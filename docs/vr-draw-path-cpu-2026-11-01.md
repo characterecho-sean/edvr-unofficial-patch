@@ -2,9 +2,11 @@
 
 ## Status
 
-- **State (2026-11-01): design reviewed, spec #157 written, not built.**
-  Next: test build 1 and one flight. Writing the spec corrected three points
-  here: item 1's rig and item 3's two wrappers (see those sections).
+- **State (2026-11-01): built (tickets #158-#163 merged), not flown.**
+  Next: one flight with test build 1. Writing the spec corrected three points
+  here: item 1's rig and item 3's two wrappers (see those sections). The
+  build's code review (findings fixed on `build1/review-fixes`) moved the
+  re-issue counter's edges: see that section.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -172,7 +174,7 @@ No `/GL` or `/LTCG` (#154), so calls across source files never inline.
 - **`nativeOnFootLabelIssue`** (native_on_foot.cpp about 30494, called at
   vscreen.cpp:4457). `g_labPending` is in the anonymous `f44` namespace
   (30188), so a header cannot read it. Corrected: no mirror. `valid` leaves
-  `LabPending` and becomes one module-level `std::atomic<bool>`, relaxed,
+  `LabPending` and becomes one inline `std::atomic<bool>` in native_on_foot.h, relaxed,
   which every site uses (30257, 30305, 30314, 30495-30496, 35879), the
   vscreen call site included. The body keeps its full test. The 35879 reset
   runs in `shutdownDeviceHooks` (device_hook.cpp:3313, by way of
@@ -221,6 +223,25 @@ split (3744-3807), flat UI and sun (5135-5138, 5217-5220), ui depth (4553,
 hook CPU:` (perf_monitor.cpp:1216), timed on the same sampled frames and
 stride scaling (1199-1216) so the lines compare. No key. Traced end to end:
 no re-issues prints 0, never an absent line.
+
+Review fixes (build 1): the draw hook clock now stops at the game's own draw,
+so the weapon-motion re-issue is inside `draw hook CPU:` as the line says (the
+hook figure rises by that cost; it is EDVR's own work). The splash dim's
+second issue and the FSS reveal replay go through the helper (`splash_dim`,
+`fss_reveal`). `flat_ui` is outside the hook figure (the flat branch has no
+hook clock): labelled, not clocked. `loader_panel` never prints (its
+substitute ignores the draw it is handed); kept as a name, noted in the
+tally's reading guide. The ms are the draw call only, not the Begin/End state
+work. `--tally reissue` flags a GPU census re-issue section that ran against
+windows counting none of its callers. The benchmark collector counts clears
+at the idle tick and the native-menu tick; the line says so. `--perf-windows`
+drops the window after a flip logged at a window's end frame as well. The
+depth-size agreement check (item 1, DLAA) resolves through
+`bindingResolveAgreement`, a fault budget of its own, so it cannot spend the
+probe budget the world rows use. The slot cache keeps its `on` and
+`stoodDown` inputs: both are constant at the lookup, but the invalidation
+across a gap where UI depth was off rests on them as much as on the epoch,
+and removing them is not worth a rig rewrite for one compare each.
 
 ## The temporary keys
 
