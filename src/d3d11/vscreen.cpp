@@ -52,6 +52,7 @@
 #include "depth_probe.h"      // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
+#include "draw_reissue_line.h" // ReissueCaller: the re-issue counter's names
 #include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
 #include "frame_ticks.h"       // frameTick: the boundary's ticks, timed by name
 #include "boundary_tick.h"     // one fault budget per boundary tick
@@ -3715,6 +3716,25 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     s->realUnmap(self, res, sub);
 }
 
+// Every re-issue (GLOSSARY: Re-issue) is counted and timed by caller (draw_reissue_line.h; perf_monitor.cpp's "draw reissue CPU:" line): the count on every frame, the
+// time on a draw-sample frame, where each re-issue is clocked whole (they are few, so no stride and no scaling). pureDrawReissue and the thunk below are the only
+// ways to re-issue a game draw; a new re-issue goes through one of them, never to g_state->realDraw* directly.
+struct ReissueClock {
+    ReissueCaller caller;
+    bool on;
+    int64_t t0;
+    explicit ReissueClock(ReissueCaller c) : caller(c), on(perfMonitorSampleDraws()), t0(on ? static_cast<int64_t>(qpcNow()) : 0) {}
+    ~ReissueClock() { perfMonitorNoteReissue(static_cast<size_t>(caller), on, on ? static_cast<int64_t>(qpcNow()) - t0 : 0); }
+};
+
+// The same for the callers that take the draw as a function pointer (panel_curve.h, the loader panel, weapon and screen motion) or issue indexed instanced draws
+// themselves: one thunk a caller, so the name travels with the pointer. The arguments pass through unchanged.
+template <ReissueCaller C>
+void STDMETHODCALLTYPE reissueDrawIndexedInstanced(ID3D11DeviceContext* self, UINT count, UINT instances, UINT start, INT base, UINT startInstance) {
+    ReissueClock clock(C);
+    g_state->realDrawIndexedInstanced(self, count, instances, start, base, startInstance);
+}
+
 // The quad-skip re-issue, lifted out of forwardWithVerdict and NOINLINE.
 //
 // It owns a D3D11_RECT savedRects[16] that RSGetScissorRects fills, which
@@ -3741,7 +3761,7 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
     //
     // 1. the quads before the range
     if (cut0 > 0 && cut0 <= total) {
-        s->realDrawIndexedInstanced(self, cut0, s->qsInstances,
+        reissueDrawIndexedInstanced<ReissueCaller::QuadSplit>(self, cut0, s->qsInstances,
                                     s->qsStartIndex, s->qsBaseVertex,
                                     s->qsStartInstance);
     }
@@ -3793,7 +3813,7 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
             box.bottom = static_cast<LONG>(cy + hh);
             self->RSSetScissorRects(1, &box);
             self->RSSetState(s->quadClipRs);
-            s->realDrawIndexedInstanced(self, cut1 - cut0, s->qsInstances,
+            reissueDrawIndexedInstanced<ReissueCaller::QuadSplit>(self, cut1 - cut0, s->qsInstances,
                                         s->qsStartIndex + cut0,
                                         s->qsBaseVertex,
                                         s->qsStartInstance);
@@ -3804,7 +3824,7 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
     }
     // 3. the quads after the range
     if (cut1 < total) {
-        s->realDrawIndexedInstanced(self, total - cut1, s->qsInstances,
+        reissueDrawIndexedInstanced<ReissueCaller::QuadSplit>(self, total - cut1, s->qsInstances,
                                     s->qsStartIndex + cut1,
                                     s->qsBaseVertex, s->qsStartInstance);
     }
@@ -3905,8 +3925,9 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
 // parameters in memory for the whole body (self was reloaded from its stack
 // slot at every use), for a closure a normal draw never calls. Same four
 // calls with the same arguments.
-__declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,
+__declspec(noinline) void pureDrawReissue(ReissueCaller who, ID3D11DeviceContext* self, char kind, UINT count,
                                           UINT instances, const DrawArgs& args) {
+    ReissueClock clock(who);
     switch(kind) {
     case 'D':g_state->realDraw(self,count,UINT(args.base));break;
     case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
@@ -3923,7 +3944,7 @@ __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, 
 __declspec(noinline) void starGlowAfterDraw(ID3D11DeviceContext* self, char kind, UINT count,
                                             UINT instances, const DrawArgs& args, DrawVerdict v) {
     if (vrStarGlowAfterDraw(self, v == DrawVerdict::kNone && !uiLayerIssueBlocked())) {
-        pureDrawReissue(self, kind, count, instances, args);
+        pureDrawReissue(ReissueCaller::StarGlow, self, kind, count, instances, args);
         vrStarGlowReplayEnd(self);
     }
 }
@@ -3939,7 +3960,7 @@ struct BlendReplayArgs {
 };
 void blendReplay(void* p) {
     const auto* a = static_cast<const BlendReplayArgs*>(p);
-    pureDrawReissue(a->self, a->kind, a->count, a->instances, *a->args);
+    pureDrawReissue(ReissueCaller::BlendProbe, a->self, a->kind, a->count, a->instances, *a->args);
 }
 __declspec(noinline) void blendProbeOfferDraw(ID3D11DeviceContext* self, DrawVerdict v, char kind, UINT count, UINT instances,
                                               const DrawArgs& args, bool udOn, bool holoOn, UiLayerFamily family, bool uiTaken,
@@ -3982,10 +4003,10 @@ __declspec(noinline) void crispHudTonemapReissue(ID3D11DeviceContext* self, char
     if (uiLayerCrispToneBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
         census.markIssued();   // the tonemap re-issue: its scope opens only when the begin admitted the draw
-        pureDrawReissue(self, kind, count, instances, args);
+        pureDrawReissue(ReissueCaller::CrispHud, self, kind, count, instances, args);
         // The weapons fire: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
         // then the scene with the light); the layer binds each step's HDR source and blend, and says when no step is left.
-        while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);
+        while (uiLayerCrispToneNext(self)) pureDrawReissue(ReissueCaller::Tonemap, self, kind, count, instances, args);
         uiLayerCrispToneEnd(self);
     }
 }
@@ -4027,7 +4048,7 @@ __declspec(noinline) void worldScreenReissue(ID3D11DeviceContext* self, char kin
     VrWorldInternalScope internal;
     if (uiLayerWorldReissueBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FrameWorldLayer);
-        pureDrawReissue(self, kind, count, instances, args);
+        pureDrawReissue(ReissueCaller::WorldScreen, self, kind, count, instances, args);
         uiLayerWorldReissueEnd(self);
     }
 }
@@ -4044,7 +4065,7 @@ __declspec(noinline) void worldScreenReissueCurved(ID3D11DeviceContext* self) {
     if (!panelCurveReissueReady()) return;
     if (uiLayerWorldReissueBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FrameWorldLayer);
-        const bool drawn = panelCurveReissue(self, g_state->realDrawIndexedInstanced);
+        const bool drawn = panelCurveReissue(self, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);
         uiLayerWorldReissueEnd(self, drawn);
     }
 }
@@ -4162,12 +4183,12 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
     if (uiLayerMultiplyBegin(self)) {
         census.markIssued();   // a real pass: the multiply's draw (an empty scope is one where neither begin declines to issue)
-        pureDrawReissue(self, kind, count, instances, args);
+        pureDrawReissue(ReissueCaller::UiLayerSecond, self, kind, count, instances, args);
         uiLayerEnd(self);
     }
     if (uiLayerWriteBackBegin(self)) {
         census.markIssued();
-        pureDrawReissue(self, kind, count, instances, args);
+        pureDrawReissue(ReissueCaller::UiLayerSecond, self, kind, count, instances, args);
         uiLayerWriteBackEnd(self);
     }
 }
@@ -4366,7 +4387,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kLoaderPanel) {
         const bool layered = uiLayer && uiLayerBegin(self);
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
-        const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
+        const bool swallowed = loaderPanelSubstitute(self, reissueDrawIndexedInstanced<ReissueCaller::LoaderPanel>,
                                                      g_state->qsInstances,
                                                      g_state->qsStartInstance);
         if (seedOutcome.on) {
@@ -4402,7 +4423,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
         // The strip's own motion pass is the per-eye one the game's tail ends with, which the flat screen skips while the VR
         // world route owns the frame (worldReissue.on: the route's re-issue below makes the eye layer-only); so does this.
-        const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced, !worldReissue.on);
+        const bool swallowed = panelCurveSubstitute(self, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>, !worldReissue.on);
         if (seedOutcome.on) {
             seedOutcome.substituted = swallowed;
             // A successful substitute issues its mesh and can issue the
@@ -4482,7 +4503,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             stripReverseU = introCurveReverseU();
         }
         if (stripToward != 0 && !uiLayerIssueBlocked()) {
-            stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);
+            stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);
             if (seedOutcome.on && stripIssued) {
                 seedOutcome.substituted = true;
                 seedOutcome.known = false;   // the strip's mesh is not the game's draw: its original count is not the strip's
@@ -4550,7 +4571,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // of 2026-09-07). splashDimBegin below has had this shape all along.
     if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
-        if (uiDepthReissueBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        if (uiDepthReissueBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthReissueEnd(self);
     }
     // The generic hologram/icon depth pass (ui_depth.h): the same draw twice
@@ -4567,9 +4588,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // with the take on, not a pass failure).
     if (!layered && uiDepthScope.holoOn) {
         GpuCensusScope census(self, GpuCensusSection::FrameHologramPasses);
-        if (uiDepthHologramContributionBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        if (uiDepthHologramContributionBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthHologramContributionEnd(self);
-        if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthHologramElementDepthEnd(self);
     }
     // uiDepthPlanetPending() is the function's own first test, inline: it
@@ -4578,13 +4599,13 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
     if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
-        pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
+        pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);uiDepthPlanetEnd(self);
     }
     // F105: an in-world screen (world_screen_coverage.h), the same draw once more into the eye's coverage and edit masks,
     // while the game's state for it is still bound. The pending test is inline, like the planets' above.
     if (owner && !layered && uiDepthWorldScreenPending() && uiDepthWorldScreenBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
-        pureDrawReissue(self,kind,count,instances,args);uiDepthWorldScreenEnd(self);
+        pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);uiDepthWorldScreenEnd(self);
     }
     if (v != DrawVerdict::kNone) {
         if (v == DrawVerdict::kBackdrop) backdropEnd(self);
@@ -4598,7 +4619,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             splashDimBegin(self)) {
             // The dim is the same draw through the dark shader, so it follows the strip when the strip drew this one: the game's flat quad
             // would dim a rectangle over a screen whose edges have come nearer. A strip that fails here leaves the game's own draw.
-            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {
+            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
+                ReissueClock dimClock(ReissueCaller::SplashDim);   // the dim through the game's own quad: a re-issue of the draw
                 draw(AlteredDrawClass::None);
             }
             splashDimEnd(self);
@@ -4736,7 +4758,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
         g_state->realDrawIndexedInstancedIndirect(self, args, off);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstancedIndirect(self, args, off); });
+        flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawIndexedInstancedIndirect(self, args, off); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
@@ -4771,7 +4793,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
         g_state->realDrawInstancedIndirect(self, args, off);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawInstancedIndirect(self, args, off); });
+        flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawInstancedIndirect(self, args, off); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
@@ -5135,7 +5157,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         if (sun.issues()) g_state->realDraw(self, count, start);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
+        if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDraw(self, count, start); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -5185,7 +5207,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawAuto(self);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawAuto(self); });
+        flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawAuto(self); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
@@ -5217,7 +5239,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
+        if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -5297,7 +5319,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -5375,7 +5397,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                               baseVertex, startInstance);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
@@ -5437,7 +5459,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
             GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
-            weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
+            weaponMotionDraw(self, reissueDrawIndexedInstanced<ReissueCaller::WeaponMotion>, perInstance, instances,
                              startIndex, baseVertex, startInstance);
         }
         if (clock.on) clock.realCall(r0);
@@ -5498,8 +5520,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 // work now, not this call site: most calls into either
                 // function return above, at screenMotionLive()'s own flags
                 // or g.sourceFrame!=g.frame, before issuing anything.
-                screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
-                screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+                screenMotionUiDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotionUi>,perInstance,instances,startIndex,baseVertex,startInstance);
+                screenMotionDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotion>,perInstance,instances,startIndex,baseVertex,startInstance);
             }
         }
         return true;  // the original draw was issued
