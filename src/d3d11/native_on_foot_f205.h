@@ -1,5 +1,5 @@
-// F205 (native on-foot VR): the full-detail scope takes both eyes, and every ADS press shows its view inside a circle sized as flat's ADS FOV. The pure parts, header only, no game or D3D11
-// state, so native_frame_test runs the very functions the frame thread uses. Journal: the arc doc, F205.
+// F205/F206 (native on-foot VR): the full-detail scope takes both eyes, and its view is shown inside a circle that hides its black side bars. The pure parts, header only, no game or D3D11
+// state, so native_frame_test runs the very functions the frame thread uses. Journal: the arc doc, F205 and F206.
 //
 // 1. THE EFFECTIVE SIGHT EYE. fix.native_on_foot_ads_sight_eye is the player's choice (F162: both | right | left). The full-detail scope (B3) needs both: the left eye is drawn as the zoomed view
 //    and the share shows the right eye's picture to both. So while B3 applies, a press behaves as both whatever the key says. It is decided ONCE, at the press's start (the sight lock's aiming eye
@@ -7,12 +7,14 @@
 //    the player's setting is back. One function, effectiveSightEye, is what every reader of the choice asks (adsSightEyeMode in native_on_foot.cpp); nothing else reads the key.
 //    B3 applies when its key is on, the scope zoom key is on, the held item is B3's table entry (the scoped Executioner) AND a temporal mode runs. With Anti-aliasing off B3's full detail does not
 //    run (its left door needs the upscaler's picture: F202 left it so), so nothing needs the left eye to show the right's picture and the press keeps the player's sight eye (the RC5 review:
-//    forcing both there took the player's choice for no benefit, and the log's "full detail needs both eyes" was false). The circle is a different matter and has no such gate. The latch is
+//    forcing both there took the player's choice for no benefit, and the log's "full detail needs both eyes" was false). The circle follows the latch (section 2). The latch is
 //    decided once per press, so a mode switched in the middle of one cannot flip the aiming eye.
 //
-// 2. THE VIEW CIRCLE (view_circle.h): the radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV; no circle, with the reason, for a weapon whose ADS FOV is not known, for a frustum
-//    that is not an eye, for a sight whose far point is not known, and with the scope zoom off. F205b (the pilot's word): the circle has no key of its own; it is on whenever
-//    fix.native_on_foot_ads_scope_zoom is, by the lens's own read.
+// 2. THE VIEW CIRCLE (view_circle.h; F206, the pilot's word: "back off on the stencil entirely for all weapons except the sniper with scope mod so that it hides the black vertical bars and then
+//    have the widest radius possible that does"). The circle is the full-detail scope's alone: it is asked for only in a press B3 applies to (the latch above forced both: the scoped Executioner,
+//    B3 on, the scope zoom on, a temporal mode), so no other weapon, no B3-less scoped press and no Anti-aliasing-off press draws one, and the circle needs no sight-eye condition of its own.
+//    The d3d11 half asks for its centre alone (the sight's far point in each eye's own view); the runtime draws it exactly while B3's right-eye mirror strip is, by the mirror's weight, as wide
+//    as it can be and still hide the bars (scope_circle.h coverageRadius). F205's flat-ADS-FOV rule, its table and its weight ramp are gone.
 #pragma once
 
 #include "native_on_foot_f162.h"
@@ -55,70 +57,51 @@ inline int formatOverride(char* buf, size_t n, int keyMode) noexcept {
     return std::snprintf(buf, n, "scope zoom (B3): the sight eye is both for this press (fix.native_on_foot_ads_sight_eye is %s): full detail needs both eyes", f162::name(keyMode));
 }
 
-// ---- 2. the circle ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-enum class Why : int { kOk = 0, kScopeZoomOff = 1, kAdsFovUnknown = 2, kNoFrustum = 3, kNoCentre = 4 };
-inline const char* whyText(Why w) noexcept {
-    switch (w) {
-        case Why::kOk: return "ok";
-        case Why::kScopeZoomOff: return "fix.native_on_foot_ads_scope_zoom is off";
-        case Why::kAdsFovUnknown: return "the ADS FOV of the held weapon is not known";
-        case Why::kNoFrustum: return "the eye's frustum is not known";
-        default: return "the sight's far point is not known";
-    }
+// ---- 2. the circle (F206) --------------------------------------------------------------------------------------------------------------------------------------------------------
+// Whether a press has a circle: exactly when the latch forced both, that is when B3's full-detail view runs in it (b3Applies at the engage from idle). Decided once, with the rest of the press's
+// state, so a setting changed in the middle of a press changes nothing until the next one.
+inline bool pressHasCircle(const PressLatch& latch) noexcept { return latch.forced; }
+// The request: the circle's centre is asked for in a press that has a circle once the sight's far point is known in both eyes. Whether the circle is drawn, and by what weight and radius, is the
+// runtime's (the mirror strip's weight; the widest radius that keeps the bars in the black): a request while the strip is down draws nothing.
+inline bool requestOn(bool pressHasCircleNow, bool haveCentre) noexcept { return pressHasCircleNow && haveCentre; }
+
+// A B3 press whose window stood (the strip up or the left eye narrowed) and that got no circle says why, once, in a line after the press.
+enum class NoCircle : int { kNoCentre = 1, kNoFrame = 2 };
+inline const char* noCircleText(NoCircle w) noexcept {
+    return w == NoCircle::kNoCentre ? "the sight's far point was not known in both eyes while the full-detail view stood"
+                                    : "the runtime drew no circle frame while the full-detail view stood (no report: the request did not reach it, or no radius hid the bars)";
 }
-struct Radius {
-    Why why = Why::kOk;
-    double radiusRad = std::nan("");
-    double halfFovRad = std::nan("");
+// What the frame thread knows of a press at its end. The line is due when the press had a circle and its window stood, no run of the circle was reported for it, and the window has been gone
+// (and the press over) for kNoCircleWaitMs: the runtime reports a run when the mirror has gone, so a report that is coming has come.
+constexpr uint64_t kNoCircleWaitMs = 1000;
+struct PressEnd {
+    bool hasCircle = false, windowSeen = false, runReported = false, haveCentre = false;
 };
-// The flat rule. scopeZoomOn: fix.native_on_foot_ads_scope_zoom, the one setting that switches the circle (F205b: the circle's own key was removed on the pilot's word). fovKnown: the held weapon's ADS FOV
-// is in the table (scope_zoom_s1.h adsFovDeg). hipDeg: the scope zoom's reference FOV (the hip FOV the lens measures M against).
-inline Radius circleRadius(bool scopeZoomOn, bool fovKnown, double adsDeg, double hipDeg, const float tan4[4]) noexcept {
-    Radius r;
-    if (!scopeZoomOn) { r.why = Why::kScopeZoomOff; return r; }
-    if (!fovKnown || !(std::isfinite(adsDeg) && adsDeg > 0.0)) { r.why = Why::kAdsFovUnknown; return r; }
-    r.halfFovRad = viewcircle::halfFovRad(tan4);
-    if (!std::isfinite(r.halfFovRad)) { r.why = Why::kNoFrustum; return r; }
-    r.radiusRad = viewcircle::radiusRad(adsDeg, hipDeg, r.halfFovRad);
-    if (!std::isfinite(r.radiusRad)) { r.why = Why::kAdsFovUnknown; return r; }
-    return r;
+inline bool noCircleDue(const PressEnd& p, uint64_t msSinceOverAndGone) noexcept { return p.hasCircle && p.windowSeen && !p.runReported && msSinceOverAndGone >= kNoCircleWaitMs; }
+inline NoCircle noCircleWhy(const PressEnd& p) noexcept { return p.haveCentre ? NoCircle::kNoFrame : NoCircle::kNoCentre; }
+inline int formatNoCircle(char* buf, size_t n, uint32_t press, NoCircle why, const char* item, const char* scope) noexcept {
+    return std::snprintf(buf, n, "ADS view circle (F206): press %u: no circle: %s (item %s, scope %s)", press, noCircleText(why), item ? item : "none", scope ? scope : "unknown");
 }
 
-// The press line. mode: "on" or "off" (the Anti-aliasing mode, so a flight in each can be compared). tc: the sight's far point as tangents of the left and the right eye's own view (null: none known).
-inline int formatLine(char* buf, size_t n, uint32_t press, const char* mode, const Radius& r, double adsDeg, double hipDeg, bool fromBare, const char* item, const char* scope,
-                      const float (*tc)[2] = nullptr) noexcept {
-    const double deg = 180.0 / viewcircle::kPi;
-    if (r.why == Why::kScopeZoomOff)   // F205b: the circle follows the scope zoom setting; with it off the press says so and nothing else
-        return std::snprintf(buf, n, "ADS view circle (F205): press %u: no circle (fix.native_on_foot_ads_scope_zoom is off)", press);
-    if (r.why != Why::kOk)
-        return std::snprintf(buf, n, "ADS view circle (F205): press %u, Anti-aliasing %s: no circle: %s (item %s, scope %s)", press, mode, whyText(r.why), item ? item : "none", scope ? scope : "unknown");
-    int len = std::snprintf(buf, n, "ADS view circle (F205): press %u, Anti-aliasing %s: radius %.2f deg (ADS FOV %.2f / hip FOV %.2f x the headset's half-FOV %.2f deg, vertical)%s; item %s, scope %s",
-                            press, mode, r.radiusRad * deg, adsDeg, hipDeg, r.halfFovRad * deg, fromBare ? "; the ADS FOV is the item's own (an unmeasured scoped copy takes it)" : "", item ? item : "none",
-                            scope ? scope : "unknown");
-    if (tc && len > 0 && static_cast<size_t>(len) < n)
-        len += std::snprintf(buf + len, n - static_cast<size_t>(len), "; centre (tangents) left %+.4f/%+.4f right %+.4f/%+.4f", static_cast<double>(tc[0][0]), static_cast<double>(tc[0][1]),
-                             static_cast<double>(tc[1][0]), static_cast<double>(tc[1][1]));
-    if (len > 0 && static_cast<size_t>(len) < n) len += std::snprintf(buf + len, n - static_cast<size_t>(len), " (the scope zoom is on)");   // F205b: what switched it
-    return len;
-}
-
-// The runtime's report of one run of the circle, as the graphics log gets it (edvrNoteNativeViewCircle). "ADS view circle on N frames, radius X deg" is the figure --health reads.
+// The runtime's report of one run of the circle (view_circle.h), as the graphics log gets it (edvrNoteNativeViewCircle): the press line. "ADS view circle (F206): press N: radius X deg" is what
+// --health reads. Y, the nearest edge of what the other eye covers, less the band (the margin and half the 3 deg soft edge: Y - X) is the radius; the run's smallest and largest radius say how it
+// followed the window.
 inline bool reportReadable(const EdvrNativeViewCircleReport* r) noexcept {
-    if (!r || r->size < sizeof(EdvrNativeViewCircleReport) || r->version != EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_1) return false;
-    const float values[] = {r->seconds, r->radiusDeg, r->requestedDeg, r->coverageDeg, r->weightPeak, r->centre[0], r->centre[1], r->centre[2], r->centre[3]};
+    if (!r || r->size < sizeof(EdvrNativeViewCircleReport) || r->version != EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_2) return false;
+    const float values[] = {r->seconds, r->radiusDeg, r->radiusMinDeg, r->radiusMaxDeg, r->edgeDeg, r->weightPeak, r->centre[0], r->centre[1], r->centre[2], r->centre[3]};
     for (float v : values)
         if (!(v == v) || v > 1e9f || v < -1e9f) return false;
     return true;
 }
-inline int formatRuntime(char* buf, size_t n, const EdvrNativeViewCircleReport& r) noexcept {
+inline int formatRun(char* buf, size_t n, uint32_t press, const EdvrNativeViewCircleReport& r) noexcept {
     return std::snprintf(buf, n,
-                         "ADS view circle (F205) runtime: ADS view circle on %u frames, radius %.2f deg (the d3d11 half asked %.2f deg%s), over %.2f s; refused %u, with the share %u; weight peak %.2f; "
-                         "centre (u, v) left %.3f/%.3f right %.3f/%.3f",
-                         r.frames, static_cast<double>(r.radiusDeg), static_cast<double>(r.requestedDeg),
-                         r.cappedFrames ? "; cut to the circle that hides the full-detail scope's side bars on some frames" : "", static_cast<double>(r.seconds), r.refusedFrames, r.sharedFrames,
-                         static_cast<double>(r.weightPeak), static_cast<double>(r.centre[0]), static_cast<double>(r.centre[1]), static_cast<double>(r.centre[2]), static_cast<double>(r.centre[3]));
+                         "ADS view circle (F206): press %u: radius %.2f deg (the widest that keeps the full-detail view's side bars in the black: nearest edge %.2f deg less the band %.2f deg); "
+                         "over the run %.2f to %.2f deg; drawn on %u frames over %.2f s; refused %u, with the share %u; weight peak %.2f; centre (u, v) left %.3f/%.3f right %.3f/%.3f",
+                         press, static_cast<double>(r.radiusDeg), static_cast<double>(r.edgeDeg), static_cast<double>(r.edgeDeg - r.radiusDeg), static_cast<double>(r.radiusMinDeg),
+                         static_cast<double>(r.radiusMaxDeg), r.frames, static_cast<double>(r.seconds), r.refusedFrames, r.sharedFrames, static_cast<double>(r.weightPeak),
+                         static_cast<double>(r.centre[0]), static_cast<double>(r.centre[1]), static_cast<double>(r.centre[2]), static_cast<double>(r.centre[3]));
 }
-inline constexpr size_t kRuntimeLineBytes = 400;
+inline constexpr size_t kRunLineBytes = 480;
 
 }  // namespace f205
 }  // namespace nofoot

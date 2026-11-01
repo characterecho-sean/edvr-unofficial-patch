@@ -107,6 +107,51 @@ void sharePureSelfTest() {
     const double canted=capDeg(fovDeg(-50,40,45,-45),yawQuat(10.75),fovDeg(-40,50,45,-45),yawQuat(-10.75),0.f,0.f,0.f,0.f);
     check(std::isfinite(canted)&&canted>0.0&&canted<50.0,"F205 pure: with displays canted outward the cap is a number inside the fields");
     check(!std::isfinite(sc::coverageRadius(Mapping{},Mapping{},c0,c0)),"F205 pure: an unusable mapping gives no cap");
+    // F206: the radius is this cap, worked out from the actual centre each frame. Known windows: the pilot's Pimax session (parallel views, up and down 1.065, left -1.2543/+0.8746 and the mirror of it)
+    // and the Quest 3 (horizontals of the 2026-10-31 session, up 0.9657 down 1.4281), the sight straight ahead and off centre. It never exceeds the black's edge less the band: judged pointwise against
+    // the shader's own arithmetic (eye_share.h lookup for the bars, blackWeight for the circle) over a grid of both eyes' pixels, and it is the widest: a quarter of a degree more lets a bar through.
+    {
+      const auto fovT=[](double l,double r,double up,double dn){return XrFovf{float(std::atan(l)),float(std::atan(r)),float(std::atan(up)),float(std::atan(dn))};};
+      struct Win {const char* name;XrFovf lf,rf;};
+      const Win wins[]={{"Pimax (1.2648 up and down, the pilot's session horizontals)",fovT(-1.2543,.8746,1.2648,-1.2648),fovT(-.8746,1.2543,1.2648,-1.2648)},
+                        {"Pimax (1.065 up and down, the 04:12 session)",fovT(-1.2543,.8746,1.065,-1.065),fovT(-.8746,1.2543,1.065,-1.065)},
+                        {"Quest 3 (up 0.9657, down 1.4281)",ql,qr}};
+      const double centres[][2]={{0.0,0.0},{.12,.05},{-.2,.1},{.3,-.15},{.25,0.0},{-.25,0.0}};   // tangents in each eye's own view: straight ahead, and off centre every way
+      bool exact=true,pointwise=true,widest=true;double lowest=1e9,highest=-1e9;
+      for(const Win& w:wins)for(const auto& ct:centres) {
+        const Mapping sMap=makeMapping(w.lf,yawQuat(0),w.rf,yawQuat(0),place),mMap=makeMapping(w.rf,yawQuat(0),w.lf,yawQuat(0),place);
+        const float cl[2]={float(ct[0]),float(ct[1])},cr[2]={float(ct[0]),float(ct[1])};
+        const double R=sc::coverageRadius(sMap,mMap,cl,cr);
+        exact=exact&&sMap.valid&&mMap.valid&&std::isfinite(R)&&R>0.0;
+        if(!(std::isfinite(R)&&R>0.0))continue;
+        lowest=std::fmin(lowest,R/k);highest=std::fmax(highest,R/k);
+        double u3[3];sc::unitOf(cl,u3);
+        const double wider=R+.25*k;bool letsThrough=false;
+        for(int eye=0;eye<2;++eye) {   // the left eye's picture against the share's bars, the right eye's against the mirror's
+          const Mapping& m=eye==0?sMap:mMap;
+          const Tangents& own=m.left;   // the eye the circle is in is the mapping's `left` (the mirror's mapping has the eyes exchanged)
+          for(unsigned yi=0;yi<48;++yi)for(unsigned xi=0;xi<48;++xi) {
+            const double uu=(xi+.5)/48.0,vv=(yi+.5)/48.0;
+            const shareview::Lookup lk=shareview::lookup(m,uu,vv);
+            const double tx=own.left+(own.right-own.left)*uu,ty=own.up+(own.down-own.up)*vv;
+            const double theta=sc::angleFromCentre(tx,ty,u3);
+            const double bar=lk.ahead?1.0-lk.fov:1.0;   // the bars' black here (weight 1): the part of the left eye the right eye does not cover, or the mirror of it
+            const double circle=sc::blackWeight(theta,R,m.marginRad,m.bandRad,1.0);
+            if(circle+1e-9<bar)pointwise=false;
+            if(sc::blackWeight(theta,wider,m.marginRad,m.bandRad,1.0)+1e-6<bar)letsThrough=true;
+          }
+        }
+        if(ct[1]==0.0)widest=widest&&letsThrough;   // on the middle row the shader's axis angle is the true angle, so the cap is exact there (off it the true angle to the edge is a little smaller: slack)
+      }
+      char buf[400];
+      std::snprintf(buf,sizeof(buf),"F206 pure: on the Pimax (both sessions) and the Quest 3, the sight straight ahead and off centre, the radius that hides the bars is %.2f to %.2f degrees; at every pixel of both eyes the circle's black is at least the bars' (it never exceeds the "
+                    "black's edge less the band), and a quarter of a degree wider lets a bar through (it is the widest)",lowest,highest);
+      check(exact&&pointwise&&widest,buf);
+      // the pilot's Pimax straight ahead, and the Quest 3: the figures the report names
+      const Mapping pS=makeMapping(fovT(-1.2543,.8746,1.2648,-1.2648),yawQuat(0),fovT(-.8746,1.2543,1.2648,-1.2648),yawQuat(0),place),pM=makeMapping(fovT(-.8746,1.2543,1.2648,-1.2648),yawQuat(0),fovT(-1.2543,.8746,1.2648,-1.2648),yawQuat(0),place);
+      const float z2[2]={0.f,0.f};
+      check(std::fabs(sc::coverageRadius(pS,pM,z2,z2)/k-(std::atan(.8746)/k-kEdgeMarginDeg-.5*kBandDeg))<1e-3,"F206 pure: the Pimax of the pilot's session, the sight straight ahead: 41.17 degrees from the nearest edge less the margin and half the band, 39.42");
+    }
   }
 }
 void shareSelfTest(bool owned) {
@@ -220,63 +265,118 @@ void shareSelfTest(bool owned) {
         check(mZoom.facts.mirrorDrawn&&mZoom.r==m1.r&&mZoomHalf.facts.mirrorDrawn&&mZoomHalf.r==m1.r,what);
         std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): with no share drawn there is no mirror, narrowed or not: the right eye is as it was, and the narrowed left eye is cleared to black",mode,kind);
         check(mNoShare.r==base.eye[1]&&!mNoShare.facts.mirrorDrawn&&mZoomNoShare.r==base.eye[1]&&!mZoomNoShare.facts.mirrorDrawn&&mZoomNoShare.facts.leftBlacked&&!mNoShare.facts.leftBlacked,what);
-        // F205: the ADS view circle. Black outside a circle about the sight in each eye, over that eye's finished image, by the weight; it needs nothing of the share. The fixture's views are +-45 degrees
-        // and parallel, 128 px a side; the sight straight ahead, so a pixel's angle from it is atan of its tangent. With no circle, a weight of 0 or one that is no number, both eyes are exactly what they were.
+        // F206: the ADS view circle is the full-detail scope's alone: black outside a circle about the sight in each eye, over that eye's finished image, drawn exactly while the mirror strip is (so with
+        // the bars it hides), by the mirror's own weight, at the widest radius that keeps the bars in the black. The fixture's views are +-45 degrees and parallel, 128 px a side; the sight straight
+        // ahead is the middle, a pixel's angle from it atan of the length of its tangent. The request is a centre alone: no radius, no weight.
         {
           const auto ringed=[&](float share,float black,bool zoomed,const StereoViewCircle* c) {
             XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
             check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed,nullptr,c)==XR_SUCCESS,"circle render");
             Pair o;o.l=readWhole(f,0,image);o.r=readWhole(f,1,image);o.facts=f.renderer.shareFacts();return o;
           };
-          const auto circleOf=[&](double radiusDeg,float weight){StereoViewCircle c;c.on=true;c.radiusRad=float(radiusDeg*kSharePi/180.0);c.weight=weight;return c;};
-          const StereoViewCircle full20=circleOf(20,1.f),half20=circleOf(20,.5f),zero20=circleOf(20,0.f),nan20=circleOf(20,nanF),off20=[&]{StereoViewCircle c=circleOf(20,1.f);c.on=false;return c;}(),big60=circleOf(60,1.f),tiny3=circleOf(3,1.f);
-          for(float share:{0.f,1.f}) {
-            const Pair plain=ringed(share,0.f,false,nullptr);
+          const auto centred=[&](float x,float y){StereoViewCircle c;c.on=true;for(int e=0;e<2;++e){c.tc[e][0]=x;c.tc[e][1]=y;}return c;};
+          const StereoViewCircle ahead=centred(0.f,0.f),side=centred(.3f,0.f),nearEdge=centred(float(std::tan(44.0*kSharePi/180.0)),0.f),nanC=centred(nanF,0.f);
+          StereoViewCircle offC=ahead;offC.on=false;
+          const double kBand=edvr::openxr::shareview::kBandDeg,kMargin=edvr::openxr::shareview::kEdgeMarginDeg;
+          const auto angleFrom=[&](unsigned x,unsigned y,double cx,double cy) {
+            const double tx=(x+.5)/64.0-1.0,ty=1.0-(y+.5)/64.0;
+            const double d=(tx*cx+ty*cy+1.0)/(std::sqrt(tx*tx+ty*ty+1.0)*std::sqrt(cx*cx+cy*cy+1.0));
+            return std::acos(std::fmin(1.0,d))*180.0/kSharePi;
+          };
+          // (1) no request, or an off one: both eyes exactly the render made without it, with and without a share, a strip or a narrowed frame; nothing drawn, nothing refused
+          {
             bool same=true;
-            for(const StereoViewCircle* c:{&zero20,&nan20,&off20}){const Pair o=ringed(share,0.f,false,c);same=same&&o.l==plain.l&&o.r==plain.r&&!o.facts.circleDrawn&&!o.facts.circleRefused;}
-            std::snprintf(what,sizeof(what),"F205 (%s, %s) share %.0f: no circle, a weight of 0, a weight that is no number and an off request give both eyes exactly the render made without one, and draw nothing",mode,kind,double(share));
+            for(float share:{0.f,1.f})for(float black:{0.f,.5f,1.f})for(bool zoomed:{false,true}) {
+              const Pair plain=ringed(share,black,zoomed,nullptr),o=ringed(share,black,zoomed,&offC);
+              same=same&&o.l==plain.l&&o.r==plain.r&&!o.facts.circleDrawn&&!o.facts.circleRefused&&o.facts.circleWeight==0.f&&!plain.facts.circleDrawn;
+            }
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): no request and an off request give both eyes exactly the render made without one (every share, strip and narrowed frame), and draw nothing",mode,kind);
             check(same,what);
           }
-          for(float share:{0.f,1.f}) {
-            const Pair plain=ringed(share,0.f,false,nullptr),ring=ringed(share,0.f,false,&full20);
-            const auto angleOf=[&](unsigned x){return std::atan((x+.5)/64.0-1.0)*180.0/kSharePi;};   // along the middle row, the sight straight ahead
-            bool inside=true,outside=true,eyes=true;
-            for(unsigned x=0;x<size;++x) {
-              const double a=std::fabs(angleOf(x));
-              if(a<20.0-.5*edvr::openxr::shareview::kBandDeg-.1)inside=inside&&at(ring.l,x,64)==at(plain.l,x,64)&&at(ring.r,x,64)==at(plain.r,x,64);
-              if(a>20.0+.5*edvr::openxr::shareview::kBandDeg+.1)outside=outside&&sum(at(ring.l,x,64))<=3&&sum(at(ring.r,x,64))<=3;
+          // (2) a request without the full-detail scope's mirror (no strip and not narrowed; or no share): the circle is not drawn, and nothing is refused: the circle is B3's alone
+          {
+            bool none=true;
+            const float shares[]={1.f,0.f,0.f},blacks[]={0.f,1.f,0.f};const bool zooms[]={false,false,true};
+            for(int k=0;k<3;++k) {
+              const Pair plain=ringed(shares[k],blacks[k],zooms[k],nullptr),o=ringed(shares[k],blacks[k],zooms[k],&ahead);
+              none=none&&o.l==plain.l&&o.r==plain.r&&!o.facts.circleDrawn&&!o.facts.circleRefused&&o.facts.circleWeight==0.f;
             }
-            bool cornersBlack=true;
-            for(const auto& c:corners){cornersBlack=cornersBlack&&sum(at(ring.l,c[0],c[1]))<=3&&sum(at(ring.r,c[0],c[1]))<=3&&sum(at(plain.l,c[0],c[1]))>0;}
-            eyes=ring.facts.circleDrawn&&!ring.facts.circleCapped&&!ring.facts.circleRefused&&std::fabs(ring.facts.circleRadiusDeg-20.f)<.001f&&std::fabs(ring.facts.circleCentreUv[0]-.5f)<.001f&&
-                 std::fabs(ring.facts.circleCentreUv[1]-.5f)<.001f&&std::fabs(ring.facts.circleCentreUv[2]-.5f)<.001f&&std::fabs(ring.facts.circleCentreUv[3]-.5f)<.001f&&ring.facts.drawn==(share>0.f);
-            std::snprintf(what,sizeof(what),"F205 (%s, %s) %s: inside the circle both eyes are their own pixels bit for bit (to half a band inside the radius), beyond half a band outside it they are black, the four corners are black, "
-                          "and the facts say radius 20 deg and the centre at the middle of each eye's image",mode,kind,share>0.f?"circle with the share":"circle with no share (each eye its own view)");
-            check(inside&&outside&&cornersBlack&&eyes,what);
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): a request while the mirror strip is not drawn (no strip and no narrowing; or no share) draws no circle, and is no refusal: both eyes are the render made without it",mode,kind);
+            check(none,what);
           }
-          {   // the weight: half a weight leaves the pixel at the radius a quarter black (half the band's half), the centre untouched; the radius pixel is darker with the whole weight than with half
-            const Pair plain=ringed(0.f,0.f,false,nullptr),whole=ringed(0.f,0.f,false,&full20),halfW=ringed(0.f,0.f,false,&half20);
-            const unsigned x=unsigned(std::lround(64.0*(1.0+std::tan(20.0*kSharePi/180.0))-.5));   // the pixel whose angle is the radius
-            std::snprintf(what,sizeof(what),"F205 (%s, %s): at the radius the picture is part black by the weight (more with the whole weight than with half), and the centre is untouched at either",mode,kind);
-            check(sum(at(whole.r,x,64))<sum(at(halfW.r,x,64))&&sum(at(halfW.r,x,64))<sum(at(plain.r,x,64))&&sum(at(whole.r,x,64))>3&&at(halfW.r,64,64)==at(plain.r,64,64)&&at(whole.l,64,64)==at(plain.l,64,64),what);
+          // (3) the window stands: the circle is the widest that hides the bars. Straight ahead, +-45 degree views are 45 degrees from the nearest edge: 45 - 0.25 - 1.5 = 43.25 degrees.
+          // Pointwise: the bars' black in every pixel (the frame with the strip against the frame without) is no stronger than the circle's, so no bar shows inside the circle (the picture there is
+          // the picture); and the circle is black from half a band outside the radius out; and it is the widest: a circle a quarter of a degree wider would let a bar show.
+          const auto judge=[&](float x,float y,double expectRadius,double expectEdge,const char* name) {
+            const StereoViewCircle c=centred(x,y);
+            const Pair noBars=ringed(1.f,0.f,false,nullptr),bars=ringed(1.f,1.f,false,nullptr),ring=ringed(1.f,1.f,false,&c);
+            const StereoShareFacts facts=ring.facts;
+            bool inside=true,outside=true,hidden=true,never=true;
+            unsigned barPixels=0;
+            const double R=facts.circleRadiusDeg;
+            for(unsigned yy=0;yy<size;++yy)for(unsigned xx=0;xx<size;++xx) {
+              const double th=angleFrom(xx,yy,x,y);
+              for(int e=0;e<2;++e) {
+                const uint32_t pRing=at(e?ring.r:ring.l,xx,yy),pBars=at(e?bars.r:bars.l,xx,yy),pFree=at(e?noBars.r:noBars.l,xx,yy);
+                const unsigned vr=sum(pRing),vb=sum(pBars),v0=sum(pFree);
+                if(th<R-.5*kBand-.1)inside=inside&&pRing==pBars&&pBars==pFree;   // clear: no circle and no bar
+                if(th>R+.5*kBand+.1)outside=outside&&vr<=3;
+                never=never&&vr<=vb;
+                if(e==1&&v0>60&&vb<v0) {   // a right-eye pixel the mirror darkens: the circle darkens it at least as much (final = free x (1-bar) x (1-circle), circle >= bar)
+                  ++barPixels;
+                  hidden=hidden&&double(vr)<=double(vb)*double(vb)/double(v0)+4.0;
+                }
+              }
+            }
+            // the widest: a circle 0.25 degree wider (the same weight, the same centre) lets a bar show somewhere (the fully black part of the circle would no longer cover the bars' ramp)
+            const double widerR=expectRadius+.25;bool letsThrough=false;
+            for(unsigned yy=0;yy<size&&!letsThrough;++yy)for(unsigned xx=0;xx<size&&!letsThrough;++xx) {
+              const double th=angleFrom(xx,yy,x,y);
+              const unsigned v0=sum(at(noBars.r,xx,yy)),vb=sum(at(bars.r,xx,yy));
+              if(v0<=60||vb>=v0)continue;
+              const double circle=std::fmax(0.0,std::fmin(1.0,(th-(widerR-.5*kBand))/kBand)),barB=1.0-double(vb)/double(v0);
+              if(circle+1e-3<barB)letsThrough=true;
+            }
+            std::snprintf(what,sizeof(what),"F206 (%s, %s) %s: radius %.2f deg from the nearest edge %.2f (expected %.2f from %.2f): inside it no bar and no circle, every right-eye pixel the bars darken (%u) is darkened by the circle at least as much, "
+                          "beyond half a band outside it black, and a quarter of a degree wider lets a bar through; weight %.2f",
+                          mode,kind,name,R,double(facts.circleEdgeDeg),expectRadius,expectEdge,barPixels,double(facts.circleWeight));
+            check(facts.circleDrawn&&!facts.circleRefused&&std::fabs(R-expectRadius)<.05&&std::fabs(double(facts.circleEdgeDeg)-expectEdge)<.05&&inside&&outside&&hidden&&never&&letsThrough&&barPixels>200&&
+                  facts.circleWeight==1.f,what);
+          };
+          judge(0.f,0.f,45.0-kMargin-.5*kBand,45.0,"centre straight ahead");
+          {   // off centre: the sight 0.3 of a tangent (16.70 degrees) to the right is 28.30 degrees from the right edge: 28.30 - 1.75 = 26.55
+            const double a=std::atan(.3)*180.0/kSharePi;
+            judge(.3f,0.f,45.0-a-kMargin-.5*kBand,45.0-a,"centre 16.70 degrees right of the middle");
           }
-          {   // the full-detail scope's window stands (the strip up, the share drawn): the radius is cut so the circle's black takes in the side bars; parallel +-45 degree views are 45 degrees from the nearest
-            // edge, so the cut is 45 - 0.25 - 1.5 = 43.25; without the window a 60 degree circle is drawn as asked; a circle under 5 degrees is no view and is not drawn
-            const Pair cut=ringed(1.f,1.f,false,&big60),cutZoom=ringed(1.f,0.f,true,&big60),freeRing=ringed(0.f,0.f,false,&big60),freeShare=ringed(1.f,0.f,false,&big60),tiny=ringed(1.f,0.f,false,&tiny3);
-            std::snprintf(what,sizeof(what),"F205 (%s, %s): with B3's window standing a 60 degree circle is cut to the %.2f degrees that hide its side bars (strip up, or the left eye narrowed); with no window it is drawn as asked, "
-                          "and one under 5 degrees is refused and draws nothing",mode,kind,double(cut.facts.circleRadiusDeg));
-            check(cut.facts.circleDrawn&&cut.facts.circleCapped&&std::fabs(cut.facts.circleRadiusDeg-43.25f)<.05f&&std::fabs(cut.facts.circleCoverageDeg-43.25f)<.05f&&cutZoom.facts.circleCapped&&
-                  freeRing.facts.circleDrawn&&!freeRing.facts.circleCapped&&std::fabs(freeRing.facts.circleRadiusDeg-60.f)<.001f&&freeShare.facts.circleDrawn&&!freeShare.facts.circleCapped&&
-                  !tiny.facts.circleDrawn&&tiny.facts.circleRefused,what);
+          {   // the centre's pixel in each eye's image is the facts' centre
+            const Pair ring=ringed(1.f,1.f,false,&side);
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): the facts say the centre in each eye's image: 0.65 across, the middle down",mode,kind);
+            check(ring.facts.circleDrawn&&std::fabs(ring.facts.circleCentreUv[0]-.65f)<.001f&&std::fabs(ring.facts.circleCentreUv[1]-.5f)<.001f&&std::fabs(ring.facts.circleCentreUv[2]-.65f)<.001f&&std::fabs(ring.facts.circleCentreUv[3]-.5f)<.001f,what);
           }
-          {   // the work: no circle and a weight of 0 draw what a plain frame draws; a circle adds one triangle to each eye
-            const PassWork plain=measurePass(f,[&]{XrCompositionLayerProjection l{};check(f.renderer.renderCaptured(f.views,space,capture,l)==XR_SUCCESS,"circle work render");});
-            const PassWork zero=measurePass(f,[&]{XrCompositionLayerProjection l{};
-              check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,0.f,nullptr,0.f,false,nullptr,&zero20)==XR_SUCCESS,"circle work render");});
-            const PassWork ring=measurePass(f,[&]{XrCompositionLayerProjection l{};
-              check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,0.f,nullptr,0.f,false,nullptr,&full20)==XR_SUCCESS,"circle work render");});
-            std::snprintf(what,sizeof(what),"F205 (%s, %s): a circle of weight 0 runs no extra pass; a circle adds one triangle to each eye",mode,kind);
-            check(plain.ok&&zero.ok&&ring.ok&&zero.vs==plain.vs&&zero.ps==plain.ps&&ring.vs==plain.vs*2,what);
+          // (4) the weight is the strip's, not an ADS weight: a half strip draws it by 0.5 (the radius the same), a whole strip by 1, a narrowed frame by 1 at any strip and any share weight
+          {
+            const Pair half=ringed(1.f,.5f,false,&ahead),whole=ringed(1.f,1.f,false,&ahead),zoomed=ringed(1.f,0.f,true,&ahead),zoomedHalfShare=ringed(.5f,0.f,true,&ahead),halfShare=ringed(.5f,1.f,false,&ahead);
+            const Pair plainHalf=ringed(1.f,.5f,false,nullptr);
+            const unsigned xr=unsigned(std::lround(64.0*(1.0+std::tan(43.25*kSharePi/180.0))-.5));   // the pixel whose angle is the radius, on the middle row
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): the circle's weight is the mirror strip's (0.5 at half a strip, 1 at a whole one, 1 on a narrowed frame whatever the share's weight), the radius the same at each, and at the radius the "
+                          "picture is part black by that weight (more at a whole strip than at half)",mode,kind);
+            check(half.facts.circleDrawn&&half.facts.circleWeight==.5f&&whole.facts.circleWeight==1.f&&zoomed.facts.circleDrawn&&zoomed.facts.circleWeight==1.f&&zoomedHalfShare.facts.circleWeight==1.f&&halfShare.facts.circleWeight==1.f&&
+                  std::fabs(half.facts.circleRadiusDeg-whole.facts.circleRadiusDeg)<.001f&&std::fabs(zoomed.facts.circleRadiusDeg-whole.facts.circleRadiusDeg)<.001f&&sum(at(plainHalf.r,xr,64))>sum(at(half.r,xr,64))&&
+                  sum(at(half.r,xr,64))>sum(at(whole.r,xr,64)),what);
+          }
+          // (5) a radius too small to be a view (the sight 44 degrees out is one degree from the edge), and a centre that is no number: refused, nothing drawn, both eyes the render made without it
+          {
+            const Pair plain=ringed(1.f,1.f,false,nullptr),tiny=ringed(1.f,1.f,false,&nearEdge),bad=ringed(1.f,1.f,false,&nanC);
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): a radius under 5 degrees (the sight one degree from the edge) and a centre that is no number are refused: nothing is drawn, and both eyes are the render made without a circle",mode,kind);
+            check(!tiny.facts.circleDrawn&&tiny.facts.circleRefused&&tiny.l==plain.l&&tiny.r==plain.r&&!bad.facts.circleDrawn&&bad.facts.circleRefused&&bad.l==plain.l&&bad.r==plain.r,what);
+          }
+          // (6) the work: a request with no mirror runs no extra pass; with the strip a circle adds one triangle to each eye
+          {
+            const auto work=[&](float share,float black,bool zoomed,const StereoViewCircle* c){return measurePass(f,[&]{XrCompositionLayerProjection l{};
+              check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed,nullptr,c)==XR_SUCCESS,"circle work render");});};
+            const PassWork plain=work(0.f,0.f,false,nullptr),noMirror=work(0.f,0.f,false,&ahead),stripOnly=work(1.f,1.f,false,nullptr),stripRing=work(1.f,1.f,false,&ahead),stripOff=work(1.f,1.f,false,&offC);
+            std::snprintf(what,sizeof(what),"F206 (%s, %s): a request with no mirror runs no extra pass; with the strip up a circle adds one triangle to each eye",mode,kind);
+            check(plain.ok&&noMirror.ok&&stripOnly.ok&&stripRing.ok&&stripOff.ok&&noMirror.vs==plain.vs&&noMirror.ps==plain.ps&&stripOff.vs==stripOnly.vs&&stripRing.vs==stripOnly.vs+6,what);
           }
         }
         strip(1.f,0.f,false);   // leave the last render one with a share drawn, as the checks after this block read its facts

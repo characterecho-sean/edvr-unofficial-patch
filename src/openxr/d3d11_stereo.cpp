@@ -343,7 +343,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
   leftStripBlack=comfort::sanitize(leftStripBlack);
   shareFacts_.drawn=shareFacts_.refused=false;
   shareFacts_.leftBlacked=shareFacts_.mirrorDrawn=false;shareFacts_.mirrorWidth=0.f;
-  shareFacts_.circleDrawn=shareFacts_.circleRefused=shareFacts_.circleCapped=false;shareFacts_.circleRadiusDeg=shareFacts_.circleCoverageDeg=0.f;
+  shareFacts_.circleDrawn=shareFacts_.circleRefused=false;shareFacts_.circleRadiusDeg=shareFacts_.circleEdgeDeg=shareFacts_.circleWeight=0.f;
   for(int k=0;k<4;++k)shareFacts_.circleCentreUv[k]=0.f;
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
@@ -446,7 +446,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
   // B3-3: the right eye's mirror of the left eye's strip. While the left eye's outer strip is taken toward black (the strip up, or the left eye narrowed, with the share drawn) the
   // directions of the right view that the left view does not see go toward black the same way, with the same edge band, by the same weight (full on a narrowed frame, as the left
   // strip is), so the two edges come and go together. The constants are the share's with the eyes exchanged. Neither the strip nor the narrowing: no pass at all.
-  ShareConstants mirror{};bool mirrorOn=false;shareview::Mapping mirrorMap{};
+  ShareConstants mirror{};bool mirrorOn=false;shareview::Mapping mirrorMap{};float mirrorWeight=0.f;
   if(shareOn&&(leftStripBlack>0.f||leftZoomed)) {
     const double leftPlace[4]={double(viewports[0].TopLeftX)/eyes_[0].width,double(viewports[0].TopLeftY)/eyes_[0].height,
                                double(viewports[0].TopLeftX+viewports[0].Width)/eyes_[0].width,double(viewports[0].TopLeftY+viewports[0].Height)/eyes_[0].height};
@@ -459,7 +459,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       mirror.leftSize[0]=float(eyes_[1].width);mirror.leftSize[1]=float(eyes_[1].height);
       mirror.band[0]=float(mm.marginRad);mirror.band[1]=float(1.0/mm.bandRad);mirror.band[2]=weight;
       mirror.misc[3]=1.f;
-      mirrorOn=true;mirrorMap=mm;
+      mirrorOn=true;mirrorMap=mm;mirrorWeight=weight;
       // how much of the right eye's width the strip takes on its middle row: the columns at least half black, by the same arithmetic as the shader (eye_share.h lookup)
       const unsigned columns=128;unsigned taken=0;
       for(unsigned i=0;i<columns;++i) {
@@ -469,25 +469,25 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       shareFacts_.mirrorWidth=float(taken)/float(columns);
     }
   }
-  // F205: the ADS view circle. Black outside a circle about the sight in each eye, over that eye's finished image (share and mirror included), by the weight. It needs nothing of the share: with the
-  // sight eye at right or left each eye shows its own view and each circle is centred on the sight's direction in that eye's view, so the two fuse into one. While the full-detail scope's window
-  // stands (the mirror is drawn) the radius is cut so the circle's black takes in the side bars (scope_circle.h coverageRadius); a cut below kMinRadiusDeg is no view, and the circle is not drawn
-  // that frame. A weight of 0, no circle, or a fully black frame: no pass at all.
+  // F206: the ADS view circle is the full-detail scope's alone. It is drawn exactly while its black bars are: the mirror is drawn (the strip up or the left eye narrowed, with a share), by the mirror's
+  // own weight (the strip's through the entry ramp and the exit hold, full on a narrowed frame), so a frame never has the bars without the circle or the circle without the bars. Its radius is the
+  // widest that keeps the bars in the black (scope_circle.h coverageRadius: the distance from the sight's centre in each eye to the nearest edge of what the other eye covers, less the margin and half
+  // the band, the smaller of the two eyes), worked out every frame from the actual centre and the views; a radius under kMinCircleDeg is no view, and the circle is not drawn that frame (refused).
+  // A request that is off, or no mirror: no pass at all, and both eyes are the images the renderer has always drawn.
   ShareConstants ring[2]{};bool ringOn=false;
-  if(circle&&circle->on&&circle->weight>0.f&&circle->weight==circle->weight&&fade<1.f) {
+  if(circle&&circle->on&&mirrorOn&&mirrorWeight>0.f&&fade<1.f) {
     constexpr double kDeg=180.0/shareview::kPi;
     const double margin=shareview::kEdgeMarginDeg/kDeg,band=shareview::kBandDeg/kDeg;
-    double radius=double(circle->radiusRad);
-    bool usable=std::isfinite(radius)&&radius>0.0;
+    shareFacts_.circleWeight=mirrorWeight;
+    double radius=std::nan("");
+    bool usable=true;
     double centre[2][3]{};
     shareview::Tangents tg[2];
     for(int e=0;e<2&&usable;++e){tg[e]=shareview::tangentsOf(views[e].fov);usable=shareview::tangentsUsable(tg[e])&&scopecircle::unitOf(circle->tc[e],centre[e]);}
-    if(usable&&mirrorOn) {
-      const double cap=scopecircle::coverageRadius(shareMap,mirrorMap,circle->tc[0],circle->tc[1]);
-      if(std::isfinite(cap)) {
-        shareFacts_.circleCoverageDeg=float(cap*kDeg);
-        if(cap<radius){radius=cap;shareFacts_.circleCapped=true;}
-      }
+    if(usable) {
+      radius=scopecircle::coverageRadius(shareMap,mirrorMap,circle->tc[0],circle->tc[1]);
+      usable=std::isfinite(radius);
+      if(usable)shareFacts_.circleEdgeDeg=float((radius+margin+0.5*band)*kDeg);
     }
     if(usable&&!(radius>=shareview::kMinCircleDeg/kDeg))usable=false;
     if(!usable)shareFacts_.circleRefused=true;
@@ -497,7 +497,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         k.leftTan[0]=float(tg[e].left);k.leftTan[1]=float(tg[e].right);k.leftTan[2]=float(tg[e].up);k.leftTan[3]=float(tg[e].down);
         k.leftSize[0]=float(eyes_[e].width);k.leftSize[1]=float(eyes_[e].height);
         k.rightAng[0]=float(centre[e][0]);k.rightAng[1]=float(centre[e][1]);k.rightAng[2]=float(centre[e][2]);k.rightAng[3]=float(radius+margin+0.5*band);
-        k.band[0]=float(margin);k.band[1]=float(1.0/band);k.band[2]=circle->weight;k.band[3]=0.f;
+        k.band[0]=float(margin);k.band[1]=float(1.0/band);k.band[2]=mirrorWeight;k.band[3]=0.f;
         k.misc[3]=2.f;
         shareFacts_.circleCentreUv[2*e]=float((double(circle->tc[e][0])-tg[e].left)/(tg[e].right-tg[e].left));
         shareFacts_.circleCentreUv[2*e+1]=float((tg[e].up-double(circle->tc[e][1]))/(tg[e].up-tg[e].down));
