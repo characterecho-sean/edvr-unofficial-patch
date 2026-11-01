@@ -15106,6 +15106,28 @@ def _hj_f95c_head_shadow(rows, ctx):
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
 
+_TEE_HELD = (("h_measure", "measure"), ("h_pending", "pending"), ("h_bound", "bound"), ("h_census", "census"), ("h_check", "check"),
+             ("h_polled", "polled"), ("h_world0", "world 0"), ("h_world1", "world 1"), ("h_clear", "clear"))
+
+
+def _tee_held_text(sec):
+    """#155: the cost lines' tally of the terms that held the tee's fast frame back, the draws refused as not scene depth, and the depth-size scene test
+    against the depth probe (counted only while the probe is wanted). Lines from a build before #155 carry none of it, which the text says."""
+    held = [r for r in sec if r.get("h_measure") is not None]
+    if not held:
+        return "; no #155 tally (a build before it)"
+    sums = [(name, sum(int(r[k]) for r in held)) for k, name in _TEE_HELD]
+    total = sum(n for _, n in sums)
+    terms = ", ".join("%s %d (%s)" % (name, n, _hpct(n, total)) for name, n in sums if n) or "no slow call"
+    text = "; held (#155) over %d lines: %s; not scene depth %d" % (len(held), terms, sum(int(r["notscene"]) for r in held))
+    agree, disagree = (sum(int(r[k]) for r in held) for k in ("agree", "disagree"))
+    if agree + disagree:
+        text += "; scene size agrees with the depth probe on %.1f%% of %d world draws (%d disagree)" % (100.0 * agree / (agree + disagree), agree + disagree, disagree)
+    else:
+        text += "; no scene size comparison (the depth probe not wanted)"
+    return text
+
+
 def _hj_f100_tee(rows, ctx):
     """F100: the marker probe's draw tee. Per window (its cost line; 1 s before F125 and in the detail log, 10 s otherwise): the calls, the share the prefilter
     took, the frames, and the tee's clock (a mean call from one call in 64 on the perf monitor's sample frames, and the estimate a frame). Calls and no prefilter
@@ -15124,6 +15146,7 @@ def _hj_f100_tee(rows, ctx):
         text += "; the tee %.3f ms a frame (median of %d clocked %s, max %.3f), %.1f ns a call" % (ms[len(ms) // 2], len(ms), unit, ms[-1], ns[len(ns) // 2])
     else:
         text += "; the tee's clock took no call (no perf sample frame on foot)"
+    text += _tee_held_text(sec)
     if not calls:
         return ("IDLE", text)
     if not fast:
@@ -16776,7 +16799,11 @@ HEALTH_RULES = (
     ), _hj_f95c_head_shadow),
     _hrule("marker tee (F100)", ("F100",), ("tee (F100)",), (
         ("sec", r"tee \(F100\): fast path (?P<fast>\d+) of (?P<calls>\d+) calls, (?P<frames>\d+) frames, tee clock: (?:(?P<clocked>\d+) calls clocked, (?P<ns>-?[\d.]+) ns a "
-                r"call, est\. (?P<ms>-?[\d.]+) ms a frame|none)(?:; over " + H_WL + r")?"),   # F125: the window's seconds; none before F125 (1 s)
+                r"call, est\. (?P<ms>-?[\d.]+) ms a frame|none)(?:; over " + H_WL + r")?"   # F125: the window's seconds; none before F125 (1 s)
+                # #155: the slow calls by the term that held the fast frame back, the world draws refused as not scene depth, the size test against the probe
+                r"(?:; tee held \(#155\): measure (?P<h_measure>\d+), pending (?P<h_pending>\d+), bound (?P<h_bound>\d+), census (?P<h_census>\d+), "
+                r"check (?P<h_check>\d+), polled (?P<h_polled>\d+), world 0 (?P<h_world0>\d+), world 1 (?P<h_world1>\d+), clear (?P<h_clear>\d+); "
+                r"not scene depth (?P<notscene>\d+); scene size vs the depth probe: agree (?P<agree>\d+), disagree (?P<disagree>\d+))?"),
         ("families", r"marker probe \(F100\): measurement families (?P<state>ON|off) "),
     ), _hj_f100_tee),
     _hrule("pose hook CPU (F100)", ("F100",), ("pose hook CPU (F100)",), (
@@ -21600,10 +21627,11 @@ def self_test_health():
         # ---- marker tee (F100): the draw tee's prefilter and its clock; pose hook CPU (F100): the local avatar's Animate work ----
         T100, P100 = "marker tee (F100)", "pose hook CPU (F100)"
 
-        def tee100(fast=1800000, calls=2000000, frames=90, clocked=350, ns=25.0, ms=0.556, wl=1):
+        def tee100(fast=1800000, calls=2000000, frames=90, clocked=350, ns=25.0, ms=0.556, wl=1, held=None):
             head = R("native on foot marker probe: cost: draw tee calls %llu", calls, 300000, 1000, 900, 298100, 8900, 960, 44640, 0)
             tail = R(", tee clock: %llu calls clocked", clocked, ns, ms, wl) if clocked else R(", tee clock: none", wl)
-            return head + R("; tee (F100): fast path %llu", fast, calls, frames) + tail
+            # #155: the tally (measure .. world 1, clear), not scene depth, agree, disagree; absent before #155
+            return head + R("; tee (F100): fast path %llu", fast, calls, frames) + tail + (R("; tee held (#155):", *held) if held else "")
 
         def pose100(calls=90, mean=42.5, mx=120.0, ms=3.825, wl=1):
             return R("native on foot pose hook CPU (F100) %u s:", wl, calls, mean, mx, ms)
@@ -21623,6 +21651,18 @@ def self_test_health():
               has=["14 s:", "median of 2 clocked windows"], lacks=["UNPARSED"])
         check("F100 tee: 10 s without a clock sample", [tee100(clocked=0, wl=10)], 0, [("PARTIAL", T100)],
               has=["10 s:", "the tee's clock took no call"], lacks=["UNPARSED"])
+        # #155: the tally on the cost line. AA off, key off: every slow call held by world 0, draws refused as not scene depth, no probe to compare with.
+        check("F100 tee: #155 tally, AA off and no world rows", [tee100(fast=0, wl=10, held=(0, 0, 0, 0, 0, 0, 900000, 0, 0, 450000, 0, 0))] * 2, 3,
+              [("NEVER APPLIED", T100)], has=["held (#155) over 2 lines: world 0 1800000 (100%)", "not scene depth 900000",
+                                               "no scene size comparison (the depth probe not wanted)"], lacks=["UNPARSED", "world 1"])
+        # DLAA: mostly published, a few pending; the size test against the probe's answer.
+        check("F100 tee: #155 tally with DLAA, the size test compared", [tee100(wl=10, held=(0, 30, 2, 0, 4, 64, 0, 0, 900, 0, 9990, 10))], 0, [("OK", T100)],
+              has=["held (#155) over 1 lines: pending 30 (3%), bound 2 (0%), check 4 (0%), polled 64 (6%), clear 900 (90%)", "not scene depth 0",
+                   "scene size agrees with the depth probe on 99.9% of 10000 world draws (10 disagree)"], lacks=["UNPARSED"])
+        check("F100 tee: #155 tally all zero still reads as run", [tee100(wl=10, held=(0,) * 12)], 0, [("OK", T100)],
+              has=["held (#155) over 1 lines: no slow call", "not scene depth 0"], lacks=["UNPARSED"])
+        check("F100 tee: a line without the #155 tally says so", [tee100(wl=10)], 0, [("OK", T100)],
+              has=["no #155 tally (a build before it)"], lacks=["UNPARSED", "held (#155) over"])
         check("F100 pose: the local Animate work clocked", [pose100(), pose100(ms=4.1)], 0, [("OK", P100)],
               has=["2 s: 180 calls (90 a second), 42.5 us a call (median second), max 120.0 us"], lacks=["UNPARSED"])
         check("F100 pose: no local work", [pose100(0, 0.0, 0.0, 0.0)] * 2, 0, [("IDLE", P100)], has=["no local Animate work clocked"])
