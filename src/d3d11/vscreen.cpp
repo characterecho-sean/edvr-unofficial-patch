@@ -6078,10 +6078,7 @@ bool vScreenVrCpuDepthSlotCache() { return g_vrCpuDepthSlotCache.load(std::memor
 
 // One temporary draw-path key: read it, store it, and say so when it differs from the last sweep's (or, the first time, say where it starts: was none).
 // The line carries the perf monitor's frame number, the one `draw hook CPU:` windows end at, so edvr_log.py --perf-windows drops the window a flip fell in.
-static void vrDrawPathKeySweep(Config& cfg, const char* key, std::atomic<bool>& flag, int& last) {
-    char full[96];
-    _snprintf_s(full, sizeof(full), _TRUNCATE, "experimental.%s", key);
-    const bool v = cfg.getBool(full, true);
+static void vrDrawPathKeySweep(const char* full, bool v, std::atomic<bool>& flag, int& last) {
     if (last != (v ? 1 : 0)) {
         Log::get().note("vr draw path key: %s = %s (was %s) at frame %u", full, v ? "on" : "off", last < 0 ? "none" : (last ? "on" : "off"), perfMonitorFrameNo());
         last = v ? 1 : 0;
@@ -6184,9 +6181,9 @@ static void vScreenRefreshConfigBody(bool forced) {
     // The temporary draw-path keys (test build 1): TEMPORARY, they go with the build's closing.
     {
         static int lastEyeRows = -1, lastBenchIdle = -1, lastDepthCache = -1;
-        vrDrawPathKeySweep(cfg, "vr_eye_rows_without_aa", g_vrEyeRowsWithoutAa, lastEyeRows);
-        vrDrawPathKeySweep(cfg, "vr_cpu_benchmark_idle", g_vrCpuBenchmarkIdle, lastBenchIdle);
-        vrDrawPathKeySweep(cfg, "vr_cpu_depth_slot_cache", g_vrCpuDepthSlotCache, lastDepthCache);
+        vrDrawPathKeySweep("experimental.vr_eye_rows_without_aa", cfg.getBool("experimental.vr_eye_rows_without_aa", true), g_vrEyeRowsWithoutAa, lastEyeRows);
+        vrDrawPathKeySweep("experimental.vr_cpu_benchmark_idle", cfg.getBool("experimental.vr_cpu_benchmark_idle", true), g_vrCpuBenchmarkIdle, lastBenchIdle);
+        vrDrawPathKeySweep("experimental.vr_cpu_depth_slot_cache", cfg.getBool("experimental.vr_cpu_depth_slot_cache", true), g_vrCpuDepthSlotCache, lastDepthCache);
     }
 }
 
