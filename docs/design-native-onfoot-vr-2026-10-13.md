@@ -4455,6 +4455,7 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - (b) A mark-only layer still needs the HDR scene for the tonemap difference, so it is (a). A plain add brings back A2's brightness over bright glass.
     - (c) Shrinking the mark's quad by 1/M in the scene gives the true size, not a crisp mark. Unverified.
   - **The recommendation:** the mark stays magnified with the picture for now; (a) as its own arc if the pilot wants it.
+  - **CLOSED 2026-11-01 by the pilot's word ("Leave it magnified").** With Anti-aliasing off the gunsight mark is magnified with the picture. Do not re-propose route (a) unless he asks.
 - **Installed for one flight:** F203 on top of F196-F202, as the build after this doc commit.
   - **Next flight** (Anti-aliasing off, mouse look, `fix.native_on_foot_ads_head_aim = on`): ADS presses should leave the sight where the mouse put it. Read the press lines' `kept ... injected +0.00 +0.00`.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
