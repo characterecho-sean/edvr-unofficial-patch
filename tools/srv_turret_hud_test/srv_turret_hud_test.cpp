@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -1911,6 +1912,188 @@ static void contentDepthCases() {
     check(st::anchoredMove<double>(cp, in, out) && closeTo(out[3], 2.5 + double(cp.tz), 1e-12), "with 1 / z_c at 0 the CPU move is the plain translation (the quad's own depth moves by T.z)");
 }
 
+// THE RADAR'S OWN CAMERA (srv_turret_math.h; camera mode, the slot hook): the mode and its back distance; the camera's move against an independent inverse; the plane pointers' rebase; the
+// radar-slot test over a fake memory; the direction rule.
+static bool invert4(const double m[16], double out[16]) {   // Gauss-Jordan with partial pivoting, row-major
+    double a[4][8];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 8; ++c) a[r][c] = c < 4 ? m[r * 4 + c] : (c - 4 == r ? 1.0 : 0.0);
+    for (int c = 0; c < 4; ++c) {
+        int piv = c;
+        for (int r = c + 1; r < 4; ++r)
+            if (std::fabs(a[r][c]) > std::fabs(a[piv][c])) piv = r;
+        if (std::fabs(a[piv][c]) < 1e-12) return false;
+        if (piv != c)
+            for (int k = 0; k < 8; ++k) std::swap(a[c][k], a[piv][k]);
+        const double inv = 1.0 / a[c][c];
+        for (int k = 0; k < 8; ++k) a[c][k] *= inv;
+        for (int r = 0; r < 4; ++r)
+            if (r != c) {
+                const double f = a[r][c];
+                for (int k = 0; k < 8; ++k) a[r][k] -= f * a[c][k];
+            }
+    }
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) out[r * 4 + c] = a[r][c + 4];
+    return true;
+}
+struct FakeMemory {   // a block of real memory whose reads succeed only inside it
+    std::vector<uint8_t> bytes = std::vector<uint8_t>(0x4000, 0);
+    uintptr_t at(size_t offset) const { return reinterpret_cast<uintptr_t>(bytes.data()) + offset; }
+    template <class T>
+    void put(size_t offset, T v) { std::memcpy(bytes.data() + offset, &v, sizeof(v)); }
+};
+static bool fakeRead(void* ctx, uintptr_t address, void* out, size_t n) {
+    const FakeMemory& m = *static_cast<const FakeMemory*>(ctx);
+    const uintptr_t lo = m.at(0);
+    if (address < lo || address - lo > m.bytes.size() || m.bytes.size() - (address - lo) < n) return false;
+    std::memcpy(out, reinterpret_cast<const void*>(address), n);
+    return true;
+}
+static void slotCameraCases() {
+    using A = st::RadarAnchorMode;
+    check(st::radarAnchorModeOf("camera") == A::kCamera && !std::strcmp(st::radarAnchorModeName(A::kCamera), "camera") && st::radarAnchorModeOf("Camera") == A::kOn &&
+              !std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed"),
+          "fix.srv_turret_radar_anchor takes camera (and only that spelling), and the settings line names it");
+    check(st::radarAnchorOffset(true, A::kCamera, 65).zero() && !st::radarAnchorOffset(true, A::kOn, 65).zero(), "camera mode publishes a zero setter offset (the restore gives the game its placement back)");
+    check(st::radarCameraBackM(true, A::kCamera, 65) == 0.65f && st::radarCameraBackM(true, A::kCamera, 500) == 1.5f && st::radarCameraBackM(false, A::kCamera, 65) == 0.0f &&
+              st::radarCameraBackM(true, A::kOn, 65) == 0.0f && st::radarCameraBackM(true, A::kOff, 65) == 0.0f && st::radarCameraBackM(true, A::kCamera, 0) == 0.0f,
+          "the slot camera's back distance is the radar forward key in metres (capped at 150 cm) while the view is on in camera mode, else 0");
+    // the move: an orthonormal camera (yaw 30, pitch -12, roll 7 degrees) whose view is the inverse of its world
+    const double yaw = 30.0 / 57.29577951308232, pitch = -12.0 / 57.29577951308232, roll = 7.0 / 57.29577951308232;
+    const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
+    const double Ry[9] = {cy, 0, -sy, 0, 1, 0, sy, 0, cy}, Rx[9] = {1, 0, 0, 0, cp, sp, 0, -sp, cp}, Rz[9] = {cr, sr, 0, -sr, cr, 0, 0, 0, 1};
+    double t1[9] = {}, R[9] = {};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) t1[i * 3 + j] += Rz[i * 3 + k] * Rx[k * 3 + j];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) R[i * 3 + j] += t1[i * 3 + k] * Ry[k * 3 + j];
+    for (double& r : R) r = double(float(r));   // the float camera is the truth: the inverse below is of exactly what the camera holds
+    double world[16] = {R[0], R[1], R[2], 0, R[3], R[4], R[5], 0, R[6], R[7], R[8], 0, 1.25, -0.5, 2.75, 1}, view[16];
+    check(invert4(world, view), "the test camera's world inverts");
+    alignas(16) uint8_t cam[st::kCamBytes] = {};
+    for (size_t i = 0; i < st::kCamBytes; ++i) cam[i] = static_cast<uint8_t>(i * 7 + 3);   // every byte the move must not touch has a value
+    float wf[16], vf[16];
+    for (int i = 0; i < 16; ++i) {
+        wf[i] = static_cast<float>(world[i]);
+        vf[i] = static_cast<float>(view[i]);
+    }
+    std::memcpy(cam, wf, sizeof(wf));
+    std::memcpy(cam + st::kCamViewAt, vf, sizeof(vf));
+    const uint32_t flags0 = 0x5;
+    std::memcpy(cam + st::kCamFlagsAt, &flags0, sizeof(flags0));
+    uint8_t before[st::kCamBytes];
+    std::memcpy(before, cam, sizeof(before));
+    const float d[3] = {0.11f, -0.07f, 0.23f};
+    st::cameraMoveBy(cam, d);
+    float wAfter[16], vAfter[16];
+    std::memcpy(wAfter, cam, sizeof(wAfter));
+    std::memcpy(vAfter, cam + st::kCamViewAt, sizeof(vAfter));
+    double world2[16], view2[16];
+    for (int i = 0; i < 16; ++i) world2[i] = wAfter[i];
+    check(invert4(world2, view2), "the moved camera's world inverts");
+    bool inverse = true;
+    for (int i = 0; i < 16; ++i) inverse = inverse && std::fabs(double(vAfter[i]) - view2[i]) <= 1e-6 * std::max(1.0, std::fabs(view2[i]));
+    check(inverse && world2[12] == double(wf[12] + d[0]) && world2[13] == double(wf[13] + d[1]) && world2[14] == double(wf[14] + d[2]),
+          "the camera moved by d: its position by d, and its view is the inverse of the moved world (an independent inverse, to 1e-6)");
+    uint32_t flags1 = 0;
+    std::memcpy(&flags1, cam + st::kCamFlagsAt, sizeof(flags1));
+    bool untouched = true;
+    for (size_t i = 0; i < st::kCamBytes; ++i) {
+        const bool written = (i >= st::kCamPositionAt && i < st::kCamPositionAt + 12) || (i >= st::kCamViewAt + 48 && i < st::kCamViewAt + 60) || (i >= st::kCamFlagsAt && i < st::kCamFlagsAt + 4);
+        if (!written) untouched = untouched && cam[i] == before[i];
+    }
+    check(flags1 == (flags0 | st::kCamVpDirty) && st::kCamVpDirty == 0x8u && untouched,
+          "...VP is marked dirty (bit 3, the others kept), and nothing else of the camera changes (the projection, the frustum, the rotation)");
+    std::memcpy(cam, before, sizeof(before));
+    const float D = 0.65f, back[3] = {static_cast<float>(-D * R[6]), static_cast<float>(-D * R[7]), static_cast<float>(-D * R[8])};
+    st::cameraMoveBy(cam, back);
+    float vBack[16];
+    std::memcpy(vBack, cam + st::kCamViewAt, sizeof(vBack));
+    check(std::fabs(double(vBack[14]) - (double(vf[14]) + D)) <= 2e-6 * std::max(1.0, std::fabs(double(vf[14]))) && std::fabs(double(vBack[12]) - vf[12]) <= 1e-4 &&
+              std::fabs(double(vBack[13]) - vf[13]) <= 1e-4,
+          "d = -D times the camera's forward: view row 3's z grows by exactly D, its x and y stay");
+    // the plane pointers' rebase
+    alignas(16) uint8_t copy[st::kCamBytes] = {};
+    const uintptr_t src = 0x7FF612340000ull, to = reinterpret_cast<uintptr_t>(copy);
+    const auto rebased = [&](uintptr_t a, uintptr_t b, uintptr_t& ra, uintptr_t& rb) {
+        std::memcpy(copy + st::kCamPlanePtrAt[0], &a, 8);
+        std::memcpy(copy + st::kCamPlanePtrAt[1], &b, 8);
+        st::cameraRebase(copy, src);
+        std::memcpy(&ra, copy + st::kCamPlanePtrAt[0], 8);
+        std::memcpy(&rb, copy + st::kCamPlanePtrAt[1], 8);
+    };
+    uintptr_t ra = 0, rb = 0;
+    rebased(src + 0x90, src + 0xF0, ra, rb);
+    bool rebase = ra == to + 0x90 && rb == to + 0xF0;
+    rebased(src + 0x90 + 0x30, src + 0xF0 + 0x70, ra, rb);
+    rebase = rebase && ra == to + 0xC0 && rb == to + 0x160;
+    rebased(src + 0xF0 + 0x10, src + 0x90 + 0x10, ra, rb);
+    rebase = rebase && ra == to + 0x100 && rb == to + 0xA0;
+    check(rebase, "a plane pointer into either of the source's inline blocks (+0x90, 6 x 16; +0xF0, 8 x 16) points at the same place in the copy");
+    rebased(src + 0x8F, src + 0x170, ra, rb);
+    bool kept = ra == src + 0x8F && rb == src + 0x170;
+    rebased(0x1234560000ull, 0, ra, rb);
+    kept = kept && ra == 0x1234560000ull && rb == 0;
+    check(kept, "...and one outside them (just before, just past, another object's, null) is kept");
+    // the radar-slot test over a fake memory: slot 0x000, manager 0x1000, lists 0x1200, component array 0x1400, component 0x1800, link 0x2000, descriptor 0x2400
+    const uintptr_t slotVt = 0x1454FB7F8ull, linkVt = 0x145511F18ull;
+    const auto build = [&](FakeMemory& m) {
+        m.put<uint64_t>(0x0, slotVt);
+        m.put<uint32_t>(st::kSlotIndexAt, 1);
+        m.put<uint64_t>(st::kSlotManagerAt, m.at(0x1000));
+        m.put<uint32_t>(st::kSlotListAt, 2);
+        m.put<uint64_t>(0x1000 + st::kManagerCountAt, 3);
+        m.put<uint64_t>(0x1000 + st::kManagerListsAt, m.at(0x1200));
+        m.put<uint64_t>(0x1200 + 1 * st::kManagerEntryBytes + st::kEntryCountAt, 2);
+        m.put<uint64_t>(0x1200 + 1 * st::kManagerEntryBytes + st::kEntryDataAt, m.at(0x1400));
+        m.put<uint64_t>(0x1400, 0);   // a null entry is passed over
+        m.put<uint64_t>(0x1408, m.at(0x1800));
+        m.put<uint64_t>(0x1800 + st::kComponentLinkAt, m.at(0x2000));
+        m.put<uint64_t>(0x2000, linkVt);
+        m.put<uint64_t>(0x1800 + st::kComponentDescAt, m.at(0x2400));
+        m.put<uint32_t>(0x2400 + st::kDescModeAt, st::kRadarModeIcon);
+    };
+    const auto test = [&](FakeMemory& m, st::RadarSlot& out) { return st::radarSlotTest(m.at(0), slotVt, linkVt, &fakeRead, &m, out); };
+    {
+        FakeMemory m;
+        build(m);
+        st::RadarSlot hit;
+        check(test(m, hit) == 1 && hit.index == 1 && hit.mode == st::kRadarModeIcon && hit.list == 2, "a slot with the radar's component at its index is the radar's: index 1, mode 5 (the icon), list B");
+    }
+    const auto miss = [&](const std::function<void(FakeMemory&)>& edit, int want) {
+        FakeMemory m;
+        build(m);
+        edit(m);
+        st::RadarSlot hit;
+        return test(m, hit) == want;
+    };
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x0, 0x1454FB800ull); }, 0), "...not with another slot vtable");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x1000 + st::kManagerCountAt, 1); }, 0), "...not with its index past the manager's lists");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(st::kSlotManagerAt, 0); }, 0), "...not without a manager");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x1200 + 1 * st::kManagerEntryBytes + st::kEntryCountAt, 65); }, 0), "...not with more than 64 components at its index");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x1800 + st::kComponentLinkAt, 0); }, 0), "...not when the component has no link");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x2000, 0x145511DE8ull); }, 0), "...not when the link's vtable is not the radar interface's");
+    check(miss([](FakeMemory& m) { m.put<uint64_t>(0x1000 + st::kManagerListsAt, 0x10); }, -1), "...and a read that fails is a fault (-1), not an answer");
+    check(miss([](FakeMemory& m) { m.put<uint32_t>(0x2400 + st::kDescModeAt, st::kRadarModeTerrain); m.put<uint32_t>(st::kSlotListAt, 0); }, 1), "...and the terrain host's slot in list A is the radar's too");
+    // the direction rule
+    const int64_t f = 10000000;
+    const float uRaw[3] = {0.0f, 0.0f, 2.0f}, camF[3] = {0.6f, 0.0f, 0.8f}, zero3[3] = {0.0f, 0.0f, 0.0f};
+    float dd[3];
+    using F = st::CameraBackFrom;
+    bool rule = st::radarCameraBack(0.65f, true, f / 20, f, uRaw, camF, dd) == F::kTurret && dd[0] == 0.0f && dd[1] == 0.0f && std::fabs(dd[2] + 0.65f) < 1e-7f;
+    rule = rule && st::radarCameraBack(0.65f, true, f / 5, f, uRaw, camF, dd) == F::kCamera && std::fabs(dd[0] + 0.39f) < 1e-6f && std::fabs(dd[2] + 0.52f) < 1e-6f;
+    rule = rule && st::radarCameraBack(0.65f, false, 0, f, uRaw, camF, dd) == F::kCamera && st::radarCameraBack(0.65f, true, -5, f, uRaw, camF, dd) == F::kCamera;
+    rule = rule && st::radarCameraBack(0.65f, true, 0, f, zero3, camF, dd) == F::kCamera;
+    check(rule, "the slot camera moves back D along the turret's forward (unit) from a sample written within 100 ms; a stale, missing, future-dated or zero one falls back to the camera's own forward");
+    bool none = st::radarCameraBack(0.65f, false, 0, f, nullptr, zero3, dd) == F::kNone && dd[0] == 0.0f && dd[1] == 0.0f && dd[2] == 0.0f;
+    none = none && st::radarCameraBack(0.0f, true, 0, f, uRaw, camF, dd) == F::kNone && dd[2] == 0.0f;
+    none = none && st::radarCameraBack(std::numeric_limits<float>::quiet_NaN(), true, 0, f, uRaw, camF, dd) == F::kNone && st::radarCameraBack(-0.3f, true, 0, f, uRaw, camF, dd) == F::kNone;
+    check(none, "...and D of 0 (or negative, or NaN), or no usable direction at all, is no move");
+}
+
 static void depthMathCases() {
     using M = st::DepthMode;
     check(st::depthModeOf("game") == M::kGame && st::depthModeOf("real") == M::kReal && st::depthModeOf("front") == M::kFront && st::depthModeOf("") == M::kGame &&
@@ -2955,6 +3138,7 @@ int main(int argc, char** argv) {
         depthMathCases();
         radarAnchorCases();
         contentDepthCases();
+        slotCameraCases();
         planeAndUnmovedCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);

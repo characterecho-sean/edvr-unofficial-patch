@@ -12,6 +12,7 @@
 //     is the fallback (0, 0, s * F), along the vehicle's forward, which swings the disc off as the turret turns (flight of 07bde936). Each call goes into a ring the render thread
 //     reads (srvRadarAnchorShownCall): the draw-time correction moves the radar's billboards by what the turret did between the sample and the frame drawn (srv_turret.cpp).
 //   * the schematic's per-frame update (0x384A590, obj in RCX, dt in XMM1): counted only, to say the object is alive. It writes nothing.
+// Camera mode (TEMPORARY) adds a third, THE SLOT CAMERA below: the placement stays the game's own and the radar's schematic slots are framed from a camera moved back instead.
 //
 // The frame thread (srv_turret.cpp srvTurretFrameTick) arms them, publishes the offset every frame and does all the logging; the hooks only record.
 #pragma once
@@ -101,7 +102,31 @@ struct RadarAnchorStats {
 };
 RadarAnchorStats srvRadarAnchorStats();
 
-// DLL unload: both gates close, so the relays forward straight to the game's functions.
+// THE SLOT CAMERA (TEMPORARY, fix.srv_turret_radar_anchor = camera; docs\srv-turret-hud-2026-10-30.md, "the radar's own camera moved back"). A third hook, build 334925 only, on the
+// schematic slot's update 0x36BF3C0 (RCX = the slot, RDX = the camera it frames, gates, billboards and renders its picture from): for the radar's slots (srv_turret_math.h
+// radarSlotTest: the terrain disc's and the Scorpion icon's, both lists, so both eyes) while a back distance is published, the original gets a private copy of the camera moved back by it
+// along the turret's forward (st::radarCameraBack, st::cameraMoveBy); every other call gets the game's camera. Once (later calls return the first answer): verify the build and the
+// prologue and install it; says "srv turret radar camera: slot hook armed: ..." or "... slot hook stood down: <why>; nothing was patched". Frame thread.
+RadarAnchorHookState srvRadarSlotArm();
+// Every frame, frame thread: the back distance in metres (0: every call gets the game's camera).
+void srvRadarSlotPublish(float backM);
+// The slot hook's record, cumulative. Radar slots and first hits by kind (0 terrain, mode 4; 1 icon, mode 5; 2 another mode) and list (0 A, 1 B, 2 another).
+struct RadarSlotFirst {
+    bool have = false;
+    uintptr_t slot = 0;
+    uint32_t index = 0, mode = 0, list = 0;
+    bool fromTurret = false;   // the direction: the turret's (the CPU camera sample), else the camera's own forward
+    float u[3] = {}, back = 0.0f;
+};
+struct RadarSlotStats {
+    RadarAnchorHookState state = RadarAnchorHookState::NotTried;
+    uint64_t calls = 0, radar[3][3] = {}, moved = 0, fromTurret = 0, fromCamera = 0, faults = 0;
+    uint32_t thread = 0;   // the thread the hook runs on (0: not called yet)
+    RadarSlotFirst first[3][3];
+};
+RadarSlotStats srvRadarSlotStats();
+
+// DLL unload: every gate closes, so the relays forward straight to the game's functions.
 void srvRadarAnchorShutdown();
 
 }  // namespace edvr

@@ -97,16 +97,20 @@ inline DepthMode depthModeOf(const char* text) {
     if (text && !std::strcmp(text, "front")) return DepthMode::kFront;
     return DepthMode::kGame;
 }
-// fix.srv_turret_radar_anchor (on | reversed | off, default on): whether the radar's terrain schematic is moved forward IN THE GAME by the radar-forward key (srv_radar_anchor.cpp, build
-// 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset.
-enum class RadarAnchorMode : uint8_t { kOn = 0, kReversed = 1, kOff = 2 };
+// fix.srv_turret_radar_anchor (on | reversed | off | camera, default on): whether the radar's terrain schematic is moved forward IN THE GAME by the radar-forward key (srv_radar_anchor.cpp, build
+// 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset. camera (TEMPORARY, flight fe0b2560): the placement
+// is the game's own, and the radar's schematic CAMERA is moved back by the radar-forward key instead (THE RADAR'S OWN CAMERA below).
+enum class RadarAnchorMode : uint8_t { kOn = 0, kReversed = 1, kOff = 2, kCamera = 3 };
 inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kOn;
 inline constexpr const char* kRadarAnchorDefaultText = "on";
-inline const char* radarAnchorModeName(RadarAnchorMode m) { return m == RadarAnchorMode::kReversed ? "reversed" : m == RadarAnchorMode::kOff ? "off" : "on"; }
+inline const char* radarAnchorModeName(RadarAnchorMode m) {
+    return m == RadarAnchorMode::kReversed ? "reversed" : m == RadarAnchorMode::kOff ? "off" : m == RadarAnchorMode::kCamera ? "camera" : "on";
+}
 // The key's text; anything else is the default, on (the settings line says which it took).
 inline RadarAnchorMode radarAnchorModeOf(const char* text) {
     if (text && !std::strcmp(text, "reversed")) return RadarAnchorMode::kReversed;
     if (text && !std::strcmp(text, "off")) return RadarAnchorMode::kOff;
+    if (text && !std::strcmp(text, "camera")) return RadarAnchorMode::kCamera;
     return RadarAnchorMode::kOn;
 }
 // Signature H's geometry shader reads the draw's vertex constants at GS slot 1: the draw's own VS slot 1, rows 277 to 279 the camera's right, up and forward in world axes.
@@ -238,7 +242,7 @@ inline bool isFamilyVs(uint64_t vs) {
 // ---- the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
 // The published offset: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s +1 for on and -1 for reversed (flown 2026-10-31: on is forward, about 1:1). The
 // hook adds s * F along the turret's forward instead when it has u and the anchor's rotation (radarAnchorAlong below), and this is its fallback. All bits zero (never a -0.0) unless
-// the Scorpion's turret view is on, the key is not off and F is above 0.
+// the Scorpion's turret view is on, the key is on or reversed and F is above 0 (camera mode publishes zero: the existing restore gives the game its own placement back).
 struct RadarAnchorOffset {
     float m[3] = {0.0f, 0.0f, 0.0f};
     uint32_t bits[3] = {0u, 0u, 0u};
@@ -246,11 +250,138 @@ struct RadarAnchorOffset {
 };
 inline RadarAnchorOffset radarAnchorOffset(bool on, RadarAnchorMode mode, int radarForwardCm) {
     RadarAnchorOffset o;
-    if (!on || mode == RadarAnchorMode::kOff || radarForwardCm <= 0) return o;
+    if (!on || mode == RadarAnchorMode::kOff || mode == RadarAnchorMode::kCamera || radarForwardCm <= 0) return o;
     const int cm = radarForwardCm > kRadarForwardMaxCm ? kRadarForwardMaxCm : radarForwardCm;
     o.m[2] = static_cast<float>(cm) / 100.0f * (mode == RadarAnchorMode::kReversed ? -1.0f : 1.0f);
     std::memcpy(&o.bits[2], &o.m[2], sizeof(float));
     return o;
+}
+// ---- THE RADAR'S OWN CAMERA (fix.srv_turret_radar_anchor = camera; srv_radar_anchor.cpp, the slot hook; flight fe0b2560) ------------------------------------------------------------
+// Camera mode leaves the schematic's placement to the game and hands each of the radar's schematic slots (the terrain disc's and the Scorpion icon's, in both lists: both eyes) a private
+// copy of the camera moved BACK by D, the radar-forward key, along the turret's forward, at the slot update's entry (0x36BF3C0 in build 334925;
+// analysis\decomp\verify_20261101_srv_radar_slot_camera.txt). The slot's gate, window, quad and picture camera V0 all come from that camera and nothing else, so the schematic, about 0.44 m behind the
+// eye at the game's camera, is about D - 0.44 m in front of V0, and V0 follows the camera every frame. The radar's own picture billboards then move forward by D through the regular
+// radar path (srv_turret.cpp), with the rest of the radar.
+// The camera object: 0x2F0 bytes of float rows (row-vector convention). World at +0x00 (rows x, y, z axes; row 3, the position, at +0x30), the frustum block's two plane-array
+// pointers at +0x70 and +0x78 (into its own inline blocks at +0x90, 6 x 16 bytes, and +0xF0, 8 x 16 bytes), view at +0x170 (row 3 at +0x1A0), projection +0x1B0 (position-free), VP
+// +0x1F0, dirty flags +0x230 (bit 3: VP, which the game rebuilds as view x projection before it reads it).
+inline constexpr size_t kCamBytes = 0x2F0;
+inline constexpr size_t kCamForwardAt = 0x20, kCamPositionAt = 0x30, kCamViewAt = 0x170, kCamFlagsAt = 0x230;
+inline constexpr size_t kCamPlanePtrAt[2] = {0x70, 0x78}, kCamInlineAt[2] = {0x90, 0xF0}, kCamInlineBytes[2] = {6 * 16, 8 * 16};
+inline constexpr uint32_t kCamVpDirty = 0x8;
+inline constexpr double kTurretSampleFreshS = 0.100;   // the turret's forward is taken from a CPU camera sample written at most this long ago
+
+// The back distance the slot hook is given: D = the radar-forward key in metres (capped as the setter's F is) while the Scorpion's turret view is on in camera mode; else 0 (no move).
+inline float radarCameraBackM(bool on, RadarAnchorMode mode, int radarForwardCm) {
+    if (!on || mode != RadarAnchorMode::kCamera || radarForwardCm <= 0) return 0.0f;
+    return static_cast<float>(radarForwardCm > kRadarForwardMaxCm ? kRadarForwardMaxCm : radarForwardCm) / 100.0f;
+}
+
+// The private copy's plane-array pointers: one that points into either of the source camera's inline blocks is moved to the same place in the copy's; any other is kept (the game only
+// reads through them).
+inline void cameraRebase(uint8_t* copy, uintptr_t source) {
+    const uintptr_t to = reinterpret_cast<uintptr_t>(copy);
+    for (const size_t at : kCamPlanePtrAt) {
+        uintptr_t p = 0;
+        std::memcpy(&p, copy + at, sizeof(p));
+        for (int b = 0; b < 2; ++b) {
+            const uintptr_t lo = source + kCamInlineAt[b];
+            if (p >= lo && p - lo < kCamInlineBytes[b]) {
+                p = to + kCamInlineAt[b] + (p - lo);
+                std::memcpy(copy + at, &p, sizeof(p));
+                break;
+            }
+        }
+    }
+}
+
+// The camera moved by the world offset d: its position += d; its view's row 3 -= d.x view row 0 + d.y view row 1 + d.z view row 2 (the columns of the view's 3x3 are the world's axes,
+// so this is the view the game would derive from the moved position, and for d = -D times the camera's forward it is view row 3's z + D); and VP marked dirty, so the game rebuilds it
+// from the edited view and the unchanged projection.
+inline void cameraMoveBy(uint8_t* cam, const float d[3]) {
+    float pos[3], view[16];
+    std::memcpy(pos, cam + kCamPositionAt, sizeof(pos));
+    std::memcpy(view, cam + kCamViewAt, sizeof(view));
+    for (int i = 0; i < 3; ++i) pos[i] += d[i];
+    for (int j = 0; j < 3; ++j) view[12 + j] -= d[0] * view[j] + d[1] * view[4 + j] + d[2] * view[8 + j];
+    uint32_t flags = 0;
+    std::memcpy(&flags, cam + kCamFlagsAt, sizeof(flags));
+    flags |= kCamVpDirty;
+    std::memcpy(cam + kCamPositionAt, pos, sizeof(pos));
+    std::memcpy(cam + kCamViewAt + 12 * sizeof(float), view + 12, 3 * sizeof(float));
+    std::memcpy(cam + kCamFlagsAt, &flags, sizeof(flags));
+}
+
+// Where the slot camera's move comes from: the turret's forward (the CPU camera sample), the camera's own forward (its world row 2; +z is forward, INFERRED from the projection's
+// w = z_view), or no move.
+enum class CameraBackFrom : uint8_t { kNone = 0, kTurret = 1, kCamera = 2 };
+// The world offset the radar's slot camera is moved by: d = -D * u, u the turret's forward in the world while its sample was written at most kTurretSampleFreshS ago (age and rate in QPC
+// ticks), else the camera's own forward, each made unit length. D not above 0 or not finite, or no usable direction: no move (d zero).
+inline CameraBackFrom radarCameraBack(float backM, bool haveU, int64_t uAgeTicks, int64_t ticksPerSecond, const float* u, const float* camForward, float d[3]) {
+    d[0] = d[1] = d[2] = 0.0f;
+    if (!(backM > 0.0f) || !std::isfinite(backM)) return CameraBackFrom::kNone;
+    const auto unit = [](const float* v, float out[3]) {
+        if (!v) return false;
+        const double n = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+        if (!(n > 1.0e-6) || !std::isfinite(n)) return false;
+        for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(v[i] / n);
+        return true;
+    };
+    const bool fresh = haveU && ticksPerSecond > 0 && uAgeTicks >= 0 && double(uAgeTicks) <= kTurretSampleFreshS * double(ticksPerSecond);
+    float dir[3];
+    CameraBackFrom from = CameraBackFrom::kNone;
+    if (fresh && unit(u, dir))
+        from = CameraBackFrom::kTurret;
+    else if (unit(camForward, dir))
+        from = CameraBackFrom::kCamera;
+    else
+        return CameraBackFrom::kNone;
+    for (int i = 0; i < 3; ++i) d[i] = -backM * dir[i];
+    return from;
+}
+
+// THE RADAR'S SLOTS (0x36BF3C0's RCX). A slot is the radar's when one of the components registered at its index has its link (+0x388) on an object of the radar's interface vtable
+// (0x5511F18): the slot's vtable; its index (+0x258) and manager (+0x280); the manager's per-index component lists (+0xB0, 0x20 bytes each, +0xA8 of them), each a count (+0x10) and an
+// array of component pointers (+0x18); a component's placement mode at *(+0x50)+0x74 (4 the terrain host, 5 the vehicle icon); the slot's list at +0x288 (0 A, 2 B). Mirror slots
+// share index and manager, so both lists (both eyes) are caught. Read through `read` (SEH-guarded in the hook; a fake memory in the rig): 1 the radar's (out filled), 0 not, -1 a read
+// failed.
+using MemRead = bool (*)(void* ctx, uintptr_t address, void* out, size_t bytes);
+inline constexpr size_t kSlotIndexAt = 0x258, kSlotManagerAt = 0x280, kSlotListAt = 0x288, kManagerCountAt = 0xA8, kManagerListsAt = 0xB0, kManagerEntryBytes = 0x20, kEntryCountAt = 0x10,
+                        kEntryDataAt = 0x18, kComponentLinkAt = 0x388, kComponentDescAt = 0x50, kDescModeAt = 0x74;
+inline constexpr uint64_t kSlotComponentsMax = 64;
+inline constexpr uint32_t kRadarModeTerrain = 4, kRadarModeIcon = 5;
+struct RadarSlot {
+    uint32_t index = 0, mode = 0, list = 0;
+};
+inline int radarSlotTest(uintptr_t slot, uintptr_t slotVtable, uintptr_t linkVtable, MemRead read, void* ctx, RadarSlot& out) {
+    uintptr_t vtable = 0, manager = 0, lists = 0, data = 0;
+    uint32_t index = 0;
+    uint64_t count = 0, n = 0;
+    if (!read(ctx, slot, &vtable, sizeof(vtable))) return -1;
+    if (vtable != slotVtable) return 0;
+    if (!read(ctx, slot + kSlotIndexAt, &index, sizeof(index)) || !read(ctx, slot + kSlotManagerAt, &manager, sizeof(manager))) return -1;
+    if (!manager) return 0;
+    if (!read(ctx, manager + kManagerCountAt, &count, sizeof(count))) return -1;
+    if (index >= count) return 0;
+    if (!read(ctx, manager + kManagerListsAt, &lists, sizeof(lists))) return -1;
+    const uintptr_t entry = lists + uintptr_t(index) * kManagerEntryBytes;
+    if (!read(ctx, entry + kEntryCountAt, &n, sizeof(n)) || !read(ctx, entry + kEntryDataAt, &data, sizeof(data))) return -1;
+    if (n > kSlotComponentsMax) return 0;
+    for (uint64_t i = 0; i < n; ++i) {
+        uintptr_t component = 0, link = 0, linkVt = 0, desc = 0;
+        if (!read(ctx, data + uintptr_t(i) * sizeof(uintptr_t), &component, sizeof(component))) return -1;
+        if (!component) continue;
+        if (!read(ctx, component + kComponentLinkAt, &link, sizeof(link))) return -1;
+        if (!link) continue;
+        if (!read(ctx, link, &linkVt, sizeof(linkVt))) return -1;
+        if (linkVt != linkVtable) continue;
+        if (!read(ctx, component + kComponentDescAt, &desc, sizeof(desc)) || !read(ctx, desc + kDescModeAt, &out.mode, sizeof(out.mode)) ||
+            !read(ctx, slot + kSlotListAt, &out.list, sizeof(out.list)))
+            return -1;
+        out.index = index;
+        return 1;
+    }
+    return 0;
 }
 // The placement setter's rule (0x38563A0 in build 334925; srv_radar_anchor.cpp). The game hands it P, a 4x4 of rows x, y, z and translation; P[12..14] is the hologram's place
 // relative to the anchor in the anchor's axes (about (0, +1.96, 0) on the Scorpion: the first build REPLACED it and dropped the radar 1.96 m). The hook ADDS d to that translation

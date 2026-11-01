@@ -269,7 +269,7 @@ void readKeys() {
         Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s (live; "
                         "fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, "
                         "fix.srv_turret_hud_depth, fix.srv_turret_hud_scissor and fix.srv_turret_radar_anchor, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key "
-                        "open or game, the radar anchor key on, reversed or off)",
+                        "open or game, the radar anchor key on, reversed, off or camera)",
                         back, forward, radarForward, panels, radar, gap, st::depthModeName(depth), scissorOpen ? "open" : "game", st::radarAnchorModeName(anchorMode));
 }
 
@@ -1417,6 +1417,9 @@ void radarCamBoundary(ID3D11DeviceContext* ctx) {
 // placement (added, or our own value fed back) the draw path leaves the two 5559BD94 billboard families to the game (g_anchorYield), so the picture the game now frames and places
 // itself is not moved a second time. The setter is not called by EDVR: a key change reaches the game at its next call (the 10 s line counts the calls).
 std::atomic<bool> g_anchorYield{false};
+// CAMERA MODE (fix.srv_turret_radar_anchor = camera; srv_turret_math.h THE RADAR'S OWN CAMERA): set by the frame tick while the view is on in camera mode; the draw path then sends the radar's
+// own picture billboards through the regular radar path and leaves every other 5559BD94 draw to the game (cameraLeaves).
+std::atomic<bool> g_cameraBillboards{false};
 
 // The turret's forward for the native move (render thread). While the anchor is wanted, eye 0's first draw of a panel or 5559BD94 family each frame gives a camera sample: the live
 // camera's right, up and forward in the world (VS b1 rows 277..279) paired with eye 0's seated rotation of the same frame (the host's pose at the draw, as drawEyeFrame uses), which
@@ -1613,6 +1616,10 @@ struct AnchorWatch {
     bool warned = false;            // the feedback warning has been said
     bool yieldSeen = false;         // the anchor yield was on in this 10 s window (the correction line is said)
     bool threadsSaid = false;       // the setter's and the camera writes' threads have been said
+    bool slotArmTried = false;      // camera mode: the slot hook's arm was asked for
+    bool cameraSeen = false;        // camera mode was on with the view in this 10 s window (the slot camera's line is said)
+    bool slotSaid[3][3] = {};       // camera mode: the first move of each kind and list has been said
+    uint64_t winSlotCalls = 0, winSlotRadar[3][3] = {}, winSlotMoved = 0, winSlotTurret = 0, winSlotCamera = 0, winSlotFaults = 0;
     uint64_t stayMoved = 0, stayOurs = 0;   // the setter hook's counters when the stay began
     uint64_t winCalls = 0, winRadar = 0, winMoved = 0, winOurs = 0, winRestored = 0, winFaulted = 0, winChanges = 0, winUpdates = 0;   // ... when the 10 s window began
     uint64_t winDirected = 0, winFallback = 0, winNoU = 0, winNoAnchor = 0, winAnchorFaults = 0, winDirCopies = 0, winDirReads = 0, winDirRejects = 0;
@@ -1656,6 +1663,55 @@ void anchorDirLine(const RadarAnchorStats& a, st::RadarAnchorMode mode) {
                     static_cast<double>(a.d[2]), dist, a.lastDirected ? "u" : "the anchor's z", st::angleToZDeg(along), st::yawDeg(along), st::radarAnchorModeName(mode), timing);
 }
 
+// CAMERA MODE's lines, frame thread. The slot hook's first move of each kind (terrain, icon) and list (A, B: the two eyes), once each.
+const char* const kSlotKindName[3] = {"terrain", "icon", "another mode"};
+const char* const kSlotListName[3] = {"A", "B", "another list"};
+void slotFirstLines(AnchorWatch& w) {
+    const RadarSlotStats r = srvRadarSlotStats();
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l) {
+            const RadarSlotFirst& f = r.first[k][l];
+            if (!f.have || w.slotSaid[k][l]) continue;
+            w.slotSaid[k][l] = true;
+            Log::get().note("srv turret radar camera: moved back %.2f m for slot 0x%llX (index %u, %s (mode %u), list %s (%u)), direction from %s, u (%.3f,%.3f,%.3f)", static_cast<double>(f.back),
+                            static_cast<unsigned long long>(f.slot), f.index, kSlotKindName[k], f.mode, kSlotListName[l], f.list,
+                            f.fromTurret ? "the turret (CPU camera sample)" : "the camera's own forward", static_cast<double>(f.u[0]), static_cast<double>(f.u[1]), static_cast<double>(f.u[2]));
+        }
+}
+// The 10 s line, whenever camera mode was on with the view in the window (radar slots 0: the hook never saw the radar's slots); the baselines move on either way.
+void slotWindow(AnchorWatch& w) {
+    const RadarSlotStats r = srvRadarSlotStats();
+    if (w.cameraSeen) {
+        uint64_t radar[3][3], total = 0;
+        for (int k = 0; k < 3; ++k)
+            for (int l = 0; l < 3; ++l) {
+                radar[k][l] = r.radar[k][l] - w.winSlotRadar[k][l];
+                total += radar[k][l];
+            }
+        const uint64_t other = radar[0][2] + radar[1][2] + radar[2][0] + radar[2][1] + radar[2][2];
+        char tail[200] = "";
+        if (r.state != RadarAnchorHookState::Armed)
+            std::snprintf(tail, sizeof(tail), " -- the slot hook is not armed (%s)", r.state == RadarAnchorHookState::StoodDown ? "it stood down: its line says why" : "not tried");
+        else if (total == 0)
+            std::snprintf(tail, sizeof(tail), " -- NO radar slot in these 10 s: the camera was not moved");
+        Log::get().note("srv turret radar camera: 10 s: slot calls %llu, radar slots %llu (terrain A %llu, terrain B %llu, icon A %llu, icon B %llu, other %llu), moved %llu (direction turret %llu, "
+                        "camera forward %llu), faults %llu; hook thread %u, camera writes on thread %u%s",
+                        static_cast<unsigned long long>(r.calls - w.winSlotCalls), static_cast<unsigned long long>(total), static_cast<unsigned long long>(radar[0][0]),
+                        static_cast<unsigned long long>(radar[0][1]), static_cast<unsigned long long>(radar[1][0]), static_cast<unsigned long long>(radar[1][1]),
+                        static_cast<unsigned long long>(other), static_cast<unsigned long long>(r.moved - w.winSlotMoved), static_cast<unsigned long long>(r.fromTurret - w.winSlotTurret),
+                        static_cast<unsigned long long>(r.fromCamera - w.winSlotCamera), static_cast<unsigned long long>(r.faults - w.winSlotFaults), r.thread,
+                        g_cameraWriteThread.load(std::memory_order_relaxed), tail);
+    }
+    w.cameraSeen = g_cameraBillboards.load(std::memory_order_relaxed);
+    w.winSlotCalls = r.calls;
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l) w.winSlotRadar[k][l] = r.radar[k][l];
+    w.winSlotMoved = r.moved;
+    w.winSlotTurret = r.fromTurret;
+    w.winSlotCamera = r.fromCamera;
+    w.winSlotFaults = r.faults;
+}
+
 void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
     AnchorWatch& w = g_anchorWatch;
     const auto mode = static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed));
@@ -1663,8 +1719,20 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
         w.armTried = true;
         (void)srvRadarAnchorArm(nullptr, 0);   // says its own lines: "setter hook armed: ..." or "setter hook stood down: <why>; nothing was patched", then the update counter's
     }
-    w.offset = st::radarAnchorOffset(on, mode, radarForwardCm);
+    w.offset = st::radarAnchorOffset(on, mode, radarForwardCm);   // zero in camera mode: the restore gives the game its own placement back
     srvRadarAnchorPublish(w.offset.bits, frameNo);
+    // CAMERA MODE: the slot hook, armed once when the view is first on in camera mode, and its back distance every frame (0 outside camera mode or the view: the game's camera)
+    const bool cameraMode = on && mode == st::RadarAnchorMode::kCamera;
+    if (cameraMode && !w.slotArmTried) {
+        w.slotArmTried = true;
+        (void)srvRadarSlotArm();   // says its own line: "srv turret radar camera: slot hook armed: ..." or "... slot hook stood down: <why>; nothing was patched"
+    }
+    srvRadarSlotPublish(st::radarCameraBackM(on, mode, radarForwardCm));
+    g_cameraBillboards.store(cameraMode, std::memory_order_relaxed);
+    if (cameraMode) {
+        w.cameraSeen = true;
+        slotFirstLines(w);
+    }
     const RadarAnchorStats a = srvRadarAnchorStats();
     const bool dirWanted = on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed;
     g_anchorDirWanted.store(dirWanted, std::memory_order_relaxed);
@@ -1717,9 +1785,9 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
         Log::get().note("srv turret radar anchor: WARNING: the game's translation moved by (%.3f,%.3f,%.3f) between setter calls, close to the offset: its caller may feed back our value",
                         static_cast<double>(a.suspectStep[0]), static_cast<double>(a.suspectStep[1]), static_cast<double>(a.suspectStep[2]));
     }
-    g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);
+    g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && mode != st::RadarAnchorMode::kCamera && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);
     const bool yieldNow = g_anchorYield.load(std::memory_order_relaxed);
-    detail::g_srvTurretRadarWritersOn.store(yieldNow, std::memory_order_relaxed);   // the draw-time correction's writer watch
+    detail::g_srvTurretRadarWritersOn.store(yieldNow || cameraMode, std::memory_order_relaxed);   // the writer watch: the draw-time correction's, and camera mode's billboard match
     if (yieldNow) w.yieldSeen = true;
     const uint32_t cameraThread = g_cameraWriteThread.load(std::memory_order_relaxed);
     if (!w.threadsSaid && a.setterThread && cameraThread) {
@@ -1826,6 +1894,7 @@ void anchorWindow(bool seen) {
     w.winUpdates = a.updates;
     correctionWindow(w.yieldSeen);
     w.yieldSeen = g_anchorYield.load(std::memory_order_relaxed);
+    slotWindow(w);
 }
 
 bool anchorLeaves(int family) { return st::radarAnchorLeavesFamily(family) && g_anchorYield.load(std::memory_order_relaxed); }
@@ -3457,6 +3526,18 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial) {
         Log::get().note("srv turret camera: back cleared (serial %u)", static_cast<unsigned>(serial));
 }
 
+// CAMERA MODE (srv_turret_math.h THE RADAR'S OWN CAMERA): the radar's schematic camera is moved back by D in the game, so the radar's own picture billboards (family 7 on a texture this
+// frame's radar writers drew: billboardKind) go through the regular radar path, +D along the seat with the rest of the radar, with no delta, lock or content depth (tr.w 0); every
+// other 5559BD94 draw (family 8, the panel holograms) is the game's own, as in on mode. True: the draw is left to the game.
+bool cameraLeaves(ID3D11DeviceContext* ctx, int family, int eye) {
+    if (!st::radarAnchorLeavesFamily(family) || !g_cameraBillboards.load(std::memory_order_relaxed)) return false;
+    bool lastFrameOnly = false;
+    if (family == 7 && billboardKind(ctx, lastFrameOnly) != 0) return false;
+    // left to the game; the hologram's source instrument keeps its rounds (the regular path collects the radar's own)
+    if ((eye == 0 || eye == 1) && (family == kHoloFamilyA || family == kHoloFamilyB)) holoCollect(ctx, family, eye, g_probe[eye][family].ordinal++);
+    return true;
+}
+
 bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!ctx || family < 0 || family >= static_cast<int>(kFamilyN)) return false;
     if (eye == 0) anchorDirSample(ctx, family);   // the radar anchor's direction: the live camera's axes, read only (one copy a frame while the anchor is wanted)
@@ -3468,6 +3549,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     // The radar's schematic is moved in the game: the 5559BD94 billboards are the game's own (a decline counts as group-off), but for the radar's own picture billboards, which the
     // draw-time correction moves by what the turret did since the setter's sample.
     if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);
+    if (cameraLeaves(ctx, family, eye)) return false;   // camera mode: a billboard that is not the radar's own picture is the game's own
     if (eye != 0 && eye != 1) {
         refuse(st::Refuse::kNoEye);
         return false;
@@ -3614,6 +3696,7 @@ void srvTurretShutdown() {
     g_radarCam = RadarCamWatch{};
     srvRadarAnchorShutdown();   // the hook's gate shuts: the relay forwards straight to the game's function
     g_anchorYield.store(false, std::memory_order_relaxed);
+    g_cameraBillboards.store(false, std::memory_order_relaxed);
     detail::g_srvTurretRadarWritersOn.store(false, std::memory_order_relaxed);
     g_writers = Writers{};
     g_writersPrev = Writers{};

@@ -11,6 +11,7 @@
 #include <intrin.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -44,6 +45,14 @@ constexpr uint8_t kSetterPrologue[kSetterPrologueBytes] = {0x48, 0x83, 0xEC, 0x4
 constexpr size_t kUpdatePrologueBytes = 16;
 constexpr uint8_t kUpdatePrologue[kUpdatePrologueBytes] = {0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01};
 constexpr uint32_t kSlots = 4;   // schematics whose placement may hold an offset of ours at once (one is expected: the Scorpion's)
+// THE SLOT CAMERA (camera mode; srv_radar_anchor.h): the schematic slot's update, RCX = the slot, RDX = the camera (its only caller is 0x36BF330), and the slot's vtable (both slot
+// constructors; analysis\decomp\verify_20261101_srv_radar_slot_camera.txt).
+constexpr uintptr_t kSlotRva = 0x36BF3C0;
+constexpr uintptr_t kSlotVtableRva = 0x54FB7F8;
+// `push rbp; push r14; push r15; lea rbp,[rsp-6F0h]; sub rsp,7F0h`, read from EliteDangerous64-334925.exe through its section table. Boundaries 2, 4, 6, 14, 21: CodeHook steals the
+// three pushes (6 bytes); none of the five is rip-relative, and the first that is lies at +0x15.
+constexpr size_t kSlotPrologueBytes = 21;
+constexpr uint8_t kSlotPrologue[kSlotPrologueBytes] = {0x40, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x10, 0xF9, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xF0, 0x07, 0x00, 0x00};
 
 using Fn = uintptr_t(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 using MatrixFn = const float*(__fastcall*)(uintptr_t);
@@ -114,6 +123,21 @@ struct State {
     st::Aim prevAimK;
     bool havePrevAim = false;
     double intervalS = 1.0 / 90.0;
+    // THE SLOT CAMERA: its hook, the slot vtable, its own arm state, the back distance published by the frame thread (float bits; 0: every call gets the game's camera), and its record
+    Hook slot;
+    uintptr_t slotVtable = 0;
+    std::atomic<int> slotState{int(RadarAnchorHookState::NotTried)};
+    std::atomic<uint32_t> slotBack{0};
+    std::atomic<uint64_t> slotCalls{0}, slotRadar[3][3]{}, slotMoved{0}, slotFromTurret{0}, slotFromCamera{0}, slotFaults{0};
+    std::atomic<uint32_t> slotThread{0};
+    struct SlotFirst {   // the first move of each kind and list: claimed by the hook, filled, then ready (release) for the frame thread
+        std::atomic<bool> claimed{false}, ready{false};
+        uintptr_t slot = 0;
+        uint32_t index = 0, mode = 0, list = 0;
+        bool fromTurret = false;
+        float u[3] = {}, back = 0.0f;
+    };
+    SlotFirst slotFirst[3][3];
 };
 std::atomic<State*> g_state{nullptr};
 std::mutex g_armMutex;
@@ -508,6 +532,60 @@ __declspec(noinline) bool guardedRead(uintptr_t address, void* out, size_t bytes
     }
 }
 
+// THE SLOT CAMERA's hook (0x36BF3C0; camera mode). For a radar slot (st::radarSlotTest) while a back distance is published, the original gets a private copy of the camera (0x2F0 bytes on
+// this stack, its plane pointers rebased) moved back by d = -D u (st::radarCameraBack: the turret's forward from the CPU camera sample while fresh, else the camera's own forward;
+// st::cameraMoveBy: position, view row 3, VP dirty), which the call reads and rebuilds into instead of the game's camera; every other call, and any fault, gets the game's camera.
+// Game thread: records only (no logging, no allocation), and every game read is under SEH.
+bool sehRead(void*, uintptr_t address, void* out, size_t bytes) noexcept { return guardedRead(address, out, bytes); }
+__declspec(noinline) uintptr_t __fastcall slotHooked(uintptr_t slot, uintptr_t cam, uintptr_t r8, uintptr_t r9) noexcept {
+    State* const s = g_state.load(std::memory_order_acquire);
+    if (!s) return 0;   // cannot happen: the state exists before the relay is built
+    const auto forward = reinterpret_cast<Fn>(s->slot.forward.load(std::memory_order_acquire));
+    if (!forward) return 0;   // nor this: the gate opens only after the forward is published
+    s->slotCalls.fetch_add(1, std::memory_order_relaxed);
+    {
+        uint32_t none = 0;
+        if (s->slotThread.compare_exchange_strong(none, GetCurrentThreadId(), std::memory_order_relaxed)) {
+        }
+    }
+    const float back = floatOf(s->slotBack.load(std::memory_order_relaxed));
+    if (!(back > 0.0f) || !slot || !cam) return forward(slot, cam, r8, r9);
+    st::RadarSlot hit;
+    const int radar = st::radarSlotTest(slot, s->slotVtable, s->interfaceVtable, &sehRead, nullptr, hit);
+    if (radar < 0) s->slotFaults.fetch_add(1, std::memory_order_relaxed);
+    if (radar <= 0) return forward(slot, cam, r8, r9);
+    const int kind = hit.mode == st::kRadarModeTerrain ? 0 : hit.mode == st::kRadarModeIcon ? 1 : 2, list = hit.list == 0 ? 0 : hit.list == 2 ? 1 : 2;
+    s->slotRadar[kind][list].fetch_add(1, std::memory_order_relaxed);
+    alignas(16) uint8_t copy[st::kCamBytes];
+    if (!guardedRead(cam, copy, sizeof(copy))) {
+        s->slotFaults.fetch_add(1, std::memory_order_relaxed);
+        return forward(slot, cam, r8, r9);
+    }
+    st::cameraRebase(copy, cam);
+    float camForward[3];
+    std::memcpy(camForward, copy + st::kCamForwardAt, sizeof(camForward));
+    Sample smp;
+    const bool haveU = readSample(*s, smp);
+    float d[3];
+    const st::CameraBackFrom from = st::radarCameraBack(back, haveU, haveU ? qpcNow() - smp.qpc : -1, s->qpcFreq, haveU ? smp.u : nullptr, camForward, d);
+    if (from == st::CameraBackFrom::kNone) return forward(slot, cam, r8, r9);
+    st::cameraMoveBy(copy, d);
+    s->slotMoved.fetch_add(1, std::memory_order_relaxed);
+    (from == st::CameraBackFrom::kTurret ? s->slotFromTurret : s->slotFromCamera).fetch_add(1, std::memory_order_relaxed);
+    State::SlotFirst& first = s->slotFirst[kind][list];
+    bool unclaimed = false;
+    if (first.claimed.compare_exchange_strong(unclaimed, true, std::memory_order_relaxed)) {
+        first.slot = slot;
+        first.index = hit.index;
+        first.mode = hit.mode;
+        first.list = hit.list;
+        first.fromTurret = from == st::CameraBackFrom::kTurret;
+        for (int i = 0; i < 3; ++i) first.u[i] = back > 0.0f ? -d[i] / back : 0.0f;
+        first.back = back;
+        first.ready.store(true, std::memory_order_release);
+    }
+    return forward(slot, reinterpret_cast<uintptr_t>(copy), r8, r9);   // the copy lives on this frame until the original returns
+}
 uint8_t* allocateRelay(uintptr_t target) noexcept {
     SYSTEM_INFO info{};
     GetSystemInfo(&info);
@@ -753,11 +831,94 @@ RadarAnchorStats srvRadarAnchorStats() {
     return r;
 }
 
+RadarAnchorHookState srvRadarSlotArm() {
+    std::lock_guard<std::mutex> lock(g_armMutex);
+    State* s = g_state.load(std::memory_order_acquire);
+    if (s && s->slotState.load() != int(RadarAnchorHookState::NotTried)) return RadarAnchorHookState(s->slotState.load());
+    if (!s) {
+        s = new State;   // process lifetime: a call already inside a relay must be able to finish
+        g_state.store(s, std::memory_order_release);
+    }
+    const auto stood = [&](const char* why) {
+        s->slotState.store(int(RadarAnchorHookState::StoodDown));
+        Log::get().note("srv turret radar camera: slot hook stood down: %s; nothing was patched", why);
+        return RadarAnchorHookState::StoodDown;
+    };
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base) return stood("the game module could not be resolved");
+    uint32_t stamp = 0, size = 0;
+    if (!gameBuildIdentity(&stamp, &size)) return stood("the game's PE header is unreadable");
+    if (stamp != kStamp || size != kImageSize) {
+        char b[200];
+        std::snprintf(b, sizeof(b), "the game is %s, not build 334925 (PE stamp 0x%08X, image size 0x%X); this hook knows build 334925 only", gameBuildText(), stamp, size);
+        return stood(b);
+    }
+    // the same values the setter's arm sets (whichever arms first), before the patch
+    s->base = base;
+    {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        s->qpcFreq = f.QuadPart > 0 ? f.QuadPart : 1;
+    }
+    s->objectVtable = base + kObjectVtableRva;
+    s->interfaceVtable = base + kInterfaceVtableRva;
+    s->slotVtable = base + kSlotVtableRva;
+    const uintptr_t target = base + kSlotRva;
+    const char* why = installHook(s->slot, target, kSlotPrologue, kSlotPrologueBytes, reinterpret_cast<const void*>(&slotHooked), "srv-radar-slot");
+    if (*why) {
+        char b[260];
+        std::snprintf(b, sizeof(b), "EliteDangerous64.exe+0x36BF3C0 (the schematic slot's update): %s", why);
+        return stood(b);
+    }
+    s->slotState.store(int(RadarAnchorHookState::Armed));
+    Log::get().note("srv turret radar camera: slot hook armed: EliteDangerous64.exe+0x%llX (the schematic slot's update, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes "
+                    "verified, relay at 0x%llX; the radar's slots get a camera moved back by the radar forward key",
+                    static_cast<unsigned long long>(kSlotRva), static_cast<unsigned long long>(target), s->slot.hook.stolenBytes(), kSlotPrologueBytes, kSlotPrologueBytes,
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s->slot.relay)));
+    return RadarAnchorHookState::Armed;
+}
+
+void srvRadarSlotPublish(float backM) {
+    State* s = g_state.load(std::memory_order_acquire);
+    if (!s || s->slotState.load() != int(RadarAnchorHookState::Armed)) return;
+    s->slotBack.store(bitsOf(backM > 0.0f && std::isfinite(backM) ? backM : 0.0f), std::memory_order_relaxed);
+}
+
+RadarSlotStats srvRadarSlotStats() {
+    RadarSlotStats r;
+    State* s = g_state.load(std::memory_order_acquire);
+    if (!s) return r;
+    r.state = RadarAnchorHookState(s->slotState.load());
+    r.calls = s->slotCalls.load(std::memory_order_relaxed);
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l) {
+            r.radar[k][l] = s->slotRadar[k][l].load(std::memory_order_relaxed);
+            const State::SlotFirst& f = s->slotFirst[k][l];
+            if (!f.ready.load(std::memory_order_acquire)) continue;
+            RadarSlotFirst& o = r.first[k][l];
+            o.have = true;
+            o.slot = f.slot;
+            o.index = f.index;
+            o.mode = f.mode;
+            o.list = f.list;
+            o.fromTurret = f.fromTurret;
+            for (int i = 0; i < 3; ++i) o.u[i] = f.u[i];
+            o.back = f.back;
+        }
+    r.moved = s->slotMoved.load(std::memory_order_relaxed);
+    r.fromTurret = s->slotFromTurret.load(std::memory_order_relaxed);
+    r.fromCamera = s->slotFromCamera.load(std::memory_order_relaxed);
+    r.faults = s->slotFaults.load(std::memory_order_relaxed);
+    r.thread = s->slotThread.load(std::memory_order_relaxed);
+    return r;
+}
+
 void srvRadarAnchorShutdown() {
     State* s = g_state.load(std::memory_order_acquire);
     if (!s) return;
     s->setter.gate.store(0, std::memory_order_seq_cst);
     s->update.gate.store(0, std::memory_order_seq_cst);
+    s->slot.gate.store(0, std::memory_order_seq_cst);
 }
 
 }  // namespace edvr

@@ -15,15 +15,13 @@
   is empty (journal, "V0 is gated by visibility"). Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
-- **The radar fix:** a hook on the schematic's placement setter
-  (0x38563A0, build 334925 only) adds radar forward along the turret's
-  seated forward, in the anchor's axes, to the translation the game sets;
-  the radar's picture billboards are corrected at draw time. FLOWN
-  (8e3bcd7b, the pair capture): the game damps the radar's placement over
-  about 65 ms, the disc and the icon differently, so a delta by the setter's
-  last d leaves the disc trailing and 2 cm off the icon (the ghost; no hole
-  in the disc's picture). BUILT, NOT FLOWN: each billboard locked to its own
-  seated rest place, learned at rest (journal, "the lock").
+- **The radar fix:** FLOWN (fe0b2560): the lock held, but the disc orbits:
+  any turret-dependent native offset reaches the screen late (journal, "the
+  lock flown"). BUILT, NOT FLOWN: `fix.srv_turret_radar_anchor = camera`
+  (TEMPORARY). The setter adds nothing; a hook on the schematic slot's
+  update (0x36BF3C0, build 334925 only) gives the radar's slots the scene
+  camera moved back by radar forward along the turret's forward, and the
+  radar's own billboards move +D along the seat with the rest of the radar.
 - **UI quality parity:** FLOWN (8e3bcd7b): the layer's relief radius fix is
   applied to both programs (k 2, cb1[120].z 1.3666 from the bound b1).
 - **The radar's way out without it:** camera back 70, radar forward 0.
@@ -45,7 +43,7 @@
   `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
   `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (front),
   `fix.srv_turret_hud_scissor` (open), `fix.srv_turret_radar_anchor` (on;
-  reversed, off). Sean's flown values
+  reversed, off, camera). Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** a view switch is followed up to about 0.5 s after the game
   writes Status.json (the watcher's 500 ms poll); left alone, a fix would
@@ -54,10 +52,11 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight (this branch):** radar anchor on, camera back 0 to 35,
-  radar forward = 65 minus camera back. Sit still a second, then a fast and
-  a slow sweep with INSERT during each; then drive forward and turn. Read
-  `--grep "srv turret radar lock"` and `--grep "radar pair: lock"`.
+- **Next flight (this branch):** `fix.srv_turret_radar_anchor = camera`,
+  camera back 0 to 35, radar forward = 65 minus camera back. Sit still, then
+  fast and slow sweeps; drive forward and turn. Read `--grep "srv turret
+  radar camera"`: the slot hook armed, radar slots in every 10 s line, and
+  V0's schematic origin about D - 0.44 m in front, tracking every frame.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -217,6 +216,12 @@ same amount. Matching them needs a change to one layer's stereo depth.
 - ruled out: a hole in the disc's picture as the Scorpion's ghost, because
   the dump's disc t4 (`eye_072742058001_RadarDiscT4.bmp`) is a full ellipse;
   the ghost is the disc's quad 2 cm off the icon's (flight 8e3bcd7b).
+- ruled out: a seated lock of the radar billboards' quad centres, because
+  the quads held their targets (centre off the target 0.00 mm, shifts 2 to
+  8 cm, max 25 cm) while the pictures in them are drawn from a viewpoint 10
+  to 25 cm wrong: the native content itself swings +-9 cm sideways in the
+  camera frame during sweeps, and Sean saw the disc "sort of orbit up and
+  down" (flight fe0b2560, `edvr_gfx_20261101_080045.log`).
 
 ## Journal
 
@@ -1733,3 +1738,135 @@ centre stays at the target through a sweep; whether driving or turning the
 vehicle shows the same damping (the targets do not follow a moving vehicle
 until it rests).
 
+### 2026-11-01: the lock flown (flight fe0b2560); the radar's own camera moved back
+
+Steam, `edvr_gfx_20261101_080045.log`. The lock held (centre off the
+target 0.00 mm, shifts 2 to 8 cm, max 25 cm), but Sean says the disc now
+"sort of orbits up and down". The V0 decode in the same log shows the
+native content origin swinging +-9 cm sideways in the camera frame during
+sweeps: the content really does lag. A pinned quad holds a picture drawn
+from a viewpoint 10 to 25 cm wrong, so its shape and its place inside the
+quad wobble (ruled out above).
+
+**Reading across 8e3bcd7b and fe0b2560.** Any turret-dependent native
+offset (our d = F u in the setter) reaches the screen several frames late,
+and differently for the disc and the icon. Either the setter's thread
+(29912) runs frames ahead of the camera writes (thread 14084), so the
+"shown call" pairing was never right, or the game damps the placement
+after the setter. The cure is the same either way: no turret-dependent
+native offset at all.
+
+**The design.**
+- The radar stays where the game puts it (the setter adds nothing). It sits
+  on the turret's yaw axis about 0.44 m behind the stock eye and does not
+  swing with the turret, so pipelining or damping has nothing to show.
+- The radar's schematic slots (the terrain disc and the Scorpion icon, both
+  eyes) are given the scene camera moved back by D, the radar forward key,
+  along the turret's seated back direction. The volume is then in front of
+  that camera, so the gate passes, V0 tracks, and the game frames, renders
+  and billboards the picture from E - D: exactly what the eye would see of
+  the radar moved forward by D. Panel holograms and every other slot keep
+  the real camera.
+- The geometry shader moves the radar's billboards by +D along the seat,
+  the translation the radar group already gives DF3503CD and the contacts.
+  No delta, no lock.
+
+**The RE (build 334925, read-only; inbox item
+`20261101-082718-srv-radar-slot-camera`, waiting for intake).**
+- 0x36BF3C0(slot in RCX, camera in RDX) builds the gate, the window, the
+  billboard's quad corners (slot+0x380..0x3FF) and V0 (a value copy into
+  *(slot+0x100)+0x20) from that camera alone, and keeps no pointer to it.
+  Its only caller is 0x36BF330; in VR, list A takes the left eye's camera
+  and list B (mirror slots, slot+0x288 = 2) the right eye's.
+- The camera object (0x2F0 bytes): world matrix at +0x00 (rows x, y, z;
+  float position at +0x30), view at +0x170, projection at +0x1B0, VP at
+  +0x1F0, dirty flags at +0x230 (bit 3 makes 0x4F4AF0 rebuild VP from view
+  and projection), near +0x234, far +0x238. No inverse is cached. Moving it
+  by a world d takes the position, view row 3 (minus d through the view's
+  axis rows) and the VP-dirty bit.
+- A radar slot is told from its own data: the slot's class vtable
+  0x54FB7F8, its index (slot+0x258) and manager (slot+0x280) name a
+  component list in which some component links (+0x388) to the radar
+  interface (vtable 0x5511F18); that component's mode (4 terrain, 5 icon)
+  says which.
+- The thread is unconfirmed (0x287B050 runs from the engine's update
+  dispatch); the camera objects are members of persistent objects.
+
+**The build.**
+- **The mode.** `fix.srv_turret_radar_anchor` takes a TEMPORARY fourth value,
+  `camera`. `on` (and reversed) keep the setter's move, the delta and the
+  lock; `off` is off. In camera mode the setter publishes a zero offset, so
+  the existing restore gives the game its own placement back, and there is
+  no anchor yield: no delta, no lock, no content depth.
+- **The slot hook** (`srv_radar_anchor.cpp`), on 0x36BF3C0, is pinned like the
+  setter's: PE stamp 0x6ADA8048 and size 0x640C000, and 21 prologue bytes
+  `40 55 41 56 41 57 48 8D AC 24 10 F9 FF FF 48 81 EC F0 07 00 00`, checked
+  against the exe and verified before the patch. CodeHook steals the three
+  pushes (6 bytes; its patch is 5), not the 14 bytes the brief named. Its
+  decoder already took all five encodings; a vtable_test cell pins them.
+  It is armed once, the first frame the view is on in camera mode, and
+  stands down with nothing patched on any mismatch. The audit's
+  exact-build entry for the file now names the slot camera too.
+- **Its body** (game thread: records only, every game read under SEH):
+  - It forwards unchanged unless D > 0 and `st::radarSlotTest` says the
+    slot is the radar's: the RE's test, a read failure counted as a fault.
+  - It copies the 0x2F0 bytes into an aligned stack buffer and rebases a
+    plane pointer that points into either of the source's inline blocks.
+  - It moves the copy by d = -D u (`st::cameraMoveBy`): position += d, view
+    row 3 -= d through the view's rows, flags |= 8. Then the original runs
+    with RDX = the copy.
+  - u is the CPU camera sample's turret forward while its write is at most
+    100 ms old, else the camera's own forward (world row 2, made unit).
+  - Both lists get the same world d. D is the radar forward key in metres,
+    capped at 1.5 m like the setter's F, published every frame (0 outside
+    the view or camera mode).
+- **The draw path.** In camera mode the writer watch stays on. A family-7
+  draw whose t4 is this frame's radar writer's target goes through the
+  regular radar path (the group's params with tRadar, tr.w 0), the same
+  translation DF3503CD and the contacts get. Every other 5559BD94 draw
+  (family 8, the panel holograms) is the game's own, as in on mode, and the
+  holo source rounds still see it.
+- **The rig.**
+  - The mode's spelling and name, the zero setter offset, and D from the
+    key.
+  - `cameraMoveBy` on a camera whose view is the inverse of its world: view'
+    equals an independent inverse of world' to 1e-6, nothing else changes,
+    and d = -D times forward grows view row 3's z by exactly D.
+  - The rebase inside, outside and at the edges of both blocks.
+  - The radar-slot test over a fake memory: a hit (icon, list B), the wrong
+    slot vtable, an index past the lists, no manager, more than 64
+    components, no link, the link's vtable wrong, a fault, and the terrain
+    in list A.
+  - The direction rule: fresh, stale, missing, future-dated and zero
+    samples, the camera fallback, and D of 0, negative or NaN.
+  - Wiring pins with 11 controls for the zero offset and no yield, the build
+    pin and prologue, a quiet hook, the copy only for a radar slot, the
+    rebase, VP dirty, D published and the regular path.
+
+The log lines (frame tick):
+- `srv turret radar camera: slot hook armed: EliteDangerous64.exe+0x36BF3C0
+  (the schematic slot's update, build 334925) at 0x.., stolen=6 bytes,
+  prologue 21/21 bytes verified, relay at 0x..; the radar's slots get a
+  camera moved back by the radar forward key`, or `... slot hook stood down:
+  <why>; nothing was patched`.
+- `srv turret radar camera: moved back D m for slot 0x.. (index i,
+  terrain|icon (mode m), list A|B (l)), direction from the turret (CPU camera
+  sample)|the camera's own forward, u (x,y,z)`, once per kind and list.
+- `srv turret radar camera: 10 s: slot calls N, radar slots M (terrain A a,
+  terrain B b, icon A c, icon B d, other o), moved K (direction turret t,
+  camera forward f), faults x; hook thread T, camera writes on thread W`,
+  whenever camera mode was on with the view in the window. It ends "-- NO
+  radar slot in these 10 s" when M is 0, or names an unarmed hook. Absent
+  otherwise.
+- The settings line's radar anchor reads `camera`; `edvr_log.py`'s settings
+  pattern takes it.
+- What should follow: the V0 instrument's lines (`srv turret radar camera:
+  ... the schematic's origin at (x,y,z) m`) should show the origin about
+  D - 0.44 m in front of V0 (z about +0.2 at D 0.65), tracking every frame
+  instead of freezing.
+
+Unconfirmed until it flies: the hook's thread against the camera writes'
+(the 10 s line names both); which slot indices the terrain and the icon
+use; that list A and list B are the two eyes; the camera's +z as forward
+(the fallback only); and whether the billboard quad the game builds from
+the moved camera, moved +D by the shader, lands where the eye expects.

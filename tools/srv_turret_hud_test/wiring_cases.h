@@ -37,6 +37,11 @@ static std::string replaced(std::string t, const std::string& from, const std::s
     if (p != std::string::npos) t.replace(p, from.size(), to);
     return t;
 }
+static std::string replacedLast(std::string t, const std::string& from, const std::string& to) {
+    const size_t p = t.rfind(from);
+    if (p != std::string::npos) t.replace(p, from.size(), to);
+    return t;
+}
 
 // vscreen.cpp, forwardWithVerdict.
 static bool wiredVscreenScope(const std::string& t) {
@@ -373,7 +378,7 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const size_t counted = found(groupOff) ? module.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : npos;
     const size_t refusedFn = module.find("void srvTurretHudNoteRefusedDraw(int family) {");
     const size_t refusedOff = found(refusedFn) ? module.find("&& !anchorLeaves(family);", refusedFn) : npos;
-    const size_t yield = module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);");
+    const size_t yield = module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && mode != st::RadarAnchorMode::kCamera && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);");
     const size_t downFn = module.find("void srvTurretShutdown() {");
     const size_t down = found(downFn) ? module.find("srvRadarAnchorShutdown();", downFn) : npos;
     const bool moduleOk = found(parsed) && found(flat) && found(onAt) && flat < onAt && found(ticked) && found(published) && found(leaves) && found(counted) && leaves < counted &&
@@ -392,7 +397,9 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const bool adds = found(rule) && found(handed) && hook.find("return", sum) == handed && !found(hook.find("0x15B0")) && !found(hook.find("0x15F0")) && !found(hook.find("volatile uint32_t*"));
     const bool pinned = found(hook.find("constexpr uintptr_t kSetterRva = 0x38563A0;")) && found(hook.find("constexpr uintptr_t kUpdateRva = 0x384A590;")) &&
                         found(hook.find("constexpr uintptr_t kObjectVtableRva = 0x5511DE8;")) && found(hook.find("constexpr uintptr_t kInterfaceVtableRva = 0x5511F18;")) &&
-                        found(hook.find("constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;")) && found(hook.find("if (stamp != kStamp || size != kImageSize) {")) &&
+                        found(hook.find("constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;")) &&
+                        hook.find("if (stamp != kStamp || size != kImageSize) {", hook.find("RadarAnchorHookState srvRadarAnchorArm(char* whyOut, size_t cap) {")) <
+                            hook.find("RadarAnchorHookState srvRadarAnchorState() {") &&   // the setter's own arm checks the build (the slot camera's arm has its own check)
                         found(hook.find("{0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0x28, 0x15, 0x00, 0x00, 0x0F, 0x10, 0x4A, 0x10}")) &&
                         found(hook.find("{0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01}")) &&
                         found(hook.find("if (std::memcmp(got, prologue, n) != 0) return")) &&
@@ -423,11 +430,11 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
                           found(newest) && !found(hook.find("leadAim")) && !found(hook.find("extrapolateAim")) && found(getterCheck) && found(getterCall) && getterCheck < getterCall &&
                           found(hook.find("const uint64_t nowSeq = nativeTemporalFrameSequence();"));
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
-    const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
+    const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off, camera | recommended on | live | menu", shipped) : npos;
     const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
     const size_t source = build.find("\"src\\d3d11\\srv_radar_anchor.cpp\"");
     const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
-    const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")"));
+    const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hooks: the placement setter, the update counter, the slot camera\")"));
     return found(key) && moduleOk && integerOnly && adds && pinned && direction && directed && iniOk && buildOk && auditOk;
 }
 // The radar anchor's CPU camera rows: vscreen.cpp's Unmap tee hands every scene camera block write to srvTurretNoteCameraWrite (after the temporal pass's reader, before the block is
@@ -528,7 +535,41 @@ static bool wiredLock(const std::string& vscreen, const std::string& module) {
     const bool rest = found(module.find("c.atRest = g_rest.step(c.haveRate && vehicleRate, c.yawRateDegS, c.pitchRateDegS, c.vehicleRateDegS);"));
     return found(shape) && found(scope) && shape < scope && found(set) && sets == 1 && counted && learn && shapeChecked && reset && rest;
 }
-static bool wiredBuild(const std::string& t) {
+// CAMERA MODE (flight fe0b2560; srv_turret_math.h THE RADAR'S OWN CAMERA): the mode publishes a zero setter offset (the restore gives the game its placement back) and no yield (no delta,
+// lock or content depth); the slot hook is pinned to build 334925 (the stamp and size, the RVA, the slot vtable, the 21 prologue bytes) and records only (no logging, no allocation); it
+// hands the original the moved copy only for a radar slot (st::radarSlotTest) and the game's camera otherwise; the copy is rebased, then moved, with VP marked dirty; the frame tick
+// publishes D from the radar forward key and turns the writer watch on; the draw path sends the radar's own picture billboards through the regular radar path and leaves the rest.
+static bool wiredSlotCamera(const std::string& module, const std::string& hook, const std::string& math) {
+    const size_t npos = std::string::npos;
+    const bool zero = found(math.find("if (!on || mode == RadarAnchorMode::kOff || mode == RadarAnchorMode::kCamera || radarForwardCm <= 0) return o;")) &&
+                      found(math.find("if (text && !std::strcmp(text, \"camera\")) return RadarAnchorMode::kCamera;"));
+    const bool dirty = found(math.find("inline constexpr uint32_t kCamVpDirty = 0x8;")) && found(math.find("    flags |= kCamVpDirty;\n")) &&
+                       found(math.find("view[12 + j] -= d[0] * view[j] + d[1] * view[4 + j] + d[2] * view[8 + j];"));
+    const size_t armFn = hook.find("RadarAnchorHookState srvRadarSlotArm() {");
+    const size_t stamp = found(armFn) ? hook.find("if (stamp != kStamp || size != kImageSize) {", armFn) : npos;
+    const size_t patched = found(stamp) ? hook.find("installHook(s->slot, target, kSlotPrologue, kSlotPrologueBytes, reinterpret_cast<const void*>(&slotHooked), \"srv-radar-slot\");", stamp) : npos;
+    const bool pinned = found(hook.find("constexpr uintptr_t kSlotRva = 0x36BF3C0;")) && found(hook.find("constexpr uintptr_t kSlotVtableRva = 0x54FB7F8;")) &&
+                        found(hook.find("{0x40, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x10, 0xF9, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xF0, 0x07, 0x00, 0x00}")) && found(patched) &&
+                        found(hook.find("s->slotVtable = base + kSlotVtableRva;"));
+    const size_t fn = hook.find("uintptr_t __fastcall slotHooked(uintptr_t slot, uintptr_t cam, uintptr_t r8, uintptr_t r9) noexcept {");
+    const size_t tested = found(fn) ? hook.find("const int radar = st::radarSlotTest(slot, s->slotVtable, s->interfaceVtable, &sehRead, nullptr, hit);", fn) : npos;
+    const size_t notRadar = found(tested) ? hook.find("if (radar <= 0) return forward(slot, cam, r8, r9);", tested) : npos;
+    const size_t copied = found(notRadar) ? hook.find("if (!guardedRead(cam, copy, sizeof(copy))) {", notRadar) : npos;
+    const size_t rebased = found(copied) ? hook.find("st::cameraRebase(copy, cam);", copied) : npos;
+    const size_t moved = found(rebased) ? hook.find("st::cameraMoveBy(copy, d);", rebased) : npos;
+    const size_t handed = found(moved) ? hook.find("return forward(slot, reinterpret_cast<uintptr_t>(copy), r8, r9);", moved) : npos;
+    size_t hands = 0;
+    for (size_t at = hook.find("reinterpret_cast<uintptr_t>(copy)"); found(at); at = hook.find("reinterpret_cast<uintptr_t>(copy)", at + 1)) ++hands;
+    const std::string body = found(fn) && found(handed) ? hook.substr(fn, handed - fn) : std::string();
+    const bool quiet = !body.empty() && !found(body.find("Log::")) && !found(body.find("printf")) && !found(body.find("new ")) && !found(body.find("malloc"));
+    const bool ticked = found(module.find("srvRadarSlotPublish(st::radarCameraBackM(on, mode, radarForwardCm));")) &&
+                        found(module.find("detail::g_srvTurretRadarWritersOn.store(yieldNow || cameraMode, std::memory_order_relaxed);")) &&
+                        found(module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && mode != st::RadarAnchorMode::kCamera && "));
+    const size_t routed = module.find("    if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);\n    if (cameraLeaves(ctx, family, eye)) return false;");
+    const bool regular = found(routed) && found(module.find("    if (family == 7 && billboardKind(ctx, lastFrameOnly) != 0) return false;\n")) &&
+                         found(module.find("if (!st::radarAnchorLeavesFamily(family) || !g_cameraBillboards.load(std::memory_order_relaxed)) return false;"));
+    return zero && dirty && pinned && found(handed) && hands == 1 && quiet && ticked && regular;
+}static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
     const size_t compile = t.find("ERROR: compile failed");
     return found(source) && found(compile) && source < compile && found(t.find(":rig_srv_turret_hud_test\n")) && found(t.find("srv_turret_hud_test.exe\" --self-test || exit /b 1"));
@@ -767,11 +808,23 @@ static void wiringCases() {
     check(!wiredLock(vscreen, replaced(module, "!st::lockShape(static_cast<int>(topo), detail::g_srvTurretDrawCount, detail::g_srvTurretDrawInstances)", "false")),
           "control: a lock that never checks the draw's shape trips the pin");
     check(!wiredLock(vscreen, replaced(module, "if (!locked && dEye[0] == 0.0f", "if (dEye[0] == 0.0f")), "control: a locked draw left to the game at a zero delta trips the pin");
-    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
-    check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
+    check(wiredSlotCamera(module, anchorHook, mathText), "camera mode: a zero setter offset and no yield, the slot hook pinned to build 334925 and quiet, the moved copy for a radar slot only, rebased then moved with VP dirty, D published, the radar's own billboards on the regular path");
+    check(!wiredSlotCamera(module, anchorHook, replaced(mathText, "mode == RadarAnchorMode::kCamera || radarForwardCm <= 0) return o;", "radarForwardCm <= 0) return o;")), "control: camera mode that still moves the placement trips the pin");
+    check(!wiredSlotCamera(replaced(module, "mode != st::RadarAnchorMode::kCamera && a.state", "a.state"), anchorHook, mathText), "control: camera mode with the anchor yield (delta and lock) trips the pin");
+    check(!wiredSlotCamera(module, replaced(anchorHook, "if (radar <= 0) return forward(slot, cam, r8, r9);", "(void)radar;"), mathText), "control: the moved camera handed to a slot that is not the radar's trips the pin");
+    check(!wiredSlotCamera(module, anchorHook, replaced(mathText, "    flags |= kCamVpDirty;\n", "")), "control: the moved camera without VP marked dirty trips the pin");
+    check(!wiredSlotCamera(module, replaced(anchorHook, "    st::cameraRebase(copy, cam);\n", ""), mathText), "control: a copy whose plane pointers still point into the game's camera trips the pin");
+    check(!wiredSlotCamera(module, replaced(anchorHook, "0x48, 0x81, 0xEC, 0xF0, 0x07, 0x00, 0x00}", "0x48, 0x81, 0xEC, 0xF0, 0x08, 0x00, 0x00}"), mathText), "control: a drifted slot prologue trips the pin");
+    check(!wiredSlotCamera(module, replaced(anchorHook, "constexpr uintptr_t kSlotRva = 0x36BF3C0;", "constexpr uintptr_t kSlotRva = 0x36BF3D0;"), mathText), "control: a drifted slot address trips the pin");
+    check(!wiredSlotCamera(module, replacedLast(anchorHook, "if (stamp != kStamp || size != kImageSize) {", "if (false) {"), mathText), "control: a slot hook armed without the build check trips the pin");
+    check(!wiredSlotCamera(module, replaced(anchorHook, "    const float back = floatOf(s->slotBack.load(std::memory_order_relaxed));\n", "    const float back = floatOf(s->slotBack.load(std::memory_order_relaxed));\n    Log::get().note(\"slot\");\n"), mathText),
+          "control: a slot hook that logs on the game thread trips the pin");
+    check(!wiredSlotCamera(replaced(module, "    if (family == 7 && billboardKind(ctx, lastFrameOnly) != 0) return false;\n", ""), anchorHook, mathText), "control: camera mode leaving the radar's own billboards to the game trips the pin");
+    check(!wiredSlotCamera(replaced(module, "srvRadarSlotPublish(st::radarCameraBackM(on, mode, radarForwardCm));", "srvRadarSlotPublish(0.0f);"), anchorHook, mathText), "control: no back distance published trips the pin");    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off, camera", "# ui: SRV turret radar anchor | choices on, reversed, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, ini, replaced(build, "\"src\\d3d11\\srv_radar_anchor.cpp\"", ""), audit), "control: the hook outside the compile list trips the pin");
-    check(!wiredAnchor(module, anchorHook, ini, build, replaced(audit, "(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")", "")), "control: the hook not listed as exact-build only trips the pin");
+    check(!wiredAnchor(module, anchorHook, ini, build, replaced(audit, "(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hooks: the placement setter, the update counter, the slot camera\")", "")), "control: the hook not listed as exact-build only trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_anchor\n"), "control: the radar anchor key on the flat allow-list trips the pin");
     check(wiredBuild(build), "build.bat: the module is in the DLL's compile list and this rig has its label and its run");
     check(!wiredBuild(replaced(build, "\"src\\d3d11\\srv_turret.cpp\"", "")), "control: a module outside the compile list trips the pin");
