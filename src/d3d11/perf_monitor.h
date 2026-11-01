@@ -28,6 +28,7 @@
 // re-rasterises at 4 Hz on the worker thread. Nothing here writes a file.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11Device;
@@ -166,6 +167,11 @@ inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; 
 // nothing in a frame's draw order is known to.
 constexpr uint32_t kPerfMonitorDrawTimeStride = 64;
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
+
+// The re-issue counter (draw_reissue_line.h): one call per re-issue of a game draw, from vscreen.cpp's ReissueClock. Counted on every frame; `ticks` is the re-issue's
+// whole time and is given only on a draw-sample frame, where EVERY re-issue is timed (they are few, so no stride: the figure is exact, not scaled). The window line
+// "draw reissue CPU:" prints beside "draw hook CPU:" and is written even with none.
+void perfMonitorNoteReissue(size_t caller, bool timed, int64_t ticks);
 
 // The runtime closed its timing context, so the session is over: the long-frame counts and the worst few
 // are written (docs/freeze-diagnostics-2026-10-01.md). Called from native_timing.cpp's close through
