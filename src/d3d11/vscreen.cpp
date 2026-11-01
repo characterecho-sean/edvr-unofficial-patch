@@ -6184,6 +6184,7 @@ static void vScreenRefreshConfigBody(bool forced) {
         vrDrawPathKeySweep("experimental.vr_eye_rows_without_aa", cfg.getBool("experimental.vr_eye_rows_without_aa", true), g_vrEyeRowsWithoutAa, lastEyeRows);
         vrDrawPathKeySweep("experimental.vr_cpu_benchmark_idle", cfg.getBool("experimental.vr_cpu_benchmark_idle", true), g_vrCpuBenchmarkIdle, lastBenchIdle);
         vrDrawPathKeySweep("experimental.vr_cpu_depth_slot_cache", cfg.getBool("experimental.vr_cpu_depth_slot_cache", true), g_vrCpuDepthSlotCache, lastDepthCache);
+        uiDepthSetSlotCache(g_vrCpuDepthSlotCache.load(std::memory_order_relaxed));   // the cache's rig does not link vscreen, so the key is handed down
     }
 }
 

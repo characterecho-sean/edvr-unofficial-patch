@@ -108,6 +108,10 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 //     SHARED, so the layer and this pass can never disagree about an eye.
 //     -1 for a third target of one shape, or a full table.
 int uiDepthSampledSurfaceSlot();
+// TEMPORARY (experimental.vr_cpu_depth_slot_cache, depth_slot_cache.h): the key is an input the caller sets (the config sweep, vscreen.cpp), because the
+// cache's rig does not link vscreen. The cache clears itself when the value it last saw changes. The counts are read and reset once per perf window.
+void uiDepthSetSlotCache(bool on);
+void uiDepthSlotCacheTakeCounts(uint32_t* hits, uint32_t* misses);
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
 // The read-only form, for observers (the HUD layer census): a query that
 // REGISTERS changes the table the deciding paths then read. On 2026-09-27
