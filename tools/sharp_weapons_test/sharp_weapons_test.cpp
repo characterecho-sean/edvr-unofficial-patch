@@ -899,8 +899,8 @@ static bool wiredVscreen(const std::string& t) {
     const size_t ps = t.find("else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", fn);
     if (skip == std::string::npos || vs == std::string::npos || ps == std::string::npos || !(skip < vs) || !(vs < ps)) return false;
     // the steps loop: after the game's tonemap draw is re-issued once, before the layer's End
-    const size_t loop = t.find("while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);");
-    const size_t first = t.rfind("pureDrawReissue(self, kind, count, instances, args);", loop);
+    const size_t loop = t.find("while (uiLayerCrispToneNext(self)) pureDrawReissue(ReissueCaller::Tonemap, self, kind, count, instances, args);");
+    const size_t first = t.rfind("pureDrawReissue(ReissueCaller::CrispHud, self, kind, count, instances, args);", loop);
     const size_t end = t.find("uiLayerCrispToneEnd(self);", loop);
     return loop != std::string::npos && first != std::string::npos && end != std::string::npos && first < loop && loop < end &&
            has(t, "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {");
@@ -958,7 +958,7 @@ static void wiringTests() {
     check(wiredVscreen(vscreen), "vscreen.cpp: the pixel shader is read for the weapons' vertex shaders, the post-tonemap rules wait for fix.ui_quality, the steps are issued");
     check(!wiredVscreen(replaced(vscreen, "else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", "else if (f.targetKind == 1 && false)")), "control: no pixel shader read for the pairs trips the pin");
     check(!wiredVscreen(replaced(vscreen, "if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", "")), "control: post-tonemap rules that run for the weapons trip the pin");
-    check(!wiredVscreen(replaced(vscreen, "while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);", "")), "control: no loop over the steps trips the pin");
+    check(!wiredVscreen(replaced(vscreen, "while (uiLayerCrispToneNext(self)) pureDrawReissue(ReissueCaller::Tonemap, self, kind, count, instances, args);", "")), "control: no loop over the steps trips the pin");
 
     check(wiredSnapshot(snap), "eye_draw_snapshot.h: the next eye dump watches the three weapons-fire vertex shaders (their constant buffers settle W3)");
     check(!wiredSnapshot(replaced(snap, "case 0x939D01F28D1FEEA8ull: // multicannon rounds\n", "")), "control: an unwatched pair trips the pin");

@@ -44,7 +44,7 @@ const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
     "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
 const char* const kStripCall =
-    "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);";
+    "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
 const char* const kLambda =
@@ -53,7 +53,7 @@ const char* const kLambda =
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
     "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){if(!(stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,"
-    "stripReverseU,g_state->realDrawIndexedInstanced))){draw(AlteredDrawClass::None);}splashDimEnd(self);}";
+    "stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))){draw(AlteredDrawClass::None);}splashDimEnd(self);}";
 const char* const kTick =
     "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;introCurveTick(g_state->ownerCtx,sceneFrame);"
     "if(sceneFrame)introCurveNoteRetired();});";
@@ -117,9 +117,9 @@ std::vector<WirePin> wiringPins(const std::string& text) {
     pins.push_back({"strip-site",
                     inOrder(fwd, {"boolstripIssued=false;", "autoobservedDraw=[&](AlteredDrawaltered){", "if(v!=DrawVerdict::kNone)forwardVerdictBegin(self,v);",
                                   "constboollayered=uiLayer&&uiLayerBegin(self);", "floatstripGain=0.0f;intstripToward=0;boolstripReverseU=false;", kCandidate,
-                                  "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);",
+                                  "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
                                   "constbooloriginalIssued=observedDraw(", "if(layered){uiLayerEnd(self);", "if(v==DrawVerdict::kBackdrop)backdropEnd(self);",
-                                  "splashDimBegin(self)", "panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced)",
+                                  "splashDimBegin(self)", "panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::SplashDim>)",
                                   "draw(AlteredDrawClass::None);", "splashDimEnd(self);", "forwardVerdictEnd(self,v);"}) &&
                         countOf(fwd, "panelCurveSurfaceDraw(") == 2 && countOf(all, "panelCurveSurfaceDraw(") == 2,
                     "intro curve wiring [strip-site]: the strip is drawn after forwardVerdictBegin (kBackdrop's slot swap is in place) and the layer's Begin, before the game's own "
@@ -196,7 +196,7 @@ const char* const kRawStripStart = "    float stripGain = 0.0f;\n";
 const char* const kRawGuard = R"x(    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
         !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
 )x";
-const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {
+const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
                 draw(AlteredDrawClass::None);
             }
 )x";
@@ -263,20 +263,20 @@ void testIntroCurveControls(const std::string& text) {
          "strip-site"},
         {"the dim draws the game's quad only", {{kRawDim, "            draw(AlteredDrawClass::None);\n"}}, "strip-site"},
         {"the dim has no fallback",
-         {{kRawDim, "            if (stripIssued) panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
+         {{kRawDim, "            if (stripIssued) panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>);\n"}}, "strip-site"},
         {"the dim draws the strip whatever the main draw did",
-         {{"if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
-           "if (!(panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {"}},
+         {{"if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {",
+           "if (!(panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {"}},
          "unarmed-text"},
         {"a third place draws the strip",
-         {{kRawEnd, std::string(kRawEnd) + "    panelCurveSurfaceDraw(self, 1.0f, 1, false, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
+         {{kRawEnd, std::string(kRawEnd) + "    panelCurveSurfaceDraw(self, 1.0f, 1, false, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);\n"}}, "strip-site"},
         {"the dim drops the u direction",
-         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
-           "panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced))) {"}},
+         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {"}},
          "strip-site"},
         {"the dim hard-codes the u direction",
-         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
-           "panelCurveSurfaceDraw(self, stripGain, stripToward, false, g_state->realDrawIndexedInstanced))) {"}},
+         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, false, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {"}},
          "strip-site"},
         {"the u direction starts true", {{"bool stripReverseU = false;", "bool stripReverseU = true;"}}, "strip-site"},
         // ---- unarmed-text
@@ -312,27 +312,27 @@ void testIntroCurveControls(const std::string& text) {
           {"            if (introPanelStripArmed()) {\n", "            stripReverseU = introPanelStripReverseU();\n            if (introPanelStripArmed()) {\n"}},
          "strip-args"},
         {"the strip's call drops the u direction",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
-           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);"}},
          "strip-args"},
         {"the strip's call hard-codes the u direction",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
-           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, false, g_state->realDrawIndexedInstanced);"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, false, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);"}},
          "strip-args"},
         {"the strip is drawn through no draw function",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
            "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, nullptr);"}},
          "strip-args"},
         {"the strip is drawn through the thunk's wrapper",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
            "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, draw);"}},
          "strip-args"},
         {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},
         {"the strip is asked with no direction set", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (!uiLayerIssueBlocked()) {"}}, "strip-args"},
         // ---- fallback
         {"the strip counts as issued whatever it returned",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
-           "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n            stripIssued = true;"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);\n            stripIssued = true;"}},
          "fallback"},
         {"every draw starts as the strip's", {{"bool stripIssued = false;", "bool stripIssued = true;"}}, "fallback"},
         // ---- not-on-foot-flag
