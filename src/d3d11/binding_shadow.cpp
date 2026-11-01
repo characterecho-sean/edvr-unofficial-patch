@@ -62,6 +62,9 @@ FaultBudget g_resourceBudget("bindingShadow.resolveResource", 5);
 // can run out alone, and the note says it was a probe.
 FaultBudget g_viewProbeBudget("bindingShadow.resolveProbe", 5);
 FaultBudget g_resourceProbeBudget("bindingShadow.resolveResourceProbe", 5);
+// The always-on depth-size agreement check (#155/#163, native_on_foot.cpp sceneDepthSize) has a budget of its own: it runs on every slow-path world draw with DLAA, and
+// must not spend the probe budget the world rows resolve their colour target with.
+FaultBudget g_viewAgreementBudget("bindingShadow.resolveAgreement", 5);
 
 Slot& slotOf(BindSlot s) { return detail::g_bindingSlots[static_cast<size_t>(s)]; }
 
@@ -199,6 +202,10 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
 
 bool bindingResolveProbe(void* view, ResourceInfo* out) {
     return resolveView(g_viewProbeBudget, view, out);
+}
+
+bool bindingResolveAgreement(void* view, ResourceInfo* out) {
+    return resolveView(g_viewAgreementBudget, view, out);
 }
 
 bool bindingResolveResourceProbe(void* resource, ResourceInfo* out) {

@@ -236,6 +236,9 @@ bool bindingResolveResource(void* resource, ResourceInfo* out);
 // Rigs that supply their own bindingResolve (EDVR_BINDING_SHADOW_EXTERNAL) never
 // call these; the modules that do are compiled only into the DLL.
 bool bindingResolveProbe(void* view, ResourceInfo* out);
+// The always-on depth-size agreement check's own view resolver (native_on_foot.cpp sceneDepthSize): a budget apart from the probes', so a stale view it faults on cannot
+// stop the world rows resolving their colour target.
+bool bindingResolveAgreement(void* view, ResourceInfo* out);
 bool bindingResolveResourceProbe(void* resource, ResourceInfo* out);
 
 }  // namespace edvr

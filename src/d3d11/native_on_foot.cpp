@@ -28605,7 +28605,7 @@ bool sceneDepthSize(uint32_t frame, uint32_t colourW, uint32_t colourH) {
     if (!dsv) return false;
     if (dsv != g_sizeDsv || g_sizeDsvFrame != frame) {
         ResourceInfo ri;
-        g_sizeDsvOk = bindingResolveProbe(dsv, &ri) && ri.isTexture2D;
+        g_sizeDsvOk = bindingResolveAgreement(dsv, &ri) && ri.isTexture2D;   // its own fault budget: the world rows' probe budget is not ours to spend
         g_sizeDsvW = g_sizeDsvOk ? ri.a : 0;
         g_sizeDsvH = g_sizeDsvOk ? ri.b : 0;
         g_sizeDsv = dsv;
@@ -35923,8 +35923,8 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
     f44::g_iconRing.release();   // F66f
     f44::g_labRing.release();    // F87p
+    g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);   // first: the render thread stops reading the struct before it is reset
     f44::g_labPending = f44::LabPending{};
-    g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
     for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
     f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
     f44::g_iconLastHit = -1;   // F142
