@@ -4483,6 +4483,11 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
   - **Off foot with Anti-aliasing off,** celestial motion and the vr_camera_census diagnostic are declined again, as before F196.
   - **The rest of #152** (a per-scene subscriber mask so the draw gate can close in VR) stays with the contributor's draw-path investigation.
   - **Next:** a disembark with Anti-aliasing off. Read the edge lines, F113's rows from the second on-foot frame, and the draw hook CPU in the ship.
+  - **FLOWN OK (2026-11-01)** `edvr_gfx_20261101_112440.log` (Frontier, Pimax, v0.22.0-rc.5-45-ga4413c83, build matched). Anti-aliasing was switched off at 11:25:08.
+    - **The edges:** `the on-foot arm is on (native on foot went active, after 10567 frames off)` at 11:26:51.763, and `... off (... after 2474 frames on)` at 11:27:27.518. Two lines, no flapping.
+    - **F113's first window:** 136 frames, `none 1` per eye (the edge frame), the rest from the terrain. Every window after reads `none 0`.
+    - **Draw hook CPU with Anti-aliasing off:** 0.022-0.071 ms a frame off foot (F196's flight: 0.041-0.21), and 0.35-0.50 ms on foot.
+    - `--health`: build matched. Only F91 and F87p read NEVER APPLIED; both predate this arc.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
