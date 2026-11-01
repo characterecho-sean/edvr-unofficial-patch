@@ -56,6 +56,7 @@ internal static class SelfTests
         SymbolOptions();
         DiaLibraryMatchesProcess();
         GameBuildIdentity();
+        GameBuildMismatchReport();
         SymbolAnnotation();
         ReportShape();
         Console.WriteLine($"EdvrCpuProfile self-test: {_checks} checks");
@@ -405,14 +406,12 @@ internal static class SelfTests
         Check(Matches("record_drain", 0x42E25C0), "0x42e25c0 is inside record_drain");
         Check(!Matches("record_drain", 0x42E2686), "record_drain ends at 134 bytes");
         Check(!Matches("thunk_42e2160", 0x42E25C0), "0x42e25c0 is not the earlier thunk");
-        Check(RvaTable.Classes[ClassId("thunk_42e2160")].Bound == 0x42E2170, "a thunk takes 16 bytes");
         // Edges come from the table entry, not a literal: a retarget that moves a
         // thunk once left a hand-typed last byte behind (0521f426 vs 0x42E220F).
         var thunk = RvaTable.Classes[ClassId("thunk_42e2160")];
+        Check(thunk.Bound == thunk.Entry + 0x10, "a thunk takes 16 bytes");
         Check(Matches("thunk_42e2160", thunk.Entry + 0xF) && !Matches("thunk_42e2160", thunk.Entry + 0x10) &&
               !Matches("thunk_42e2160", thunk.Entry - 1), "thunk window edges follow the table entry");
-        Check(Matches("thunk_42e2160", 0x42E216F) && !Matches("thunk_42e2160", 0x42E2170),
-              "thunk window edges");
         ClassNamesAgreeWithEntries();
         Check(Matches("reset_repopulate", 0x36A3C60) && !Matches("reset_repopulate", 0x36A3EFF),
               "reset_repopulate window edges");
@@ -440,26 +439,30 @@ internal static class SelfTests
         foreach (var item in RvaTable.Classes)
         {
             var at = item.Name.LastIndexOf('_');
-            if (item.Kind is not (RvaKind.Thunk or RvaKind.CallSite or RvaKind.Eval) || at < 0) continue;
+            if (item.Kind is not (RvaKind.Thunk or RvaKind.CallSite or RvaKind.Eval or RvaKind.Lod) || at < 0) continue;
             if (!uint.TryParse(item.Name[(at + 1)..], System.Globalization.NumberStyles.HexNumber, null, out var named)) continue;
             Check(named == item.Entry,
                   $"class {item.Name} is named for 0x{named:X} but its entry is 0x{item.Entry:X}; rename it or fix the entry after the retarget");
         }
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (root is not null && !File.Exists(Path.Combine(root.FullName, "AGENTS.md"))) root = root.Parent;
-        var source = root is null ? null : Path.Combine(root.FullName, "src", "d3d11", "kinematic_eval_hook.cpp");
-        if (source is null || !File.Exists(source))
-        {
-            Console.WriteLine("self-test SKIP: kinematic_eval_hook.cpp not found; thunk citation check not run");
-            return;
-        }
+        var source = RepoFile(Path.Combine("src", "d3d11", "kinematic_eval_hook.cpp"), "thunk citation check not run");
+        if (source is null) return;
         var text = File.ReadAllText(source);
-        foreach (var name in new[] { "thunk_42e2160", "thunk_42e2710" })
-        {
-            var entry = RvaTable.Classes[ClassId(name)].Entry;
-            Check(text.Contains($"thunk 0x{entry:X}", StringComparison.Ordinal),
-                  $"kinematic_eval_hook.cpp no longer cites {name} at 0x{entry:X}: the retarget moved one of them without the other");
-        }
+        foreach (var item in RvaTable.Classes.Where(item => item.Kind == RvaKind.Thunk))
+            Check(text.Contains($"thunk 0x{item.Entry:X}", StringComparison.Ordinal),
+                  $"kinematic_eval_hook.cpp no longer cites {item.Name} at 0x{item.Entry:X}: the retarget moved one of them without the other");
+    }
+
+    // A file of the source tree, found by walking up from the analyzer to a
+    // directory that holds build.bat (it ships in a source archive; AGENTS.md is
+    // export-ignore). A tree without the file prints the SKIP and returns null.
+    private static string? RepoFile(string relative, string whatIsSkipped)
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "build.bat"))) root = root.Parent;
+        var path = root is null ? null : Path.Combine(root.FullName, relative);
+        if (path is not null && File.Exists(path)) return path;
+        Console.WriteLine($"self-test SKIP: {relative} not found; {whatIsSkipped}");
+        return null;
     }
 
     // The analyzer is x64. DiaLoader fails on an x86 msdia140.dll, and then no
@@ -501,15 +504,25 @@ internal static class SelfTests
         Check(!unknown.NamesGameFunctions && unknown.Warning.Contains("could not be read"),
               "an identity the trace did not carry refuses and says so");
         Check(new StackStore("c:\\game").Identity.NamesGameFunctions, "a self-test store keeps naming game functions");
+        var noGame = GameBuildGuard.NoGameExecutable;
+        Check(!noGame.NamesGameFunctions && noGame.Warning.Length == 0 && !noGame.GameExecutableInTrace,
+              "a trace with no game executable names nothing and warns of nothing");
+        Check(ok.GameExecutableInTrace && unknown.GameExecutableInTrace,
+              "an unreadable game executable is still a game executable in the trace");
 
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (root is not null && !File.Exists(Path.Combine(root.FullName, "AGENTS.md"))) root = root.Parent;
-        var source = root is null ? null : Path.Combine(root.FullName, "src", "common", "game_signatures.inc");
-        if (source is null || !File.Exists(source))
-        {
-            Console.WriteLine("self-test SKIP: game_signatures.inc not found; identity pair not cross-checked against the signature table");
-            return;
-        }
+        // The class match that Classify runs per game frame, with a mismatched
+        // identity: nothing matches, so no frame is attributed to a wrong function.
+        var drain = RvaTable.Classes[ClassId("record_drain")];
+        Check(new StackStore("c:\\game").ClassesFor(drain.Entry).Contains(ClassId("record_drain")),
+              "a matching build classifies a game RVA");
+        Check(new StackStore("c:\\game", otherStamp).ClassesFor(drain.Entry).Length == 0,
+              "a mismatched build classifies no game RVA");
+        Check(new StackStore("c:\\game", noGame).ClassesFor(drain.Entry).Length == 0,
+              "a trace with no game executable classifies no game RVA");
+
+        var source = RepoFile(Path.Combine("src", "common", "game_signatures.inc"),
+                              "identity pair not cross-checked against the signature table");
+        if (source is null) return;
         var text = File.ReadAllText(source);
         Check(text.Contains($"kKnownStamp = 0x{RvaTable.ExpectedTimeDateStamp:X8}u", StringComparison.Ordinal),
               "RvaTable.ExpectedTimeDateStamp is the build the signature table is keyed to; retarget both together");
@@ -517,6 +530,98 @@ internal static class SelfTests
               "RvaTable.ExpectedImageSize is the build the signature table is keyed to; retarget both together");
         Check(text.Contains($"kKnownBuild[] = \"{RvaTable.ExpectedBuild}\"", StringComparison.Ordinal),
               "RvaTable.ExpectedBuild is the build the signature table is keyed to");
+    }
+
+    // A capture whose game build is not the table's must not report a measured
+    // zero for anything that needs the table: those values are null, everywhere
+    // they appear, and only a mismatch (not a trace with no game) warns.
+    private static void GameBuildMismatchReport()
+    {
+        var output = Path.Combine(Path.GetTempPath(), $"edvr-cpu-selftest-{Guid.NewGuid():N}");
+        var input = WriteTemp("fixture.etl", "not a real trace, only its size is read");
+        string[] gateKeys = { "callerPipelineRunningUs", "callerPipelineRunningUsPerFrame", "callerPipelineWaitUs",
+                              "callerPipelineWaitUsPerFrame", "threadPipelineRunningUs",
+                              "threadPipelineRunningUsPerFrame", "criticalPathShare",
+                              "criticalPathShareMeanOfFrames" };
+        void NullsEverywhere(Dictionary<string, object?> report, string framesPath, string what)
+        {
+            var gate = (Dictionary<string, object?>)report["gate"]!;
+            foreach (var key in gateKeys) Check(gate[key] is null, $"{what}: gate {key} is unmeasured");
+            Check(Convert.ToInt32(gate["frames"]) == 2, $"{what}: the frame count is still measured");
+            var windows = (Dictionary<string, object?>[])report["windows"]!;
+            Check(windows.Length > 0, $"{what}: the fixture has a window");
+            foreach (var window in windows)
+            {
+                var windowGate = (Dictionary<string, object?>)window["gate"]!;
+                foreach (var key in gateKeys) Check(windowGate[key] is null, $"{what}: window gate {key} is unmeasured");
+                var windowAttribution = (Dictionary<string, object?>)window["attribution"]!;
+                Check(windowAttribution["byWakerClass"] is null, $"{what}: window waker classes are unmeasured");
+            }
+            var attribution = (Dictionary<string, object?>)report["attributionSummary"]!;
+            foreach (var key in new[] { "byWakerClass", "byBlockingSiteAndWakerClass", "pipelineWaitShare" })
+                Check(attribution[key] is null, $"{what}: attribution {key} is unmeasured");
+            foreach (var row in (List<Dictionary<string, object?>>)attribution["byRegion"]!)
+                Check(row["byClass"] is null, $"{what}: region {row["region"]} waker classes are unmeasured");
+            Check(Convert.ToInt32(attribution["waitSegments"]) == 2, $"{what}: wait segments are still measured");
+            var rva = (Dictionary<string, object?>)report["rvaClasses"]!;
+            foreach (var key in new[] { "sampleCountsByClass", "callerSampleCountsByClass",
+                                        "firstSampledFrameSequence", "lastSampledFrameSequence" })
+                Check(rva[key] is null, $"{what}: rvaClasses {key} is unmeasured");
+            foreach (var thread in (Dictionary<string, object?>[])report["threads"]!)
+                Check(thread["pipelineSamples"] is null && thread["pipelineRunningUs"] is null,
+                      $"{what}: thread pipeline samples are unmeasured");
+            foreach (var line in File.ReadAllLines(framesPath))
+            {
+                using var doc = JsonDocument.Parse(line);
+                var frameGate = doc.RootElement.GetProperty("gate");
+                foreach (var key in gateKeys.Where(key => frameGate.TryGetProperty(key, out _)))
+                    Check(frameGate.GetProperty(key).ValueKind == JsonValueKind.Null,
+                          $"{what}: frames.jsonl gate {key} is unmeasured");
+                Check(frameGate.GetProperty("callerPipelineRunningUs").ValueKind == JsonValueKind.Null,
+                      $"{what}: frames.jsonl carries the unmeasured gate");
+                Check(doc.RootElement.GetProperty("caller").GetProperty("pipelineSamples").ValueKind == JsonValueKind.Null,
+                      $"{what}: frames.jsonl caller pipeline samples are unmeasured");
+            }
+        }
+        try
+        {
+            var matchedPath = Path.Combine(output, "matched.jsonl");
+            var matched = Report.Build(input, Pid, Fixture(), matchedPath, null);
+            Check(((string[])matched["warnings"]!).Length == 0, "a matching build warns of nothing");
+            var matchedBuild = (Dictionary<string, object?>)matched["gameBuild"]!;
+            Check(matchedBuild["namesGameFunctions"] is true && matchedBuild["gameExecutableInTrace"] is true,
+                  "a matching build names game functions");
+            Check(((Dictionary<string, object?>)matched["gate"]!)["callerPipelineRunningUs"] is not null,
+                  "a matching build still measures the gate");
+
+            var mismatchPath = Path.Combine(output, "mismatch.jsonl");
+            var mismatch = Report.Build(input, Pid,
+                Fixture(identity: GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp + 1, RvaTable.ExpectedImageSize)),
+                mismatchPath, null);
+            var warnings = (string[])mismatch["warnings"]!;
+            Check(warnings.Length == 1 && warnings[0].StartsWith("game build mismatch:"), "a mismatch warns once");
+            var mismatchBuild = (Dictionary<string, object?>)mismatch["gameBuild"]!;
+            Check(mismatchBuild["namesGameFunctions"] is false && mismatchBuild["gameExecutableInTrace"] is true,
+                  "a mismatch names no game functions");
+            Check((string)mismatchBuild["capturePeTimeDateStamp"]! == $"0x{RvaTable.ExpectedTimeDateStamp + 1:X8}",
+                  "a mismatch reports the capture's own timestamp");
+            NullsEverywhere(mismatch, mismatchPath, "mismatch");
+
+            // The pre-flight smoke traces build\openxr_trace_test.exe, which has no
+            // game executable: that is its own case, with no false warning.
+            var noGamePath = Path.Combine(output, "nogame.jsonl");
+            var noGame = Report.Build(input, Pid, Fixture(identity: GameBuildGuard.NoGameExecutable), noGamePath, null);
+            Check(((string[])noGame["warnings"]!).Length == 0, "a trace with no game executable has no warning");
+            var noGameBuild = (Dictionary<string, object?>)noGame["gameBuild"]!;
+            Check(noGameBuild["gameExecutableInTrace"] is false && noGameBuild["namesGameFunctions"] is false,
+                  "a trace with no game executable says so");
+            NullsEverywhere(noGame, noGamePath, "no game");
+        }
+        finally
+        {
+            File.Delete(input);
+            if (Directory.Exists(output)) Directory.Delete(output, true);
+        }
     }
 
     private static void StackLabels()
@@ -614,7 +719,7 @@ internal static class SelfTests
         CallerThread: Caller, NextWaitThread: Caller, Status: 0,
         Flags: Markers.PostValid | Markers.SinglePresent, SceneReady: 1);
 
-    private static Collected Fixture(bool boundaryWait = false)
+    private static Collected Fixture(bool boundaryWait = false, GameIdentity? identity = null)
     {
         var data = new Collected { HasCallStacks = true, EventsLost = 0 };
         var epoch = new DateTime(2026, 9, 22, 14, 23, 50, DateTimeKind.Utc);
@@ -655,7 +760,7 @@ internal static class SelfTests
         worker.Add(4200, CpuState.Running);
         worker.Add(5000, CpuState.Waiting);
 
-        var stacks = new StackStore(@"c:\game");
+        var stacks = new StackStore(@"c:\game", identity);
         var exe = stacks.AddModuleForTest(@"c:\game\elitedangerous64.exe", "elitedangerous64.exe", GameBase);
         var edvrD3d11 = stacks.AddModuleForTest(@"c:\game\d3d11.dll", "d3d11.dll", 0x7FF000000000);
         var systemD3d11 = stacks.AddModuleForTest(@"c:\windows\system32\d3d11.dll", "d3d11.dll", 0x7FF100000000);
