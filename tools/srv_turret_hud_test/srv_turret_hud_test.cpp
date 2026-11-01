@@ -15,7 +15,7 @@
 //   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
 //   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
 //   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
-//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (P) the radar disc's plane in the seated frame (the inverse of eyeFrameFrom's step; a turret-fixed square keeps its centre and normal as the head moves and turns, a tilted one reads its tilt) and the list of unmoved family draws; (S) the scissor: a draw the game scissored to the top half of the target, kept (the moved quad is cropped) and opened (it covers below the rectangle; the top half is the same picture), several rectangles (three, sixteen, none with the test on) put back exactly, the rasterizer state object untouched, no target view (the viewport's extent), a look that changes nothing, a second open refused and the boundary settle; (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (p) the content depth, a branch of the shader the module does not use (tr.w = 1 / z_c scales the translation by w / z_c); (S) the scissor: a draw the game scissored to the top half of the target, kept (the moved quad is cropped) and opened (it covers below the rectangle; the top half is the same picture), several rectangles (three, sixteen, none with the test on) put back exactly, the rasterizer state object untouched, no target view (the viewport's extent), a look that changes nothing, a second open refused and the boundary settle; (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
 //   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
 //   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
 //   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
@@ -23,20 +23,21 @@
 //   checked on a level head, a yawed head and a canted eye.
 //   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
 //   again plus TURRETPRE, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
-//   THE SCENE CONSTANTS AND THE REGISTER COPY: signature H's binding takes the draw's vertex constants at GS slot 1 (with the range the game bound them with) beside the turret constants and gives both back, also through a failed restore and the settle; the disc probe's copy of a pixel-shader register (cb2[11], cb1[90]) is read from the right offset, counted from the bound range's first constant, and refused past the buffer or the range.
+//   THE SCENE CONSTANTS AND THE REGISTER COPY: signature H's binding takes the draw's vertex constants at GS slot 1 (with the range the game bound them with) beside the turret constants and gives both back, also through a failed restore and the settle; the binding header's copy of a pixel-shader register (cb2[11], cb1[90]) is read from the right offset, counted from the bound range's first constant, and refused past the buffer or the range.
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
 //   geometry stage empty after the issue. THE CONSTANTS: four registers, made once per device, rewritten only when a number changes, refused when not finite, not a window, a gap of 0 with
 //   no translation, a frustum that is none, or an anchor, translation or gap beyond 2 m; a push, a pull and a translation alone are accepted. THE GROUPS: every family has one, the two
 //   hologram families are the panels, the other seven the radar; a group's push is used when above 0, else the gap, else the translation alone, else the group is off; B7790CBF is no family.
-//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each signature (its record is the vertex whole, from the
-//   signature table, then `pre`) and the capture summary: a quad 0.46 to 0.52 m from the anchor reads six vertices moved, the distance before and 1.2 m more after; one 1.5 m out and one at
-//   500 m read in_window 0 with the picture unchanged; with the translation alone every vertex reads as moved.
+//   THE RADAR ANCHOR AND THE RADAR'S OWN CAMERA (no device): the key's text and the setter's offset, the placement setter's add-and-idempotence rule, the turret's forward from the camera's axes and its
+//   pairing with the anchor's rotation by frame, the slot camera's move against an independent inverse, the plane pointers' rebase, the radar-slot test over a fake memory and the direction rule.
+//   THE EYE'S POSE (no device): the head's pose times the eye's, as the module's direction sample takes it.
+//   THE TWIN: the stream-output twin of each signature (its record is the vertex whole, from the signature table, then `pre`) is what every move case reads; the declaration is the rig's own.
 //   THE SCORPION LATCH (journal_vehicle_latch.h, no device): LoadGame's Ship and LaunchSRV's SRVType set it for combat_multicrew_srv_01 in any case and clear it for anything
 //   else; the main menu's music, DockSRV, SRVDestroyed and Shutdown clear it; a localised name, a missing, escaped, shorter, longer or too distant field is unknown, which is
 //   false; a session fed in two pieces cut at every byte and byte by byte gives the same changes; a new file resets it; the state has no room for a line.
 //   THE MUTANTS, each run through the same move cases in every signature's text and each caught: no window, either end of it, the sign of the anchor, of the gap and of the translation, y
-//   read down, the tangents mixed, the translation dropped, the move about the origin, w or the NDC z not kept, the unmoved vertex returned when the move ends behind the eye, the depth fallback gone (z / w, the far end, or none inside the near plane), a `pre` that is the moved position,
+//   read down, the tangents mixed, the translation dropped, the content depth ignored or taken without the vertex's depth, the move about the origin, w or the NDC z not kept, the unmoved vertex returned when the move ends behind the eye, the depth fallback gone (z / w, the far end, or none inside the near plane), a `pre` that is the moved position,
 //   and a pass-through that reverses the winding (caught by the strip cases); and the binding whose restore does nothing. --wiring scans the sources that connect all this to the game,
 //   with controls that edit a copy and must trip the pin.
 #include <windows.h>
@@ -334,19 +335,19 @@ static void resetScene() {
 }
 static void noopSetGs(ID3D11DeviceContext*, ID3D11GeometryShader*, ID3D11ClassInstance* const*, uint32_t) {}
 
-// What the GPU instrument reads back for a sampled draw: the pipeline statistics, the stream-output statistics and the records the twin streamed out.
+// What a draw through the stream-output twin gives back (captureMove): the pipeline statistics, the stream-output statistics and the records the twin streamed out.
+static constexpr UINT kTwinBufferBytes = 65536;   // the stream-output buffer of such a draw
 struct Sample {
     D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
     D3D11_QUERY_DATA_SO_STATISTICS so{};
-    std::vector<float> records;   // kCaptureBufferBytes / 4 floats
-    bool soTargetAfter = true, gsAfter = true;
+    std::vector<float> records;   // kTwinBufferBytes / 4 floats
 };
 struct DrawOpts {
     int eye = 0;                 // which constants buffer
     bool skipRestore = false;    // MUTANT: a restore that does nothing
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;   // the draw's topology
     int cull = 0;                // 0 no culling, 1 back faces culled, 2 front faces culled
-    Sample* sample = nullptr;    // the instrument: queries around the scope (and, with soTarget, the stream-output target of the twin)
+    Sample* sample = nullptr;    // queries around the scope (and, with soTarget, the stream-output target of the twin)
     bool soTarget = false;
     bool scissored = false;      // the game's draw has ScissorEnable and the one rectangle scissorRect
     D3D11_RECT scissorRect{0, 0, 0, 0};
@@ -398,7 +399,7 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
         if (o.soTarget) {
             ck(g_dev->CreateQuery(&sd, &soQ), "the stream-output-statistics query");
             D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = st::kCaptureBufferBytes;
+            bd.ByteWidth = kTwinBufferBytes;
             bd.BindFlags = D3D11_BIND_STREAM_OUTPUT;
             ck(g_dev->CreateBuffer(&bd, nullptr, &soBuf), "the stream-output buffer");
             bd.BindFlags = 0;
@@ -432,17 +433,10 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
             g_ctx->CopyResource(staging.Get(), soBuf.Get());
             D3D11_MAPPED_SUBRESOURCE m{};
             ck(g_ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m), "Map the stream-output copy");
-            o.sample->records.resize(st::kCaptureBufferBytes / 4);
-            std::memcpy(o.sample->records.data(), m.pData, st::kCaptureBufferBytes);
+            o.sample->records.resize(kTwinBufferBytes / 4);
+            std::memcpy(o.sample->records.data(), m.pData, kTwinBufferBytes);
             g_ctx->Unmap(staging.Get(), 0);
         }
-        ComPtr<ID3D11GeometryShader> now;
-        g_ctx->GSGetShader(&now, nullptr, nullptr);
-        o.sample->gsAfter = now != nullptr;
-        ID3D11Buffer* so[1] = {};
-        g_ctx->SOGetTargets(1, so);
-        o.sample->soTargetAfter = so[0] != nullptr;
-        if (so[0]) so[0]->Release();
     }
     return t.read();
 }
@@ -1272,9 +1266,9 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         }
         resetScene();
     }
-    {   // (p) THE CONTENT DEPTH (the radar billboards' correction): with tr.w = 1 / z_c every vertex moves by T w / z_c, so a quad 2.5 m out lands on screen exactly where content at
-        // z_c = 0.34 m on the same rays, moved by T, projects (by the camera's own projection); with tr.w = 0 the same vertices move by T at their own depth (as before); a vertex on the
-        // eye plane is left alone
+    {   // (p) THE CONTENT DEPTH, a branch of the shader that the module does not use (it writes tr.w as 0): with tr.w = 1 / z_c every vertex moves by T w / z_c, so a quad 2.5 m out lands on
+        // screen exactly where content at z_c = 0.34 m on the same rays, moved by T, projects (by the camera's own projection); with tr.w = 0 the same vertices move by T at their own depth;
+        // a vertex on the eye plane is left alone
         const float t[3] = {0.012f, -0.008f, 0.03f};
         const double zc = 0.34;
         st::TurretParams p = st::translateParamsFor(frameOfCam(cam, nullptr, t));
@@ -1300,18 +1294,6 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         eyePos(m.pre[5], cam, zIn);
         eyePos(m.post[5], cam, zOut);
         f.expect(closeTo(zOut[0] - zIn[0], t[0], 3e-5) && closeTo(zOut[1] - zIn[1], t[1], 3e-5) && closeTo(zOut[2] - zIn[2], t[2], 3e-5), "(p) ...and a vertex at z_c itself moves by exactly T");
-        double box[8] = {1e30, -1e30, 1e30, -1e30, 1e30, -1e30, 1e30, -1e30};   // the quad's NDC box before (x, y) and after
-        for (size_t i = 0; i < 4; ++i) {
-            const double v[4] = {m.pre[i][0] / m.pre[i][3], m.pre[i][1] / m.pre[i][3], m.post[i][0] / m.post[i][3], m.post[i][1] / m.post[i][3]};
-            for (int j = 0; j < 4; ++j) {
-                box[2 * j] = std::min(box[2 * j], v[j]);
-                box[2 * j + 1] = std::max(box[2 * j + 1], v[j]);
-            }
-        }
-        const double cx = (box[0] + box[1]) * 0.5, cy = (box[2] + box[3]) * 0.5;
-        double e[2] = {};
-        f.expect(st::contentShiftNdc(p, cx, cy, t, zc, e) && closeTo((box[4] + box[5]) * 0.5 - cx, e[0], 5e-5) && closeTo((box[6] + box[7]) * 0.5 - cy, e[1], 5e-5),
-                 "(p) the quad probe's expectation (st::contentShiftNdc at the NDC box's centre) is the shift of the quad's NDC box centre");
         st::TurretParams plain = p;
         plain.invZc = 0.0f;
         const Captured mp = captureMove(fam, twin, pts, cam, plain);
@@ -1666,7 +1648,7 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
     f.expect(maxDiff(plainBefore, plainAfter) == 0.0, "a plain issue after the shifted one is the plain image again");
 }
 
-// ---------------------------------------------------------------- the radar anchor moved in the game (experimental.srv_turret_radar_anchor): the key, the offset's bits, the recent test, the families
+// ---------------------------------------------------------------- the radar anchor moved in the game (experimental.srv_turret_radar_anchor): the key, the offset's bits, the placement rule, the direction, the families
 static void radarAnchorCases() {
     using A = st::RadarAnchorMode;
     check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kCamera &&
@@ -1738,13 +1720,12 @@ static void radarAnchorCases() {
     const double p75 = 7.5 / 57.29577951308232;
     const float seatFwd[3] = {0.0f, float(-std::sin(p75)), float(std::cos(p75))};   // the seated forward, 7.5 deg below the vehicle's level (DF3503CD's seated normal (0, 0.992, 0.130))
     float dd[3], ua[3];
-    check(st::radarAnchorAlong(seatFwd, idA, 0.45f, dd, ua) && near3(dd, 0.0, -0.05874, 0.44615, 2e-5) && near3(ua, 0.0, -0.13053, 0.99144, 2e-5) &&
-              std::fabs(st::angleToZDeg(ua) - 7.5) < 0.01 && std::fabs(st::yawDeg(ua)) < 1e-6,
-          "anchor = identity, u 7.5 deg below level: d = 0.45 m along u, (0, -0.059, 0.446), angle to the anchor's z 7.5 deg");
+    check(st::radarAnchorAlong(seatFwd, idA, 0.45f, dd, ua) && near3(dd, 0.0, -0.05874, 0.44615, 2e-5) && near3(ua, 0.0, -0.13053, 0.99144, 2e-5),
+          "anchor = identity, u 7.5 deg below level: d = 0.45 m along u, (0, -0.059, 0.446), and u in the anchor's axes (0, -0.131, 0.991)");
     check(st::radarAnchorAlong(seatFwd, idA, -0.45f, dd, ua) && near3(dd, 0.0, 0.05874, -0.44615, 2e-5), "reversed: the same line the other way");
     const float worldX[3] = {1.0f, 0.0f, 0.0f};
-    check(st::radarAnchorAlong(worldX, idA, 0.45f, dd, ua) && near3(dd, 0.45, 0.0, 0.0, 1e-6) && std::fabs(st::angleToZDeg(ua) - 90.0) < 1e-4 && std::fabs(st::yawDeg(ua) - 90.0) < 1e-4,
-          "the turret 90 deg to the right of a vehicle facing the anchor's z: d along the anchor's x, yaw 90 deg");
+    check(st::radarAnchorAlong(worldX, idA, 0.45f, dd, ua) && near3(dd, 0.45, 0.0, 0.0, 1e-6) && near3(ua, 1.0, 0.0, 0.0, 1e-6),
+          "the turret 90 deg to the right of a vehicle facing the anchor's z: d along the anchor's x");
     const float yawA[16] = {0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // a vehicle facing world +x
     check(st::radarAnchorAlong(worldX, yawA, 0.45f, dd, ua) && near3(dd, 0.0, 0.0, 0.45, 1e-6), "a vehicle facing world +x with the turret ahead: d along the anchor's z");
     float scaledA[16], skewA[16];
@@ -1756,7 +1737,7 @@ static void radarAnchorCases() {
     const float notUnit[3] = {0.0f, 0.0f, 0.5f};
     check(!st::radarAnchorAlong(seatFwd, scaledA, 0.45f, dd, ua) && !st::radarAnchorAlong(seatFwd, skewA, 0.45f, dd, ua) && !st::radarAnchorAlong(notUnit, idA, 0.45f, dd, ua),
           "an anchor whose rows are not unit or not orthogonal, or a u that is not unit: refused (the fallback (0, 0, s * F))");
-    // The lag (flight of c1275025: the disc lagged the turret): u paired with the anchor of its own host frame, and the aim carried forward over u's age at the last rate, held.
+    // The lag (flight of c1275025: the disc lagged the turret): u paired with the anchor of its own host frame.
     st::SeqRing<st::Rot9, 4> ring;
     st::Rot9 rotA, rotB;
     rotA.r[0] = 1.0f;
@@ -1773,143 +1754,10 @@ static void radarAnchorCases() {
     ring.put(13, rotA);
     ring.put(14, rotA);
     check(!ring.find(10) && ring.find(11) && ring.find(14), "a full ring forgets its oldest frame first");
-    const float ahead[3] = {0.0f, 0.0f, 1.0f}, right90[3] = {1.0f, 0.0f, 0.0f};
-    const float up10[3] = {0.0f, float(std::sin(10.0 / 57.29577951308232)), float(std::cos(10.0 / 57.29577951308232))};
-    const st::Aim aAhead = st::aimOf(ahead), aRight = st::aimOf(right90), aUp = st::aimOf(up10);
-    st::Aim probe;
-    probe.yaw = 37.0;
-    probe.pitch = -12.0;
-    float probeU[3];
-    st::unitOfAim(probe, probeU);
-    const st::Aim back = st::aimOf(probeU);
-    check(std::fabs(aAhead.yaw) < 1e-9 && std::fabs(aAhead.pitch) < 1e-9 && std::fabs(aRight.yaw - 90.0) < 1e-9 && std::fabs(aUp.pitch - 10.0) < 1e-4 && std::fabs(aUp.yaw) < 1e-9 &&
-              std::fabs(back.yaw - 37.0) < 1e-4 && std::fabs(back.pitch + 12.0) < 1e-4 && near3(probeU, std::cos(-12.0 / 57.29577951308232) * std::sin(37.0 / 57.29577951308232),
-                                                                                                 std::sin(-12.0 / 57.29577951308232),
-                                                                                                 std::cos(-12.0 / 57.29577951308232) * std::cos(37.0 / 57.29577951308232), 1e-6),
-          "the aim relative to the vehicle: yaw atan2(x, z), pitch asin(y), and back to a unit vector");
-    check(std::fabs(st::wrapDeg(190.0) + 170.0) < 1e-9 && std::fabs(st::wrapDeg(-190.0) - 170.0) < 1e-9 && std::fabs(st::wrapDeg(45.0) - 45.0) < 1e-9, "yaw wraps into +-180");
-    // The draw-time correction (flight of c8d79c6a: the lead was right on average, +-1 to 2 deg of the turret's own changes were left): delta = desired - used, in the world.
-    {
-        const double y5 = 5.0 / 57.29577951308232;
-        const float uUsedA[3] = {float(std::sin(y5)), 0.0f, float(std::cos(y5))};   // the aim the shown call used, 5 deg right of the anchor's z
-        const float sFc = 0.45f;
-        const float dUsedC[3] = {sFc * uUsedA[0], sFc * uUsedA[1], sFc * uUsedA[2]};
-        const float ident16[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 3.0f, 4.0f, 5.0f, 1.0f};
-        const float uTrueZ[3] = {0.0f, 0.0f, 1.0f};   // the turret now straight ahead
-        float dW[3], dS[3];
-        check(st::radarCorrectionWorld(uTrueZ, ident16, sFc, dUsedC, dW, dS) && near3(dW, -sFc * std::sin(y5), 0.0, sFc * (1.0 - std::cos(y5)), 1e-6) && near3(dS, 0.0, 0.0, sFc, 1e-6),
-              "anchor = identity: delta = sF (u_true - u_used), the desired offset sF along u_true");
-        const float yawed[16] = {0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // a vehicle facing world +x
-        const float uTrueX[3] = {1.0f, 0.0f, 0.0f};
-        check(st::radarCorrectionWorld(uTrueX, yawed, sFc, dUsedC, dW, dS) && near3(dW, sFc * (1.0 - std::cos(y5)), 0.0, sFc * std::sin(y5), 1e-6) && near3(dS, 0.0, 0.0, sFc, 1e-6),
-              "a rotated anchor: the used offset is put through the anchor's rows into the world, the desired one along u_true, and delta is their difference there");
-        // A slightly scaled anchor (rows of length 1.03, which the setter still directs with): dStar is the setter's own offset for u_true (radarAnchorAlong on the same rows), so
-        // the aim the call used gives exactly 0, and a different aim gives its difference put through the same rows.
-        float scaled16[16];
-        std::memcpy(scaled16, ident16, sizeof(scaled16));
-        for (int i = 0; i < 3; ++i) scaled16[i * 5] = 1.03f;
-        float dUsedS[3], uaS[3], dSetter[3];
-        check(st::radarAnchorAlong(uUsedA, scaled16, sFc, dUsedS, uaS) && st::radarCorrectionWorld(uUsedA, scaled16, sFc, dUsedS, dW, dS) && near3(dW, 0.0, 0.0, 0.0, 1e-7),
-              "a slightly scaled anchor: the aim the shown call used gives no correction (dStar is the setter's own offset)");
-        check(st::radarAnchorAlong(uTrueZ, scaled16, sFc, dSetter, uaS) && st::radarCorrectionWorld(uTrueZ, scaled16, sFc, dUsedS, dW, dS) &&
-                  near3(dS, dSetter[0], dSetter[1], dSetter[2], 1e-7) &&
-                  near3(dW, 1.03 * (dSetter[0] - dUsedS[0]), 1.03 * (dSetter[1] - dUsedS[1]), 1.03 * (dSetter[2] - dUsedS[2]), 1e-6),
-              "a slightly scaled anchor: dStar equals the setter's offset for u_true, and delta is the difference through the same rows");
-        float scaled2[16];
-        std::memcpy(scaled2, ident16, sizeof(scaled2));
-        for (int i = 0; i < 3; ++i) scaled2[i * 5] = 2.0f;
-        check(!st::radarCorrectionWorld(uTrueZ, scaled2, sFc, dUsedC, dW, dS), "an anchor the setter would not direct with (rows of length 2): no correction");
-        const float uSame[3] = {uUsedA[0], uUsedA[1], uUsedA[2]};
-        check(st::radarCorrectionWorld(uSame, ident16, sFc, dUsedC, dW, dS) && near3(dW, 0.0, 0.0, 0.0, 1e-7), "u_true equal to the used aim: no correction");
-        check(st::radarCorrectionWorld(uTrueZ, ident16, -sFc, dUsedC, dW, dS) && near3(dS, 0.0, 0.0, -sFc, 1e-6), "reversed: the desired offset runs the other way");
-        float skew16[16], uneven16[16];
-        std::memcpy(skew16, ident16, sizeof(skew16));
-        std::memcpy(uneven16, ident16, sizeof(uneven16));
-        skew16[4] = 0.6f;
-        skew16[5] = 0.8f;
-        uneven16[0] = 1.5f;
-        const float halfU[3] = {0.0f, 0.0f, 0.5f};
-        check(!st::radarCorrectionWorld(uTrueZ, skew16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, uneven16, sFc, dUsedC, dW, dS) &&
-                  !st::radarCorrectionWorld(halfU, ident16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, ident16, 0.0f, dUsedC, dW, dS),
-              "an anchor whose rows are not orthogonal or not of one length, a u that is not unit, or no offset: no correction (the draw is the game's own)");
-        check(st::kCorrectionMaxM == 0.50 && st::kCorrectionLargeM == 0.10, "the correction's bound is 0.5 m, a sanity bound (every draw left to the game pops); over 10 cm is applied and counted as large");
-        // The eye conversion on a canted eye (10 deg about up, 3 deg about right): delta in the eye's axes, then signature H's mapping (l += R x + U y + F z) gives delta back.
-        const double a10 = 10.0 / 57.29577951308232, a3 = 3.0 / 57.29577951308232;
-        const double Rv[3] = {std::cos(a10), 0.0, -std::sin(a10)}, Fv0[3] = {std::sin(a10), 0.0, std::cos(a10)};
-        const double Uv[3] = {0.0 * std::cos(a3) - Fv0[0] * std::sin(a3), std::cos(a3) - Fv0[1] * std::sin(a3), 0.0 - Fv0[2] * std::sin(a3)};
-        const double Fv[3] = {Fv0[0] * std::cos(a3) + 0.0 * std::sin(a3), Fv0[1] * std::cos(a3) + std::sin(a3), Fv0[2] * std::cos(a3)};
-        const float camRows[12] = {float(Rv[0]), float(Rv[1]), float(Rv[2]), 0.0f, float(Uv[0]), float(Uv[1]), float(Uv[2]), 0.0f, float(Fv[0]), float(Fv[1]), float(Fv[2]), 0.0f};
-        const float delta[3] = {0.012f, -0.004f, 0.007f};
-        float eyeD[3];
-        st::radarDeltaInEye(camRows, delta, eyeD);
-        float back[3];
-        for (int j = 0; j < 3; ++j) back[j] = camRows[j] * eyeD[0] + camRows[4 + j] * eyeD[1] + camRows[8 + j] * eyeD[2];
-        check(st::axesUsable(camRows, camRows + 4, camRows + 8) && near3(back, delta[0], delta[1], delta[2], 1e-6) && std::fabs(eyeD[2] - (Fv[0] * 0.012 - Fv[1] * 0.004 + Fv[2] * 0.007)) < 1e-6,
-              "a canted eye: the world delta in the eye's axes, put back through signature H's lighting mapping, is the world delta again");
-    }
-    st::ResidualStats rs;
-    rs.add(1.5, 1.5);    // lagging a full frame
-    rs.add(-0.3, 1.5);   // leading
-    rs.add(0.2, 0.1);    // too slow to say
-    check(rs.n == 3 && rs.lagging == 1 && rs.leading == 1 && rs.latN == 2 && std::fabs(rs.mean() - (1.4 / 3.0)) < 1e-12 && std::fabs(rs.maxAbs - 1.5) < 1e-12 &&
-              std::fabs(rs.latency() - ((1.0 - 0.2) / 2.0)) < 1e-12 && st::residualSide(-1.0, -2.0) == 1 && st::residualSide(1.0, -2.0) == -1 && st::residualSide(0.0, 2.0) == 0,
-          "the residual: lagging with the rate's sign, leading against it, the latency left in frames as residual over rate, slow samples counted but not classed");    check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
-    const float before[3] = {0.0f, 1.96f, 0.0f}, stepD[3] = {0.0f, 1.96f, 0.45f}, closeTo[3] = {0.0f, 1.96f, 0.40f}, other[3] = {0.0f, 2.0f, 0.0f}, d45[3] = {0.0f, 0.0f, 0.45f},
-                dz[3] = {0.0f, 0.0f, 0.0f};
-    check(st::placementStepLooksLikeOffset(before, stepD, d45) && st::placementStepLooksLikeOffset(before, closeTo, d45) && !st::placementStepLooksLikeOffset(before, other, d45) &&
-              !st::placementStepLooksLikeOffset(before, stepD, dz),
-          "the feedback warning: the game's translation stepping by about the offset (within a quarter of it) is suspect, another step is not, and nothing is with no offset");
+    check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
     check(st::radarAnchorLeavesFamily(7) && st::radarAnchorLeavesFamily(8) && !st::radarAnchorLeavesFamily(0) && !st::radarAnchorLeavesFamily(2) && !st::radarAnchorLeavesFamily(6) &&
               !st::radarAnchorLeavesFamily(-1) && !st::radarAnchorLeavesFamily(9) && !std::strcmp(st::kFamilies[7].name, "5559BD94.EA02FAC2") && !std::strcmp(st::kFamilies[8].name, "5559BD94.E95634B0"),
           "the native move leaves the two 5559BD94 billboard families to the game and no other");
-}
-
-// ---------------------------------------------------------------- the depth modes and the displacement, on the CPU
-// THE CONTENT DEPTH on the CPU (srv_turret_math.h): z_c from the V0 instrument only when it has one, read in the last 90 frames, 0.1 to 2 m; paramsUsable takes 1 / z_c in [0, 20] and
-// nothing else; the CPU move puts a vertex where content at z_c on its ray, moved by T, projects (st::contentShiftNdc, the quad probe's expectation).
-static void contentDepthCases() {
-    check(st::kContentInvZMax == 20.0f && st::kContentDepthMinM == 0.10 && st::kContentDepthMaxM == 2.0 && st::kContentDepthFreshFrames == 90u, "the content depth's bounds: 1 / z_c up to 20, z_c 0.1 to 2 m, 90 frames");
-    check(st::contentInvDepth(true, 0, 0.34) == static_cast<float>(1.0 / 0.34) && st::contentInvDepth(true, st::kContentDepthFreshFrames, 0.10) == static_cast<float>(1.0 / 0.10) &&
-              st::contentInvDepth(true, 5, 2.0) == 0.5f,
-          "a fresh V0 read 0.1 to 2 m deep is the content depth (1 / z_c)");
-    check(st::contentInvDepth(false, 0, 0.34) == 0.0f && st::contentInvDepth(true, st::kContentDepthFreshFrames + 1, 0.34) == 0.0f && st::contentInvDepth(true, 0, 0.099) == 0.0f &&
-              st::contentInvDepth(true, 0, 2.01) == 0.0f && st::contentInvDepth(true, 0, -0.34) == 0.0f && st::contentInvDepth(true, 0, std::nan("")) == 0.0f,
-          "no V0 read, a stale one, or a depth out of 0.1..2 m (or not a number): no content depth (0, the plain delta)");
-    st::EyeFrame ef;
-    ef.l = -1.1f;
-    ef.r = 1.0f;
-    ef.dn = -1.05f;
-    ef.up = 0.95f;
-    ef.tRadar[0] = 0.012f;
-    ef.tRadar[1] = -0.008f;
-    ef.tRadar[2] = 0.03f;
-    st::TurretParams cp = st::translateParamsFor(ef, st::Group::kRadar);
-    bool usable = st::paramsUsable(cp);
-    for (const float k : {static_cast<float>(1.0 / 0.34), 0.5f, 20.0f}) {
-        cp.invZc = k;
-        usable = usable && st::paramsUsable(cp);
-    }
-    for (const float k : {20.5f, -0.1f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
-        cp.invZc = k;
-        usable = usable && !st::paramsUsable(cp);
-    }
-    check(usable, "the constants take 1 / z_c from 0 to 20 (z_c of 5 cm or more) and refuse more, less, NaN and infinity");
-    cp.invZc = static_cast<float>(1.0 / 0.34);
-    const float t[3] = {0.012f, -0.008f, 0.03f};
-    bool same = true;
-    for (const double w : {0.2, 0.34, 2.5, 7.0}) {
-        const double x = 0.2, y = -0.1, in[4] = {x * w, y * w, 0.025, w};
-        double out[4], e[2] = {};
-        same = same && st::anchoredMove<double>(cp, in, out) && st::contentShiftNdc(cp, x, y, t, 1.0 / double(cp.invZc), e) && closeTo(out[0] / out[3] - x, e[0], 1e-9) &&
-               closeTo(out[1] / out[3] - y, e[1], 1e-9);
-    }
-    check(same, "the CPU move with 1 / z_c shifts a vertex at any depth (0.2, 0.34, 2.5, 7 m) on screen by exactly the content's shift at z_c (st::contentShiftNdc)");
-    double e[2] = {};
-    check(!st::contentShiftNdc(cp, 0.0, 0.0, t, 0.0, e) && !st::contentShiftNdc(cp, 0.0, 0.0, t, -0.3, e), "no content shift without a content depth");
-    cp.invZc = 0.0f;
-    const double in[4] = {0.5, -0.25, 0.025, 2.5};
-    double out[4];
-    check(st::anchoredMove<double>(cp, in, out) && closeTo(out[3], 2.5 + double(cp.tz), 1e-12), "with 1 / z_c at 0 the CPU move is the plain translation (the quad's own depth moves by T.z)");
 }
 
 // THE RADAR'S OWN CAMERA (srv_turret_math.h; camera mode, the slot hook): the mode and its back distance; the camera's move against an independent inverse; the plane pointers' rebase; the
@@ -2094,6 +1942,7 @@ static void slotCameraCases() {
     check(none, "...and D of 0 (or negative, or NaN), or no usable direction at all, is no move");
 }
 
+// ---------------------------------------------------------------- the depth modes and the displacement, on the CPU
 static void depthMathCases() {
     using M = st::DepthMode;
     check(st::depthModeOf("game") == M::kGame && st::depthModeOf("real") == M::kReal && st::depthModeOf("front") == M::kFront && st::depthModeOf("") == M::kGame &&
@@ -2138,7 +1987,7 @@ static void depthMathCases() {
     check(!moved && zero[0] == 0.0 && zero[1] == 0.0 && zero[2] == 0.0, "a vertex left alone has no displacement");
 }
 
-// ---------------------------------------------------------------- the disc's plane in the seated frame, and the unmoved-draw list (CPU only)
+// ---------------------------------------------------------------- the eye's pose in the seated frame (CPU only)
 static void yawPose(float m[12], double degrees, double x, double y, double z) {   // a 3x4 row-major pose: a turn about Y, then a position
     const double a = degrees * 3.14159265358979323846 / 180.0, c = std::cos(a), s = std::sin(a);
     const double rot[9] = {c, 0, s, 0, 1, 0, -s, 0, c};
@@ -2148,136 +1997,27 @@ static void yawPose(float m[12], double degrees, double x, double y, double z) {
     m[7] = float(y);
     m[11] = float(z);
 }
-// The six records of a seated quad (two triangles: 0 1 2 and 1 3 2) as the game's vertex stage would write their clip positions for the eye (R, E) with these tangents: the inverse of quadInSeated.
-static void recordsOfQuad(const double R[9], const double E[3], const double pts[4][3], const float tn[4], float* rec, uint32_t stride, uint32_t pre) {
-    const int tri[6] = {0, 1, 2, 1, 3, 2};
-    for (int i = 0; i < 6; ++i) {
-        float* r = rec + size_t(i) * stride;
-        for (uint32_t k = 0; k < stride; ++k) r[k] = 99.0f;   // the other elements of the record: not read
-        const double d[3] = {pts[tri[i]][0] - E[0], pts[tri[i]][1] - E[1], pts[tri[i]][2] - E[2]};
-        double v[3];
-        for (int j = 0; j < 3; ++j) v[j] = R[0 * 3 + j] * d[0] + R[1 * 3 + j] * d[1] + R[2 * 3 + j] * d[2];   // R^T d
-        const double X = v[0], Y = v[1], Z = -v[2];
-        r[pre + 0] = float((2.0 * X - Z * (double(tn[1]) + tn[0])) / (double(tn[1]) - tn[0]));
-        r[pre + 1] = float((2.0 * Y - Z * (double(tn[3]) + tn[2])) / (double(tn[3]) - tn[2]));
-        r[pre + 2] = 0.025f;
-        r[pre + 3] = float(Z);
-    }
-}
-static void planeAndUnmovedCases() {
-    const float tn[4] = {-1.0f, 1.2f, -0.9f, 1.1f};
-    float headA[12], headB[12], eyeA[12], eyeB[12];
+static void eyePoseCases() {
+    const double rad = 3.14159265358979323846 / 180.0;
+    float headA[12], headB[12], eyeA[12];
     yawPose(headA, 0.0, 0.05, 0.10, 0.02);
     yawPose(headB, 35.0, -0.12, 0.14, 0.20);   // the head turned 35 degrees and moved
     yawPose(eyeA, 3.0, -0.032f, 0.004f, 0.015f);   // the left eye, off the head centre and turned a little
-    for (int i = 0; i < 12; ++i) eyeB[i] = eyeA[i];
     double RA[9], EA[3], RB[9], EB[3];
-    check(st::eyePoseOf(headA, eyeA, RA, EA) && st::eyePoseOf(headB, eyeB, RB, EB), "an eye's pose is the head's times the eye's");
+    check(st::eyePoseOf(headA, eyeA, RA, EA) && st::eyePoseOf(headB, eyeA, RB, EB), "an eye's pose is the head's times the eye's");
+    // E = head + R_head t_eye, R = R_head R_eye (turns about Y add)
+    check(closeTo(RA[0], std::cos(3.0 * rad), 1e-5) && closeTo(RA[2], std::sin(3.0 * rad), 1e-5) && closeTo(RA[6], -std::sin(3.0 * rad), 1e-5) && closeTo(RA[8], std::cos(3.0 * rad), 1e-5) &&
+              closeTo(RA[4], 1.0, 1e-9) && closeTo(EA[0], 0.05 - 0.032, 1e-5) && closeTo(EA[1], 0.10 + 0.004, 1e-5) && closeTo(EA[2], 0.02 + 0.015, 1e-5),
+          "a level head: the eye's rotation is its own and its position is the head's plus the eye's offset");
+    const double c35 = std::cos(35.0 * rad), s35 = std::sin(35.0 * rad);
+    check(closeTo(RB[0], std::cos(38.0 * rad), 1e-5) && closeTo(RB[2], std::sin(38.0 * rad), 1e-5) && closeTo(RB[6], -std::sin(38.0 * rad), 1e-5) && closeTo(RB[8], std::cos(38.0 * rad), 1e-5) &&
+              closeTo(EB[0], -0.12 + c35 * -0.032 + s35 * 0.015, 1e-5) && closeTo(EB[1], 0.14 + 0.004, 1e-5) && closeTo(EB[2], 0.20 + -s35 * -0.032 + c35 * 0.015, 1e-5),
+          "the head turned 35 degrees: the eye's rotation is the sum of the turns (38) and its position the head's plus the eye's offset turned by the head");
     float bad[12];
     std::memcpy(bad, headA, sizeof(bad));
     bad[5] = NAN;
     double Rx[9], Ex[3];
     check(!st::eyePoseOf(bad, eyeA, Rx, Ex), "a pose that is not finite: refused");
-    {   // eyeToSeated is the inverse of eyeFrameFrom's step for the anchor
-        const double anchor[3] = {0.20, -0.10, -0.50};
-        st::EyeFrame e;
-        check(st::eyeFrameFrom(headB, eyeB, anchor, 0.0, 0.0, tn, e), "an eye frame is built");
-        const double a[3] = {e.a[0], e.a[1], e.a[2]};
-        double back[3];
-        st::eyeToSeated(RB, EB, a, back);
-        check(closeTo(back[0], anchor[0], 1e-5) && closeTo(back[1], anchor[1], 1e-5) && closeTo(back[2], anchor[2], 1e-5), "the seated point of the anchor's eye-space point is the anchor (the inverse of eyeFrameFrom's step)");
-    }
-    // a horizontal square 0.4 m on a side, 0.35 m below the head and 0.45 m ahead (seated -z is forward)
-    const double C[3] = {0.10, -0.35, -0.45};
-    const double square[4][3] = {{C[0] - 0.2, C[1], C[2] - 0.2}, {C[0] + 0.2, C[1], C[2] - 0.2}, {C[0] - 0.2, C[1], C[2] + 0.2}, {C[0] + 0.2, C[1], C[2] + 0.2}};
-    const uint32_t stride = 10, pre = 6;
-    float recA[6 * 10], recB[6 * 10];
-    recordsOfQuad(RA, EA, square, tn, recA, stride, pre);
-    recordsOfQuad(RB, EB, square, tn, recB, stride, pre);
-    st::SeatedQuad qa, qb;
-    check(st::quadInSeated(recA, stride, pre, 0, 6, tn, RA, EA, qa) && st::quadInSeated(recB, stride, pre, 0, 6, tn, RB, EB, qb), "a quad's six records are read back");
-    check(closeTo(qa.centre[0], C[0], 1e-4) && closeTo(qa.centre[1], C[1], 1e-4) && closeTo(qa.centre[2], C[2], 1e-4) && closeTo(qa.normal[0], 0.0, 1e-4) && closeTo(qa.normal[1], -1.0, 1e-4) &&
-              closeTo(qa.normal[2], 0.0, 1e-4),
-          "...the centre is the square's and the normal its vertical (the winding's sign) in the seated frame");
-    check(closeTo(qb.centre[0], C[0], 1e-4) && closeTo(qb.centre[1], C[1], 1e-4) && closeTo(qb.centre[2], C[2], 1e-4) && st::angleBetweenDeg(qa.normal, qb.normal) < 0.01,
-          "a turret-fixed square seen from a head that moved and turned 35 degrees has the same centre and normal");
-    {   // a billboard: the square turned toward the moved head (a tilt of 40 degrees about the seated X axis through its centre) has the normal turned by that much
-        const double a = 40.0 * 3.14159265358979323846 / 180.0, c = std::cos(a), s = std::sin(a);
-        double tilted[4][3];
-        for (int i = 0; i < 4; ++i) {
-            const double dy = square[i][1] - C[1], dz = square[i][2] - C[2];
-            tilted[i][0] = square[i][0];
-            tilted[i][1] = C[1] + c * dy - s * dz;
-            tilted[i][2] = C[2] + s * dy + c * dz;
-        }
-        float recT[6 * 10];
-        recordsOfQuad(RB, EB, tilted, tn, recT, stride, pre);
-        st::SeatedQuad qt;
-        check(st::quadInSeated(recT, stride, pre, 0, 6, tn, RB, EB, qt) && closeTo(st::angleBetweenDeg(qa.normal, qt.normal), 40.0, 1e-4) && closeTo(qt.centre[0], C[0], 1e-4) &&
-                  closeTo(qt.centre[1], C[1], 1e-4) && closeTo(qt.centre[2], C[2], 1e-4),
-              "a square turned 40 degrees in the seated frame reads as a normal 40 degrees from the fixed one, with the same centre");
-        check(closeTo(st::angleBetweenDeg(qa.normal, qa.normal), 0.0, 1e-9), "an angle with itself is 0");
-    }
-    {   // the second quad of a capture, and the refusals
-        float two[12 * 10];
-        std::memcpy(two, recA, sizeof(recA));
-        std::memcpy(two + 6 * 10, recB, sizeof(recB));
-        st::SeatedQuad q2;
-        check(st::quadInSeated(two, stride, pre, 6, 12, tn, RB, EB, q2) && closeTo(q2.centre[1], C[1], 1e-4), "the second quad of a capture (records 6 to 11)");
-        check(!st::quadInSeated(two, stride, pre, 7, 12, tn, RB, EB, q2) && !st::quadInSeated(two, stride, pre, 0, 5, tn, RB, EB, q2) && !st::quadInSeated(nullptr, stride, pre, 0, 6, tn, RB, EB, q2) &&
-                  !st::quadInSeated(two, 9, pre, 0, 12, tn, RB, EB, q2),
-              "fewer than six records from the first, no records, a stride that does not hold the record: refused");
-        float nan6[6 * 10];
-        std::memcpy(nan6, recA, sizeof(nan6));
-        nan6[3 * 10 + pre + 1] = NAN;
-        float flat[6 * 10];
-        for (int i = 0; i < 6; ++i)
-            for (uint32_t k = 0; k < stride; ++k) flat[i * 10 + k] = recA[k];   // six copies of the first record: no area
-        check(!st::quadInSeated(nan6, stride, pre, 0, 6, tn, RA, EA, q2) && !st::quadInSeated(flat, stride, pre, 0, 6, tn, RA, EA, q2), "a record that is not finite, a quad with no area: refused");
-    }
-    {   // the angle between vectors
-        const double x[3] = {1, 0, 0}, y[3] = {0, 1, 0}, mx[3] = {-1, 0, 0}, zero[3] = {0, 0, 0};
-        check(closeTo(st::angleBetweenDeg(x, y), 90.0, 1e-9) && closeTo(st::angleBetweenDeg(x, mx), 180.0, 1e-9) && st::angleBetweenDeg(x, zero) == 0.0, "the angle between vectors: 90, 180, and 0 for a vector with no length");
-    }
-    {   // the radar picture's camera, from the 4EDE4BC9 draw's cb0 rows 4..7 and 9..11 as logged in the flight of 707c0ab5 (round 1, eye 0; the offline decomposition gave these numbers)
-        const float m[16] = {0.013715f, 0.00028609f, 0.00026257f, -0.041348f, -0.00058093f, 0.011863f, 0.016461f, -4.941f,
-                             8.6297e-12f, 4.9187e-11f, -4.7421e-10f, 0.01f, -3.6195e-05f, -0.00020631f, 0.001989f, -0.43696f};
-        const float a[12] = {-0.00078334f, -0.00067174f, 0.0017132f, -0.33076f, 0.0001677f, 0.0018282f, 0.00079349f, -0.36006f, -0.0018326f, 0.00045444f, -0.00065972f, 0.10097f};
-        st::RadarCam rc;
-        check(st::radarCamFrom(m, a, rc), "the radar camera is decoded from the logged constants");
-        check(closeTo(rc.centre[0], -0.00655, 2e-4) && closeTo(rc.centre[1], -0.24137, 2e-4) && closeTo(rc.centre[2], -0.43696, 2e-4),
-              "...the schematic's origin sits at (-0.007, -0.241, -0.437) in its camera: 0.44 m behind it");
-        check(closeTo(rc.fwd[0], 0.89364, 1e-4) && closeTo(rc.fwd[1], 0.29875, 1e-4) && closeTo(rc.fwd[2], -0.3349, 1e-4), "...the camera's forward is the 256x256 writers' cb1[279]");
-        check(closeTo(rc.tanX[0], -0.14455, 2e-4) && closeTo(rc.tanX[1], 0.14699, 2e-4) && closeTo(rc.tanY[0], -1.27079, 2e-4) && closeTo(rc.tanY[1], -0.97452, 2e-4) && closeTo(rc.scale, 0.002, 1e-5),
-              "...the window is tan x -0.145..0.147, tan y -1.271..-0.975, the local scale 0.002");
-        float singular[12] = {};
-        float nanm[16];
-        std::memcpy(nanm, m, sizeof(nanm));
-        nanm[5] = NAN;
-        check(!st::radarCamFrom(m, singular, rc) && !st::radarCamFrom(nanm, a, rc) && !st::radarCamFrom(nullptr, a, rc), "a singular model, a value that is not finite, no constants: refused");
-    }
-    {   // the unmoved list as the 10 s line spells it
-        uint32_t counts[st::kFamilyCount + 1][st::kUnmovedRoutes] = {};
-        char out[512];
-        check(st::unmovedList(out, sizeof(out), counts) == 4 && !std::strcmp(out, "none"), "no unmoved draw: `none`");
-        counts[2][size_t(st::UnmovedRoute::kForeignDeferred)] = 12;
-        counts[0][size_t(st::UnmovedRoute::kFastPath)] = 3;
-        counts[st::kFamilyCount][size_t(st::UnmovedRoute::kCommandList)] = 2;
-        const size_t n = st::unmovedList(out, sizeof(out), counts);
-        check(n == std::strlen(out) && !std::strcmp(out, "1989E6D3 fast-path 3, DF3503CD foreign-deferred 12, ? command-list 2"), "the list is `<family> <route> N` in family then route order, `?` for the unknown family");
-        char narrow[40];
-        const size_t m = st::unmovedList(narrow, sizeof(narrow), counts);
-        check(m == std::strlen(narrow) && m < sizeof(narrow) && !std::strcmp(narrow, "1989E6D3 fast-path 3"), "a list that does not fit ends at the last whole entry, NUL-terminated");
-        char one[3];
-        check(st::unmovedList(one, sizeof(one), counts) == 0 && one[0] == 0 && st::unmovedList(nullptr, 10, counts) == 0 && st::unmovedList(out, 0, counts) == 0, "a buffer too small for any entry: empty; no buffer: nothing");
-        bool names = true;
-        for (uint32_t r = 0; r < st::kUnmovedRoutes; ++r) {
-            const auto route = static_cast<st::UnmovedRoute>(r);
-            names = names && std::strcmp(st::unmovedRouteName(route), "?") != 0 && std::strcmp(st::unmovedRouteWhere(route), "?") != 0;
-            for (uint32_t q = 0; q < r; ++q) names = names && std::strcmp(st::unmovedRouteName(route), st::unmovedRouteName(static_cast<st::UnmovedRoute>(q))) != 0;
-        }
-        check(names && st::kUnmovedRoutes == 9, "every route has its own name and its description");
-    }
 }
 
 // ---------------------------------------------------------------- the scissor
@@ -2535,65 +2275,6 @@ static void sceneBindingCases(ID3D11GeometryShader* gs, Fails& f) {
     g_ctx->ClearState();
 }
 
-// The disc probe's register copy (st::copyPsRegister), on WARP: the offsets, the first constant of a ranged binding, and the refusals.
-static void copyRegisterCases() {
-    const auto filled = [&](UINT registers, UINT row, const float v[4]) {
-        std::vector<float> data(size_t(registers) * 4, -1.0f);
-        std::memcpy(data.data() + size_t(row) * 4, v, 16);
-        return makeBuffer(UINT(data.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, data.data());
-    };
-    D3D11_BUFFER_DESC sd{};
-    sd.ByteWidth = 32;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Buffer> stage;
-    ck(g_dev->CreateBuffer(&sd, nullptr, &stage), "staging buffer");
-    const auto readStage = [&](float out[8]) {
-        D3D11_MAPPED_SUBRESOURCE m{};
-        ck(g_ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "Map the register copy");
-        std::memcpy(out, m.pData, 32);
-        g_ctx->Unmap(stage.Get(), 0);
-    };
-    const float alpha[4] = {1.0f, 2.0f, 3.0f, 0.75f}, colour[4] = {5.0f, 0.5f, 7.0f, 8.0f}, ranged[4] = {9.0f, 8.0f, 7.0f, 6.0f};
-    auto cb2 = filled(16, 11, alpha), cb1 = filled(100, 90, colour);
-    g_ctx->ClearState();
-    g_ctx->PSSetConstantBuffers(2, 1, cb2.GetAddressOf());
-    g_ctx->PSSetConstantBuffers(1, 1, cb1.GetAddressOf());
-    check(st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 11, 0) && st::copyPsRegister(g_ctx.Get(), stage.Get(), 1, 90, 16), "the disc's two registers are copied");
-    float got[8];
-    readStage(got);
-    check(got[0] == 1.0f && got[1] == 2.0f && got[2] == 3.0f && got[3] == 0.75f && got[4] == 5.0f && got[5] == 0.5f && got[6] == 7.0f && got[7] == 8.0f,
-          "...cb2[11] at byte 0 and cb1[90] at byte 16, exactly (alpha is .w of the first, the intensity .y of the second)");
-    float before[8];
-    readStage(before);
-    check(!st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 16, 0) && !st::copyPsRegister(g_ctx.Get(), stage.Get(), 1, 100, 16) && !st::copyPsRegister(g_ctx.Get(), stage.Get(), 6, 0, 0) &&
-              !st::copyPsRegister(g_ctx.Get(), nullptr, 2, 11, 0) && !st::copyPsRegister(nullptr, stage.Get(), 2, 11, 0),
-          "a register past the buffer, nothing bound at the slot, no staging buffer, no context: refused");
-    float after[8];
-    readStage(after);
-    check(std::memcmp(before, after, sizeof(before)) == 0, "...and the staging buffer is untouched");
-    {   // a ranged binding: the register is counted from the first constant the game bound the buffer with
-        const float decoy[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        std::vector<float> data(size_t(48) * 4, -1.0f);
-        std::memcpy(data.data() + size_t(11) * 4, decoy, 16);     // row 11 of the whole buffer: not the one
-        std::memcpy(data.data() + size_t(16 + 11) * 4, ranged, 16);   // row 11 counted from constant 16: the one
-        auto big = makeBuffer(UINT(data.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, data.data());
-        ComPtr<ID3D11DeviceContext1> c1;
-        check(SUCCEEDED(g_ctx.As(&c1)), "the 11.1 context");
-        const UINT first = 16, count = 16;
-        ID3D11Buffer* b = big.Get();
-        c1->PSSetConstantBuffers1(2, 1, &b, &first, &count);
-        check(st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 11, 0), "a ranged binding: copied");
-        readStage(got);
-        check(got[0] == 9.0f && got[1] == 8.0f && got[2] == 7.0f && got[3] == 6.0f, "...from the register counted from the first constant (row 11 + 16), not row 11 of the whole buffer");
-        readStage(before);
-        check(!st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 16, 0), "a row past the bound range (though inside the buffer): refused");
-        readStage(after);
-        check(std::memcmp(before, after, sizeof(before)) == 0, "...and the staging buffer is untouched");
-    }
-    g_ctx->ClearState();
-}
-
 // ---------------------------------------------------------------- the constants
 static void constantsCases() {
     st::Constants c;
@@ -2655,6 +2336,26 @@ static void constantsCases() {
     bad = p0;
     bad.depth = 3.0f;
     check(c.get(g_ctx.Get(), bad) == nullptr, "a depth mode that is not 0, 1 or 2: refused");
+    {   // the shader's two spare constants (tr.w, 1 / the content depth, and an.w, the lock flag): the module writes both as 0, and the validity test still takes only a sane value in them
+        st::TurretParams spare = p0;
+        bool sane = st::paramsUsable(spare);
+        for (const float k : {static_cast<float>(1.0 / 0.34), 0.5f, st::kContentInvZMax}) {
+            spare.invZc = k;
+            sane = sane && st::paramsUsable(spare);
+        }
+        for (const float k : {st::kContentInvZMax + 0.5f, -0.1f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+            spare.invZc = k;
+            sane = sane && !st::paramsUsable(spare);
+        }
+        spare.invZc = 0.0f;
+        for (const float k : {0.0f, 1.0f}) {
+            spare.lock = k;
+            sane = sane && st::paramsUsable(spare);
+        }
+        spare.lock = 0.5f;
+        sane = sane && !st::paramsUsable(spare);
+        check(sane, "1 / z_c is taken from 0 to 20 (z_c of 5 cm or more) and refused above, below, as NaN and as infinity; the lock flag is 0 or 1");
+    }
     check(c.get(g_ctx.Get(), p1) == first, "...and the buffer is still the good one");
     check(c.get(g_ctx.Get(), st::withDepth(p1, st::DepthMode::kReal)) == first && c.written().depth == 1.0f && readBack(first).depth == 1.0f &&
               c.get(g_ctx.Get(), st::withDepth(p1, st::DepthMode::kFront)) == first && readBack(first).depth == 2.0f && c.get(g_ctx.Get(), p1) == first && readBack(first).depth == 0.0f,
@@ -2711,268 +2412,23 @@ static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
              "the control: the plain strip is whole with no culling and with one facing culled, and gone with the other (both triangles share a winding)");
 }
 
-// ---------------------------------------------------------------- THE LOCK (srv_turret_math.h; the shader's turretLockCentre and turretLock), on WARP
-// With the lock flag the twin moves every vertex of a triangle by T - C, C the midpoint of the triangle's longest edge: a quad's centre lands on T, its two triangles agree (the shared
-// corners bit for bit), every vertex keeps the game's NDC depth, and signature H's lighting position moves by the same vector. A rectangle (a billboard) and a parallelogram sheared along x
-// and tilted in depth, cut along its long diagonal.
-static void lockCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
-    const Cam cam;
-    const float target[3] = {-0.012f, 0.017f, 0.31f};
-    st::TurretParams p = st::translateParamsFor(frameOfCam(cam, nullptr, target, target), st::Group::kRadar);
-    p.lock = 1.0f;
-    f.expect(st::paramsUsable(p), "lock: the constants with the lock flag are usable");
-    st::TurretParams half = p;
-    half.lock = 0.5f;
-    f.expect(!st::paramsUsable(half), "lock: a lock flag that is neither 0 nor 1 is refused");
-    Pt rect[4];
-    boxAt(rect, 0.03f, -0.02f, 0.33f, 0.06f, 0.04f);
-    const float s = 0.025f;
-    Pt shear[4] = {Pt{0.03f - 0.06f + s, -0.02f - 0.04f, 0.30f}, Pt{0.03f + 0.06f + s, -0.02f - 0.04f, 0.34f}, Pt{0.03f - 0.06f - s, -0.02f + 0.04f, 0.31f}, Pt{}};
-    shear[3] = Pt{shear[1].x + shear[2].x - shear[0].x, shear[1].y + shear[2].y - shear[0].y, shear[1].d + shear[2].d - shear[0].d};
-    const float right[3] = {0.8f, 0.0f, 0.6f}, up[3] = {-0.36f, 0.8f, 0.48f}, fwd[3] = {-0.48f, -0.6f, 0.64f};
-    const bool scene = fam == int(st::kSceneSignature);
-    if (scene) setScene(right, up, fwd, 0);
-    for (int which = 0; which < 2; ++which) {
-        const Pt* c = which == 0 ? rect : shear;
-        const char* name = which == 0 ? "a rectangle" : "a sheared, tilted parallelogram";
-        const std::vector<Pt> pts = {c[0], c[1], c[2], c[1], c[3], c[2]};   // addQuadPts' order: the two triangles share c[1]-c[2]
-        const double centre[3] = {(double(c[1].x) + c[2].x) * 0.5, (double(c[1].y) + c[2].y) * 0.5, (double(c[1].d) + c[2].d) * 0.5};
-        const Captured m = captureMove(fam, twin, pts, cam, p);
-        double post[6][3], pre[6][3];
-        for (int i = 0; i < 6; ++i) {
-            eyePos(m.post[i], cam, post[i]);
-            eyePos(m.pre[i], cam, pre[i]);
-        }
-        double ca[3], cb[3], preC[3];
-        st::lockCentre<double>(post[0], post[1], post[2], ca);
-        st::lockCentre<double>(post[3], post[4], post[5], cb);
-        st::lockCentre<double>(pre[0], pre[1], pre[2], preC);
-        char what[200];
-        bool onT = true, agree = true, rigid = true, depth = true;
-        for (int k = 0; k < 3; ++k) {
-            onT = onT && std::fabs(ca[k] - target[k]) < 1e-5 && std::fabs(cb[k] - target[k]) < 1e-5;
-            agree = agree && std::fabs(ca[k] - cb[k]) < 1e-5;
-        }
-        for (int i = 0; i < 6; ++i) {
-            for (int k = 0; k < 3; ++k) rigid = rigid && std::fabs((post[i][k] - pre[i][k]) - (target[k] - centre[k])) < 1e-5;
-            depth = depth && closeTo(double(m.post[i][2]) / m.post[i][3], double(m.pre[i][2]) / m.pre[i][3], 1e-5);
-        }
-        std::snprintf(what, sizeof(what), "lock, %s: each triangle's longest-edge midpoint lands on the target to 1e-5 m", name);
-        f.expect(onT, what);
-        std::snprintf(what, sizeof(what), "lock, %s: the two triangles agree to 1e-5 m, and the shared corners land on the same clip position bit for bit", name);
-        f.expect(agree && std::memcmp(m.post[1].data(), m.post[3].data(), 16) == 0 && std::memcmp(m.post[2].data(), m.post[5].data(), 16) == 0, what);
-        std::snprintf(what, sizeof(what), "lock, %s: every vertex moves by target - centre (a rigid translation), keeping the game's NDC depth", name);
-        f.expect(rigid && depth, what);
-        std::snprintf(what, sizeof(what), "lock, %s: the CPU rule (st::lockCentre) finds the quad's centre on the game's corners", name);
-        f.expect(std::fabs(preC[0] - centre[0]) < 1e-5 && std::fabs(preC[1] - centre[1]) < 1e-5 && std::fabs(preC[2] - centre[2]) < 1e-5, what);
-        if (scene) {
-            bool lit = true;
-            for (size_t i = 0; i < pts.size(); ++i) {
-                const double l0[3] = {tagU(i), tagV(i), 0.0}, k3[3] = {target[0] - centre[0], target[1] - centre[1], target[2] - centre[2]};
-                for (int k = 0; k < 3; ++k) lit = lit && closeTo(m.lp[i][k], l0[k] + right[k] * k3[0] + up[k] * k3[1] + fwd[k] * k3[2], 1e-4);
-            }
-            std::snprintf(what, sizeof(what), "lock, %s: the Scorpion hologram's lighting position moves by the same vector, in the camera's right, up and forward", name);
-            f.expect(lit, what);
-        }
-    }
-    if (scene) resetScene();
-    // the control: a triangle's own mean is not shared by the sheared quad's two triangles (the longest-edge rule is what makes them agree)
-    const double t1 = (double(shear[0].x) + shear[1].x + shear[2].x) / 3.0, t2 = (double(shear[1].x) + shear[3].x + shear[2].x) / 3.0;
-    f.expect(std::fabs(t1 - t2) > 1e-3, "lock control: the sheared quad's two triangles have different means (a crack under a mean-centre rule)");
-    // without the flag the same constants are the plain translation by T (the delta path is unchanged)
-    st::TurretParams plain = p;
-    plain.lock = 0.0f;
-    const std::vector<Pt> quad = {rect[0], rect[1], rect[2], rect[1], rect[3], rect[2]};
-    const Captured m0 = captureMove(fam, twin, quad, cam, plain);
-    expectReference(f, "lock: with the flag at 0 the twin is the plain translation, every vertex the CPU reference's", plain, m0, 6);
+// ---------------------------------------------------------------- the stream-output twin (the rig's own)
+// The production bytecode again, with a stream-output declaration of its record and rasterized as well, so that what the shader did to every vertex is read back exactly (captureMove). The
+// module makes no twin: the declaration is built here from the signature table, one entry for each element in the signature's order into stream 0 and output slot 0, then the shader's own
+// `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with the moved clip position at Family::posFloat and the game's at Family::preFloat.
+static UINT soDeclarationForTwin(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[st::kMaxSigElements]) {
+    const st::Signature& s = st::kSignatures[sig];
+    for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
+    out[s.count] = D3D11_SO_DECLARATION_ENTRY{0, st::kPreSemantic, 0, 0, static_cast<BYTE>(st::kPreFloats), 0};
+    return s.count + 1;
 }
-
-// THE LOCK on the CPU (srv_turret_math.h): the draw's shape, the seated-to-eye conversion, the vehicle's turn, rest, the target's learning and re-learning, and the reset rules.
-static void lockCpuCases() {
-    check(st::lockShape(4, 6, 1) && st::lockShape(5, 4, 1) && st::lockShape(4, 6, 0), "lock shape: a list of 6 or a strip of 4, one instance, is a single quad");
-    check(!st::lockShape(4, 12, 1) && !st::lockShape(5, 6, 1) && !st::lockShape(4, 6, 2) && !st::lockShape(1, 6, 1) && !st::lockShape(4, 3, 1), "lock shape: more triangles, instances or another topology are not");
-    const float head[12] = {0.8f, 0.0f, 0.6f, 0.1f, 0.0f, 1.0f, 0.0f, 1.2f, -0.6f, 0.0f, 0.8f, -0.3f}, eyeToHead[12] = {1, 0, 0, -0.032f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
-    double R[9], E[3];
-    check(st::eyePoseOf(head, eyeToHead, R, E), "lock: an eye pose");
-    const double eyePt[3] = {0.03, -0.21, 0.33};
-    double seated[3], back[3];
-    st::eyeToSeated(R, E, eyePt, seated);
-    st::seatedToEye(R, E, seated, back);
-    check(std::fabs(back[0] - eyePt[0]) < 1e-6 && std::fabs(back[1] - eyePt[1]) < 1e-6 && std::fabs(back[2] - eyePt[2]) < 1e-6,
-          "lock: seatedToEye is eyeToSeated's inverse (to the float rows' orthonormality)");
-    const float A[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    const double a = 2.0 * 3.14159265358979323846 / 180.0;
-    const float B[16] = {float(std::cos(a)), 0, float(std::sin(a)), 0, 0, 1, 0, 0, float(-std::sin(a)), 0, float(std::cos(a)), 0, 0, 0, 0, 1};
-    float B2[16];
-    for (int i = 0; i < 16; ++i) B2[i] = B[i] * 1.5f;   // a scale on the rows does not count as a turn
-    check(std::fabs(st::rotationAngleDeg(A, A)) < 1e-3 && std::fabs(st::rotationAngleDeg(A, B) - 2.0) < 1e-3 && std::fabs(st::rotationAngleDeg(A, B2) - 2.0) < 1e-3,
-          "lock: the vehicle's turn between two rotations, in degrees, whatever the rows' scale");
-    // rest: every rate under 3 deg/s for 20 frames in a row
-    st::RestWatch r;
-    for (uint32_t i = 0; i + 1 < st::kRestFrames; ++i) check(!r.step(true, 1.0, -2.0, 2.9), "rest: not before 20 still frames");
-    check(r.step(true, 1.0, -2.0, 2.9), "rest: at the 20th still frame");
-    check(!r.step(true, 3.5, 0.0, 0.0) && r.frames == 0, "rest: a turret yaw rate of 3 deg/s or more breaks it");
-    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
-    check(r.atRest() && !r.step(true, 0.0, -3.0, 0.0), "rest: ... and so does the pitch");
-    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
-    check(r.atRest() && !r.step(true, 0.0, 0.0, 4.0), "rest: ... and the vehicle's own turn");
-    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
-    check(r.atRest() && !r.step(false, 0.0, 0.0, 0.0) && r.frames == 0, "rest: ... and a frame without the rates");
-    // learning: the mean of the first six rest samples; then each moves it by 1 - exp(-dt / 1 s)
-    st::LockTarget t;
-    const double s1[3] = {0.010, -0.220, -0.050}, s2[3] = {0.004, -0.220, -0.060};
-    bool learnedAt = false;
-    for (uint32_t i = 0; i < st::kLockLearnSamples; ++i) {
-        const bool first = t.add(i % 2 ? s2 : s1, 0.1 * i);
-        check(first == (i + 1 == st::kLockLearnSamples), "learning: learned exactly at the sixth rest sample");
-        learnedAt = learnedAt || first;
-    }
-    check(learnedAt && t.learned && t.n == st::kLockLearnSamples && std::fabs(t.seated[0] - 0.007) < 1e-12 && std::fabs(t.seated[2] + 0.055) < 1e-12, "learning: the target is the samples' mean");
-    const double moved[3] = {0.017, -0.220, -0.055};
-    check(!t.add(moved, 0.5 + 0.5) && t.relearned == 1, "re-learning: a later rest sample is a re-learn, not a first learning");
-    const double want = 0.007 + (1.0 - std::exp(-0.5)) * 0.010;
-    check(std::fabs(t.seated[0] - want) < 1e-12 && std::fabs(t.seated[2] + 0.055) < 1e-12, "re-learning: an exponential average with a 1 s time constant (dt 0.5 s)");
-    const double before = t.seated[0];
-    t.add(moved, 100.0);
-    check(std::fabs(t.seated[0] - (before + (1.0 - std::exp(-2.0)) * (0.017 - before))) < 1e-12, "re-learning: a long gap counts as 2 s at most");
-    const double bad[3] = {NAN, 0.0, 0.0};
-    const double kept = t.seated[0];
-    check(!t.add(bad, 101.0) && t.seated[0] == kept, "learning: a sample that is not finite is not taken");
-    // the resets: the view coming on, and camera back, radar forward or the anchor key changing; nothing else
-    check(st::lockResetWhy(false, true, 35, 35, 30, 30, 0, 0) == st::LockReset::kViewOn, "reset: the view comes on");
-    check(st::lockResetWhy(true, true, 35, 30, 30, 30, 0, 0) == st::LockReset::kKey && st::lockResetWhy(true, true, 35, 35, 30, 35, 0, 0) == st::LockReset::kKey &&
-              st::lockResetWhy(true, true, 35, 35, 30, 30, 0, 1) == st::LockReset::kKey,
-          "reset: camera back, radar forward or the anchor key changes");
-    check(st::lockResetWhy(true, true, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone && st::lockResetWhy(true, false, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone &&
-              st::lockResetWhy(false, false, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone,
-          "reset: none while the view stays on or off with the keys unchanged (the view going off is not a reset; the next view-on is)");
-}
-
-// ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
 static ComPtr<ID3D11GeometryShader> twinFromCode(int fam, const void* data, size_t size) {
     D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
-    const UINT entries = st::soDeclaration(uint32_t(fam), decl);
+    const UINT entries = soDeclarationForTwin(uint32_t(fam), decl);
     const UINT stride = (st::sigFloats(uint32_t(fam)) + st::kPreFloats) * 4;
     ComPtr<ID3D11GeometryShader> twin;
     ck(g_dev->CreateGeometryShaderWithStreamOutput(data, size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
     return twin;
-}
-static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
-    const st::Signature& S = st::kSignatures[fam];
-    const uint32_t strideFloats = st::sigFloats(uint32_t(fam)) + st::kPreFloats, posFloat = st::sigPosFloat(uint32_t(fam)), preFloat = st::sigFloats(uint32_t(fam));
-    // the twin, made as the module makes it: the signature's bytecode, its stream-output entries (then `pre`), stream 0 rasterized as well
-    const ComPtr<ID3D11GeometryShader> twin = twinFromCode(fam, kBytes[fam].data, kBytes[fam].size);
-    const Cam cam;
-    const float a[3] = {0.10f, 0.05f, 0.0f};
-    const st::TurretParams params = st::pushParamsFor(frameOfCam(cam, a), kPushBackM);
-    Pt c[4];
-    boxAt(c, 0.0f, 0.0f, 0.45f, 0.08f, 0.05f);
-    std::vector<Vtx> quad;
-    addQuadPts(quad, c);
-    DrawOpts base;
-
-    // a plain draw: the vertex shader ran, the geometry shader did not (gs = 0 with ia_prims above 0 is how a flight reads "never ran")
-    Sample plain;
-    DrawOpts o = base;
-    o.sample = &plain;
-    const Frame plainFrame = render(quad, cam, nullptr, params, 256, 256, o);
-    check(plain.stats.IAPrimitives == 2 && plain.stats.VSInvocations >= 4 && plain.stats.GSInvocations == 0 && plain.stats.GSPrimitives == 0 && plain.stats.PSInvocations > 300,
-          "a quad drawn with no geometry shader: two primitives in, vertex shader and pixel shader ran, the geometry shader's invocation count is 0");
-
-    // through the production shader: it ran once for each triangle
-    Sample prod;
-    o.sample = &prod;
-    const Frame prodFrame = render(quad, cam, gs, params, 256, 256, o);
-    check(prod.stats.IAPrimitives == 2 && prod.stats.GSInvocations == 2 && prod.stats.GSPrimitives == 2 && prod.stats.CInvocations >= 2 && prod.stats.PSInvocations > 300 && !prod.gsAfter,
-          "...and through the production shader: two primitives in, the geometry shader ran twice and emitted two, and the context's geometry stage is empty after");
-    check(maxDiff(plainFrame, prodFrame) > 0.01, "...and the pixels differ from the plain draw: the shader moved the quad");
-
-    // through the twin with its stream-output target: the same statistics, the same pixels, and the records of what the shader wrote
-    Sample cap;
-    o.sample = &cap;
-    o.soTarget = true;
-    const Frame twinFrame = render(quad, cam, twin.Get(), params, 256, 256, o);
-    check(cap.stats.GSInvocations == 2 && cap.stats.GSPrimitives == 2 && cap.stats.IAPrimitives == 2 && cap.so.NumPrimitivesWritten == 2 && cap.so.PrimitivesStorageNeeded == 2,
-          "through the twin: two invocations, two primitives written to the stream-output target, none lost");
-    check(maxDiff(prodFrame, twinFrame) == 0.0, "...and it rasterizes exactly as the production shader does (the instrument does not change the picture)");
-    check(!cap.soTargetAfter && !cap.gsAfter, "...and the stream-output target and the geometry stage are empty after the scope");
-    const st::CaptureSummary cs = st::summarizeCapture(cap.records.data(), 6, strideFloats, posFloat, preFloat, params);
-    double lo = 1e9, hi = 0;
-    for (const Pt& p : c) {
-        const double d = std::sqrt((p.x - a[0]) * (p.x - a[0]) + (p.y - a[1]) * (p.y - a[1]) + (p.d - a[2]) * (p.d - a[2]));
-        lo = std::min(lo, d);
-        hi = std::max(hi, d);
-    }
-    check(cs.vertices == 6 && cs.inWindow == 6 && std::fabs(cs.beforeMin - lo) < 1e-3 && std::fabs(cs.beforeMax - hi) < 1e-3 && std::fabs(cs.afterMin - (lo + kPushBackM)) < 2e-3 &&
-              std::fabs(cs.afterMax - (hi + kPushBackM)) < 2e-3,
-          "the capture reads six vertices, all moved, at anchor distance 0.46 to 0.52 m before and 1.2 m further after");
-    // the captured record is the vertex whole: the interpolants as the vertex shader wrote them, not only the position (the first vertex is u = 0, v = 0, and the second element
-    // starts with 0.25; the second vertex starts with u = 1)
-    bool whole = std::fabs(cap.records[0] - 0.0f) < 1e-6f && std::fabs(cap.records[1] - 0.0f) < 1e-6f && std::fabs(cap.records[strideFloats] - 1.0f) < 1e-6f;
-    if (S.el[0].comps == 4) whole = whole && std::fabs(cap.records[3] - 1.0f) < 1e-6f;
-    if (S.count > 2) whole = whole && std::fabs(cap.records[S.el[0].comps] - 0.25f) < 1e-6f;
-    check(whole, "...with the interpolants intact in the record (the texture coordinate and the second element): the shader passes them through");
-    check(cs.zFixed == 0, "...none of them on the depth fallback (their own NDC z is valid)");
-    // `pre` is the first vertex's clip position as the stand-in vertex shader made it, and the position differs from it
-    check(std::fabs(cap.records[preFloat + 0] - (cam.p00 * c[0].x + cam.offX * c[0].d)) < 1e-5f && std::fabs(cap.records[preFloat + 3] - c[0].d) < 1e-5f &&
-              std::memcmp(&cap.records[preFloat], &cap.records[posFloat], 16) != 0,
-          "...and its `pre` is the clip position before the move (the vertex shader's), different from the position the shader wrote");
-
-    // a quad whose vertices lie 1.4 m or more from the anchor (the larger panels) and the reticle's depth: the shader RUNS (gs = 2) and moves nothing, the pixels are the plain draw's, and
-    // the capture says so (in_window 0): this is what a flight reads for the larger panels' draws
-    for (const float depth : {1.5f, 500.0f}) {
-        std::vector<Vtx> outside;
-        Pt q[4];
-        boxAt(q, 0.0f, 0.0f, depth, 0.2f * depth, 0.13f * depth);
-        addQuadPts(outside, q);
-        Sample outCap, outPlain;
-        DrawOpts oo = base;
-        oo.sample = &outCap;
-        oo.soTarget = true;
-        const Frame twinOut = render(outside, cam, twin.Get(), params, 256, 256, oo);
-        DrawOpts ob = base;
-        ob.sample = &outPlain;
-        const Frame plainOut = render(outside, cam, nullptr, params, 256, 256, ob);
-        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, posFloat, preFloat, params);
-        char what[220];
-        std::snprintf(what, sizeof(what), "a quad at %.1f m: the geometry shader ran twice, the capture reads in_window 0 and w = %.1f, and the picture is the plain draw's bit for bit", double(depth),
-                      double(depth));
-        check(outCap.stats.GSInvocations == 2 && co.vertices == 6 && co.inWindow == 0 && std::fabs(co.wMin - depth) < depth * 1e-3f && maxDiff(twinOut, plainOut) == 0.0 && covered(twinOut) > 1000, what);
-    }
-    // the translation alone: every vertex is moved
-    {
-        const float t[3] = {0.02f, -0.01f, 0.7f};
-        const st::TurretParams only = st::translateParamsFor(frameOfCam(cam, a, t));
-        Sample ts;
-        DrawOpts ot = base;
-        ot.sample = &ts;
-        ot.soTarget = true;
-        (void)render(quad, cam, twin.Get(), only, 256, 256, ot);
-        const st::CaptureSummary ct = st::summarizeCapture(ts.records.data(), 6, strideFloats, posFloat, preFloat, only);
-        check(ct.vertices == 6 && ct.inWindow == 6 && ct.zFixed == 0 && ct.afterMin > ct.beforeMin + 0.5 && ct.wMin > 1.0f, "the translation alone: the capture reads all six vertices moved (w 0.45 becomes 1.15)");
-        // a quad the game had behind the eye (Elite's clip z 0.025): moved, and every vertex on the depth fallback
-        Pt behind[4];
-        boxAt(behind, 0.0f, 0.0f, -0.2f, 0.06f, 0.04f, 0.025f);
-        std::vector<Vtx> bq;
-        addQuadPts(bq, behind);
-        Sample bs;
-        DrawOpts ob = base;
-        ob.sample = &bs;
-        ob.soTarget = true;
-        (void)render(bq, cam, twin.Get(), only, 256, 256, ob);
-        const st::CaptureSummary cb = st::summarizeCapture(bs.records.data(), 6, strideFloats, posFloat, preFloat, only);
-        check(cb.vertices == 6 && cb.inWindow == 6 && cb.zFixed == 6 && cb.wMin > 0.4f, "a quad the game had behind the eye: all six vertices moved to the front, all six counted on the depth fallback");
-    }
-    // the summary's own edges
-    std::vector<float> junk(2 * strideFloats, 0.0f);
-    junk[posFloat] = NAN;
-    junk[posFloat + 3] = 1.0f;
-    junk[strideFloats + posFloat + 3] = -1.0f;
-    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, posFloat, preFloat, params);
-    check(cj.vertices == 1 && cj.inWindow == 1 && st::summarizeCapture(nullptr, 6, strideFloats, posFloat, preFloat, params).vertices == 0 &&
-              st::summarizeCapture(junk.data(), 2, 3, posFloat, preFloat, params).vertices == 0,
-          "the summary skips a vertex that is not finite, reads nothing from nothing and refuses a stride too short for the position");
-    g_ctx->ClearState();
 }
 
 // ---------------------------------------------------------------- the Scorpion latch (journal_vehicle_latch.h; no device)
@@ -3137,9 +2593,8 @@ int main(int argc, char** argv) {
         mathCases();
         depthMathCases();
         radarAnchorCases();
-        contentDepthCases();
         slotCameraCases();
-        planeAndUnmovedCases();
+        eyePoseCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
         if (FAILED(made))
@@ -3159,22 +2614,18 @@ int main(int argc, char** argv) {
         }
 
         constantsCases();
-        lockCpuCases();
         Fails production;
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
             linkageCases(int(fam), gsOf[fam].Get());
-            instrumentCases(int(fam), gsOf[fam].Get());
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
             stripCases(twinOf[fam].Get(), production);
-            lockCases(int(fam), twinOf[fam].Get(), production);
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
         sceneBindingCases(gsOf[st::kSceneSignature].Get(), production);
         scissorCases(gsOf[0].Get(), production);
-        copyRegisterCases();
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
@@ -3250,27 +2701,6 @@ int main(int argc, char** argv) {
                     check(fails.n > 0, what);
                 }
             }
-            {   // THE LOCK's mutants: each caught by the lock cases (the last, the lighting position's, in signature H only)
-                const Mutant lockMutants[] = {
-                    {"the lock flag ignored", "const bool locked = an.w > 0.5;", "const bool locked = an.w > 5.0;"},
-                    {"the triangle's mean as its centre", "if (pq >= qr && pq >= rp) return (p + q) * 0.5;", "if (pq >= 0.0) return (p + q + r) / 3.0;"},
-                    {"the shortest edge's test", "if (pq >= qr && pq >= rp)", "if (pq <= qr && pq <= rp)"},
-                    {"the shift's sign", "tr.xyz - turretLockCentre(v[0].pos, v[1].pos, v[2].pos)", "turretLockCentre(v[0].pos, v[1].pos, v[2].pos) - tr.xyz"},
-                    {"the game's depth not kept under the lock", "gz * s.z, s.z);", "0.5 * s.z, s.z);"},
-                    {"the lock's displacement not given to the lighting line", "dq = k;", "dq = float3(0.0, 0.0, 0.0);"},
-                };
-                for (const Mutant& m : lockMutants) {
-                    if (std::strcmp(m.from, "dq = k;") == 0 && fam != st::kSceneSignature) continue;
-                    const std::string mutated = replaceAll(text, m.from, m.to);
-                    check(mutated != text, "a lock mutant differs from the production text");
-                    const auto mg = twinFromText(int(fam), mutated);
-                    Fails fails;
-                    lockCases(int(fam), mg.Get(), fails);
-                    char what[200];
-                    std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the lock cases", m.name, fam);
-                    check(fails.n > 0, what);
-                }
-            }
             {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
                 const std::string flipped = replaceAll(text, "o.v = v[i];", "o.v = v[(i == 0) ? 0 : (3 - i)];");
                 check(flipped != text, "the winding mutant differs from the production text");
@@ -3304,7 +2734,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants, five lock mutants and the winding mutant in each of eight signatures, six more in signature H and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

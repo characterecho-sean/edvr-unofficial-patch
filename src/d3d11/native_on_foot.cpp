@@ -15959,7 +15959,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         const double aimRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
         const nofoot::f172::Raise neckRaise = nofoot::f172::publish(neckRef.out.seatedY, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
         if (onFoot && !camExternal && neckRef.out.seatedY != 0.0) g_f172Turned.add(neckRaise);
-        // Issue 140 (TEMPORARY, experimental.srv_turret_camera_back): the SRV's turret view moves the camera back, over the turret's axis. Seated +z is backward and the view moves by
+        // Issue 140 (experimental.srv_turret_camera_back): the SRV's turret view moves the camera back, over the turret's axis. Seated +z is backward and the view moves by
         // MINUS the published alignment, so D metres back is z = -D. Added AFTER the on-foot gate and the external-camera zero below (every on-foot term above is an exact zero off
         // foot), as exactly 0.0 outside the turret view; this is the one publisher of the alignment, so the serials stay coherent.
         const double turretBackZ = srvTurretBackSeatedZ();
@@ -37455,7 +37455,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
-    srvTurretFrameTick(frameNo);   // issue 140: the SRV turret view (the journal's bit, the five TEMPORARY keys, the geometry the HUD move is made from), just before alignTick adds its camera term
+    srvTurretFrameTick(frameNo);   // issue 140: the SRV turret view (the journal's bit, the keys, the geometry the HUD move is made from), just before alignTick adds its camera term
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain

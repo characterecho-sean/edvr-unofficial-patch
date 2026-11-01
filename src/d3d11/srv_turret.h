@@ -1,6 +1,6 @@
-// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the nine TEMPORARY keys, the families and the
+// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the nine experimental keys, the families and the
 // maths; srv_turret_hud_shader.h and srv_turret_hud_binding.h are the private geometry shaders and their binding (tools/srv_turret_hud_test runs them on WARP);
-// journal_vehicle_latch.h is the Scorpion latch; srv_radar_anchor.h is the hook that moves the radar's schematic in the game; srv_turret.cpp is this module.
+// journal_vehicle_latch.h is the Scorpion latch; srv_radar_anchor.h is the hooks that move the radar's schematic in the game; srv_turret.cpp is this module.
 //
 // THE SCORPION ONLY. Status.json's turret-view bit is set in the Scarab too, whose turret view was fine, so both parts act only while the turret view is on AND the journal says the
 // vehicle is the Scorpion (journalSrvScorpion: LoadGame's Ship or LaunchSRV's SRVType is combat_multicrew_srv_01; unknown, a training scenario included, is "not the Scorpion"; the
@@ -30,10 +30,22 @@
 // reticle's sprite, vs E508648660A352B2, is not a panel: an earlier build targeted it, at about 500 m, and moved nothing. The flight HUD's vectors, vs B7790CBFC6554097, are not in
 // the pass.)
 //
+// THE RADAR IN THE GAME (experimental.srv_turret_radar_anchor: camera, on, reversed or off; srv_radar_anchor.h). The radar disc is a picture the game draws of its terrain schematic (vs 4EDE4BC9,
+// and vs 5B0068AF for the Scorpion icon) from the live camera, shown by the hologram billboard vs 5559BD94 (family 7, ps EA02FAC2). At the stock turret camera the schematic's volume lies about 0.44 m
+// behind the eye, so the game's own visibility gate leaves the picture empty. The key picks how the radar is moved in the game itself, and the frame tick (anchorTick) arms the hook its mode needs:
+//   * camera (the default): a hook on the schematic slot's update (0x36BF3C0) gives the radar's slots the scene camera moved back by the radar forward key along the turret's forward u. The radar's own
+//     picture billboards (family 7 on a texture the frame's radar writers drew into: srvTurretRadarWriterDraw, billboardKind) then go through the regular radar path of part 2, moved forward along the seat
+//     with the rest of the radar; every other 5559BD94 draw is the game's own (cameraLeaves).
+//   * on, reversed: a hook on the radar's placement setter (0x38563A0) adds the radar forward key along u (reversed: against it) to the placement, or (0, 0, s * F) in the anchor's axes when there is no u. While the
+//     last setter call left our offset in the placement the draw path leaves the two 5559BD94 billboard families to the game (anchorLeaves), so the picture the game now frames is not moved a second time.
+//   * off: the game's own radar.
+// u is the turret's forward from the live camera's right, up and forward (rows 277 to 279 of the scene camera block): read on the CPU when the game writes the block (the Unmap tee,
+// srvTurretNoteCameraWrite, kept by buffer with the host frame), else copied to a staging ring and read back at the frame boundary without stalling (anchorDirSample, anchorDirBoundary).
+//
 // WHAT THE LOG SHOWS (a flight in the turret view must tell "never ran" from "ran"):
 //   "srv turret: the vehicle is the Scorpion|not the Scorpion (event E)"   each change of the latch (journal_watch.cpp, the worker thread): E is LoadGame, LaunchSRV, Music, DockSRV,
 //     SRVDestroyed, Shutdown or NewJournal (another journal file).
-//   "srv turret settings: ..."        the eight keys (the last two, the depth mode as front, game or real and the scissor as open or game, as text), at the first frame and at each change.
+//   "srv turret settings: ..."        the nine keys (the last three, the depth mode as front, game or real, the scissor as open or game and the radar anchor as on, reversed, off or camera, as text), at the first frame and at each change.
 //   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|radar forward changed|recentre|head away)"      each time the anchor is taken (the head's seated position).
 //     A frozen head pose (the same bits frame after frame) never latches it; "head away" is the safety net: the head stayed more than 35 cm from the anchor for 90 frames in a row.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the Scorpion's turret view (the view bit AND the latch).
@@ -42,30 +54,11 @@
 //   "srv turret hud: precompiled geometry shader ... created|FAILED" (shader_swap.cpp), once for each signature, at the first draw that asks for them.
 //   "srv turret hud: first draw of family F ... the G group: a vertex A to B m from the anchor moves D m deeper|nearer|does not move radially, in 3D about the anchor (x,y,z m seated),
 //     after the group's HUD moves H m forward ..." once for each family (deeper: the push-back, nearer: the pull); "srv turret hud: refused a draw (reason) ..." once per reason.
-//   "srv turret hud: panels: gap=-1.10 m dMin=0.02 dMax=1.00; radar: ...; anchor=(x,y,z) head_offset=N cm T=(x,y,z) Tradar=(x,y,z) ipd_elite=.. P00[L,R]=.. draws[L,R]=.. bound=.. pose refreshed at draw: N of M frames
+//   "srv turret hud: panels: gap=-1.10 m dMin=0.02 dMax=1.00; radar: ...; anchor=(x,y,z) head_offset=N cm T=(x,y,z) Tradar=(x,y,z) ipd_elite=.. P00[L,R]=.. draws[L,R]=.. bound=.. scissor opened N pose refreshed at draw: N of M frames
 //     refused[...]=.. families[1989E6D3,...]=n,..." every 10 s while the Scorpion's turret view was on at any point of the window: each group's constants (gap and the window of anchor distances, or
-//     "off"; a gap of 0 is the translation alone), the anchor, how far the head is from it, eye 0's translation for the panels (T) and for the radar (Tradar), the frames in the window (M) whose pose the draw
-//     found newer than the one the frame tick built from (N; near M when the host's beginFrame runs after the boundary tick, near 0 when it runs before it), the matched draws of each family
-//     (names, then counts, in kFamilies' order).
-//   THE GPU INSTRUMENT (whether the shader RAN, and what it wrote): once a second per eye and family, while the pass is bound, one matched draw (the frame's draws of the family
-//   rotate) is issued through a stream-output twin of its signature's shader (the same bytecode and constants, still rasterized) with a pipeline-statistics query and a
-//   stream-output-statistics query around the scope (Begin right after the bind, End right before the restore). Read back without a stall (DONOTFLUSH, a staging copy mapped
-//   DO_NOT_WAIT) on later frames, given up after 8:
-//   "srv turret hud stats: eye=E issues=N ia_prims=.. vs=.. gs=.. gs_prims=.. c_inv=.. c_prims=.. ps=.. (lost N) draw=K family=F"   gs=0 with ia_prims>0: the shader never ran.
-//   "srv turret hud capture: family=F eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] dist=[a,b]->[c,d] a=(x,y,z) zfix=N gap=.."   the vertices the shader wrote
-//   (in_window: how many it moved, read from the shader's own `pre` output, the clip position as the game made it): with a push the weapon panels' and the radar's draws read in_window
-//   above 0 (anchor distance before 0.1 to 0.7 m, after that plus the push) and the larger panels' in_window 0 at 1.3 m and more (the pull: the other way round); with only the HUD-forward
-//   key every vertex reads as moved. zfix is how many of the moved vertices took the depth fallback (the game's NDC z was not a valid reversed-Z depth: the vertex was behind the eye or
-//   inside its near plane). gap= is the signed gap the family's group ran with. The capture holds the first kCaptureBufferBytes of a draw's output, so a long draw is a sample.
-//   "srv turret hud: panels: ... bound=N scissor opened N pose refreshed at draw: N of M frames unmoved family draws: <family> <route> N, ... refused[...]=..."   the unmoved family draws (srv_turret_math.h
-//     UnmovedRoute) are the draws of a family that reached the GPU without the pass's shader bound, by route (refused, group-off, fast-path, indirect, auto, foreign-immediate, foreign-deferred,
-//     reissue, command-list) or `none`; "srv turret hud: first unmoved family draw by route R (family F): <where>" says the first of each route once (a reissue: the call site, module+offset).
-//   "srv turret hud disc plane: inst=K centre=(x,y,z) normal=(x,y,z) head=(x,y,z)"   once a second for eye 0's sampled radar-disc scope: each quad of the capture (six records) from its PRE-move clip
-//     positions, in the SEATED frame, with the head's seated position. A turret-fixed disc keeps its centre and normal as the head moves; a billboard's normal turns with the head.
-//   "srv turret hud disc: family=DF3503CD eye=E draw=K issues=N samples_passed=S alpha=A intensity=I (cb2[11].w, cb1[90].y)"   for the radar disc's sampled scope only: an occlusion query around
-//   it (S: the samples that passed the depth and stencil tests, over all the scope's issues) and the two pixel-shader registers its alpha and colour scale are made of, copied to a staging buffer
-//   at the end of the scope (n/a when a copy was refused). S = 0 with the pixel shader running (the statistics line's ps) is a depth or stencil test removing the disc; S above 0 with A about 0 is
-//   the game fading it.
+//     "off"; a gap of 0 is the translation alone), the anchor, how far the head is from it, eye 0's translation for the panels (T) and for the radar (Tradar), the draws of each eye and the ones bound, the draws whose
+//     scissor was opened, the frames in the window (M) whose pose the draw found newer than the one the frame tick built from (N; near M when the host's beginFrame runs after the boundary tick, near 0 when
+//     it runs before it), the refusals by reason, the matched draws of each family (names, then counts, in kFamilies' order).
 //   "srv turret hud state: family=F eye=E issue=K target=game|other WxH format=N depth_view=yes|no | depth: .. | stencil: .. | blend rt0: .."   each family's first scope, at each of its first eight
 //   issues (the game's own, the UI layer's, the interface depth's): the target as 'game' (the one bound when the scope began) or 'other' (the UI layer's), the depth-stencil state and the blend state
 //   of render target 0, as D3D11 enumeration numbers, then the rasterizer state (ScissorEnable, the number of scissor rectangles and the first, DepthClipEnable, CullMode,
@@ -73,54 +66,20 @@
 //   "srv turret hud: family F draws with the scissor test on: N rect(s), first [l,t,r,b], target WxH; the scissor is opened to the whole target|kept as the game set it for its draws"   once for each
 //   family found drawing with ScissorEnable (the game's first rectangle, and the extent it is opened to). The 10 s line's "scissor opened N" counts the draws whose rectangles were opened.
 //   "srv turret hud: the game's scissor rectangles could not be put back after an issue; ..."   a restore that faulted (the boundary settles it; draws are refused until then).
-//   TEMPORARY, the hologram's source (the radar's visible disc, its rim and the Scorpion are the billboard vs 5559BD94 + ps EA02FAC2 showing a picture made earlier in the frame; the turret pass
-//   moves the billboard, not the picture). A round every 15 s at most while the pass is wanted:
-//   "srv turret hud holo quad: family=F eye=0 draw=K tangents=(l,r,dn,up) T=(x,y,z) | vI pre=(x,y,z,w) post=(x,y,w) uv=(u,v) ..."   eye 0's sampled near billboard (game clip w under 1 m): its
-//     vertices before and after the move and their UVs.
-//   "srv turret holo source: round R frame N F eye=E draw=K reads tI=ID WxH fmt N bind 0x.. [WATCHED] ..."   each 5559BD94 draw of the collecting frame: its pixel-shader inputs t0..t7; render and
-//     depth targets among t2..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
-//   "srv turret holo writer: round R frame N vs=.. ps=.. draw K count N instances N topology T viewport (..) targets: rtvI=ID WxH fmt N [WATCHED] .. dsv=.."   each draw of the next frame with a
-//     watched texture bound as a render or depth target (the first 24 a round); "srv turret holo watch: round R frame N: W of D owner-context draws ..." sums it (W = 0: the picture is made
-//     some other way) and "srv turret holo watch: round R writer pairs vs/ps xN (#K ID) ..." counts every writer's shader pair.
-//   "srv turret holo billboard|writer constants: round R #K .. bB (bound first F count C) rows S..: (x,y,z,w) ..."   the vertex constants b0 rows 0..15, b1 rows 270..279 and b2 rows 0..15 of
-//     the first six billboards and ten writers, read back without stalling.
-//   TEMPORARY, the radar picture's camera V0 (the terrain schematic vs 4EDE4BC9 draws the disc's picture from it; srv_turret_math.h radarCamFrom):
-//   "srv turret radar camera: first seen|moved by (x,y,z) mm and turned A deg after N frames unchanged at frame F (copied at frame C): the schematic's origin at (x,y,z) m in the camera ...,
-//     forward (..), window tan x [..] y [..], scale S; head (x,y,z) seated, camera back B cm"   each move of V0 (2 mm or 0.05 deg), at most four lines a second, with the head and the key then;
-//   "srv turret radar camera: view off: D picture-camera draws copied, R read, M moves[ -- NEVER SEEN ...]"   the view's end (R = 0: the draw never reached the path).
-//   TEMPORARY, the radar anchor moved in the game (experimental.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hooks:
-//   "srv turret radar anchor: setter hook armed: EliteDangerous64.exe+0x38563A0 (...) at 0x.., stolen=N bytes, prologue 18/18 bytes verified, relay at 0x.." or "... setter hook stood
-//     down: <why>; nothing was patched", then "... update counter armed|stood down: ..."   once, the first time the view is on with the key not off;
-//   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
-//     5559BD94 billboards are left to the game"   each stay's first add;
-//   "srv turret radar anchor: direction at frame F: u (x,y,z) world; anchor rows (..)(..)(..) [source vfunc +0x20|fallback: ...]; P rows (..)(..)(..); d (x,y,z) in the anchor's axes
-//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K); u age N frames (setter frame F, camera sample frame G),
-//     source cpu|gpu, anchor of the sample's frame|...; aim relative to the vehicle yaw .. pitch .. deg, head pitch H deg"   with the first add, then every 2 s while the view is on;
-//   "srv turret radar anchor: turret direction from the CPU: ..." or "... from the GPU readback for host frame K (<why>) ..."   once, the first sample of each source;
-//   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U...; moves along u D, fallback B (...)"
-//     with the 10 s line while armed; "srv turret radar anchor: 10 s residual: ...; shown call before the write: mean .. min .. max .. ms; ..." beside it;
-//   "srv turret radar anchor: 10 s correction: N billboard draws moved (...) over F frames, |delta| ..., yaw ..., pitch ...; left to the game: ...; family 8 on a radar target k; writers:
-//     ..."   whenever the anchor yield was on in the window; "... correction first applied at frame F, eye E, disc|icon: delta ... cm ..." once; "... the setter runs on thread T, the
-//     camera writes on thread U" once; "... a third 256x256 5B0068AF writer at frame F: draw count .., instances .., target .. WxH, viewport ..; a billboard's t4 matched|did not match that
-//     target that frame" once (the 10 s line also says the content depth z_c the moved billboards ran with, and the draws without one);
-//   "srv turret radar anchor: quad probe: eye E disc|icon w=[a,b] pre ndc centre (x,y) moved by (dx,dy) ndc; content depth z_c Z m; expected (ex,ey) ndc for content at z_c; delta in the
-//     eye (x,y,z) cm"   a corrected billboard's GPU sample, once a second per eye, the disc and the icon in turn (srv_turret.cpp logQuadProbe);
-//   TEMPORARY, THE PAIR CAPTURE (srv_turret.cpp): "srv turret radar pair: frame F eye E disc|icon[ (dump S, frame n of 16)]: t4 .., VS b1 .., forward row 279 (..), setter call #N d (..) cm,
-//     delta in the eye (..) cm, z_c Z m, viewport WxH; issues I (our shader O, another A), prims P (needed Q); issue 0: w=[a,b], centre in the eye pre (..) post (..) m, ndc pre (..), moved
-//     (..) px, expected (..) px, uv (u,v)..; issue k: pre (..) px from issue 0's, moved (..) px, w=[..]"   each eye's disc and icon in one frame, every frame for 16 after an eye dump, else
-//     every 2 s; "... frame F eye E: disc moved (..) px (expected ..), icon moved (..) px (expected ..); disc minus icon (..) px, |D| px[ -- APART]"   per eye; "... lock: frame F eye E
-//     (dump S, frame n of 16): disc centre seated post (..) pre (..) m, icon post (..) pre (..) m; turret yaw rate R deg/s"   in the dump window; "... dump S window ended: ..." once a dump;
-//     "srv turret radar picture: dump S frame F eye 0 disc|icon: t4 .. WxH format N, content (t4 < 1000) C of T texels, t4 a to b; written eye_S_RadarDiscT4.bmp|..IconT4.bmp ..."   the
-//     two pictures of a dump; "srv turret radar pair: 10 s: disc: draws moved .., issues moved .., issues not moved .. (..), issues per moved draw 0/1/2/3+: ..; icon: ..; disc and icon
-//     moved apart on screen (over 1 px): by the constants X of F eye frames (no content depth n), by the capture Y of Z captured eye frames; capture frames .., skipped .., entries lost .."
-//     with the 10 s correction line; each billboard line ends "; LOCKED: target in the eye (..) m, applied shift (..) cm, centre post minus target (..) mm" or "; delta mode (why)", and
-//     the lock line adds "turret yaw rate R deg/s, at rest|not at rest; disc target seated (..) m, locked|why, applied shift in the eye (..) cm, post minus target (..) mm; icon ...";
-//   TEMPORARY, THE LOCK (srv_turret.cpp; srv_turret_math.h THE LOCK): "srv turret radar lock: disc|icon target learned at frame F: seated (..) m, the mean of N rest samples (eye 0 ..,
-//     eye 1 ..); its billboard is now locked to it"   once per kind and reset; "srv turret radar lock: targets reset (why)..."   at each reset; "srv turret radar lock: 10 s: draws
-//     locked L, on the delta D (no target yet a, not a single quad b, no eye pose c, target too far e); |T - C| (..) mean X max Y cm, its centre off the target mean .. max .. mm, over N
-//     captured draws; targets: disc .., icon ..; reset R, re-learned S samples; frames at rest F of G"   with the 10 s correction line;
-//   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
-//   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
+//   "srv turret hud: the game's geometry stage could not be put back after an issue; ..." and "srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary."   the same for the
+//     binding: a restore that faulted, and the boundary settle that covered it.
+//   Camera mode (srv_radar_anchor.cpp, said by the frame tick, never by the hook):
+//   "srv turret radar camera: slot hook armed: ..." or "... slot hook stood down: <why>; nothing was patched"   once, the first time the view is on in camera mode;
+//   "srv turret radar camera: moved back X m for slot 0x.. (index N, KIND (mode M), list L (K)), direction from the turret (CPU camera sample)|the camera's own forward, u (x,y,z)"   once for each kind (terrain,
+//     icon) and list (A, B: the two eyes);
+//   "srv turret radar camera: 10 s: slot calls N, radar slots M (terrain A .., terrain B .., icon A .., icon B .., other ..), moved N (direction turret .., camera forward ..), faults N; hook thread T,
+//     camera writes on thread U[ -- NO radar slot in these 10 s: ...| -- the slot hook is not armed (...)]"   every 10 s in which camera mode was on with the view.
+//   On and reversed (the setter hook):
+//   "srv turret radar anchor: setter hook armed: EliteDangerous64.exe+0x38563A0 (...) at 0x.., stolen=N bytes, prologue 18/18 bytes verified, relay at 0x.." or "... setter hook stood down: <why>; nothing was
+//     patched"   once, the first time the view is on with the key at on or reversed;
+//   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the 5559BD94 billboards are left to the game"
+//     each stay's first add;
+//   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end.
 #pragma once
 
 #include "srv_turret_math.h"
@@ -135,58 +94,28 @@ namespace edvr {
 namespace detail {
 // Asked per draw with no call: the build has no /GL to fold a cross-TU getter (target_sharp.h's reason).
 extern std::atomic<bool> g_srvTurretHudWanted;
-// The GPU instrument's issue count: true only inside the scope of the one draw a second that is sampled (srv_turret.cpp).
+// True while a family's first scope is open and its issues say their state (srv_turret.cpp noteBegin and noteEnd).
 extern std::atomic<bool> g_srvTurretHudCounting;
-extern std::atomic<uint32_t> g_srvTurretHudIssues;
-// The hologram's source instrument (srv_turret.cpp): true for the one frame a round watches the draws.
-extern std::atomic<bool> g_srvTurretHoloWatching;
-// The radar picture's camera instrument: true while the Scorpion's turret view is on (the frame tick sets it).
-extern std::atomic<bool> g_srvTurretRadarCamOn;
-// The radar anchor's turret direction: true while the Scorpion's turret view is on, experimental.srv_turret_radar_anchor is not off and the setter hook is armed (the frame tick sets it).
+// The turret's direction for the radar's move: true while the Scorpion's turret view is on and the hook of the radar anchor mode is armed (the slot hook for camera, the setter hook for on and reversed; the frame tick sets it).
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
-// The draw-time correction's writer watch: true while the anchor yield is on (the frame tick sets it).
+// Camera mode's match of the radar's own picture billboard: true while the view is on in camera mode (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarWritersOn;
-// The draw being matched: its vertex or index count and instances (srvTurretHudNoteDrawShape; owner context's thread). The radar lock takes a single quad only.
-extern uint32_t g_srvTurretDrawCount, g_srvTurretDrawInstances;
 }  // namespace detail
 
-// TEMPORARY (issue 140, the radar lock in srv_turret.cpp): vscreen.cpp forwardWithVerdict, right before the pass's scope opens, while the pass is wanted: the draw's count and instances.
-inline void srvTurretHudNoteDrawShape(uint32_t count, uint32_t instances) {
-    detail::g_srvTurretDrawCount = count;
-    detail::g_srvTurretDrawInstances = instances;
-}
-
-// TEMPORARY (issue 140, experimental.srv_turret_radar_anchor): the radar's picture writers for the draw-time correction. vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor
-// yield is on (one relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the
-// frame, which a radar billboard's t4 is matched against (srv_turret.cpp radarCorrectionBegin).
+// The radar's picture writers, for camera mode's match of the radar's own picture billboard (srv_turret.cpp billboardKind). vscreen.cpp forwardWithVerdict, every owner-context draw while camera mode is on (one
+// relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the frame, which a radar billboard's t4 is
+// matched against.
 inline bool srvTurretRadarWritersOn() { return detail::g_srvTurretRadarWritersOn.load(std::memory_order_relaxed); }
-// count and instances: the draw's (the first 256x256 icon writer beyond two in a frame is said with them).
-void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances);
-// TEMPORARY instrument (issue 140, THE PAIR CAPTURE in srv_turret.cpp): a draw of `family` that went out without the pass's shader (vscreen.cpp srvTurretUnmovedNote, owner context, while
-// the writers are watched); a radar billboard's (family 7 on a radar picture) is counted by kind for the 10 s pair line.
-void srvTurretRadarNoteUnmovedIssue(ID3D11DeviceContext* ctx, int family);
-// TEMPORARY instrument (issue 140): an eye dump was asked for, with its stamp (temporal_pass.cpp beginEyeRun; any thread). The pair capture then takes every frame of the next 16, and eye 0's
-// two radar pictures are written next to the dump.
-void srvTurretNoteEyeDump(const wchar_t* stamp);
+void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs);
 
-// TEMPORARY (issue 140, experimental.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
+// The live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them, for the turret's direction.
 // vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in
 // what this kept, so u needs no GPU readback. Owner context's thread.
 inline bool srvTurretWantsCameraRows() { return detail::g_srvTurretCameraRowsWanted.load(std::memory_order_relaxed); }
 void srvTurretNoteCameraWrite(const void* res, const void* data, uint32_t bytes);
 
-// TEMPORARY instrument (issue 140): the camera V0 the radar's picture is drawn from. vscreen.cpp forwardWithVerdict, every owner-context draw while the Scorpion's turret view is on: the
-// frame's first draw of vs 4EDE4BC9 (the terrain schematic) has its camera rows copied and read back, and each move of V0 is logged (srv_turret.cpp). One relaxed load otherwise.
-inline bool srvTurretRadarCamOn() { return detail::g_srvTurretRadarCamOn.load(std::memory_order_relaxed); }
-void srvTurretRadarCamDraw(ID3D11DeviceContext* ctx, uint64_t vs);
-
-// TEMPORARY instrument (issue 140): the pass that makes the picture the hologram billboard (vs 5559BD94) shows. vscreen.cpp forwardWithVerdict, every owner-context draw while a round watches
-// (one frame every 15 s at most): a draw with one of the billboards' watched inputs bound as a render or depth target is logged as a writer. One relaxed load otherwise.
-inline bool srvTurretHoloWatching() { return detail::g_srvTurretHoloWatching.load(std::memory_order_relaxed); }
-void srvTurretHoloWatchDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint64_t ps, char kind, uint32_t count, uint32_t instances);
-
-// vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): counts it while the sampled scope, or a family's first scope, is open
-// (srvTurretHudNoteIssue, in srv_turret.cpp, which also says the state each of the first scope's issues ran with). One relaxed load otherwise.
+// vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): while a family's first scope is open, says the state each of its issues
+// ran with (srvTurretHudNoteIssue, in srv_turret.cpp). One relaxed load otherwise.
 void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx);
 inline void srvTurretHudCountIssue(ID3D11DeviceContext* ctx) {
     if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) srvTurretHudNoteIssue(ctx);
@@ -203,15 +132,6 @@ void srvTurretFrameTick(uint32_t frameNo);
 double srvTurretBackSeatedZ();
 // alignTick, right after it published an alignment: the z it added and the serial it published under. Said in the log when it changed. Frame thread.
 void srvTurretNotePublished(double seatedZ, uint32_t serial);
-
-// The unmoved family draws (srv_turret_math.h UnmovedRoute): a draw of one of the families that reached the GPU without the pass's shader bound, by the route it took. family -1: unknown (a command
-// list). Any thread; counts per family and route for the 10 s line and says the first of each route (and of each pureDrawReissue call site) once. site: a return address for the reissue route, else null.
-void srvTurretHudNoteUnmoved(int family, srv_turret::UnmovedRoute route, const void* site);
-// The scope's own decline of a matched draw (srvTurretHudBegin returned false): counted as refused, or as group-off when the family's group has all its keys at 0 or the family is a
-// 5559BD94 billboard left to the game while the radar anchor is moved in the game. Render thread.
-void srvTurretHudNoteRefusedDraw(int family);
-// True while the pass's geometry shader is bound for an issue (between a true Begin and End). Render thread.
-bool srvTurretHudScopeActive();
 
 // Part 2, the draw path (vscreen.cpp, the render thread). Begin: the game's bindings are its own; family is the draw's shader pair's family (srv_turret_math.h familyOf), eye
 // the draw's eye (0 left, 1 right, -1 unknown). True when the family's private shader is bound for the issues that follow; End puts the game's geometry stage and constant
