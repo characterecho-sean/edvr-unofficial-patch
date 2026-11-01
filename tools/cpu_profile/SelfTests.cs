@@ -54,6 +54,7 @@ internal static class SelfTests
         ThreadBusyAndGate();
         WindowGrouping();
         SymbolOptions();
+        DiaLibraryMatchesProcess();
         SymbolAnnotation();
         ReportShape();
         Console.WriteLine($"EdvrCpuProfile self-test: {_checks} checks");
@@ -404,8 +405,14 @@ internal static class SelfTests
         Check(!Matches("record_drain", 0x42E2686), "record_drain ends at 134 bytes");
         Check(!Matches("thunk_42e2160", 0x42E25C0), "0x42e25c0 is not the earlier thunk");
         Check(RvaTable.Classes[ClassId("thunk_42e2160")].Bound == 0x42E2170, "a thunk takes 16 bytes");
+        // Edges come from the table entry, not a literal: a retarget that moves a
+        // thunk once left a hand-typed last byte behind (0521f426 vs 0x42E220F).
+        var thunk = RvaTable.Classes[ClassId("thunk_42e2160")];
+        Check(Matches("thunk_42e2160", thunk.Entry + 0xF) && !Matches("thunk_42e2160", thunk.Entry + 0x10) &&
+              !Matches("thunk_42e2160", thunk.Entry - 1), "thunk window edges follow the table entry");
         Check(Matches("thunk_42e2160", 0x42E216F) && !Matches("thunk_42e2160", 0x42E2170),
               "thunk window edges");
+        ClassNamesAgreeWithEntries();
         Check(Matches("reset_repopulate", 0x36A3C60) && !Matches("reset_repopulate", 0x36A3EFF),
               "reset_repopulate window edges");
         Check(!RvaTable.Classes[ClassId("reset_repopulate")].Pipeline,
@@ -421,6 +428,59 @@ internal static class SelfTests
         foreach (var item in RvaTable.Classes) Check(item.Bound > item.Entry, $"{item.Name} has a positive window");
         Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("thunk_42e2160")]) == "entry+0x10 (thunk)",
               "the thunk bound rule is reported");
+    }
+
+    // A class named for an address must sit at that address, and the thunks the
+    // runtime sources cite must be in the table. A game-build retarget that moves
+    // an entry without renaming it, or without updating the source comment,
+    // fails here by name instead of leaving a stale constant behind.
+    private static void ClassNamesAgreeWithEntries()
+    {
+        foreach (var item in RvaTable.Classes)
+        {
+            var at = item.Name.LastIndexOf('_');
+            if (item.Kind is not (RvaKind.Thunk or RvaKind.CallSite or RvaKind.Eval) || at < 0) continue;
+            if (!uint.TryParse(item.Name[(at + 1)..], System.Globalization.NumberStyles.HexNumber, null, out var named)) continue;
+            Check(named == item.Entry,
+                  $"class {item.Name} is named for 0x{named:X} but its entry is 0x{item.Entry:X}; rename it or fix the entry after the retarget");
+        }
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "AGENTS.md"))) root = root.Parent;
+        var source = root is null ? null : Path.Combine(root.FullName, "src", "d3d11", "kinematic_eval_hook.cpp");
+        if (source is null || !File.Exists(source))
+        {
+            Console.WriteLine("self-test SKIP: kinematic_eval_hook.cpp not found; thunk citation check not run");
+            return;
+        }
+        var text = File.ReadAllText(source);
+        foreach (var name in new[] { "thunk_42e2160", "thunk_42e2710" })
+        {
+            var entry = RvaTable.Classes[ClassId(name)].Entry;
+            Check(text.Contains($"thunk 0x{entry:X}", StringComparison.Ordinal),
+                  $"kinematic_eval_hook.cpp no longer cites {name} at 0x{entry:X}: the retarget moved one of them without the other");
+        }
+    }
+
+    // The analyzer is x64. DiaLoader fails on an x86 msdia140.dll, and then no
+    // EDVR frame resolves. The csproj copies the DLL beside the analyzer; check
+    // the one that will be loaded. Absent is a skip, printed, never a pass.
+    private static void DiaLibraryMatchesProcess()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "msdia140.dll");
+        if (!File.Exists(path))
+        {
+            Console.WriteLine("self-test SKIP: no msdia140.dll beside the analyzer (no Visual Studio copy found at build); EDVR frames will not symbolize");
+            return;
+        }
+        var bytes = File.ReadAllBytes(path);
+        Check(bytes.Length > 0x40 && bytes[0] == (byte)'M' && bytes[1] == (byte)'Z', $"{path} is a PE file");
+        var pe = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(0x3C));
+        Check(pe > 0 && pe + 6 <= bytes.Length && BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(pe)) == 0x4550,
+              $"{path} has a PE header");
+        var machine = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(pe + 4));
+        var expected = Environment.Is64BitProcess ? (ushort)0x8664 : (ushort)0x14C;
+        Check(machine == expected,
+              $"{path} is machine 0x{machine:X4} but this analyzer needs 0x{expected:X4}; the csproj must take PrivateAssemblies\\amd64\\msdia140.dll");
     }
 
     private static void StackLabels()
