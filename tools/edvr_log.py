@@ -12220,7 +12220,13 @@ def _hj_f107_away(rows, ctx):
         return None
     text = "%d episodes" % len(left)
     if ended:
-        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck" % (float(r["s"]), r["calls"], r["near"], r["far"]) for r in ended)
+        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck%s" % (
+            float(r["s"]), r["calls"], r["near"], r["far"], ", %s flaps inside the %s s hold" % (r["alt"], r["hold"]) if r.get("alt") not in (None, "0") else "") for r in ended)
+    # F208: an episode a second long or more is a real one; a log with hundreds of them in a few seconds is the camera flapping through an older build's end rule (the suit shop: 632 in 18 s)
+    flaps = [r for r in ended if float(r["s"]) < 0.2]
+    if len(ended) >= 20 and len(flaps) * 2 > len(ended):
+        return ("PARTIAL", text + "; %d of %d episodes lasted under 0.2 s: the camera alternated between two views and the episode ended on every return (a build before F208), so the view pumped" % (
+            len(flaps), len(ended)))
     if remote:
         far = max(float(r["remote_max"]) if r.get("remote_max") is not None else abs(float(r["game"])) for r in remote) / 100.0
         note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, sum(int(r["remote"]) if r.get("remote") is not None else 1 for r in remote))
@@ -16986,7 +16992,8 @@ HEALTH_RULES = (
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
         ("left", r"native on foot camera away \(F107\): the game's camera left the commander \(episode (?P<ep>\d+)\): (?P<m>[\d.]+) m from the neck"),
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
-                  r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
+                  r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"
+                  r"(?:, back near and gone again within the (?P<hold>[\d.]+) s hold (?P<alt>\d+) times)?"),   # F208: the flaps the hold absorbed (an earlier build's line has none)
     ), _hj_f107_away),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
@@ -21192,12 +21199,18 @@ def self_test_health():
 
         # ---- camera away (F107): the game's camera away from the commander ----
         F107 = "camera away (F107)"
-        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, 3.0)
-        AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0)
+        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, 3.0, 1.0)
+        AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0, 1.0, 0)
+        AWAY_END_FLAPS = R("native on foot camera away (F107): the episode ended", 18.4, 2, 1620, 710.5, 710.6, 0, 1.0, 640)
         check("F107 away: the carrier management screen in the 1c26ea5f build (the camera taken as the eye)", [neck(view=17373.5, tgt=-50.0, incam=-50.0,
               game=17423.5)] * 3 + [neck()], 3, [("NEVER APPLIED", F107)], has=["the game's camera 174.2 m from the neck in 3 neck reference seconds"])
         check("F107 away: an episode refused, the neck reference clean", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)],
               has=["1 episodes (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
+        check("F208 away: the suit shop in one episode, the flaps the hold absorbed counted and no line each", [neck(), AWAY_LEFT, AWAY_END_FLAPS, neck()], 0, [("OK", F107)],
+              has=["1 episodes (18.4 s, 1620 calls refused, the camera 710.5-710.6 m from the neck, 640 flaps inside the 1.0 s hold)"], lacks=["UNPARSED", "PARTIAL"])
+        SHOP_FLAP_END = R("native on foot camera away (F107): the episode ended", 0.0, 4, 1, 710.5, 710.5, 0, 1.0, 0)
+        check("F208 away: a build before F208 ended an episode on every return: hundreds of 0.0 s episodes are PARTIAL", [neck()] + [AWAY_LEFT, SHOP_FLAP_END] * 30 + [neck()], 0, [("PARTIAL", F107)],
+              has=["30 of 30 episodes lasted under 0.2 s", "the view pumped"], lacks=["UNPARSED"])
 
         # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
         B115 = "boarding reset (F115)"

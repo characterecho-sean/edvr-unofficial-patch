@@ -14744,7 +14744,7 @@ nofoot::f88::Settle g_f94Settle;
 // F107: the game's camera away from the commander, published by the Animate post-hook (the pin refused the call): the episode, its calls and its distances.
 // The frame thread logs the edges (the hook does not log) and takes the neck reference's raise out while the camera is away.
 std::atomic<bool> g_f107AwayNow{false};
-std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0};
+std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0}, g_f107Alternations{0};   // F208: the calls refused (near ones of an open episode too) and the returns that did not last the hold
 std::atomic<float> g_f107NearestM{0.0f}, g_f107FarthestM{0.0f};
 std::atomic<uint64_t> g_f107LastMs{0};
 uint32_t g_f107EpisodesLogged = 0;
@@ -14752,7 +14752,9 @@ bool g_f107AwayLogged = false;
 uint64_t g_f107LeftMs = 0;
 bool f107Tick(uint64_t now) noexcept {
     const uint64_t last = g_f107LastMs.load(std::memory_order_relaxed);
-    const bool away = g_f107AwayNow.load(std::memory_order_acquire) && now >= last && now - last <= nofoot::f94::kTargetMaxAgeMs;
+    // F208: an open episode is over only when the hook says so (the camera stayed on the commander for the hold) or has not reported for kAwayStaleMs; the hook reports on every call of an open
+    // episode, so a camera that alternates between far and near never ages, and a short stale report alone (the old 250 ms) ends nothing
+    const bool away = nofoot::f107::awayNow(g_f107AwayNow.load(std::memory_order_acquire), last, now);
     const uint32_t episodes = g_f107Episodes.load(std::memory_order_relaxed);
     if (away && (!g_f107AwayLogged || episodes != g_f107EpisodesLogged)) {
         g_f107AwayLogged = true;
@@ -14760,14 +14762,15 @@ bool f107Tick(uint64_t now) noexcept {
         g_f107LeftMs = now;
         Log::get().note("native on foot camera away (F107): the game's camera left the commander (episode %u): %.1f m from the neck, over the %.1f m a commander's "
                         "eye can be; the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
-                        "(the view is the game's own camera)", episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM);
+                        "(the view is the game's own camera); the episode ends after the camera has stayed on the commander for %.1f s",
+                        episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM, nofoot::f107::kReturnHoldS);
     } else if (!away && g_f107AwayLogged) {
         g_f107AwayLogged = false;
         Log::get().note("native on foot camera away (F107): the episode ended after %.1f s (episode %u): %u pinned calls refused, the camera "
-                        "%.1f to %.1f m from the neck, not a number in %u; the neck reference takes its target from the next settled stance",
+                        "%.1f to %.1f m from the neck, not a number in %u, back near and gone again within the %.1f s hold %u times; the neck reference takes its target from the next settled stance",
                         static_cast<double>(now - g_f107LeftMs) * 1e-3, episodes, g_f107Calls.load(std::memory_order_relaxed),
                         static_cast<double>(g_f107NearestM.load(std::memory_order_relaxed)), static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)),
-                        g_f107NotNumber.load(std::memory_order_relaxed));
+                        g_f107NotNumber.load(std::memory_order_relaxed), nofoot::f107::kReturnHoldS, g_f107Alternations.load(std::memory_order_relaxed));
     }
     return away;
 }
@@ -17536,6 +17539,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if (g_f107Away.away) {
                 refusal = kPinRefCameraAway;
                 g_f107Calls.store(g_f107Away.calls, std::memory_order_relaxed);
+                g_f107Alternations.store(g_f107Away.alternations, std::memory_order_relaxed);
                 g_f107NotNumber.store(g_f107Away.notNumber, std::memory_order_relaxed);
                 g_f107NearestM.store(static_cast<float>(g_f107Away.nearestM), std::memory_order_relaxed);
                 g_f107FarthestM.store(static_cast<float>(g_f107Away.farthestM), std::memory_order_relaxed);
