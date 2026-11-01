@@ -410,10 +410,13 @@ inline void run193(Check&& check) {
         check(has("if (pc.f193Camera) {   // F193: the camera rule on this target too") && has("const nofoot::f193::Result restR = nofoot::f193::cameraTarget(restHipAt, N0[1], f97W, pc.eyeYSelected, f97H, legsRoomM, pc.detachW);") &&
                   has("physicalTarget[1] = restAt.y;"),
               "F193: the rest target (the neck-yaw path) takes the same rule on the same decision, from its own hip demand");
-        check(has("nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));") &&
-                  has("if (g_f193Box.take(&bw) && bw.any()) {") &&
+        check(has("nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), secs193, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));") &&
+                  has("if (secs193 && g_f193Box.take(&bw) && bw.any()) {") &&
                   has("g_f193Box.clearPending.store(true, std::memory_order_relaxed);"),
-              "F193: the 1 s line is taken from the window with the other pin lines and cleared at an edge");
+              "F193: the height line is taken from the window with the other pin lines, every logwin window, and cleared at an edge");
+        check(has("const uint32_t secs193 = (f193Was && !adsNow && !nofoot::logwin::detail()) ? nofoot::logwin::flush(f193LineMs, now) : nofoot::logwin::window(f193LineMs, now);") &&
+                  has("        f193LineMs = 0;\n"),
+              "RC5 review: F193's height line follows the on-foot log diet (F125): 10 s windows by default, 1 s with log.on_foot_detail, closed early when the press of the sights ends, and restarted at an edge");
         check(has("fp.n0y = static_cast<float>(pc.N0[1]);") && has("fp.legsRoomM = static_cast<float>(pc.f193LegsRoomM);") && has("fp.rawEyeY = static_cast<float>(pc.rawEyeY);") && has("fp.source = pc.f193Source;") &&
                   has("sf.n0y = pin.n0y;") && has("ADS neck (F193): animated neck y %.3f m, F163 posture w %.2f, legs' room %s, standing raise asked %+.1f cm, camera eye y %.3f m, neck target y %.3f m, rule %s"),
               "F193: the F85a event lines carry the animated neck's y, the posture weight, the legs' room, the standing raise, the camera's eye, the neck target and the rule");

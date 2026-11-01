@@ -198,11 +198,11 @@ static bool wiredOffAa(const std::string& layer, const std::string& nt, const st
     const size_t off = nt.find("if(!s->currentSettings.on){"), call = nt.find("edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,"), early = nt.find("if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated");
     const size_t fn = tp.find("void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {");
     if (fn == std::string::npos) return false;
-    const std::string body = tp.substr(fn, 3400);
+    const std::string body = tp.substr(fn, 5200);
     return has(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);") && has(layer, "leftArgs.resolved = e.doorFromPass;") && off != std::string::npos && call != std::string::npos &&
            early != std::string::npos && off < call && call < early && has(nt, "(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]") && has(nt, "s->nearLast[eye]=s->nearZ[eye];") &&
-           before(body, "scopeZoomDepthClear(eye);", "if (eye != 1 || !source || !region || !scopeZoomWanted()) return;") &&
-           before(body, "if (eye != 1 || !source || !region || !scopeZoomWanted()) return;", "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)") &&
+           before(body, "scopeZoomDepthClear(eye);", "releaseEye(g_eye[eye]);") && before(body, "releaseEye(g_eye[eye]);", "if (eye != 1 || !source || !region) return;") &&
+           before(body, "if (eye != 1 || !source || !region) return;", "if (!scopeZoomWanted()) {") && has(body, "releaseDepth(g_eye[1]);") && before(body, "releaseDepth(g_eye[1]);", "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)") &&
            before(body, "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)", "scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);") &&
            has(body, "const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);") && has(body, "region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height") &&
            has(door, "if (a.gameOwn && !g_firstOwnNoted) {") && has(door, "the game's own, Anti-aliasing off") && has(door, "} else if (!a.gameOwn && !g_firstNoted) {");
@@ -266,7 +266,7 @@ static void wiringTests() {
         check(!wiredOffAa(replaced(layer, "leftArgs.resolved = e.doorFromPass;", "leftArgs.resolved = true;"), nt, temporal, door), "control: B3's left door taking the game's own picture is not what F202 builds");
         check(!wiredOffAa(layer, replaced(nt, "edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,", "edvr::temporalPassNoteEyeTanX(int(eye),source,region,"), temporal, door), "control: a mode-off branch that never tells the depth step is not the wiring");
         check(!wiredOffAa(layer, replaced(nt, "s->nearLast[eye]=s->nearZ[eye];", ""), temporal, door), "control: a near plane not kept across frames is not the wiring");
-        check(!wiredOffAa(layer, nt, replaced(temporal, "    scopeZoomDepthClear(eye);\n    if (eye != 1 || !source", "    if (eye != 1 || !source"), door), "control: a step that does not clear the slot first (a view from an earlier frame could stay) is not the wiring");
+        check(!wiredOffAa(layer, nt, replaced(temporal, "    scopeZoomDepthClear(eye);\n    // RC5 review", "    // RC5 review"), door), "control: a step that does not clear the slot first (a view from an earlier frame could stay) is not the wiring");
         check(!wiredOffAa(layer, nt, replaced(temporal, "const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);", "const float lensNear = 0.04f;"), door), "control: a near depth that is not the infinite-far reading of the runtime's near plane is not the wiring");
         check(!wiredOffAa(layer, nt, replaced(temporal, "scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);", ""), door), "control: a step that never sets the slot is not the wiring");
     }

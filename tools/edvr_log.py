@@ -15167,7 +15167,7 @@ def _hj_f186_stops(rows, ctx):
 # 2026-10-31 (F194b), and the rule that judged it is gone. A log of an earlier build is read as before: the frustum line and the key notes belong to no rule, and the 1 s line still parses in all three of its forms (the F194
 # build's, which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim; the F194b build's, with look to aim's own 10 deg gate in the settle field; and the present one).
 H194_LABEL_HEIGHT = "native on foot look to aim height (F194)"
-H194_SEC_RE = (r"native on foot look to aim height \(F194\) 1 s: (?:the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); )?"
+H194_SEC_RE = (r"native on foot look to aim height \(F194\) (?P<wl>\d+) s: (?:the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); )?"
                r"the headset's pitch \(LOCAL\) mean (?P<local>%s) deg; carried aim pitch mean (?P<carried>%s) deg \(the game's aim (?P<root>%s) deg\); the reported head's pitch from "
                r"the aim mean(?:: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg| (?P<off>%s) deg); the settle: "
                r"(?:look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) (?P<ten>\d+) of (?P<calls>\d+) pin calls, F138/F139's 20 deg gate refused (?P<f139>\d+), taken (?P<taken>\d+)"
@@ -20955,9 +20955,9 @@ def self_test_health():
         # ---- F194: look to aim's eye height settles as mouse look's does (behaviour since F195b); the view's height at each edge. The lines of the earlier builds are still read ----
         F194H = "look to aim eye height (F194)"
 
-        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, f139=0, taken=1, calls=90, raise_=-5.0, eye=19.0):
-            """The 1 s line, from the DLL's own format (formatSecond)."""
-            return R194("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg", local, carried, root, off, f139, taken, calls, raise_, eye)
+        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, f139=0, taken=1, calls=90, raise_=-5.0, eye=19.0, secs=1):
+            """The height line, from the DLL's own format (formatSecond); secs is the window it covers (1 s in the detail log, 10 s by default, 1 to 10 when a disengage closes it: F125)."""
+            return R194("native on foot look to aim height (F194) %u s: the headset's pitch (LOCAL) mean %+.1f deg", secs, local, carried, root, off, f139, taken, calls, raise_, eye)
 
         def view194(kind="engage", before="1.610 m, carried aim pitch +0.0 deg", a1="+0.0 cm (1.610 m), carried aim pitch -2.0 deg", a2="+0.0 cm (1.610 m), carried aim pitch -2.0 deg",
                     a3="+0.0 cm (1.610 m), carried aim pitch -2.0 deg"):
@@ -20980,6 +20980,14 @@ def self_test_health():
               quest194 + [view194()], 0, [("OK", F194H)],
               has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
                    "engage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s +0.0 cm; carried aim pitch -2.0 deg at 3 s"], lacks=["UNPARSED", "PARTIAL", "NEVER", "10 deg gate"])
+        # the RC5 review: F194's line follows the on-foot log diet (F125): 10 s by default, a window a disengage closes early prints its own length. A log with no detail lines reads as it should.
+        check("F194: 10 s windows (the default log) are read as the seconds they cover: 20 engaged s, 1800 pin calls, OK", [sec194(secs=10, calls=900, taken=2)] * 2 + [view194()], 0, [("OK", F194H)],
+              has=["20 engaged s, 1800 pin calls: F138/F139's 20 deg gate refused 0, stances taken 4"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: a window the disengage closed early (4 s) beside 10 s windows counts its own seconds", [sec194(secs=10, calls=900), sec194(secs=4, calls=360), view194(kind="disengage")], 0, [("OK", F194H)],
+              has=["14 engaged s, 1260 pin calls"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: a log with no detail lines and one 10 s window per engagement is not NEVER APPLIED", [sec194(secs=10, calls=900)], 0, [("OK", F194H)], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F194: 10 engaged seconds in one window with no stance taken is still PARTIAL (the window's length counts)", [sec194(secs=10, calls=900, taken=0)], 0, [("PARTIAL", F194H)],
+              has=["no stance was taken in 10 engaged seconds"], lacks=["UNPARSED", "NEVER"])
         check("F194: the 1 s line of the build with look to aim's own 10 deg gate is still read, and what that gate did is named, not judged",
               [OLD_KEYNOTE194] + [OLD_SEC194B] * 3 + [view194()], 0, [("OK", F194H)],
               has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3", "[3 row(s) of a build with look to aim's own 10 deg gate: it would have refused (skipped) 180 calls]"],

@@ -56,8 +56,20 @@ void run205(Check&& check) {
             all = all && f162::aimingEye(eff) == 1 && f162::sharesView(eff);   // forced: the right eye is the aiming eye and the share runs
         }
         check(all, "F205: B3 applying forces both for the key right, left and both (the right eye aims, the share runs); B3 not applying leaves the key as it is");
-        check(f205::b3Applies(true, true, true) && !f205::b3Applies(false, true, true) && !f205::b3Applies(true, false, true) && !f205::b3Applies(true, true, false),
-              "F205: B3 applies when its key is on, the scope zoom is on and the held item is its entry, and not otherwise");
+        check(f205::b3Applies(true, true, true, true) && !f205::b3Applies(false, true, true, true) && !f205::b3Applies(true, false, true, true) && !f205::b3Applies(true, true, false, true) &&
+                  !f205::b3Applies(true, true, true, false),
+              "F205: B3 applies when its key is on, the scope zoom is on, the held item is its entry and a temporal mode runs, and not otherwise (RC5 review: not with Anti-aliasing off)");
+        {   // the RC5 review: with the mode off the latch forces nothing for any key value; with it on it is as before
+            bool offKeeps = true, onForces = true;
+            for (int key : {int(f162::kBoth), int(f162::kRight), int(f162::kLeft)}) {
+                f205::PressLatch off, on;
+                off.begin(f205::b3Applies(true, true, true, false), key);
+                on.begin(f205::b3Applies(true, true, true, true), key);
+                offKeeps = offKeeps && !off.forced && !off.overrode && f205::effectiveSightEye(key, off.forced) == key;
+                onForces = onForces && on.forced && on.overrode == (key != f162::kBoth) && f205::effectiveSightEye(key, on.forced) == f162::kBoth;
+            }
+            check(offKeeps && onForces, "RC5 review: with Anti-aliasing off the scoped Executioner's press forces nothing for the key both, right or left (no override, no line); with a temporal mode it forces both as before");
+        }
         check(sz::lensRenderedEntry(kExecutioner, sz::kLensScopeYes) && !sz::lensRenderedEntry(kExecutioner, sz::kLensScopeNo) && !sz::lensRenderedEntry(kExecutioner, sz::kLensScopeUnknown) &&
                   !sz::lensRenderedEntry("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeYes),
               "F205: B3's entry is the scoped Executioner alone (the bare one, an unknown scope and the assault rifle are not)");
@@ -274,9 +286,9 @@ void run205(Check&& check) {
         check(tick != std::string::npos && idle != std::string::npos && idle > tick && idle - tick < 400 && engage != std::string::npos && f176 != std::string::npos && engage > f176 && engage - f176 < 600 &&
                   reengage != std::string::npos && cpp.substr(reengage, 600).find("g_f205Latch") == std::string::npos,
               "F205: the latch starts at the engage from idle (and nowhere else: a re-engage from the release does not touch it) and ends at the top of the tick once the press has fully ended");
-        check(cpp.find("bool f205B3Applies() noexcept {\n    if (!g_scopeZoomFullKey.load(std::memory_order_relaxed) || !g_scopeZoomKey.load(std::memory_order_relaxed)) return false;") != std::string::npos &&
-                  cpp.find("edvr::scopezoom::lensRenderedEntry(it.name, it.scope)") != std::string::npos,
-              "F205: B3 applies by its key, the scope zoom's and the held item's table row");
+        check(cpp.find("if (!g_scopeZoomFullKey.load(std::memory_order_relaxed) || !g_scopeZoomKey.load(std::memory_order_relaxed) || !temporalPassWantsFssChrome()) return false;") != std::string::npos &&
+                  cpp.find("edvr::scopezoom::lensRenderedEntry(it.name, it.scope), true);") != std::string::npos,
+              "F205: B3 applies by its key, the scope zoom's, the held item's table row and a temporal mode (RC5 review: the very mode b3Tick gates the full detail on)");
         check(cpp.find("std::atomic<bool> g_scopeZoomFullKey{true};") != std::string::npos && cpp.find("cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"") != std::string::npos &&
                   ini.find("native_on_foot_ads_scope_zoom_full_detail = on\n") != std::string::npos && ini.find("# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended on | live\n") != std::string::npos,
               "F205: the full-detail scope is on by default in the code, the reader's fallback, the ini line and its menu row");

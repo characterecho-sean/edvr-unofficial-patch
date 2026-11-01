@@ -260,6 +260,9 @@ struct EyeState {
     DXGI_FORMAT histFmt = DXGI_FORMAT_UNKNOWN;
 };
 EyeState g_eye[2];
+// RC5 review: with the mode off nothing holds the views temporalInner made while it was on, and the scope lens's view of the game's depth (F202) is kept past a press. The render thread lets
+// them go once at the edge to off (temporalPassNoteOffAaSceneDepth); the config edge to on arms it again.
+std::atomic<bool> g_offAaFreed[2] = {{false}, {false}};
 
 void releaseSrc(EyeState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
@@ -5619,6 +5622,10 @@ void temporalPassConfigure(Config& cfg) {
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
+        if (detail::g_temporalPassWantedFssChrome) {   // the mode is on again: the next edge to off lets the pass's views go once more (the render thread does it, in the off branch of treat)
+            g_offAaFreed[0].store(false, std::memory_order_relaxed);
+            g_offAaFreed[1].store(false, std::memory_order_relaxed);
+        }
         memset(g_rowsObserved, 0, sizeof(g_rowsObserved));
         g_rowsObservedWrites = 0;
         g_rowsObservedEvictions = 0;
@@ -6979,7 +6986,17 @@ float temporalPassDepthAt(float metres) {
 void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {
     if (eye < 0 || eye > 1) return;
     scopeZoomDepthClear(eye);
-    if (eye != 1 || !source || !region || !scopeZoomWanted()) return;
+    // RC5 review: the first call of this eye with the mode off lets go of every view the pass made while it was on (its history, copies, depth and DLSS buffers: nothing holds them now, and a resolution
+    // change would keep the old textures alive); the lens's own depth view is made again on demand. With a temporal mode on this is never called.
+    if (!g_offAaFreed[eye].load(std::memory_order_relaxed)) {
+        releaseEye(g_eye[eye]);
+        g_offAaFreed[eye].store(true, std::memory_order_relaxed);
+    }
+    if (eye != 1 || !source || !region) return;
+    if (!scopeZoomWanted()) {   // no press of the sights is open: the lens's view of the game's depth is let go, so it holds no reference to the texture (a later press makes it again)
+        releaseDepth(g_eye[1]);
+        return;
+    }
     guarded("scopeZoom.offAaDepth", [&] {
         const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);
         if (!(lensNear > 0.0f)) return;   // no near plane yet: the door counts "depth unavailable"

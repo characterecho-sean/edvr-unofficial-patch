@@ -58,14 +58,18 @@ void run194(Check&& check) {
             if (i < 3) c.f139Refused = true;
             w.add(c);
         }
-        f194::formatSecond(buf, sizeof(buf), s, w);
+        f194::formatSecond(buf, sizeof(buf), 1, s, w);
         check(std::strlen(buf) < 1100 && std::strstr(buf, "look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean +2.0 deg;") != nullptr &&
                   std::strstr(buf, "carried aim pitch mean -3.0 deg (the game's aim -16.0 deg);") != nullptr && std::strstr(buf, "the reported head's pitch from the aim mean +4.5 deg;") != nullptr &&
                   std::strstr(buf, "the settle: F138/F139's 20 deg gate refused 3, taken 1 of 90 pin calls;") != nullptr &&
                   std::strstr(buf, "the published raise mean -5.0 cm;") != nullptr && std::strstr(buf, "the drawn eye over the animated neck mean +19.0 cm") != nullptr &&
                   std::strstr(buf, "picture") == nullptr && std::strstr(buf, "ray in force") == nullptr && std::strstr(buf, "forward axis") == nullptr && std::strstr(buf, "10 deg") == nullptr,
               "F194: the 1 s line says the headset's, the carried and the game's aim pitch, the reported head's pitch from the aim, the settle (F138/F139's 20 deg gate refused, stances taken, of how many pin calls), the raise and the drawn eye over the neck, and nothing of the picture's centre, a ray or a 10 deg gate");
-        f194::formatSecond(buf, sizeof(buf), s, f194::Window{});
+        char tenBuf[1100];
+        f194::formatSecond(tenBuf, sizeof(tenBuf), 10, s, w);
+        check(std::strstr(tenBuf, "look to aim height (F194) 10 s: the headset's pitch (LOCAL) mean +2.0 deg;") != nullptr && std::strlen(tenBuf) < 1100,
+              "RC5 review: F194's line prints the seconds its window covers (10 by default, 1 with log.on_foot_detail, 1 to 10 when a disengage closes it), where it printed 1 s");
+        f194::formatSecond(buf, sizeof(buf), 1, s, f194::Window{});
         check(std::strstr(buf, "of 0 pin calls") != nullptr && std::strstr(buf, "taken 0 of 0 pin calls;") != nullptr,
               "F194: a second in which the hook wrote nothing says 0 pin calls: the line cannot read as success when the hook never ran");
         f194::Window w2;
@@ -204,9 +208,13 @@ void run194(Check&& check) {
                   has("g_f194ViewY.store(pc.f97EyeDrawn[1], std::memory_order_relaxed);") && has("if (freshIn && pc.f97EyeDrawnOk && refusal != kPinRefCameraAway && !(pc.detachW > 0.0)) {"),
               "F194: the pin hook writes the settle's fate, the drawn eye over the neck and the raise to the window, and the view's height (a fresh hip frame, the commander's camera) for the probe");
         check(has("f194Edge(now, true);   // F194: the view's height before the engage") && has("f194Edge(now, false);   // F194: the view's height before the disengage") &&
-                  has("if (g_lta.engaged) f194Edge(GetTickCount64(), false);") && has("f194Tick(now);") && has("nofoot::f194::formatSecond(heightLine, sizeof(heightLine), g_f194Sec, hw);") &&
+                  has("if (g_lta.engaged) f194Edge(GetTickCount64(), false);") && has("f194Tick(now);") && has("nofoot::f194::formatSecond(heightLine, sizeof(heightLine), secs, g_f194Sec, hw);") &&
                   has("if (g_f194Box.take(&hw) && g_f194Sec.any()) {"),
-              "F194: the probe is begun at the engage, the disengage and a stop, ticked every frame, and the 1 s line is taken from the hook's window while engaged");
+              "F194: the probe is begun at the engage, the disengage and a stop, ticked every frame, and the height line is taken from the hook's window while engaged");
+        // the RC5 review: the line follows the on-foot log diet: a window of the log's length (10 s by default, 1 s with log.on_foot_detail), closed early at the disengage unless the detail log prints every second
+        check(has("if (const uint32_t heightSecs = nofoot::logwin::window(g_f194LineMs, now)) f194SecondPrint(heightSecs);") && has("const uint32_t secs = nofoot::logwin::flush(g_f194LineMs, now);") &&
+                  has("if (secs) f194SecondPrint(secs);") && !has("if (now - g_f194LineMs >= 1000) {"),
+              "RC5 review: F194's height line is a F125 window (10 s by default, 1 s with log.on_foot_detail), flushed at the disengage; the engage and disengage height lines are as they were");
         // F109's centred line: the picture-centre and forward-axis fields are gone, F195's tail stays
         check(has("pitch kept %+.2f deg, centred %+.2f deg (%s); %s\",") && !has("the forward axis itself") && !has("(F194), "),
               "F194b: the F109 centred line is the reported head's offset, F195's kept and centred pitch and the outcome: no picture-centre pitch, no second set of angles");

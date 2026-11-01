@@ -331,9 +331,10 @@ bool f205B3Applies() noexcept;          // defined after f141Item(): B3's key an
 std::atomic<bool> g_scopeZoomKey{true};
 std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
 // B3 (live): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default ON since F205 (the pilot's word, 2026-11-01): the user's choice of the scoped Executioner's lens. On: for the
-// scoped Executioner (the table's rendered entry) with fix.native_on_foot_ads_scope_zoom on, the press takes both eyes whatever fix.native_on_foot_ads_sight_eye says (the effective sight eye),
-// and the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge in each eye's outer view while the zoom stands; off: the lens is
-// the digital zoom of the right eye (A), with no edge. With Anti-aliasing off the full detail does not run (its left door needs the upscaler's picture) and the lens is F202's.
+// scoped Executioner (the table's rendered entry) with fix.native_on_foot_ads_scope_zoom on and a temporal mode running, the press takes both eyes whatever fix.native_on_foot_ads_sight_eye says (the
+// effective sight eye), and the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge in each eye's outer view while the zoom stands;
+// off: the lens is the digital zoom of the right eye (A), with no edge. With Anti-aliasing off the full detail does not run (its left door needs the upscaler's picture): the lens is F202's and the
+// press keeps the player's sight eye.
 std::atomic<bool> g_scopeZoomFullKey{true};
 // B3's instruments, written by the draw/render thread and read by the frame thread at a press's end: a press with B3 asked is open (the draw path counts the eyes' draws, the constants buffer's
 // shadow keeps the shadow constants); the eye-sized draws into each eye since the frame thread's last tick; the readout pin's frames taken on one eye, and refused for want of a pair
@@ -1410,9 +1411,9 @@ void readKey() {
         const bool full = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail", "on") == "on";
         if (first || full != g_scopeZoomFullKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS scope zoom full detail (B3): experimental.native_on_foot_ads_scope_zoom_full_detail is %s -- %s", full ? "on" : "off",
-                            full ? "while you aim down sights through the scoped Executioner, with the scope zoom on, the press takes both eyes whatever ADS: sight eye says, the game draws the LEFT eye "
+                            full ? "while you aim down sights through the scoped Executioner, with the scope zoom on and a temporal anti-aliasing mode, the press takes both eyes whatever ADS: sight eye says, the game draws the LEFT eye "
                                    "as the zoomed view (its frustum narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture at full detail; the left eye is "
-                                   "covered by the right eye's view, and an equal black edge takes the outer part of each eye's view meanwhile (with Anti-aliasing off the lens is the digital zoom)"
+                                   "covered by the right eye's view, and an equal black edge takes the outer part of each eye's view meanwhile (with Anti-aliasing off the lens is the digital zoom and your ADS: sight eye stays)"
                                  : "the scope's lens is the digital zoom of the right eye's picture (A), with no edge");
         g_scopeZoomFullKey.store(full, std::memory_order_relaxed);
     }
@@ -8265,6 +8266,16 @@ void ltaFreshFollower(uint64_t now, nofoot::f195::Why keepWhy, uint64_t keepRunM
     g_turn.flick.reset();
     g_adsAimMode = nofoot::f92::kAimOn;
 }
+// F194's height line (F125's diet: a summary of means, so the window takes the place of the 1 s gate): the hook's window and the tick's sums over the seconds the line covers, printed and cleared.
+void f194SecondPrint(uint32_t secs) noexcept {
+    nofoot::f194::Window hw;
+    if (g_f194Box.take(&hw) && g_f194Sec.any()) {
+        char heightLine[1100];
+        nofoot::f194::formatSecond(heightLine, sizeof(heightLine), secs, g_f194Sec, hw);
+        Log::get().note("%s", heightLine);
+    }
+    g_f194Sec = nofoot::f194::Second{};
+}
 void ltaEngage(uint64_t now) noexcept {
     const bool wasUnwinding = g_lta.unwinding;
     f194Edge(now, true);   // F194: the view's height before the engage, and at 0.5 s, 1 s and 3 s after
@@ -8289,6 +8300,10 @@ void ltaEngage(uint64_t now) noexcept {
 // view stays the headset's), then drops; otherwise (a stop) adsStop has already returned the seated rotation to zero.
 void ltaDisengage(uint64_t now, const char* why, bool unwind) noexcept {
     f194Edge(now, false);   // F194: the view's height before the disengage, and at 0.5 s, 1 s and 3 s after
+    if (!nofoot::logwin::detail()) {   // F125: a window the disengage closes early is printed with its own length, so one line describes one state (the detail log prints every second as before)
+        const uint32_t secs = nofoot::logwin::flush(g_f194LineMs, now);
+        if (secs) f194SecondPrint(secs);
+    }
     g_lta.engaged = false;
     g_ltaDrop.store(false, std::memory_order_relaxed);
     g_snapIn.store(0.0f, std::memory_order_relaxed);
@@ -9562,17 +9577,9 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         }
         // F194: look to aim's height line, once a second while it is engaged: the head's, the carried and the game's pitch, the reported head's pitch from the aim, the settle's fate (the hook's window: F138/F139's 20 deg gate, the stances taken), the published raise and the drawn eye over the animated neck.
         // A window the hook wrote nothing to prints "of 0 pin calls": the line cannot read as success when the hook never ran.
+        // F125 (the log diet): a summary of means, so the window takes the place of the 1 s gate: every 10 s by default, every second with log.on_foot_detail, closed early at the disengage.
         if (g_f194LineMs == 0) g_f194LineMs = now;
-        if (now - g_f194LineMs >= 1000) {
-            g_f194LineMs = now;
-            nofoot::f194::Window hw;
-            if (g_f194Box.take(&hw) && g_f194Sec.any()) {
-                char heightLine[1100];
-                nofoot::f194::formatSecond(heightLine, sizeof(heightLine), g_f194Sec, hw);
-                Log::get().note("%s", heightLine);
-            }
-            g_f194Sec = nofoot::f194::Second{};
-        }
+        if (const uint32_t heightSecs = nofoot::logwin::window(g_f194LineMs, now)) f194SecondPrint(heightSecs);
     }
     // The 1 s lines while engaged or releasing.
     if (g_adsState != kAdsIdle && now - g_adsLineMs >= 1000) {
@@ -25158,9 +25165,12 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
 void f138Line(uint64_t now) noexcept {
     namespace f138 = nofoot::f138;
     static uint64_t lineMs = 0, binMs = 0;
+    static uint64_t f193LineMs = 0;   // F193's window (F125's diet); F193Was: whether the sights were up at the last second, to close the window when the press ends
+    static bool f193Was = false;
     static f138::Group bins[2][2];   // [look to aim][item drawn], merged each second, printed and cleared every 10 s
     if (g_f138LineReset.exchange(false, std::memory_order_relaxed)) {
         lineMs = binMs = 0;
+        f193LineMs = 0;
         g_f138Box.clearPending.store(true, std::memory_order_relaxed);   // F170: the window the edge left is not the next second's
         g_f171cBox.clearPending.store(true, std::memory_order_relaxed);  // F171: nor the raise carriage's
         g_f175Box.clearPending.store(true, std::memory_order_relaxed);   // F175: nor the view roll's
@@ -25204,12 +25214,17 @@ void f138Line(uint64_t now) noexcept {
                 }
         }
     }
-    // F193: the sights' neck height, one line for a second with calls in the sights with a weapon drawn: the rule that set it, the neck target against the camera's eye, the frame steps, the stops.
+    // F193: the sights' neck height, one line for a window with calls in the sights with a weapon drawn: the rule that set it, the neck target against the camera's eye, the frame steps, the stops.
+    // F125 (the log diet): a summary of sums and maxima, so the window takes the place of the 1 s gate: every 10 s by default (the hook's window accumulates until it is taken), every second with
+    // log.on_foot_detail, and closed early when the press of the sights ends (the detail log is as it was).
     {
+        const bool adsNow = g_adsState != kAdsIdle;
+        const uint32_t secs193 = (f193Was && !adsNow && !nofoot::logwin::detail()) ? nofoot::logwin::flush(f193LineMs, now) : nofoot::logwin::window(f193LineMs, now);
+        f193Was = adsNow;
         nofoot::f193::Window bw;
-        if (g_f193Box.take(&bw) && bw.any()) {
+        if (secs193 && g_f193Box.take(&bw) && bw.any()) {
             char bodyLine[760];
-            nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));
+            nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), secs193, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));
             Log::get().note("%s", bodyLine);
         }
     }
@@ -25711,9 +25726,10 @@ F141Item f141Item() noexcept {
 
 // F205: B3 applies to a press that starts now: its key on, the scope zoom key on, and the held item B3's table entry (the scoped Executioner). The item is read as the press's start reads it.
 bool f205B3Applies() noexcept {
-    if (!g_scopeZoomFullKey.load(std::memory_order_relaxed) || !g_scopeZoomKey.load(std::memory_order_relaxed)) return false;
+    // RC5 review: B3's full detail runs only with a temporal mode (b3Tick's keyB3 asks the same); without one nothing needs both eyes, so the press keeps the player's sight eye.
+    if (!g_scopeZoomFullKey.load(std::memory_order_relaxed) || !g_scopeZoomKey.load(std::memory_order_relaxed) || !temporalPassWantsFssChrome()) return false;
     const F141Item it = f141Item();
-    return nofoot::f205::b3Applies(true, true, edvr::scopezoom::lensRenderedEntry(it.name, it.scope));
+    return nofoot::f205::b3Applies(true, true, edvr::scopezoom::lensRenderedEntry(it.name, it.scope), true);
 }
 // The sight point's window, the activation lines and the one-shot (frame thread only, as is everything below).
 nofoot::adslog::Window g_f141Win;
@@ -36849,7 +36865,7 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
     s0::Vr& v = s0::g_vr;
     constexpr double nan = std::numeric_limits<double>::quiet_NaN();
     // F205: B3's full detail needs the upscaler's picture at the left door (F202 left it so), so it waits for a temporal mode: with Anti-aliasing off the key being on (it is by default) asks nothing of
-    // the left eye -- no window, no strip, no black bars -- and the lens is F202's. The press still takes both eyes (the effective sight eye) and the ADS view circle (circleTick) with it off.
+    // the left eye -- no window, no strip, no black bars -- and the lens is F202's. The press keeps the player's sight eye then (f205B3Applies asks the same mode); the ADS view circle (circleTick) has no such gate.
     const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn && temporalPassWantsFssChrome();
     const bool rendered = sz::lensRenderedEntry(s.item.name, s.item.scope);
     const bool asked = keyB3 && rendered;

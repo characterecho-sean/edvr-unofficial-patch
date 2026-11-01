@@ -5,8 +5,10 @@
 //    and the share shows the right eye's picture to both. So while B3 applies, a press behaves as both whatever the key says. It is decided ONCE, at the press's start (the sight lock's aiming eye
 //    must not change in the middle of a press: a flip would jump the lock), kept through a re-engage from the release, and ended when the press has fully ended (the state is idle again): then
 //    the player's setting is back. One function, effectiveSightEye, is what every reader of the choice asks (adsSightEyeMode in native_on_foot.cpp); nothing else reads the key.
-//    B3 applies when its key is on, the scope zoom key is on, and the held item is B3's table entry (the scoped Executioner). With Anti-aliasing off B3's full detail does not run (its left
-//    door needs the upscaler's picture: F202 left it so), but the press still takes both eyes and the circle: the override does not look at the temporal mode.
+//    B3 applies when its key is on, the scope zoom key is on, the held item is B3's table entry (the scoped Executioner) AND a temporal mode runs. With Anti-aliasing off B3's full detail does not
+//    run (its left door needs the upscaler's picture: F202 left it so), so nothing needs the left eye to show the right's picture and the press keeps the player's sight eye (the RC5 review:
+//    forcing both there took the player's choice for no benefit, and the log's "full detail needs both eyes" was false). The circle is a different matter and has no such gate. The latch is
+//    decided once per press, so a mode switched in the middle of one cannot flip the aiming eye.
 //
 // 2. THE VIEW CIRCLE (view_circle.h): the radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV; no circle, with the reason, for a weapon whose ADS FOV is not known, for a frustum
 //    that is not an eye, for a sight whose far point is not known, and with the scope zoom off. F205b (the pilot's word): the circle has no key of its own; it is on whenever
@@ -28,8 +30,8 @@ namespace f205 {
 // ---- 1. the effective sight eye --------------------------------------------------------------------------------------------------------------------------------------------------
 inline int effectiveSightEye(int keyMode, bool forceBoth) noexcept { return forceBoth ? f162::kBoth : keyMode; }
 
-// B3 applies: its key on, the scope zoom key on, the held item B3's entry.
-inline bool b3Applies(bool fullKeyOn, bool scopeZoomKeyOn, bool renderedEntry) noexcept { return fullKeyOn && scopeZoomKeyOn && renderedEntry; }
+// B3 applies: its key on, the scope zoom key on, the held item B3's entry, and a temporal mode running (temporalPassWantsFssChrome: what b3Tick gates the full detail on).
+inline bool b3Applies(bool fullKeyOn, bool scopeZoomKeyOn, bool renderedEntry, bool temporalMode) noexcept { return fullKeyOn && scopeZoomKeyOn && renderedEntry && temporalMode; }
 
 // The press latch (frame thread). begin() at an engage from idle decides; reengage() at an engage from the release keeps; end() at idle clears.
 struct PressLatch {
