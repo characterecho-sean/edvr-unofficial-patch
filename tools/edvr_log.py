@@ -17121,6 +17121,17 @@ def print_health(text, args, runtime_text=None):
 # A window ends at N and covers frames N-1799..N; one that a change (was not none) fell in mixes two settings and is dropped.
 PERF_KEY_RE = re.compile(r"vr draw path key: (?P<key>experimental\.vr_(?:eye_rows_without_aa|cpu_benchmark_idle|cpu_depth_slot_cache)) = (?P<value>on|off) \(was (?P<was>on|off|none)\) at frame (?P<frame>\d+)\s*$")
 PERF_WINDOW_RE = re.compile(r"draw hook CPU: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, (?P<samples>\d+) sampled frames")
+PERF_CLEARS_RE = re.compile(r"benchmark collector: (?P<size>\d+)-frame window ending (?P<end>\d+); entry clears done (?P<done>\d+), skipped (?P<skipped>\d+)")
+
+
+def parse_bench_clears(text):
+    """Every `benchmark collector:` line (src/d3d11/perf_monitor.cpp, beside each `draw hook CPU:` window), in order: dicts end, done, skipped."""
+    out = []
+    for line in text.splitlines():
+        m = PERF_CLEARS_RE.search(line)
+        if m:
+            out.append({"end": int(m.group("end")), "done": int(m.group("done")), "skipped": int(m.group("skipped"))})
+    return out
 
 
 def parse_perf_keys(text):
@@ -17134,8 +17145,9 @@ def parse_perf_keys(text):
 
 
 def perf_windows(text):
-    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples, dropped (a key changed inside it) and flips (those changes)."""
+    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples, dropped (a key changed inside it), flips (those changes) and clears_done / clears_skipped (None without a `benchmark collector:` line)."""
     flips = [k for k in parse_perf_keys(text) if k["was"] != "none"]
+    clears = dict((c["end"], c) for c in parse_bench_clears(text))
     out = []
     for line in text.splitlines():
         m = PERF_WINDOW_RE.search(line)
@@ -17145,7 +17157,8 @@ def perf_windows(text):
         start = end - size + 1
         inside = [k for k in flips if start <= k["frame"] <= end]
         out.append({"end": end, "start": start, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
-                    "dropped": bool(inside), "flips": inside})
+                    "dropped": bool(inside), "flips": inside, "clears_done": clears[end]["done"] if end in clears else None,
+                    "clears_skipped": clears[end]["skipped"] if end in clears else None})
     return out
 
 
@@ -17160,6 +17173,11 @@ def print_perf_windows(text):
     for w in wins:
         print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s" % (w["end"], w["mean"], w["max"], w["samples"], "kept" if not w["dropped"] else "dropped: " + "; ".join(
             "%s changed to %s at frame %d" % (k["key"], k["value"], k["frame"]) for k in w["flips"])))
+        # The collector's own reading: skipped is what experimental.vr_cpu_benchmark_idle did, and it is not in the draw hook's number.
+        if w["clears_done"] is None:
+            print("    no benchmark collector line for this window (a build without it)")
+        else:
+            print("    entry clears %d done / %d skipped" % (w["clears_done"], w["clears_skipped"]))
     kept = sum(1 for w in wins if not w["dropped"])
     print("[edvr] %d of %d window(s) kept, %d dropped: a window a temporary key changed in mixes two settings." % (kept, len(wins), len(wins) - kept))
     return 0
@@ -23771,6 +23789,24 @@ def self_test_perf_keys():
         rc = print_perf_windows("nothing here\n")
     if rc != 1 or "no `draw hook CPU:` window" not in buf.getvalue():
         fail("a log with no window -> rc %d:\n%s" % (rc, buf.getvalue()))
+    # The benchmark collector line (experimental.vr_cpu_benchmark_idle's own reading), written beside each `draw hook CPU:` window.
+    bench = "[10:00:02.000] benchmark collector: 1800-frame window ending %d; entry clears done %d, skipped %d (idle perf ticks only; skipped needs experimental.vr_cpu_benchmark_idle on).\n"
+    btext = win % (1800, "0.500") + bench % (1800, 1800, 0) + win % (3600, "0.400") + bench % (3600, 3, 1797) + win % (5400, "0.600")
+    clears = parse_bench_clears(btext)
+    if [(c["end"], c["done"], c["skipped"]) for c in clears] != [(1800, 1800, 0), (3600, 3, 1797)]:
+        fail("the benchmark collector lines parsed to %r" % (clears,))
+    if parse_bench_clears("benchmark collector: window ending x\nnothing here\n") != []:
+        fail("a malformed benchmark collector line parsed")
+    got = [(w["end"], w.get("clears_done"), w.get("clears_skipped")) for w in perf_windows(btext)]
+    if got != [(1800, 1800, 0), (3600, 3, 1797), (5400, None, None)]:
+        fail("the windows did not carry their clears: %r" % (got,))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_perf_windows(btext)
+    out = buf.getvalue()
+    for want in ("entry clears 3 done / 1797 skipped", "entry clears 1800 done / 0 skipped", "no benchmark collector line"):
+        if want not in out:
+            fail("--perf-windows output lacks %r:\n%s" % (want, out))
     return ok
 
 

@@ -198,6 +198,9 @@ struct State {
     double   drawWindowMs = 0.0;
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
+    // The benchmark collector's entry clears in the current 1800-frame window (experimental.vr_cpu_benchmark_idle's reading).
+    uint32_t benchClearsDone = 0;
+    uint32_t benchClearsSkipped = 0;
     // The config refresh window (the line beside the draw hook's, every 1800 frames): what kEvReload (edvr.ini re-read and every module reconfigured, on the frame
     // thread, its duration the whole of it) and kEvIniWrite (a menu edit queued for the file) were noted since the last line. A held numeric row in the F8 menu is
     // one edit and, once the write lands, one refresh about every 83 ms; this prices it.
@@ -1118,7 +1121,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
             }
         }
         if (!updateBenchmarkMetadata(s, timing, historyNow)) {
-            s.nativeBenchmark.reset();
+            if (s.nativeBenchmark.reset(vScreenVrCpuBenchmarkIdle())) ++s.benchClearsDone; else ++s.benchClearsSkipped;
             s.nativeBenchmarkScope = 0;
         }
         NativeBenchmarkObservation tick{};
@@ -1184,7 +1187,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         }
     } else {
         s.nativeHistory.clear();
-        s.nativeBenchmark.reset();
+        if (s.nativeBenchmark.reset(vScreenVrCpuBenchmarkIdle())) ++s.benchClearsDone; else ++s.benchClearsSkipped;
         s.nativeBenchmarkScope = 0;
         s.nativeBenchmarkMetadataMs = 0;
         s.nativeBenchmarkMetadata = {};
@@ -1221,6 +1224,11 @@ void perfMonitorFrame(ID3D11Device* dev) {
             unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride),
             vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
+        // Written every window, so a window with no idle tick (both 0: native perf history active) can be told from a build without the line.
+        // The collector runs in the Present-time tick, outside the draw hooks, so it is judged by these counts and cannot move the line above.
+        Log::get().note("benchmark collector: 1800-frame window ending %u; entry clears done %u, skipped %u (idle perf ticks only; skipped needs experimental.vr_cpu_benchmark_idle on).",
+            s.frameNo, s.benchClearsDone, s.benchClearsSkipped);
+        s.benchClearsDone = s.benchClearsSkipped = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
         const uint32_t edits = s.cfgEdits.exchange(0, std::memory_order_relaxed);
