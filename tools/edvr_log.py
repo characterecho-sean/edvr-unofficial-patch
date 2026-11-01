@@ -894,7 +894,32 @@ def parse_reissue(text):
     return out
 
 
-def print_reissue_tally(windows):
+# The GPU census items that are re-issue sections, and the callers that count the same work. A census window that shows one ran while every reissue window counts none of its
+# callers means the helper was bypassed or the sites are not wired: the line's own `none` could not tell. (The census is a 30 s window and the re-issue line an 1800-frame one, so
+# the check reads the whole log.)
+REISSUE_CENSUS_SECTIONS = (("hologram passes", ("ui_depth",)), ("UI depth coverage", ("ui_depth",)), ("planet", ("ui_depth",)), ("weapon motion", ("weapon_motion",)),
+                           ("UI layer reissues", ("ui_layer_second",)), ("FSS reveal replay", ("fss_reveal",)))
+REISSUE_CENSUS_RE = re.compile(r"EDVR GPU census: .*?in-frame [\d.]+ \((?P<items>.*?)\); application render")
+
+
+def reissue_census_gaps(windows, text):
+    """[(census section, callers)] for each re-issue section a `EDVR GPU census:` line shows ran (an item with a figure, not `-`) whose callers no `draw reissue CPU:` window counted."""
+    counted = {}
+    for w in windows:
+        for name, _, calls in w["callers"]:
+            counted[name] = counted.get(name, 0) + calls
+    ran = set()
+    for line in text.splitlines():
+        m = REISSUE_CENSUS_RE.search(line)
+        if not m:
+            continue
+        for section, _ in REISSUE_CENSUS_SECTIONS:
+            if re.search(r"(?:^|, )%s [\d.]+ \(" % re.escape(section), m.group("items")):
+                ran.add(section)
+    return [(section, callers) for section, callers in REISSUE_CENSUS_SECTIONS if section in ran and not any(counted.get(c, 0) for c in callers)]
+
+
+def print_reissue_tally(windows, text=""):
     """The --tally reissue report. Returns the process exit code: 1 when the log has no `draw reissue CPU:` line."""
     if not windows:
         print("[edvr] no `draw reissue CPU:` lines in this log: a build without the re-issue counter, or a session shorter than one 1800-frame window -- this tally reads --tag gfx.")
@@ -903,8 +928,14 @@ def print_reissue_tally(windows):
         hook = "n/a" if w["hook"] is None else "%.3f ms" % w["hook"]
         who = ", ".join("%s %.3f ms (%d)" % c for c in w["callers"]) if w["callers"] else "no caller"
         print("[edvr] draw reissue CPU, window ending %d: %.3f ms/sampled frame (draw hook CPU %s); %d re-issues; %s" % (w["frame"], w["mean"], hook, w["total"], who))
-    print("[edvr] %d window(s). How to read it: the ms are EDVR's re-issues timed whole (state changes and the driver call), the same sampled frames as `draw hook CPU:`, so a caller's "
-          "share of that line is its ms over the hook's. 0 re-issues with `no caller` is a window where the game was never drawn twice; no line at all is a build without the counter." % len(windows))
+    print("[edvr] %d window(s). How to read it: the ms are the re-issue DRAW CALLS timed whole, the same sampled frames as `draw hook CPU:`; the Begin/End state work around a re-issue "
+          "(binds, copies, clears) is outside them, so a low figure does not rule a pass out. Every caller but flat_ui is inside `draw hook CPU:` (its clock stops "
+          "at the game's own draw); flat_ui is outside it (the flat branch has no hook clock), so do not read it as a share of that line. loader_panel never prints: its substitute "
+          "ignores the draw it is handed (a decline goes through the observed draw), so it is a name with no count. 0 re-issues with `no caller` is a window where the game was never "
+          "drawn twice; no line at all is a build without the counter." % len(windows))
+    for section, callers in reissue_census_gaps(windows, text):
+        print("[edvr] CHECK THE WIRING: a GPU census line shows the '%s' section ran, but no window counted %s: a re-issue site may bypass the helper (src/d3d11/vscreen.cpp ReissueClock)."
+              % (section, " or ".join(callers)))
     return 0
 
 
@@ -17238,7 +17269,7 @@ def perf_windows(text):
             continue
         end, size = int(m.group("end")), int(m.group("size"))
         start = end - size + 1
-        inside = [k for k in flips if start <= k["frame"] <= end]
+        inside = [k for k in flips if start - 1 <= k["frame"] <= end]   # start - 1: a flip logged at the previous window's end frame may have run after that window's line
         out.append({"end": end, "start": start, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
                     "dropped": bool(inside), "flips": inside, "clears_done": clears[end]["done"] if end in clears else None,
                     "clears_skipped": clears[end]["skipped"] if end in clears else None,
@@ -17325,7 +17356,7 @@ def main(argv=None):
                          "STOP) on the world route's injected phase")
     ap.add_argument("--perf-windows", action="store_true",
                     help="table the graphics log's `draw hook CPU:` windows and drop any window a temporary draw-path key changed in "
-                         "(`vr draw path key:` lines; docs\vr-draw-path-cpu-2026-11-01.md), so no window mixes two settings")
+                         "(`vr draw path key:` lines; docs\\vr-draw-path-cpu-2026-11-01.md), so no window mixes two settings")
     ap.add_argument("--maps-sharp", action="store_true",
                     help="report an on-foot maps gate flight (the gate is always on): every map or menu the layer took and handed back "
                          "(when, how long, how many eyes skipped the upscaler), the 5 s "
@@ -17581,7 +17612,7 @@ def main(argv=None):
     if args.tally == "cover":
         return print_cover_tally(parse_cover(text))
     if args.tally == "reissue":
-        return print_reissue_tally(parse_reissue(text))
+        return print_reissue_tally(parse_reissue(text), text)
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -23875,6 +23906,11 @@ def self_test_perf_keys():
     # The start-up line (was none) is not a flip; 2500 falls in the window ending 3600 (1801..3600) and 6000 in the one ending 7200 (5401..7200).
     if [(w["end"], w["mean"], w["dropped"]) for w in wins] != [(1800, 0.5, False), (3600, 0.7, True), (5400, 0.6, False), (7200, 0.65, True)]:
         fail("the windows parsed to %r" % ([(w["end"], w["mean"], w["dropped"]) for w in wins],))
+    # A flip logged AT a window's end frame may have run after that window's line printed, so it can touch the window just ended and the next one: both are dropped.
+    edge = key % ("on", "none", 1) + win % (1800, "0.500") + key % ("off", "on", 3600) + win % (3600, "0.700") + win % (5400, "0.600") + win % (7200, "0.650")
+    got = [(w["end"], w["dropped"]) for w in perf_windows(edge)]
+    if got != [(1800, False), (3600, True), (5400, True), (7200, False)]:
+        fail("a flip logged at a window's end frame: windows (end, dropped) = %r, expected 3600 and 5400 dropped" % (got,))
     if parse_perf_keys("[10:00:01.000] vr draw path key: experimental.other = on (was none) at frame 1\n") != [] or perf_windows("nothing here\n") != []:
         fail("a line of another instrument parsed as a draw-path key or window")
     # The depth slot cache's line (perf_monitor.cpp), written beside each window: its counts ride on the window it ends with; a window without one reads None.
@@ -23904,7 +23940,7 @@ def self_test_perf_keys():
     if rc != 1 or "no `draw hook CPU:` window" not in buf.getvalue():
         fail("a log with no window -> rc %d:\n%s" % (rc, buf.getvalue()))
     # The benchmark collector line (experimental.vr_cpu_benchmark_idle's own reading), written beside each `draw hook CPU:` window.
-    bench = "[10:00:02.000] benchmark collector: 1800-frame window ending %d; entry clears done %d, skipped %d (idle perf ticks only; skipped needs experimental.vr_cpu_benchmark_idle on).\n"
+    bench = "[10:00:02.000] benchmark collector: 1800-frame window ending %d; entry clears done %d, skipped %d (idle and native-menu perf ticks both count; skipped needs experimental.vr_cpu_benchmark_idle on).\n"
     btext = win % (1800, "0.500") + bench % (1800, 1800, 0) + win % (3600, "0.400") + bench % (3600, 3, 1797) + win % (5400, "0.600")
     clears = parse_bench_clears(btext)
     if [(c["end"], c["done"], c["skipped"]) for c in clears] != [(1800, 1800, 0), (3600, 3, 1797)]:
@@ -24100,6 +24136,21 @@ def self_test_reissue():
         rc, out = run(["--dir", logs, "--tally", "reissue"])
         if rc != 1 or "no `draw reissue CPU:` lines in this log" not in out:
             fail("a log with no re-issue line -> rc %d:\n%s" % (rc, out))
+        # The cross-check: a GPU census line that shows a re-issue section ran, against re-issue windows that count none of its callers.
+        census = ("[10:10:00.500] EDVR GPU census: 30 s, 1800 frames; EDVR ~1.000 ms/frame = door 0.000 (x) + in-frame 1.000 (hologram passes -, UI depth coverage 0.400 (1.00/frame), "
+                  "planet -, screen motion -, weapon motion -, engine velocity -, UI layer reissues -, world layer -, FSS reveal replay -); application render p50 -; timer floor -; spans timed 9, failed 0.\n")
+        census_idle = census.replace("UI depth coverage 0.400 (1.00/frame)", "UI depth coverage -")
+        for label, body, wantflag in (("census ran a ui_depth section, no ui_depth caller", head + census + hook1 + "\n" + rei1 + "\n", True),
+                                      ("census ran it and ui_depth is counted", head + census + hook1 + "\n" + rei1.replace("crisp_hud 0.250 ms 130", "ui_depth 0.250 ms 130") + "\n", False),
+                                      ("census ran nothing", head + census_idle + hook1 + "\n" + rei1 + "\n", False),
+                                      ("no census at all", head + hook1 + "\n" + rei1 + "\n", False)):
+            with open(name, "wb") as f:
+                f.write(body.encode("utf-8"))
+            rc, out = run(["--dir", logs, "--tally", "reissue"])
+            if ("CHECK THE WIRING" in out) != wantflag:
+                fail("cross-check (%s): flag %s, wanted %s:\n%s" % (label, "CHECK THE WIRING" in out, wantflag, out))
+            if wantflag and "UI depth coverage" not in out:
+                fail("the cross-check does not name the census section (%s):\n%s" % (label, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok

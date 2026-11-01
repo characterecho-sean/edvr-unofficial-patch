@@ -1263,7 +1263,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         Log::get().note("depth slot cache: 1800-frame window ending %u; %u hits, %u misses", s.frameNo, slotHits, slotMisses);
         // Written every window, so a window with no idle tick (both 0: native perf history active) can be told from a build without the line.
         // The collector runs in the Present-time tick, outside the draw hooks, so it is judged by these counts and cannot move the line above.
-        Log::get().note("benchmark collector: 1800-frame window ending %u; entry clears done %u, skipped %u (idle perf ticks only; skipped needs experimental.vr_cpu_benchmark_idle on).",
+        Log::get().note("benchmark collector: 1800-frame window ending %u; entry clears done %u, skipped %u (idle and native-menu perf ticks both count; skipped needs experimental.vr_cpu_benchmark_idle on).",
             s.frameNo, s.benchClearsDone, s.benchClearsSkipped);
         s.benchClearsDone = s.benchClearsSkipped = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
