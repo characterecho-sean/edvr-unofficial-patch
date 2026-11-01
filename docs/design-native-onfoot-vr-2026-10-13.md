@@ -4379,5 +4379,23 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     3. Item 4 (the scope zoom is default on).
     4. Item 3.
     5. Item 5 only for rigs that render under the display size with Anti-aliasing off.
+- **F199 + F200 (`e368c88e`, full build green; `depth_scene_pick_test` 304 checks, `visor_axis_test` V14, `gpu_census_test`; NOT FLOWN): parity items 1 and 2.**
+  - **F199.** `depthProbeSceneDepth` and its format sibling serve the pick-only arm, from the pair the frame boundary formed and only at that pair's size. Any other size is refused with no re-pick, so the pair cannot flip within a frame. The diagnostics stay off.
+    - It wakes, with Anti-aliasing off: F119's grid (one single-group dispatch per eye plus a small copy each frame; it feeds F123's wall contact) and F85c/F86's reticle depth march (while a reticle, readout or prompt line is up).
+    - A new GPU census section, `FrameOnFootDepth`, times both, so the flight measures them. It times them with Anti-aliasing on too: instrumentation only.
+    - Health: F119 reads NEVER APPLIED after 5 s or more with no depth read; F123 reads NEVER APPLIED when F119 never read depth.
+  - **F200.** `visorDrawEye` (remlok_fix.cpp, the pure choice `chooseVisorEye` in visor_eye_trust.h) asks ui_depth's table first. Only when that answers -1 with the temporal path off does it ask the depth probe for the visor draw's DSV.
+    - The pilot's log shows the visor draw binds a DSV (`DSV bound`). Whether that is the probe's scene pair is not established; if not, the probe answers -1 and nothing changes.
+    - F121c's cross-check is left as is: its submitted-texture clause never fires for the visor's HDR target, and its pairing clauses do not care how the eye was named.
+    - The F121 30 s line ends `; eyes from the depth probe N`. That is the only Anti-aliasing-on change: log text.
+- **Installed for one flight:** F196 to F200 as v0.22.0-rc.4-37-ge368c88e on Frontier, verified. The live ini has `temporal_aa = off`.
+  - **Next flight (`--expect-build e368c88e`; `--health` first).** Steps:
+    - Load in with look to aim on.
+    - Walk with the nav markers in view.
+    - Draw a rifle and aim down sights.
+    - Push the face into a wall.
+    - Lower the helmet visor.
+    - Then DLSS for a short check.
+  - **Read:** `marker eye (F198)`, F62c decisions, F85b K solves, F66e solved eyes, the `centred:` reason, F119 depth reads and F123 contacts, F121's `eyes from the depth probe`, and the GPU census `FrameOnFootDepth` line against the frame rate.
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
 - ruled out: F196 as the cause of the moving markers and the loose weapon readout with Anti-aliasing off, because the user's rc.4 log (no F196, Anti-aliasing off) shows the same `no marker composite draw of the eye reached the fix` and `no weapon UI part` lines, and the code names a marker draw's eye only through the temporal-only interface layer and ui_depth.
