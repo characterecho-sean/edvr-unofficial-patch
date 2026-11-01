@@ -346,6 +346,124 @@ inline bool radarAnchorAlong(const float u[3], const float A[16], float sF, floa
     }
     return true;
 }
+// THE LAG (flight of c1275025: the disc slightly lagged the turret while it turned). u reached the setter two or three frames late (the GPU readback). Now the camera rows are read on
+// the CPU when the game writes them, u is paired with the anchor's rotation OF THE SAME FRAME (the host's frame sequence; SeqRing below), so the vehicle's own turning adds no error,
+// and the turret's aim relative to the vehicle is carried forward over whatever age is left, at the rate between the last two samples, clamped.
+// A small ring of values keyed by the host's frame sequence: put overwrites the value of the same sequence, else the oldest; find gives the value of exactly that sequence (0 is none).
+template <typename T, uint32_t N>
+struct SeqRing {
+    uint64_t seq[N] = {};
+    T val[N] = {};
+    uint32_t next = 0;
+    void put(uint64_t s, const T& v) {
+        if (!s) return;
+        for (uint32_t i = 0; i < N; ++i)
+            if (seq[i] == s) {
+                val[i] = v;
+                return;
+            }
+        seq[next] = s;
+        val[next] = v;
+        next = (next + 1) % N;
+    }
+    const T* find(uint64_t s) const {
+        if (!s) return nullptr;
+        for (uint32_t i = 0; i < N; ++i)
+            if (seq[i] == s) return &val[i];
+        return nullptr;
+    }
+};
+struct Rot9 {
+    float r[9] = {};   // the anchor's rotation rows x, y, z
+};
+// The turret's aim relative to the vehicle, in degrees: yaw = atan2(x, z) about the anchor's y, pitch = asin(y), from u in the anchor's axes.
+struct Aim {
+    double yaw = 0.0, pitch = 0.0;
+};
+inline double wrapDeg(double a) {
+    while (a > 180.0) a -= 360.0;
+    while (a < -180.0) a += 360.0;
+    return a;
+}
+inline Aim aimOf(const float v[3]) {
+    Aim a;
+    const double n = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+    if (!(n > 0.0) || !std::isfinite(n)) return a;
+    double y = v[1] / n;
+    y = y > 1.0 ? 1.0 : y < -1.0 ? -1.0 : y;
+    a.yaw = std::atan2(double(v[0]), double(v[2])) * 57.29577951308232;
+    a.pitch = std::asin(y) * 57.29577951308232;
+    return a;
+}
+inline void unitOfAim(const Aim& a, float out[3]) {
+    const double y = a.yaw / 57.29577951308232, p = a.pitch / 57.29577951308232;
+    out[0] = static_cast<float>(std::cos(p) * std::sin(y));
+    out[1] = static_cast<float>(std::sin(p));
+    out[2] = static_cast<float>(std::cos(p) * std::cos(y));
+}
+// The rate between two samples at frames k0 < k1, in degrees a frame (yaw across the +-180 wrap), each held to kAimMaxRateDegPerFrame; invalid when k1 <= k0 or the samples are more
+// than kAimRateMaxGapFrames apart (a stale pair says nothing of now).
+inline constexpr double kAimMaxRateDegPerFrame = 4.0;   // 360 deg/s at 90 Hz
+inline constexpr uint64_t kAimRateMaxGapFrames = 8;
+struct AimRate {
+    double yaw = 0.0, pitch = 0.0;
+    bool valid = false;
+};
+inline AimRate aimRate(const Aim& a0, uint64_t k0, const Aim& a1, uint64_t k1) {
+    AimRate r;
+    if (!(k1 > k0) || k1 - k0 > kAimRateMaxGapFrames) return r;
+    const double n = double(k1 - k0);
+    const auto hold = [](double v) { return v > kAimMaxRateDegPerFrame ? kAimMaxRateDegPerFrame : v < -kAimMaxRateDegPerFrame ? -kAimMaxRateDegPerFrame : v; };
+    r.yaw = hold(wrapDeg(a1.yaw - a0.yaw) / n);
+    r.pitch = hold((a1.pitch - a0.pitch) / n);
+    r.valid = true;
+    return r;
+}
+// The aim carried from its sample's frame k to frame now: a + rate * age, the age held to kAimMaxAgeFrames and each step to kAimMaxStepDeg (so a reversal cannot overshoot by more), the
+// pitch kept inside +-89 deg. No rate (or age 0): the sample's own aim.
+inline constexpr uint64_t kAimMaxAgeFrames = 4;
+inline constexpr double kAimMaxStepDeg = 5.0;
+struct AimStep {
+    Aim aim;
+    double dyaw = 0.0, dpitch = 0.0;
+    uint64_t age = 0;       // frames, as measured (not held)
+    bool clamped = false;   // the age or a step was held
+};
+inline AimStep extrapolateAim(const Aim& a, const AimRate& r, uint64_t k, uint64_t now) {
+    AimStep s;
+    s.aim = a;
+    s.age = now > k ? now - k : 0;
+    if (!r.valid || s.age == 0) return s;
+    uint64_t age = s.age;
+    if (age > kAimMaxAgeFrames) {
+        age = kAimMaxAgeFrames;
+        s.clamped = true;
+    }
+    const auto hold = [&s](double v) {
+        if (v > kAimMaxStepDeg) {
+            s.clamped = true;
+            return kAimMaxStepDeg;
+        }
+        if (v < -kAimMaxStepDeg) {
+            s.clamped = true;
+            return -kAimMaxStepDeg;
+        }
+        return v;
+    };
+    s.dyaw = hold(r.yaw * double(age));
+    s.dpitch = hold(r.pitch * double(age));
+    s.aim.yaw = wrapDeg(a.yaw + s.dyaw);
+    s.aim.pitch = a.pitch + s.dpitch;
+    s.aim.pitch = s.aim.pitch > 89.0 ? 89.0 : s.aim.pitch < -89.0 ? -89.0 : s.aim.pitch;
+    return s;
+}
+// The head's pitch in the seat from eye 0's seated rotation R (row-major, OpenVR axes): the eye's forward is minus R's third column. For the log beside u's pitch: a pairing error would
+// make u's pitch follow the head's; gun elevation does not.
+inline double headPitchDeg(const double R[9]) {
+    double y = -R[5];
+    y = y > 1.0 ? 1.0 : y < -1.0 ? -1.0 : y;
+    return std::asin(y) * 57.29577951308232;
+}
 // The angle between a vector and +Z (the anchor's forward), in degrees; its yaw about Y (atan2(x, z)) for the log.
 inline double angleToZDeg(const float v[3]) {
     const double n = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);

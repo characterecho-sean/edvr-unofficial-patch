@@ -94,7 +94,9 @@
 //   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
 //     5559BD94 billboards are left to the game"   each stay's first add;
 //   "srv turret radar anchor: direction at frame F: u (x,y,z) world; anchor rows (..)(..)(..) [source vfunc +0x20|fallback: ...]; P rows (..)(..)(..); d (x,y,z) in the anchor's axes
-//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K)"   with the first add, then every 2 s while the view is on;
+//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K); u age N frames (setter frame F, camera sample frame G), extrapolated by .. (yaw rate R deg/s),
+//     source cpu|gpu, anchor of the sample's frame|...; aim relative to the vehicle yaw .. pitch .. deg, head pitch H deg"   with the first add, then every 2 s while the view is on;
+//   "srv turret radar anchor: turret direction from the CPU: ..." or "... from the GPU readback for host frame K (<why>) ..."   once, the first sample of each source;
 //   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U...; moves along u D, fallback B (...)"
 //     with the 10 s line while armed;
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
@@ -120,7 +122,15 @@ extern std::atomic<uint32_t> g_srvTurretHudIssues;
 extern std::atomic<bool> g_srvTurretHoloWatching;
 // The radar picture's camera instrument: true while the Scorpion's turret view is on (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarCamOn;
+// The radar anchor's turret direction: true while the Scorpion's turret view is on, fix.srv_turret_radar_anchor is not off and the setter hook is armed (the frame tick sets it).
+extern std::atomic<bool> g_srvTurretCameraRowsWanted;
 }  // namespace detail
+
+// TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
+// vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in
+// what this kept, so u needs no GPU readback. Owner context's thread.
+inline bool srvTurretWantsCameraRows() { return detail::g_srvTurretCameraRowsWanted.load(std::memory_order_relaxed); }
+void srvTurretNoteCameraWrite(const void* res, const void* data, uint32_t bytes);
 
 // TEMPORARY instrument (issue 140): the camera V0 the radar's picture is drawn from. vscreen.cpp forwardWithVerdict, every owner-context draw while the Scorpion's turret view is on: the
 // frame's first draw of vs 4EDE4BC9 (the terrain schematic) has its camera rows copied and read back, and each move of V0 is logged (srv_turret.cpp). One relaxed load otherwise.

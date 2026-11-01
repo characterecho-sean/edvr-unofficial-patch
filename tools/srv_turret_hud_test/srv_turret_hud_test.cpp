@@ -1697,6 +1697,80 @@ static void radarAnchorCases() {
     const float notUnit[3] = {0.0f, 0.0f, 0.5f};
     check(!st::radarAnchorAlong(seatFwd, scaledA, 0.45f, dd, ua) && !st::radarAnchorAlong(seatFwd, skewA, 0.45f, dd, ua) && !st::radarAnchorAlong(notUnit, idA, 0.45f, dd, ua),
           "an anchor whose rows are not unit or not orthogonal, or a u that is not unit: refused (the fallback (0, 0, s * F))");
+    // The lag (flight of c1275025: the disc lagged the turret): u paired with the anchor of its own host frame, and the aim carried forward over u's age at the last rate, held.
+    st::SeqRing<st::Rot9, 4> ring;
+    st::Rot9 rotA, rotB;
+    rotA.r[0] = 1.0f;
+    rotB.r[0] = 2.0f;
+    ring.put(10, rotA);
+    ring.put(11, rotB);
+    check(ring.find(10) && ring.find(10)->r[0] == 1.0f && ring.find(11) && ring.find(11)->r[0] == 2.0f && !ring.find(12) && !ring.find(0),
+          "the anchor ring gives the rotation of exactly the sample's frame, and none for a frame it never saw (or frame 0)");
+    rotA.r[0] = 3.0f;
+    ring.put(10, rotA);
+    ring.put(0, rotB);
+    check(ring.find(10) && ring.find(10)->r[0] == 3.0f && !ring.find(0), "a second put of the same frame replaces it; frame 0 is never kept");
+    ring.put(12, rotA);
+    ring.put(13, rotA);
+    ring.put(14, rotA);
+    check(!ring.find(10) && ring.find(11) && ring.find(14), "a full ring forgets its oldest frame first");
+    const float ahead[3] = {0.0f, 0.0f, 1.0f}, right90[3] = {1.0f, 0.0f, 0.0f};
+    const float up10[3] = {0.0f, float(std::sin(10.0 / 57.29577951308232)), float(std::cos(10.0 / 57.29577951308232))};
+    const st::Aim aAhead = st::aimOf(ahead), aRight = st::aimOf(right90), aUp = st::aimOf(up10);
+    st::Aim probe;
+    probe.yaw = 37.0;
+    probe.pitch = -12.0;
+    float probeU[3];
+    st::unitOfAim(probe, probeU);
+    const st::Aim back = st::aimOf(probeU);
+    check(std::fabs(aAhead.yaw) < 1e-9 && std::fabs(aAhead.pitch) < 1e-9 && std::fabs(aRight.yaw - 90.0) < 1e-9 && std::fabs(aUp.pitch - 10.0) < 1e-4 && std::fabs(aUp.yaw) < 1e-9 &&
+              std::fabs(back.yaw - 37.0) < 1e-4 && std::fabs(back.pitch + 12.0) < 1e-4 && near3(probeU, std::cos(-12.0 / 57.29577951308232) * std::sin(37.0 / 57.29577951308232),
+                                                                                                 std::sin(-12.0 / 57.29577951308232),
+                                                                                                 std::cos(-12.0 / 57.29577951308232) * std::cos(37.0 / 57.29577951308232), 1e-6),
+          "the aim relative to the vehicle: yaw atan2(x, z), pitch asin(y), and back to a unit vector");
+    check(std::fabs(st::wrapDeg(190.0) + 170.0) < 1e-9 && std::fabs(st::wrapDeg(-190.0) - 170.0) < 1e-9 && std::fabs(st::wrapDeg(45.0) - 45.0) < 1e-9, "yaw wraps into +-180");
+    st::Aim a0, a1;
+    a0.yaw = 10.0;
+    a1.yaw = 12.0;
+    a1.pitch = -1.0;
+    const st::AimRate rate1 = st::aimRate(a0, 5, a1, 6), rate2 = st::aimRate(a0, 5, a1, 7);
+    st::Aim w0, w1;
+    w0.yaw = 179.0;
+    w1.yaw = -179.0;
+    const st::AimRate wrapRate = st::aimRate(w0, 5, w1, 6);
+    st::Aim fast;
+    fast.yaw = 30.0;
+    const st::AimRate heldRate = st::aimRate(a0, 5, fast, 6);
+    check(rate1.valid && std::fabs(rate1.yaw - 2.0) < 1e-9 && std::fabs(rate1.pitch + 1.0) < 1e-9 && rate2.valid && std::fabs(rate2.yaw - 1.0) < 1e-9 && wrapRate.valid &&
+              std::fabs(wrapRate.yaw - 2.0) < 1e-9 && heldRate.valid && std::fabs(heldRate.yaw - st::kAimMaxRateDegPerFrame) < 1e-9 && !st::aimRate(a0, 6, a1, 6).valid &&
+              !st::aimRate(a0, 7, a1, 6).valid && !st::aimRate(a0, 5, a1, 5 + st::kAimRateMaxGapFrames + 1).valid,
+          "the rate a frame between two samples: per frame of their gap, across the yaw wrap, held to 4 deg a frame; none for samples out of order or more than 8 frames apart");
+    const st::AimStep two = st::extrapolateAim(a1, rate1, 6, 8);
+    check(two.age == 2 && std::fabs(two.dyaw - 4.0) < 1e-9 && std::fabs(two.aim.yaw - 16.0) < 1e-9 && std::fabs(two.aim.pitch + 3.0) < 1e-9 && !two.clamped,
+          "a sample two frames old at 2 deg a frame: carried 4 deg forward");
+    st::AimRate brisk;
+    brisk.yaw = 4.0;
+    brisk.valid = true;
+    const st::AimStep heldStep = st::extrapolateAim(a1, brisk, 6, 9);
+    st::AimRate slow;
+    slow.yaw = 1.0;
+    slow.valid = true;
+    const st::AimStep oldStep = st::extrapolateAim(a1, slow, 6, 16);
+    check(heldStep.age == 3 && std::fabs(heldStep.dyaw - st::kAimMaxStepDeg) < 1e-9 && heldStep.clamped && oldStep.age == 10 &&
+              std::fabs(oldStep.dyaw - double(st::kAimMaxAgeFrames)) < 1e-9 && oldStep.clamped,
+          "the step is held to 5 deg (a reversal cannot overshoot by more) and the age to 4 frames");
+    const st::AimStep none = st::extrapolateAim(a1, st::AimRate{}, 6, 8), ageZero = st::extrapolateAim(a1, rate1, 8, 8);
+    st::Aim edge;
+    edge.yaw = 178.0;
+    edge.pitch = 88.0;
+    st::AimRate up;
+    up.yaw = 4.0;
+    up.pitch = 4.0;
+    up.valid = true;
+    const st::AimStep wrapped = st::extrapolateAim(edge, up, 6, 7);
+    check(none.dyaw == 0.0 && none.aim.yaw == a1.yaw && none.age == 2 && ageZero.age == 0 && ageZero.dyaw == 0.0 && std::fabs(wrapped.aim.yaw + 178.0) < 1e-9 && wrapped.aim.pitch == 89.0,
+          "no rate or no age: the sample's own aim; a step across the yaw wrap wraps, and the pitch stays inside 89 deg");
+    check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
     const float before[3] = {0.0f, 1.96f, 0.0f}, stepD[3] = {0.0f, 1.96f, 0.45f}, closeTo[3] = {0.0f, 1.96f, 0.40f}, other[3] = {0.0f, 2.0f, 0.0f}, d45[3] = {0.0f, 0.0f, 0.45f},
                 dz[3] = {0.0f, 0.0f, 0.0f};
     check(st::placementStepLooksLikeOffset(before, stepD, d45) && st::placementStepLooksLikeOffset(before, closeTo, d45) && !st::placementStepLooksLikeOffset(before, other, d45) &&

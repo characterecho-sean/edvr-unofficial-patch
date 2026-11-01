@@ -33,9 +33,13 @@ const char* srvRadarAnchorWhy();
 // Every frame, frame thread: the fallback offset's bit patterns ((0, 0, s * F) in the anchor's axes; all zero = no move: the next setter call gets the game's own placement) and the frame
 // tick's frame number (the setter hook stamps an add with it).
 void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo);
-// The turret's seated forward in the game's world (srv_turret_math.h turretForwardWorld), unit; null or !valid clears it. Render thread (read back from the live camera), and the frame
-// tick clears it when a stay begins. With it and the anchor's world rotation the setter hook adds s * F along u; without either it adds the fallback (0, 0, s * F).
-void srvRadarAnchorPublishDirection(const float u[3], bool valid);
+// The turret's seated forward in the game's world (srv_turret_math.h turretForwardWorld), unit, from a camera sample of host frame seq (cpu: rows read when the game wrote them; else
+// read back from the GPU), with the head's pitch then; null or !valid clears it. Render thread, and the frame tick clears it when a stay begins. The setter hook pairs it with the
+// anchor's rotation of the same host frame, carries the turret's aim forward over the sample's age (srv_turret_math.h extrapolateAim) and adds s * F along the result; without u or
+// a usable rotation it adds the fallback (0, 0, s * F).
+void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq = 0, bool cpu = false, float headPitchDeg = 0.0f);
+// The 10 s line: the window's largest u age (frames) and extrapolation (degrees), reset by the read.
+void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg);
 
 struct RadarAnchorStats {
     RadarAnchorHookState state = RadarAnchorHookState::NotTried;
@@ -66,8 +70,15 @@ struct RadarAnchorStats {
     float anchorRows[9] = {};      // the anchor's world rotation rows (its vfunc +0x20) at the last radar call
     float pRows[9] = {};           // P's rotation rows at the last radar call
     float u[3] = {};               // the turret's forward in the world at the last add (zero: none)
-    float uAnchor[3] = {};         // u in the anchor's axes at the last directed add
+    float uAnchor[3] = {};         // u in the anchor's axes at the last directed add (after the extrapolation)
     float d[3] = {};               // the offset the last add used, in the anchor's axes
+    // the pairing and the extrapolation at the last directed computation
+    uint64_t nowSeq = 0, sampleSeq = 0, age = 0;   // the setter's host frame, the camera sample's, and the difference
+    float dyaw = 0.0f, dpitch = 0.0f;              // degrees carried forward
+    float rateDps = 0.0f;                          // the turret's yaw rate relative to the vehicle, deg/s
+    float headPitch = 0.0f, aimPitch = 0.0f, aimYaw = 0.0f;   // the head's pitch in the seat at the sample; the turret's aim relative to the vehicle
+    bool sampleCpu = false, paired = false, lastClamped = false;   // the sample's source; the anchor's rotation found for the sample's frame; the step held
+    uint64_t ageSum = 0, extrapMilliSum = 0, clamped = 0, pairedCount = 0, unpairedCount = 0;   // cumulative, over directed computations
 };
 RadarAnchorStats srvRadarAnchorStats();
 

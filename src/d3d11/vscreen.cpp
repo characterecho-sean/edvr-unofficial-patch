@@ -1028,6 +1028,7 @@ FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's t
 FaultBudget g_glitchCameraBudget("vScreen.glitchCamera", 5);          // the transition-flash engine fix's camera tap
 FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and its live true-camera feed
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
+FaultBudget g_srvTurretCameraBudget("vScreen.srvTurretCamera", 5);    // issue 140 (TEMPORARY): the SRV radar anchor's camera rows 277..279
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
 FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
@@ -3675,6 +3676,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
                 return 56;
             });
         });
+        // Issue 140 (TEMPORARY, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279), kept by buffer for the SRV radar anchor's turret direction
+        // while the Scorpion's turret view wants them (srv_turret.h srvTurretNoteCameraWrite; one relaxed load otherwise).
+        if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;

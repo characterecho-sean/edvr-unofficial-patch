@@ -16,13 +16,13 @@
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
 - **The radar fix:** a hook on the schematic's placement setter
-  (0x38563A0, build 334925 only) adds radar forward to the translation the
-  game sets (about 1.96 m up). FLOWN (07bde936): the disc shows (rim, fill,
-  Scorpion), V0 tracks, the setter runs every frame. Two faults, one cause:
-  the disc swings off as the turret turns and sits about 5 cm high, since
-  the offset ran along the vehicle's forward. BUILT, NOT FLOWN: the offset
-  along the turret's seated forward, in the anchor's axes (journal, "the
-  radar placement along the turret").
+  (0x38563A0, build 334925 only) adds radar forward along the turret's
+  seated forward, in the anchor's axes, to the translation the game sets
+  (about 1.96 m up). FLOWN (c1275025), Sean "almost there": the disc follows
+  the turret at the right height, but lags it slightly while it turns.
+  BUILT, NOT FLOWN: the camera rows read on the CPU, paired by frame, the
+  aim carried over u's age (journal, "the turret direction without the
+  readback").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -52,11 +52,11 @@
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
-  radar forward = 65 minus camera back. Sweep the turret about 90 deg left
-  and right; watch the disc's rim against the yellow heading tick. Read
-  `--grep "srv turret radar anchor: direction"`: the anchor rows stay put,
-  d turns with the turret, "source vfunc +0x20"; and the 10 s line's moves
-  along u against the fallback.
+  radar forward = 65 minus camera back. A turret sweep, then drive forward
+  and turn the vehicle; watch whether the disc lags. Read `--grep "srv
+  turret radar anchor"`: "from the CPU", the direction line's u age and
+  source cpu, the 10 s line's mean and max age; u's pitch against the
+  head's pitch.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -183,6 +183,9 @@ same amount. Matching them needs a change to one layer's stereo depth.
   because it runs along the vehicle's forward, not the turret's: the disc
   swings with turret yaw and sits about 5 cm above the shader-moved icons
   (flight 07bde936, `edvr_gfx_20261031_160808.log`).
+- ruled out: P's rows as the source of the turret's direction, because they
+  stay near identity (8 deg of tilt at most) while the turret turns -115 to
+  +150 deg (flight c1275025, `edvr_gfx_20261031_191536.log`).
 - ruled out: a billboard move showing the disc at camera back 25, because
   the picture is empty there (the volume is behind V0); dump 130153201001
   has no disc at all.
@@ -1016,6 +1019,79 @@ The log lines (the frame tick says them):
 To fly: camera back 0 to 35, radar forward = 65 minus camera back,
 `fix.srv_turret_radar_anchor = on`. Sweep the turret about 90 deg left and
 right, and watch the disc's rim against the yellow heading tick.
+
+### 2026-10-31: the turret direction flown (flight c1275025); the turret direction without the readback (built, not flown)
+
+Steam, `edvr_gfx_20261031_191536.log`, build matches, dump
+`eye_192101956001`. Sean: "almost there". The disc follows the turret, and
+the height is right: the disc, the Scorpion icon and the contact on the rim
+line up. But the disc lags the turret slightly while it turns. Driving was
+not tested.
+- u tracked the turret through yaw -115 to +150 deg against the anchor's z.
+  The anchor's rows stayed constant (the vehicle was parked).
+- No failures: 900 of 900 moves along u in steady windows. The only fallback
+  was the first frame (no u yet), with 0 refused, 0 getter faults, and as
+  many camera reads as copies.
+- P's rows stay near identity (8 deg of tilt at most) and do not carry the
+  turret's yaw (see "Ruled out").
+- d's vertical part varies with yaw: d.y / 0.4 runs from about +6 to -12 deg.
+  It is probably gun elevation, since the icons ride the same u. A pairing
+  error between the camera sample and the head pose is not yet excluded.
+- The lag is most likely u's age: the GPU readback made u two to three
+  frames old, about 1 to 2 cm at 0.4 m during a brisk turn.
+
+**The build.** u reaches the setter with the least latency available, and
+whatever age is left is measured and carried forward.
+- **The camera rows on the CPU.** The 5376-byte scene camera block (the one
+  the camera-glitch, camera-sunglare and camera-temporal readers see at
+  Unmap) holds the camera position at float 1100 and right, up and forward
+  at rows 277..279. A new reader in the Unmap tee
+  (`srvTurretNoteCameraWrite`) keeps those rows by buffer with the host's
+  frame sequence. At the eye-0 draw the bound VS b1 is looked up there
+  first. The rows its last write put there are this draw's, because they
+  were written before it on the same thread. The sample is used when they
+  were written in the frame of the pose at the draw, and bound from the
+  first constant. u is computed at once, with no readback. The GPU ring
+  stays as the counted fallback.
+- **Pairing by frame.** The setter keeps the anchor's rotation by host frame
+  (8 frames). It puts u into the anchor's axes with the rotation of the
+  sample's own frame, so the vehicle turning or driving adds no error. That
+  aim depends only on the turret relative to the vehicle.
+- **Extrapolation.** The aim (yaw, pitch relative to the vehicle) is carried
+  over u's age in frames (setter frame minus sample frame), at the rate
+  between the last two samples. The rate is held to 4 deg a frame, the age
+  to 4 frames and each step to 5 deg, so a reversal overshoots by 5 deg at
+  most (`srv_turret_math.h` `extrapolateAim`).
+- The key, the fallback, the add-not-replace rule, the V0 instrument and the
+  shader's move of DF3503CD and the contacts are unchanged.
+
+Unconfirmed until it flies:
+- whether the eye-0 draw's VS b1 is the 5376-byte block the tee sees, and
+  written in the pose's frame. The first sample says "from the CPU" or why
+  it went to the GPU, and the 10 s line counts each reason;
+- u's age with the CPU path: 0 if the setter runs after the render in the
+  same frame, 1 if before;
+- whether d's pitch is gun elevation. A pairing error would make the aim's
+  pitch follow the head's pitch; gun elevation would not.
+
+The log lines (the frame tick and the render thread's first-time notes):
+- `srv turret radar anchor: turret direction from the CPU: eye 0's VS b1 is
+  the scene camera block (N bytes), rows 277..279 read when the game wrote
+  them in host frame K; no GPU readback`, or `... turret direction from the
+  GPU readback for host frame K (<why>); counted in the 10 s line`, once.
+- The direction line gains `; u age N frames (setter frame F, camera sample
+  frame G), extrapolated by X deg yaw Y deg pitch[ (held)] (yaw rate R
+  deg/s), source cpu|gpu, anchor of the sample's frame|of the setter's
+  frame (the sample's not kept); aim relative to the vehicle yaw A pitch B
+  deg, head pitch H deg`.
+- The 10 s line gains `; camera samples cpu N, gpu reads R of C copies (J
+  refused; cpu missed: not written a, offset b, another frame c, not a
+  camera d); u age mean M max X frames; extrapolated mean E max F deg, held
+  H; anchor paired by frame P of Q`.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back,
+`fix.srv_turret_radar_anchor = on`. A turret sweep, then drive forward and
+turn the vehicle, watching the disc against the turret.
 
 
 

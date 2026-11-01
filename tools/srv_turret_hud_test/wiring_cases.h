@@ -405,12 +405,17 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const size_t rows = found(pose0) ? module.find("holoCopyVsRows(ctx, g_dir.stage[k], 1, kDirFirstRow, kDirRows, 0, first, count)", pose0) : npos;
     const size_t boundaryFn = module.find("void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {");
     const bool direction = found(sampled) && sampled < groupOff && found(rows) && found(module.find("st::turretForwardWorld(rows, rows + 4, rows + 8, g_dir.R[k], u)")) &&
-                           found(module.find("srvRadarAnchorPublishDirection(best, true);")) && found(boundaryFn) && found(module.find("anchorDirBoundary(ctx);", boundaryFn)) &&
-                           found(module.find("srvRadarAnchorPublishDirection(nullptr, false);"));
-    const size_t along = found(setterFn) ? hook.find("st::radarAnchorAlong(u, A, floatOf(fb[2]), df, ua)", setterFn) : npos;
+                           found(module.find("srvRadarAnchorPublishDirection(best, true, g_dir.hostSeqOf[bestSlot], false, g_dir.headPitchOf[bestSlot]);")) && found(boundaryFn) &&
+                           found(module.find("anchorDirBoundary(ctx);", boundaryFn)) && found(module.find("srvRadarAnchorPublishDirection(nullptr, false);"));
+    // the lag: the setter pairs the sample with the anchor's rotation of the sample's own host frame (kept by frame), and carries the aim forward over the sample's age
+    const size_t kept = found(setterFn) ? hook.find("s->aRing.put(nowSeq, rot);", setterFn) : npos;
+    const size_t pairedK = found(kept) ? hook.find("s->aRing.find(smp.seq)", kept) : npos;
+    const size_t along = found(pairedK) ? hook.find("st::radarAnchorAlong(u, ak, 1.0f, unitD, uaK)", pairedK) : npos;
+    const size_t carried = found(along) ? hook.find("st::extrapolateAim(aimK, s->rate, smp.seq, nowSeq)", along) : npos;
     const size_t getterCheck = hook.find("if (!insideModule(s, getter)) return 0;");
     const size_t getterCall = hook.find("reinterpret_cast<MatrixFn>(getter)(anchor)");
-    const bool directed = found(along) && found(rule) && along < rule && found(getterCheck) && found(getterCall) && getterCheck < getterCall;
+    const bool directed = found(kept) && found(pairedK) && found(along) && found(carried) && found(rule) && carried < rule && found(getterCheck) && found(getterCall) && getterCheck < getterCall &&
+                          found(hook.find("const uint64_t nowSeq = nativeTemporalFrameSequence();"));
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
     const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
     const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
@@ -418,6 +423,26 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
     const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")"));
     return found(key) && moduleOk && integerOnly && adds && pinned && direction && directed && iniOk && buildOk && auditOk;
+}
+// The radar anchor's CPU camera rows: vscreen.cpp's Unmap tee hands every scene camera block write to srvTurretNoteCameraWrite (after the temporal pass's reader, before the block is
+// forgotten), which keeps rows 277..279 by buffer with the host frame; the eye-0 draw looks its bound b1 up there FIRST, uses it only when written in the pose's own frame, and falls back
+// to the GPU copy otherwise.
+static bool wiredAnchorCpuRows(const std::string& vscreen, const std::string& module) {
+    const size_t npos = std::string::npos;
+    const size_t temporal = vscreen.find("temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);");
+    const size_t tee = found(temporal) ? vscreen.find("if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });", temporal) : npos;
+    const size_t forgot = found(tee) ? vscreen.find("s->camResource = nullptr;", tee) : npos;
+    const bool teeOk = found(tee) && found(forgot) && forgot - tee < 200 && found(vscreen.find("FaultBudget g_srvTurretCameraBudget("));
+    const size_t noteFn = module.find("void srvTurretNoteCameraWrite(const void* res, const void* data, uint32_t bytes) {");
+    const size_t copied = found(noteFn) ? module.find("std::memcpy(w->rows, static_cast<const float*>(data) + kCamRowsFloat, sizeof(w->rows));", noteFn) : npos;
+    const size_t stamped = found(copied) ? module.find("w->hostSeq = nativeTemporalFrameSequence();", copied) : npos;
+    const size_t sampleFn = module.find("void anchorDirSample(ID3D11DeviceContext* ctx, int family) {");
+    const size_t cpuFirst = found(sampleFn) ? module.find("int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes);", sampleFn) : npos;
+    const size_t cpuPublished = found(cpuFirst) ? module.find("srvRadarAnchorPublishDirection(u, true, poseSeq, true, headPitch);", cpuFirst) : npos;
+    const size_t gpuCopy = found(sampleFn) ? module.find("holoCopyVsRows(ctx, g_dir.stage[k], 1, kDirFirstRow, kDirRows, 0, first, count)", sampleFn) : npos;
+    const bool moduleOk = found(copied) && found(stamped) && found(module.find("kCamRowsFloat = kDirFirstRow * 4")) && found(cpuFirst) && found(cpuPublished) && found(gpuCopy) &&
+                          cpuFirst < gpuCopy && found(module.find("if (w->hostSeq != hostSeq) return 3;")) && found(module.find("if (cb.ranged && cb.first != 0) return 2;"));
+    return teeOk && moduleOk;
 }
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
@@ -608,7 +633,17 @@ static void wiringCases() {
     check(!wiredAnchor(replaced(module, "    anchorDirBoundary(ctx);\n", ""), anchorHook, ini, build, audit), "control: the camera copies never read back trip the pin");
     check(!wiredAnchor(replaced(module, "srvRadarAnchorPublishDirection(nullptr, false);", "(void)0;"), anchorHook, ini, build, audit), "control: a u kept from an earlier stay trips the pin");
     check(!wiredAnchor(module, replaced(anchorHook, "        if (!insideModule(s, getter)) return 0;\n", ""), ini, build, audit), "control: the anchor's getter called wherever its vtable points trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "st::radarAnchorAlong(u, A, floatOf(fb[2]), df, ua)", "false"), ini, build, audit), "control: a setter that never turns d along u trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "st::radarAnchorAlong(u, ak, 1.0f, unitD, uaK)", "false"), ini, build, audit), "control: a setter that never turns d along u trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "s->aRing.find(smp.seq)", "s->aRing.find(nowSeq)"), ini, build, audit),
+          "control: u paired with the anchor of the setter's frame, not the sample's (the vehicle's turn would lag) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "st::extrapolateAim(aimK, s->rate, smp.seq, nowSeq)", "st::extrapolateAim(aimK, st::AimRate{}, smp.seq, nowSeq)"), ini, build, audit),
+          "control: an aim never carried over u's age trips the pin");
+    check(wiredAnchorCpuRows(vscreen, module), "the radar anchor's camera rows: read by the Unmap tee when the game writes them, looked up first at the eye-0 draw, used only from the pose's own frame");
+    check(!wiredAnchorCpuRows(replaced(vscreen, "if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });", ""), module),
+          "control: the Unmap tee never handing the rows over trips the pin");
+    check(!wiredAnchorCpuRows(vscreen, replaced(module, "if (w->hostSeq != hostSeq) return 3;", "")), "control: rows written in another frame paired with this frame's pose trip the pin");
+    check(!wiredAnchorCpuRows(vscreen, replaced(module, "int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes);", "int miss = 1;")), "control: the CPU path never tried (the GPU readback's lag) trips the pin");
+    check(!wiredAnchorCpuRows(vscreen, replaced(module, "w->hostSeq = nativeTemporalFrameSequence();", "w->hostSeq = 0;")), "control: writes never stamped with their frame trip the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");
