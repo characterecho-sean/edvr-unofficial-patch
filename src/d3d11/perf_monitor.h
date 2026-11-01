@@ -36,6 +36,8 @@ namespace edvr {
 
 // Every frame, from the frame boundary: the interval ring.
 void perfMonitorFrame(ID3D11Device* dev);
+// The frame number perfMonitorFrame has counted to: the one the `draw hook CPU:` window line ends at, and the one the temporary draw-path key lines carry.
+uint32_t perfMonitorFrameNo();
 // Once a frame at the owned Present's boundary, in both profiles: the cross-profile cost's 30 s and 5-minute lines (cross_profile_cost.h).
 void perfMonitorCrossProfileFrame();
 
