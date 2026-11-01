@@ -15,6 +15,10 @@ struct Family {
     // F2 (dxbc_skin_clone.h): the vertex shader has the game's skinning chain and takes the second skin in VR; the pairs that also
     // export E to target 7 are kSkinPairs below. Never in the flat profile.
     bool skinned = false;
+    // The register the second skin's E travels in, for a pair whose pixel shader already reads it: the vertex and pixel stages must agree on the
+    // register (a pixel-side remap gives wrong E on WARP, skin_clone_test K4b), and the vertex shader's own next free one (one past its last
+    // output) is a system value's input register in the hair's pixel shader. 0 = the vertex shader's next free register.
+    uint32_t skinRegister = 0;
 };
 constexpr Family kFamilies[] = {
     // 054658: both additional PSs draw certified moving station records;
@@ -62,6 +66,12 @@ constexpr Family kFamilies[] = {
     {0x7B0DC42D383F694Cull, "vs_7B0DC42D383F694C", {0x0DF03E64DF9DBEF1ull, 0, 0, 0}, false, 0, true, true},
     {0x114AF608F86D9ED8ull, "vs_114AF608F86D9ED8", {0xA17504A2627767F2ull, 0, 0, 0}, false, 0, true, true},
     {0xD99AFDC250D19A3Full, "vs_D99AFDC250D19A3F", {0xE86271E464CCDC1Dull, 0, 0, 0}, false, 0, true, true},
+    // 2026-11-01, an NPC's hair (Frontier 15:43 flight, eye runs 154737-154858; docs/kinematic-motion-injection-2026-09-19.md, "NPC hair"). Its
+    // pixels carried no slot and no E while the face beside them did, so a turning head moved the face and left the hair at the camera term
+    // (about 5 px a frame of error). The hair is drawn by an alpha-tested depth prepass (vs 3186/ps 4EBA, depth only) and then this forward
+    // pass: the skinning chain of D99A and its siblings, one colour output, blending off, depth write on. The pixel shader
+    // reads SV_IsFrontFace at v7, the register the vertex shader's E would take, so E travels in v8 for this family (skinRegister).
+    {0xA6A39338C06E03A1ull, "vs_A6A39338C06E03A1", {0x1AE6AB9A94C0456Eull, 0, 0, 0}, false, 0, true, true, 8},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 // F2: the five measured skinned pairs (the NPC's shading pairs, 2026-10-08 F10/F11): the pixel shader exports the vertex shader's E to
@@ -73,6 +83,7 @@ constexpr SkinPair kSkinPairs[] = {
     {0x114AF608F86D9ED8ull, 0xA17504A2627767F2ull},
     {0x7B0DC42D383F694Cull, 0x0DF03E64DF9DBEF1ull},
     {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull},
+    {0xA6A39338C06E03A1ull, 0x1AE6AB9A94C0456Eull},
 };
 constexpr bool skinPair(uint64_t vs, uint64_t ps) noexcept {
     for (const SkinPair& p : kSkinPairs)

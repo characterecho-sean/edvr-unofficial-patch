@@ -384,7 +384,8 @@ inline Totals judge(const Draw& d, const float (&expect)[3], double absTol, doub
 // pixels examined in the identity test (0 means the pair was not exercised).
 inline unsigned run(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::vector<BYTE>& vsCode,
                     const std::vector<BYTE>& psCode, const char* name, void (*check)(bool, const char*),
-                    const std::vector<std::pair<unsigned, float>>* psMaterial = nullptr, const char* tag = "K") {
+                    const std::vector<std::pair<unsigned, float>>* psMaterial = nullptr, const char* tag = "K",
+                    uint32_t skinRegister = ~0u) {
     Rig r;
     if (psMaterial) {
         r.psMaterial = true;
@@ -406,6 +407,7 @@ inline unsigned run(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::vect
     };
     if (!edvr::engineVelocityDeriveInputs(vsCode.data(), vsCode.size(), in, why)) return fail("derive", why);
     if (in.skinRegister >= 32) return fail("derive", "the vertex shader takes the second skin");
+    if (skinRegister != ~0u) in.skinRegister = skinRegister;   // a family's own E register (engine_velocity_families.h), the same on both stages
     if (!edvr::engineVelocityPatchVsSkin(vsCode.data(), vsCode.size(), in.skinRegister, r.vsPatched, why)) return fail("patch", why);
     in.skinExport = true;
     if (!edvr::engineVelocityPatchPs(psCode.data(), psCode.size(), in, r.psPatched, why)) return fail("patch", why);

@@ -204,7 +204,7 @@ Bound g_bound;
 std::atomic<bool> g_anyBound{false};   // EDVR state may still be bound (owner thread restores)
 
 // --- F2: the second skin (docs/kinematic-motion-injection-2026-09-19.md, "F2 built") -----------------------------
-// VR only. The five skinned vertex shaders get a clone of their own skinning chain that computes the previous position from the
+// VR only. The six skinned vertex shaders (the NPC's body families and its hair's forward pass) get a clone of their own skinning chain that computes the previous position from the
 // previous frame's palette and pose (dxbc_skin_clone.h), the join says which previous base is whose (skin_join.h, JoinCS at the
 // palette chain's dispatch), and the pixel shaders export E to target 7. Every part has a "no" that means no history for that pixel,
 // never a stale answer. Owner thread, under g_mutex.
@@ -307,7 +307,7 @@ struct Eye {
     Ptr<ID3D11RenderTargetView> slotsRtv;
     Ptr<ID3D11ShaderResourceView> slotsSrv;
     // F2 (VR eyes only): target 7, the skinned characters' E = previous - current position in centimetres and a valid flag, at the
-    // slot target's size. Cleared to zero (valid 0) with the slot target every eye-frame; written by the five skinned pairs' draws.
+    // slot target's size. Cleared to zero (valid 0) with the slot target every eye-frame; written by the skinned pairs' draws.
     Ptr<ID3D11Texture2D> skin;
     Ptr<ID3D11RenderTargetView> skinRtv;
     Ptr<ID3D11ShaderResourceView> skinSrv;
@@ -775,6 +775,9 @@ void deriveFamily(int f) {
         if (!s.valid) s.reason = "signature: " + why;
         // F2: a skinned family takes the second skin when its vertex shader's chain is the one the patch clones.
         if (s.valid && !runtimeFlatProfile() && kFamilies[f].skinned) {
+            // A family whose pixel shaders already read the vertex shader's next free register names its own (kFamilies); it must still be free on
+            // the vertex side, which the vertex patch checks.
+            if (s.inputs.skinRegister < 32 && kFamilies[f].skinRegister) s.inputs.skinRegister = kFamilies[f].skinRegister;
             if (s.inputs.skinRegister < 32) s.skin = true;
             else {
                 std::string skinWhy;
@@ -840,7 +843,7 @@ ID3D11PixelShader* patchedPsFor(ID3D11DeviceContext* ctx, int f, ID3D11PixelShad
     Ptr<ID3D11PixelShader> patched;
     std::string why = info == g_ps.end() ? "pixel shader bytecode not kept" : info->second.linked ? "class linkage" : "";
     if (why.empty()) {
-        // F2: the five skinned pairs export E to target 7 (the family's other keyed pixel shaders export the slot only). What target 7 gets from a skinned
+        // F2: the skinned pairs (kSkinPairs) export E to target 7 (the family's other keyed pixel shaders export the slot only). What target 7 gets from a skinned
         // family's pixel shader, best first: its E (a keyed pair); else "no history" written exactly (valid 0), so a pixel it covers never keeps the E an
         // earlier draw of the eye-frame wrote there; else nothing, and then the draw is not substituted at all (the draw path says so): a write-masked
         // draw would leave that earlier E under a surface it is not the answer for.
@@ -2664,8 +2667,8 @@ void armSkinLocked() {
     if (state == SkinHookState::Armed) Log::get().note("%s", line);
     else Log::get().note("skin join: %s", line);
     g_skinWanted.store(true, std::memory_order_release);
-    Log::get().note("skin join: the second skin is live (VR): the skinned characters' vertex shaders (vs_D99A, 61AE, 114A, 7B0D, 8B58) compute last frame's position "
-                    "from last frame's palette and pose and the five keyed pixel shaders export it to target 7; identity from the %s, checked against the palette "
+    Log::get().note("skin join: the second skin is live (VR): the skinned characters' vertex shaders (vs_D99A, 61AE, 114A, 7B0D, 8B58, A6A3) compute last frame's position "
+                    "from last frame's palette and pose and the keyed pixel shaders export it to target 7; identity from the %s, checked against the palette "
                     "chain's own job table every frame. A character it cannot join has no history for that frame, never a guess.",
                     state == SkinHookState::Armed ? "game's entry list (read-only hook), the table's prefix as the fallback" : "job table's prefix");
 }
