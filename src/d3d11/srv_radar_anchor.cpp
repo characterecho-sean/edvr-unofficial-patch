@@ -100,12 +100,14 @@ struct State {
     // version per entry (odd while written): the call's QPC time, the offset it left in force (0: none), the anchor's world rotation it read (valid flag), and s * F.
     struct CallSlot {
         std::atomic<uint32_t> ver{0};
+        std::atomic<uint64_t> serial{0};
         std::atomic<int64_t> t{0}, baseT{0};
         std::atomic<uint32_t> d[3]{}, a[9]{}, sF{0};
         std::atomic<bool> aValid{false};
     };
     CallSlot calls[8];
     uint32_t callNext = 0;   // the setter thread's
+    uint64_t callSerial = 0;   // the setter thread's: the calls put in the ring so far
     // the setter thread's own: the anchor's rotation by host frame; the last sample's aim (the residual's rate) and the sample interval
     st::SeqRing<st::Rot9, 8> aRing;
     int64_t lastSmpQpc = 0, qpcFreq = 1;
@@ -175,6 +177,7 @@ void putCall(State& s, int64_t t, int64_t baseT, const uint32_t d[3], const floa
     const uint32_t v = c.ver.load(std::memory_order_relaxed);
     c.ver.store(v + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
+    c.serial.store(++s.callSerial, std::memory_order_relaxed);
     c.t.store(t, std::memory_order_relaxed);
     c.baseT.store(baseT, std::memory_order_relaxed);
     for (int i = 0; i < 3; ++i) c.d[i].store(d[i], std::memory_order_relaxed);
@@ -190,6 +193,7 @@ bool readCall(const State::CallSlot& c, RadarAnchorShownCall& out) noexcept {
         const uint32_t v1 = c.ver.load(std::memory_order_acquire);
         if (v1 & 1u) continue;
         if (v1 == 0) return false;
+        out.serial = c.serial.load(std::memory_order_relaxed);
         out.t = c.t.load(std::memory_order_relaxed);
         out.baseT = c.baseT.load(std::memory_order_relaxed);
         for (int i = 0; i < 3; ++i) out.d[i] = floatOf(c.d[i].load(std::memory_order_relaxed));

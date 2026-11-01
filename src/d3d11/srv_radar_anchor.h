@@ -45,6 +45,7 @@ void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* residualMaxDeg, doubl
 // A setter call from the call ring: its QPC time, the base sample's write time, the offset it left in force (all zero: none, the game's own placement), the anchor's world rotation it
 // read (rows x, y, z in A[0..2], A[4..6], A[8..10]; aValid) and s * F.
 struct RadarAnchorShownCall {
+    uint64_t serial = 0;   // the call's number among the calls put in the ring (1 the first; TEMPORARY, the pair capture's log)
     int64_t t = 0, baseT = 0;
     float d[3] = {};
     float A[16] = {};

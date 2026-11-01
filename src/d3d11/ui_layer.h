@@ -72,6 +72,9 @@ namespace edvr {
 // The render-owner cache prepares their restricted DXBC remap before a take.
 void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
                            const void* bytes, size_t count, bool linked);
+// vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while uiLayerLive(): the block's
+// cb1[120].z kept by buffer for the hologram programs' relief radius (ui_holo_remap.h THE RELIEF). Owner context's thread.
+void uiLayerNoteSceneWrite(const void* resource, const void* data, uint32_t bytes);
 
 class Config;
 

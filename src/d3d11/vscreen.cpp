@@ -1029,6 +1029,7 @@ FaultBudget g_glitchCameraBudget("vScreen.glitchCamera", 5);          // the tra
 FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and its live true-camera feed
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
 FaultBudget g_srvTurretCameraBudget("vScreen.srvTurretCamera", 5);    // issue 140 (TEMPORARY): the SRV radar anchor's camera rows 277..279
+FaultBudget g_uiLayerSceneBudget("vScreen.uiLayerScene", 5);          // fix.ui_quality: the hologram programs' relief radius (cb1[120].z)
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
 FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
@@ -3676,6 +3677,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
                 return 56;
             });
         });
+        // fix.ui_quality: cb1[120].z, kept by buffer for the hologram programs' relief radius in the layer (ui_holo_remap.h THE RELIEF; one load otherwise).
+        if (uiLayerLive()) guardedBudget(g_uiLayerSceneBudget, [&] { uiLayerNoteSceneWrite(s->camResource, s->camData, s->camBytes); });
         // Issue 140 (TEMPORARY, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279), kept by buffer for the SRV radar anchor's turret direction
         // while the Scorpion's turret view wants them (srv_turret.h srvTurretNoteCameraWrite; one relaxed load otherwise).
         if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });
@@ -3923,6 +3926,7 @@ __declspec(noinline) void srvTurretUnmovedNote(ID3D11DeviceContext* self, srv_tu
         const uint64_t pixel = bindingShaderHash(BindSlot::Ps);
         const int family = srv_turret::familyOf(vs, pixel);
         if (family >= 0) srvTurretHudNoteUnmoved(family, ownerRoute, site);
+        if (family >= 0 && srvTurretRadarWritersOn()) srvTurretRadarNoteUnmovedIssue(self, family);   // issue 140 (TEMPORARY): an unmoved radar billboard issue, by kind
         return;
     }
     ID3D11VertexShader* vs = nullptr;

@@ -105,6 +105,15 @@
 //     target that frame" once (the 10 s line also says the content depth z_c the moved billboards ran with, and the draws without one);
 //   "srv turret radar anchor: quad probe: eye E disc|icon w=[a,b] pre ndc centre (x,y) moved by (dx,dy) ndc; content depth z_c Z m; expected (ex,ey) ndc for content at z_c; delta in the
 //     eye (x,y,z) cm"   a corrected billboard's GPU sample, once a second per eye, the disc and the icon in turn (srv_turret.cpp logQuadProbe);
+//   TEMPORARY, THE PAIR CAPTURE (srv_turret.cpp): "srv turret radar pair: frame F eye E disc|icon[ (dump S, frame n of 16)]: t4 .., VS b1 .., forward row 279 (..), setter call #N d (..) cm,
+//     delta in the eye (..) cm, z_c Z m, viewport WxH; issues I (our shader O, another A), prims P (needed Q); issue 0: w=[a,b], centre in the eye pre (..) post (..) m, ndc pre (..), moved
+//     (..) px, expected (..) px, uv (u,v)..; issue k: pre (..) px from issue 0's, moved (..) px, w=[..]"   each eye's disc and icon in one frame, every frame for 16 after an eye dump, else
+//     every 2 s; "... frame F eye E: disc moved (..) px (expected ..), icon moved (..) px (expected ..); disc minus icon (..) px, |D| px[ -- APART]"   per eye; "... lock: frame F eye E
+//     (dump S, frame n of 16): disc centre seated post (..) pre (..) m, icon post (..) pre (..) m; turret yaw rate R deg/s"   in the dump window; "... dump S window ended: ..." once a dump;
+//     "srv turret radar picture: dump S frame F eye 0 disc|icon: t4 .. WxH format N, content (t4 < 1000) C of T texels, t4 a to b; written eye_S_RadarDiscT4.bmp|..IconT4.bmp ..."   the
+//     two pictures of a dump; "srv turret radar pair: 10 s: disc: draws moved .., issues moved .., issues not moved .. (..), issues per moved draw 0/1/2/3+: ..; icon: ..; disc and icon
+//     moved apart on screen (over 1 px): by the constants X of F eye frames (no content depth n), by the capture Y of Z captured eye frames; capture frames .., skipped .., entries lost .."
+//     with the 10 s correction line;
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once
@@ -140,6 +149,12 @@ extern std::atomic<bool> g_srvTurretRadarWritersOn;
 inline bool srvTurretRadarWritersOn() { return detail::g_srvTurretRadarWritersOn.load(std::memory_order_relaxed); }
 // count and instances: the draw's (the first 256x256 icon writer beyond two in a frame is said with them).
 void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances);
+// TEMPORARY instrument (issue 140, THE PAIR CAPTURE in srv_turret.cpp): a draw of `family` that went out without the pass's shader (vscreen.cpp srvTurretUnmovedNote, owner context, while
+// the writers are watched); a radar billboard's (family 7 on a radar picture) is counted by kind for the 10 s pair line.
+void srvTurretRadarNoteUnmovedIssue(ID3D11DeviceContext* ctx, int family);
+// TEMPORARY instrument (issue 140): an eye dump was asked for, with its stamp (temporal_pass.cpp beginEyeRun; any thread). The pair capture then takes every frame of the next 16, and eye 0's
+// two radar pictures are written next to the dump.
+void srvTurretNoteEyeDump(const wchar_t* stamp);
 
 // TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
 // vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in

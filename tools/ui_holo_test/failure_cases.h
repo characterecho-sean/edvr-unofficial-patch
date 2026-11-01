@@ -19,7 +19,7 @@ inline HRESULT STDMETHODCALLTYPE createPs(Device* d,const void* bytes,SIZE_T n,I
     if(d->site==Site::CreateFault)fault();return d->site==Site::CreatePartialFail?E_FAIL:S_OK;
 }
 inline HRESULT STDMETHODCALLTYPE createCb(Device* d,const D3D11_BUFFER_DESC* desc,const D3D11_SUBRESOURCE_DATA*,ID3D11Buffer** out){
-    ++d->buffers;check(desc->ByteWidth==16&&desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER,"bounded per-draw float4 constants");*out=nullptr;
+    ++d->buffers;check(desc->ByteWidth==sizeof(Params)&&desc->ByteWidth==32&&desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER,"bounded per-draw constants: the position map and the relief radius");*out=nullptr;
     if(d->site==Site::BufferFail)return E_FAIL;if(d->site==Site::BufferNull)return S_OK;
     d->cb.refs=1;*out=reinterpret_cast<ID3D11Buffer*>(&d->cb);
     if(d->site==Site::BufferFault)fault();return d->site==Site::BufferPartialFail?E_FAIL:S_OK;

@@ -23,11 +23,13 @@
 
 #include <d3d11.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace edvr {
 
@@ -460,6 +462,7 @@ Probe* g_sample = nullptr;            // the probe of the draw whose scope is op
 int g_sampleEye = -1, g_sampleFamily = -1;
 bool g_sampleTwin = false;            // ... and whether it was issued through the twin with its stream-output target
 bool g_soBusyNoted = false;
+bool g_pairTaking = false;            // THE PAIR CAPTURE (TEMPORARY) takes the radar billboard being bound through the twin: the probe's sample stands aside for it (probeDue)
 
 void probeReleaseQueries(Probe& p) {
     st::release(p.stats);
@@ -568,7 +571,7 @@ bool probeEnsure(ID3D11DeviceContext* ctx, int eye, int family) {
 // the game's bound.
 bool probeDue(ID3D11DeviceContext* ctx, int eye, int family, uint32_t ordinal) {
     Probe& p = g_probe[eye][family];
-    if (p.inFlight || ordinal != p.wantOrd) return false;
+    if (g_pairTaking || p.inFlight || ordinal != p.wantOrd) return false;
     if (GetTickCount64() - p.lastMs < kProbeEveryMs) return false;
     if (!probeEnsure(ctx, eye, family)) return false;
     ID3D11Buffer* so[1] = {};
@@ -1857,8 +1860,23 @@ struct FrameCorrection {
     float deltaW[3] = {};
     double yawDeg = 0.0, pitchDeg = 0.0, gapMs = 0.0;
     bool counted = false;
+    // for THE PAIR CAPTURE's log (TEMPORARY): the shown call's number and the offset it left in force (the anchor's axes), the desired aim's yaw in the anchor's axes (the turret's yaw on
+    // the vehicle) with the camera write's QPC time, and its rate since the previous frame's (haveRate false without one)
+    uint64_t callSerial = 0;
+    float callD[3] = {};
+    double aimYawDeg = 0.0, yawRateDegS = 0.0;
+    int64_t writtenAt = 0;
+    bool haveRate = false;
 };
 FrameCorrection g_corr;
+struct AimPrev {
+    uint32_t frame = 0;
+    double yawDeg = 0.0;
+    int64_t t = 0;
+    bool have = false;
+};
+AimPrev g_aimPrev;   // the last frame's desired yaw and write time, for the yaw rate
+const void* g_lastT4 = nullptr;   // identity: the t4 billboardKind last read (THE PAIR CAPTURE's log)
 bool g_corrFirstSaid = false;
 int64_t g_qpcFreq = 0;
 uint32_t g_movedAt[2][2] = {};   // [eye][disc, icon]: g_frame + 1 of the frame a billboard of that kind was moved in that eye (one of each per eye per frame)
@@ -1917,6 +1935,7 @@ int billboardKind(ID3D11DeviceContext* ctx, bool& lastFrameOnly) {
     const int kind = res ? kindOf(g_writers, res) : 0;
     if (res && g_extraWriter.pending && g_extraWriter.frame == g_frame && res == g_extraWriter.target) g_extraWriter.matched = true;
     lastFrameOnly = res && !kind && kindOf(g_writersPrev, res) != 0;
+    g_lastT4 = res;
     st::release(res);
     st::release(srv);
     return kind;
@@ -1950,6 +1969,18 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
         g_qpcFreq = f.QuadPart > 0 ? f.QuadPart : 1;
     }
     c.gapMs = double(writtenAt - call.t) * 1000.0 / double(g_qpcFreq);
+    c.callSerial = call.serial;   // THE PAIR CAPTURE's log (TEMPORARY)
+    for (int i = 0; i < 3; ++i) c.callD[i] = call.d[i];
+    c.aimYawDeg = aw.yaw;
+    c.writtenAt = writtenAt;
+    if (g_aimPrev.have && g_aimPrev.frame + 1u == g_frame && writtenAt > g_aimPrev.t) {
+        c.yawRateDegS = st::wrapDeg(aw.yaw - g_aimPrev.yawDeg) * double(g_qpcFreq) / double(writtenAt - g_aimPrev.t);
+        c.haveRate = true;
+    }
+    g_aimPrev.frame = g_frame;
+    g_aimPrev.yawDeg = aw.yaw;
+    g_aimPrev.t = writtenAt;
+    g_aimPrev.have = true;
     return kCorrOk;
 }
 
@@ -1960,6 +1991,746 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
 // last kContentDepthFreshFrames frames, 0.1 to 2 m); without one the draw moves by the plain delta, counted as "no content depth". The same z_c for both eyes and both kinds (the icon
 // sits at the schematic's origin).
 float radarContentInvDepth() { return st::contentInvDepth(g_radarCam.have, g_frame - g_radarCam.lastReadFrame, g_radarCam.last.centre[2]); }
+
+// ---- THE PAIR CAPTURE (TEMPORARY instrument, issue 140: the Scorpion's ghost and the trailing disc) -------------------------------------------------------------------------------------
+// The quad probe (one billboard a second) said each quad moves as content at z_c would, yet the hole in the disc's picture sits about |delta| from the icon, and natively (a8465cb3) the two
+// agree within a frame. So in one frame BOTH radar billboards of each eye go through the stream-output twin, every issue captured, and each says: its quad's centre in the eye before and
+// after the move, its w range, the delta and z_c it ran with, its VS b1 and the forward row (279) the delta was turned with, the setter call (number and d) the frame's correction was
+// paired with, and how many issues it made with our shader bound or another. Every frame for kPairDumpFrames frames after an eye dump (srvTurretNoteEyeDump), else once every kPairEveryMs.
+// A ring of kPairSlots frames is read back at the frame boundaries without stalling; a frame whose slot is still in flight is skipped (counted). THE PICTURES: at the dump window's frames
+// eye 0's disc and icon pictures (t4) are copied once each and written next to the eye dump as grayscale images. THE LOCK: in the dump window each billboard's centre is also put in the
+// seated frame with that eye's pose, beside the turret's yaw rate. Every moved radar billboard's scope also counts its issues (srvTurretHudNoteIssue), and the 10 s pair line sums them.
+// Render thread, but the 10 s line (the frame tick).
+constexpr uint32_t kPairSlots = 6, kPairDumpFrames = 16, kPairGiveUpFrames = 8, kPairGroups = 4;
+constexpr uint64_t kPairEveryMs = 2000;
+constexpr UINT kPairBufferBytes = 4096;
+constexpr int kRadarFamily = 7;   // the radar's own picture billboard: vs 5559BD94 with ps EA02FAC2
+static_assert(st::kFamilies[kRadarFamily].sig == st::kSceneSignature && st::kFamilies[kRadarFamily].strideBytes == 52 && st::kFamilies[kRadarFamily].posFloat == 5 &&
+                  st::kFamilies[kRadarFamily].preFloat == 9,
+              "signature H's record: lighting position 3, UV 2 (float 3), the moved clip position at 5, `pre` at 9");
+constexpr uint32_t kPairUvFloat = 3;
+struct PairEntry {
+    ID3D11Buffer* so = nullptr;      // the twin's stream-output target
+    ID3D11Buffer* stage = nullptr;   // its copy for the CPU
+    ID3D11Query* stats = nullptr;    // the primitives written
+    bool armed = false, copied = false, read = false;
+    // what the draw ran with
+    float dEye[3] = {}, contentInv = 0.0f, tan[4] = {}, fwd[3] = {}, vpW = 0.0f, vpH = 0.0f;
+    const void* b1 = nullptr;
+    const void* t4 = nullptr;
+    bool pose = false;
+    double R[9] = {}, E[3] = {};
+    uint32_t issues = 0, ours = 0, other = 0;
+    // read back: issue 0's NDC box centre before the move, its move and the content's expected move (px, x right, y up), its centre in the eye before and after
+    bool measured = false, expected = false;
+    double preNdc[2] = {}, movePx[2] = {}, expectPx[2] = {}, preEye[3] = {}, postEye[3] = {};
+};
+struct PairSlot {
+    PairEntry e[2][2];   // [eye][kind - 1]
+    uint32_t frame = 0, dumpIndex = 0, waited = 0;
+    bool open = false, pending = false, dump = false;
+    uint64_t callSerial = 0;
+    float callD[3] = {};
+    double yawRate = 0.0;
+    bool haveRate = false;
+};
+enum class PictureState : uint8_t { kNone, kPending, kWritten, kFailed };
+struct PairPicture {
+    ID3D11Texture2D* stage = nullptr;
+    PictureState state = PictureState::kNone;
+    const void* id = nullptr;
+    uint32_t w = 0, h = 0, frame = 0, waited = 0, format = 0;
+    char why[96] = "";
+};
+struct PairWatch {
+    ID3D11Device* device = nullptr;   // identity: the slots' objects are this device's
+    bool failed = false;
+    PairSlot slot[kPairSlots];
+    int current = -1;                  // this frame's slot (-1: none open yet)
+    bool wantFrame = false;            // this frame is a capture frame (decided at the boundary)
+    uint64_t lastMs = 0;
+    uint32_t dumpSerial = 0;           // the last eye dump taken up
+    wchar_t stamp[16] = L"";
+    uint32_t dumpLeft = 0, dumpIndex = 0;
+    bool dumpFrame = false, windowOpen = false;
+    uint32_t windowFrames = 0, windowRadar = 0, windowCaptured[2][2] = {};   // the window's frames with a slot, radar billboard draws seen, entries captured
+    PairPicture picture[2];            // [kind - 1], eye 0
+    PairEntry* scope = nullptr;        // the open scope's entry (pairEnd, pairFinish)
+};
+PairWatch g_pair;
+std::atomic<uint32_t> g_eyeDumpSerial{0};   // srvTurretNoteEyeDump (any thread): the stamp is written before the serial moves
+wchar_t g_eyeDumpStamp[16] = L"";
+// The 10 s pair line's counts, by kind (0 disc, 1 icon) where there are two.
+struct PairCounters {
+    std::atomic<uint64_t> draws[2]{}, issuesMoved[2]{}, inScopeOther[2]{}, declined[2]{}, outside[2]{}, perDraw[2][4]{};
+    std::atomic<uint64_t> constFrames{0}, constApart{0}, constNoDepth{0}, capFrames{0}, capApart{0}, captured{0}, skippedBusy{0}, lost{0};
+};
+PairCounters g_pc;
+// A moved radar billboard's scope (radarCorrectionBegin to srvTurretHudEnd): its issues, each with the geometry shader bound when it went out (ours: moved).
+struct RadarScope {
+    ID3D11DeviceContext* ctx = nullptr;
+    const void* gs = nullptr;   // identity: the shader the binding put in
+    int kind = 0;
+    uint32_t issues = 0, ours = 0, other = 0;
+};
+RadarScope g_radarScope;
+// THE CONSTANTS' COMPARISON, every frame: each eye's moved disc and icon, the delta and z_c each ran with, and the on-screen move of content at z_c each makes at one point (the eye's last
+// captured disc centre, else the centre of the view). A difference over 1 px says the two were given different moves.
+struct FrameMove {
+    uint32_t frame = 0xFFFFFFFFu;
+    float dEye[3] = {}, contentInv = 0.0f, tan[4] = {}, vpW = 0.0f, vpH = 0.0f;
+};
+FrameMove g_frameMove[2][2];   // [eye][kind - 1]
+double g_refNdc[2][2] = {};    // [eye]: the comparison point
+
+void pairReleaseObjects() {
+    for (PairSlot& s : g_pair.slot)
+        for (auto& row : s.e)
+            for (PairEntry& e : row) {
+                st::release(e.so);
+                st::release(e.stage);
+                st::release(e.stats);
+            }
+    for (PairPicture& p : g_pair.picture) st::release(p.stage);
+}
+void pairResetSlots() {
+    for (PairSlot& s : g_pair.slot) s = PairSlot{};
+    g_pair.current = -1;
+    g_pair.scope = nullptr;
+    for (PairPicture& p : g_pair.picture) p = PairPicture{};
+}
+
+// One entry's objects on the context's device (a new device releases every slot's, and starts the ring afresh); a failure ends the instrument and is said once.
+bool pairEnsure(ID3D11DeviceContext* ctx, PairEntry& e) {
+    if (g_pair.failed) return false;
+    ID3D11Device* d = nullptr;
+    if (!guarded("srv.turret.pair.device", [&] { ctx->GetDevice(&d); }) || !d) {
+        st::release(d);
+        return false;
+    }
+    if (d != g_pair.device) {
+        pairReleaseObjects();
+        pairResetSlots();
+        g_pair.device = d;
+    }
+    HRESULT hr = S_OK;
+    const char* what = nullptr;
+    const bool ran = guarded("srv.turret.pair.make", [&] {
+        if (!e.so) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kPairBufferBytes;
+            bd.BindFlags = D3D11_BIND_STREAM_OUTPUT;
+            hr = d->CreateBuffer(&bd, nullptr, &e.so);
+            if (FAILED(hr)) { what = "the stream-output buffer"; return; }
+        }
+        if (!e.stage) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kPairBufferBytes;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            hr = d->CreateBuffer(&bd, nullptr, &e.stage);
+            if (FAILED(hr)) { what = "the staging buffer"; return; }
+        }
+        if (!e.stats) {
+            const D3D11_QUERY_DESC qd{D3D11_QUERY_SO_STATISTICS, 0};
+            hr = d->CreateQuery(&qd, &e.stats);
+            if (FAILED(hr)) { what = "the stream-output-statistics query"; return; }
+        }
+    });
+    st::release(d);
+    if (!ran || what) {
+        Log::get().note("srv turret radar pair: the capture's objects could not be made (%s, 0x%08X); the pair capture is off, the correction is unaffected.", what ? what : "a fault",
+                        static_cast<unsigned>(hr));
+        pairReleaseObjects();
+        pairResetSlots();
+        g_pair.failed = true;
+        return false;
+    }
+    return true;
+}
+
+// radarCorrectionBegin, before the bind: the entry this draw goes into, when the frame is a capture frame and the eye's billboard of this kind is not captured yet; null otherwise. The
+// frame's slot is opened at its first such draw (a ring in flight everywhere skips the frame, counted).
+PairEntry* pairTake(ID3D11DeviceContext* ctx, int eye, int kind) {
+    if (!g_pair.wantFrame || g_pair.failed || (eye != 0 && eye != 1) || (kind != 1 && kind != 2) || !g_soGs[st::kSceneSignature]) return nullptr;
+    if (g_pair.current < 0) {
+        int idle = -1;
+        for (int i = 0; i < static_cast<int>(kPairSlots); ++i)
+            if (!g_pair.slot[i].pending && !g_pair.slot[i].open) {
+                idle = i;
+                break;
+            }
+        if (idle < 0) {
+            g_pc.skippedBusy.fetch_add(1, std::memory_order_relaxed);
+            g_pair.wantFrame = false;
+            return nullptr;
+        }
+        PairSlot& s = g_pair.slot[idle];
+        for (auto& row : s.e)
+            for (PairEntry& e : row) {
+                ID3D11Buffer* so = e.so;
+                ID3D11Buffer* stage = e.stage;
+                ID3D11Query* stats = e.stats;
+                e = PairEntry{};
+                e.so = so;
+                e.stage = stage;
+                e.stats = stats;
+            }
+        s.frame = g_frame;
+        s.open = true;
+        s.pending = false;
+        s.waited = 0;
+        s.dump = g_pair.dumpFrame;
+        s.dumpIndex = g_pair.dumpIndex;
+        s.callSerial = g_corr.callSerial;
+        for (int i = 0; i < 3; ++i) s.callD[i] = g_corr.callD[i];
+        s.yawRate = g_corr.yawRateDegS;
+        s.haveRate = g_corr.haveRate;
+        g_pair.current = idle;
+        g_pair.lastMs = GetTickCount64();
+        if (s.dump) ++g_pair.windowFrames;
+    }
+    PairEntry& e = g_pair.slot[g_pair.current].e[eye][kind - 1];
+    if (e.armed || !pairEnsure(ctx, e)) return nullptr;
+    if (g_pair.current < 0) return nullptr;   // a new device reset the ring just now: this frame is not captured
+    ID3D11Buffer* so[1] = {};
+    const bool read = guarded("srv.turret.pair.so", [&] { ctx->SOGetTargets(1, so); });
+    const bool busy = !read || so[0] != nullptr;
+    st::release(so[0]);
+    return busy ? nullptr : &g_pair.slot[g_pair.current].e[eye][kind - 1];
+}
+
+// Right after the bind (the twin is bound): what the draw runs with, and the stream-output target and the query around its scope.
+void pairBegin(ID3D11DeviceContext* ctx, PairEntry& e, int eye, const float dEye[3], const st::TurretParams& p, const void* b1, const float rows[12]) {
+    for (int i = 0; i < 3; ++i) {
+        e.dEye[i] = dEye[i];
+        e.fwd[i] = rows[8 + i];   // row 279, as the delta's conversion read it
+    }
+    e.contentInv = p.invZc;
+    e.tan[0] = p.l;
+    e.tan[1] = p.r;
+    e.tan[2] = p.dn;
+    e.tan[3] = p.up;
+    e.b1 = b1;
+    e.t4 = g_lastT4;
+    D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT n = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    if (guarded("srv.turret.pair.vp", [&] { ctx->RSGetViewports(&n, vp); }) && n > 0) {
+        e.vpW = vp[0].Width;
+        e.vpH = vp[0].Height;
+    }
+    uint64_t seq = 0;
+    float head[12] = {}, eyeToHead[2][12] = {};
+    e.pose = nativeTemporalHeadPose(&seq, head, eyeToHead) && st::eyePoseOf(head, eyeToHead[eye], e.R, e.E);
+    g_pair.scope = &e;
+    e.armed = guarded("srv.turret.pair.begin", [&] {
+        ID3D11Buffer* target = e.so;
+        const UINT offset = 0;
+        ctx->SOSetTargets(1, &target, &offset);
+        ctx->Begin(e.stats);
+    });
+    if (!e.armed) g_pair.failed = true;   // a fault in the instrument's own calls ends the instrument, not the correction
+}
+// Right before the restore: the query ends and the stream-output target comes off.
+void pairEnd(ID3D11DeviceContext* ctx) {
+    PairEntry* e = g_pair.scope;
+    if (!e) return;
+    if (!guarded("srv.turret.pair.end", [&] {
+            if (e->armed) ctx->End(e->stats);
+            ctx->SOSetTargets(0, nullptr, nullptr);
+        })) {
+        e->armed = false;
+        g_pair.failed = true;
+    }
+}
+// After the restore: the records are copied for the later read.
+void pairFinish(ID3D11DeviceContext* ctx) {
+    PairEntry* e = g_pair.scope;
+    g_pair.scope = nullptr;
+    if (!e || !e->armed) return;
+    e->copied = guarded("srv.turret.pair.copy", [&] { vScreenCopyResourceRaw(ctx, e->stage, e->so); });
+    if (!e->copied) {
+        e->armed = false;
+        return;
+    }
+    if (g_pair.current >= 0 && g_pair.slot[g_pair.current].dump)
+        for (int eye = 0; eye < 2; ++eye)
+            for (int k = 0; k < 2; ++k)
+                if (&g_pair.slot[g_pair.current].e[eye][k] == e) ++g_pair.windowCaptured[eye][k];
+}
+// srvTurretHudEnd, after the probe's end: a moved radar billboard's issues, tallied by kind (and kept with its pair entry when captured).
+void radarScopeEnd() {
+    if (!g_radarScope.kind) return;
+    const int k = g_radarScope.kind - 1;
+    g_pc.draws[k].fetch_add(1, std::memory_order_relaxed);
+    g_pc.issuesMoved[k].fetch_add(g_radarScope.ours, std::memory_order_relaxed);
+    g_pc.inScopeOther[k].fetch_add(g_radarScope.other, std::memory_order_relaxed);
+    g_pc.perDraw[k][g_radarScope.issues < 3 ? g_radarScope.issues : 3].fetch_add(1, std::memory_order_relaxed);
+    if (g_pair.scope) {
+        g_pair.scope->issues = g_radarScope.issues;
+        g_pair.scope->ours = g_radarScope.ours;
+        g_pair.scope->other = g_radarScope.other;
+    }
+    g_radarScope = RadarScope{};
+    detail::g_srvTurretHudCounting.store(false, std::memory_order_relaxed);
+}
+
+// One quad of a capture: up to six records (two triangles) from `r`. Its pre-move w range, the centre of its NDC box before and after the move, the mean of its vertices in the eye before
+// and after (X right, Y up, Z forward, from the clip positions with the tangents the shader was given), and its distinct UV corners (up to four). False when a vertex is behind the eye.
+struct QuadMeasure {
+    double wLo = 1.0e30, wHi = -1.0e30, preNdc[2] = {}, postNdc[2] = {}, preEye[3] = {}, postEye[3] = {};
+    float uv[4][2] = {};
+    uint32_t uvN = 0;
+};
+bool measureQuad(const float* r, uint32_t n, const float tan[4], QuadMeasure& q) {
+    const st::Family& fam = st::kFamilies[kRadarFamily];
+    const uint32_t stride = fam.strideBytes / 4;
+    if (!r || n < 3) return false;
+    double pre[4] = {1.0e30, -1.0e30, 1.0e30, -1.0e30}, post[4] = {1.0e30, -1.0e30, 1.0e30, -1.0e30};
+    const auto eyeOf = [&](const float* c, double out[3]) {
+        const double w = c[3];
+        out[0] = c[0] * (double(tan[1]) - tan[0]) / 2.0 + w * (double(tan[1]) + tan[0]) / 2.0;
+        out[1] = c[1] * (double(tan[3]) - tan[2]) / 2.0 + w * (double(tan[3]) + tan[2]) / 2.0;
+        out[2] = w;
+    };
+    for (uint32_t i = 0; i < n; ++i) {
+        const float* v = r + static_cast<size_t>(stride) * i;
+        const float* a = v + fam.preFloat;
+        const float* b = v + fam.posFloat;
+        if (!(a[3] > 1.0e-6f) || !(b[3] > 1.0e-6f)) return false;
+        q.wLo = std::min(q.wLo, double(a[3]));
+        q.wHi = std::max(q.wHi, double(a[3]));
+        const double ax = double(a[0]) / a[3], ay = double(a[1]) / a[3], bx = double(b[0]) / b[3], by = double(b[1]) / b[3];
+        pre[0] = std::min(pre[0], ax);
+        pre[1] = std::max(pre[1], ax);
+        pre[2] = std::min(pre[2], ay);
+        pre[3] = std::max(pre[3], ay);
+        post[0] = std::min(post[0], bx);
+        post[1] = std::max(post[1], bx);
+        post[2] = std::min(post[2], by);
+        post[3] = std::max(post[3], by);
+        double pe[3], qe[3];
+        eyeOf(a, pe);
+        eyeOf(b, qe);
+        for (int k = 0; k < 3; ++k) {
+            q.preEye[k] += pe[k] / n;
+            q.postEye[k] += qe[k] / n;
+        }
+        const float u = v[kPairUvFloat], w = v[kPairUvFloat + 1];
+        bool seen = false;
+        for (uint32_t c = 0; c < q.uvN; ++c) seen = seen || (q.uv[c][0] == u && q.uv[c][1] == w);
+        if (!seen && q.uvN < 4) {
+            q.uv[q.uvN][0] = u;
+            q.uv[q.uvN][1] = w;
+            ++q.uvN;
+        }
+    }
+    q.preNdc[0] = (pre[0] + pre[1]) * 0.5;
+    q.preNdc[1] = (pre[2] + pre[3]) * 0.5;
+    q.postNdc[0] = (post[0] + post[1]) * 0.5;
+    q.postNdc[1] = (post[2] + post[3]) * 0.5;
+    return true;
+}
+const char* kKindName[3] = {"?", "disc", "icon"};
+
+// One captured billboard, said: what it ran with, its issues, and each issue's quad (up to kPairGroups; the records of the scope's issues follow one another).
+void pairLogEntry(const PairSlot& s, int eye, int kind, PairEntry& e, const float* records, const D3D11_QUERY_DATA_SO_STATISTICS& so) {
+    const st::Family& fam = st::kFamilies[kRadarFamily];
+    const uint32_t stride = fam.strideBytes / 4, capacity = kPairBufferBytes / fam.strideBytes / 3 * 3;
+    const uint64_t written = so.NumPrimitivesWritten * 3;
+    const uint32_t vertices = static_cast<uint32_t>(written < capacity ? written : capacity);
+    const uint32_t perIssue = e.issues && vertices % e.issues == 0 ? vertices / e.issues : vertices;
+    char tag[64] = "";
+    if (s.dump) std::snprintf(tag, sizeof(tag), " (dump %ls, frame %u of %u)", g_pair.stamp, s.dumpIndex + 1, kPairDumpFrames);
+    char zc[32] = "none (the plain delta)";
+    if (e.contentInv > 0.0f) std::snprintf(zc, sizeof(zc), "%.3f m", 1.0 / double(e.contentInv));
+    char line[2400];
+    int len = std::snprintf(line, sizeof(line),
+                            "srv turret radar pair: frame %u eye %d %s%s: t4 %06X, VS b1 %06X, forward row 279 (%.4f,%.4f,%.4f), setter call #%llu d (%.2f,%.2f,%.2f) cm, delta in the eye "
+                            "(%.2f,%.2f,%.2f) cm, z_c %s, viewport %.0fx%.0f; issues %u (our shader %u, another %u), prims %llu (needed %llu)",
+                            s.frame, eye, kKindName[kind], tag, holoShortId(e.t4), holoShortId(e.b1), static_cast<double>(e.fwd[0]), static_cast<double>(e.fwd[1]),
+                            static_cast<double>(e.fwd[2]), static_cast<unsigned long long>(s.callSerial), static_cast<double>(s.callD[0]) * 100.0, static_cast<double>(s.callD[1]) * 100.0,
+                            static_cast<double>(s.callD[2]) * 100.0, static_cast<double>(e.dEye[0]) * 100.0, static_cast<double>(e.dEye[1]) * 100.0, static_cast<double>(e.dEye[2]) * 100.0, zc,
+                            static_cast<double>(e.vpW), static_cast<double>(e.vpH), e.issues, e.ours, e.other, static_cast<unsigned long long>(so.NumPrimitivesWritten),
+                            static_cast<unsigned long long>(so.PrimitivesStorageNeeded));
+    st::TurretParams tp;
+    tp.l = e.tan[0];
+    tp.r = e.tan[1];
+    tp.dn = e.tan[2];
+    tp.up = e.tan[3];
+    const double hx = double(e.vpW) * 0.5, hy = double(e.vpH) * 0.5;
+    QuadMeasure first;
+    for (uint32_t g = 0; g < kPairGroups && perIssue >= 3 && (g + 1) * perIssue <= vertices && len > 0 && len < static_cast<int>(sizeof(line)) - 420; ++g) {
+        QuadMeasure q;
+        if (!measureQuad(records + static_cast<size_t>(stride) * g * perIssue, perIssue < 6 ? perIssue : 6, e.tan, q)) {
+            len += std::snprintf(line + len, sizeof(line) - len, "; issue %u: a vertex behind the eye", g);
+            continue;
+        }
+        const double mx = (q.postNdc[0] - q.preNdc[0]) * hx, my = (q.postNdc[1] - q.preNdc[1]) * hy;
+        if (g == 0) {
+            first = q;
+            e.measured = true;
+            e.preNdc[0] = q.preNdc[0];
+            e.preNdc[1] = q.preNdc[1];
+            e.movePx[0] = mx;
+            e.movePx[1] = my;
+            for (int k = 0; k < 3; ++k) {
+                e.preEye[k] = q.preEye[k];
+                e.postEye[k] = q.postEye[k];
+            }
+            double ex[2];
+            char expected[64] = "none";
+            if (e.contentInv > 0.0f && st::contentShiftNdc(tp, q.preNdc[0], q.preNdc[1], e.dEye, 1.0 / double(e.contentInv), ex)) {
+                e.expected = true;
+                e.expectPx[0] = ex[0] * hx;
+                e.expectPx[1] = ex[1] * hy;
+                std::snprintf(expected, sizeof(expected), "(%.2f,%.2f) px", e.expectPx[0], e.expectPx[1]);
+            }
+            len += std::snprintf(line + len, sizeof(line) - len,
+                                 "; issue 0: w=[%.3f,%.3f], centre in the eye pre (%.4f,%.4f,%.4f) post (%.4f,%.4f,%.4f) m, ndc pre (%.4f,%.4f), moved (%.2f,%.2f) px, expected %s, uv",
+                                 q.wLo, q.wHi, q.preEye[0], q.preEye[1], q.preEye[2], q.postEye[0], q.postEye[1], q.postEye[2], q.preNdc[0], q.preNdc[1], mx, my, expected);
+            for (uint32_t c = 0; c < q.uvN; ++c)
+                len += std::snprintf(line + len, sizeof(line) - len, " (%.4f,%.4f)", static_cast<double>(q.uv[c][0]), static_cast<double>(q.uv[c][1]));
+        } else {
+            len += std::snprintf(line + len, sizeof(line) - len, "; issue %u: pre (%+.2f,%+.2f) px from issue 0's, moved (%.2f,%.2f) px, w=[%.3f,%.3f]", g,
+                                 (q.preNdc[0] - first.preNdc[0]) * hx, (q.preNdc[1] - first.preNdc[1]) * hy, mx, my, q.wLo, q.wHi);
+        }
+    }
+    if (vertices < 3) len += std::snprintf(line + len, sizeof(line) - len, "; nothing captured");
+    Log::get().note("%s", line);
+}
+
+// A slot whose entries are all read (or given up on): each eye's disc and icon compared, and in the dump window their centres in the seated frame.
+void pairLogFrame(const PairSlot& s) {
+    for (int eye = 0; eye < 2; ++eye) {
+        const PairEntry& d = s.e[eye][0];
+        const PairEntry& i = s.e[eye][1];
+        if (!d.armed && !i.armed) continue;
+        if (!d.measured || !i.measured) {
+            Log::get().note("srv turret radar pair: frame %u eye %d: disc %s, icon %s; nothing to compare", s.frame, eye, d.measured ? "measured" : d.armed ? "lost" : "not captured",
+                            i.measured ? "measured" : i.armed ? "lost" : "not captured");
+            continue;
+        }
+        const double dx = d.movePx[0] - i.movePx[0], dy = d.movePx[1] - i.movePx[1], apart = std::sqrt(dx * dx + dy * dy);
+        g_pc.capFrames.fetch_add(1, std::memory_order_relaxed);
+        if (apart > 1.0) g_pc.capApart.fetch_add(1, std::memory_order_relaxed);
+        g_refNdc[eye][0] = d.preNdc[0];
+        g_refNdc[eye][1] = d.preNdc[1];
+        char de[48] = "none", ie[48] = "none";
+        if (d.expected) std::snprintf(de, sizeof(de), "(%.2f,%.2f)", d.expectPx[0], d.expectPx[1]);
+        if (i.expected) std::snprintf(ie, sizeof(ie), "(%.2f,%.2f)", i.expectPx[0], i.expectPx[1]);
+        Log::get().note("srv turret radar pair: frame %u eye %d: disc moved (%.2f,%.2f) px (expected %s), icon moved (%.2f,%.2f) px (expected %s); disc minus icon (%.2f,%.2f) px, |%.2f| px%s",
+                        s.frame, eye, d.movePx[0], d.movePx[1], de, i.movePx[0], i.movePx[1], ie, dx, dy, apart, apart > 1.0 ? " -- APART" : "");
+        if (!s.dump) continue;
+        char rate[32] = "unknown";
+        if (s.haveRate) std::snprintf(rate, sizeof(rate), "%.1f deg/s", s.yawRate);
+        double dPost[3] = {}, dPre[3] = {}, iPost[3] = {}, iPre[3] = {};
+        if (d.pose && i.pose) {
+            st::eyeToSeated(d.R, d.E, d.postEye, dPost);
+            st::eyeToSeated(d.R, d.E, d.preEye, dPre);
+            st::eyeToSeated(i.R, i.E, i.postEye, iPost);
+            st::eyeToSeated(i.R, i.E, i.preEye, iPre);
+            Log::get().note("srv turret radar pair: lock: frame %u eye %d (dump %ls, frame %u of %u): disc centre seated post (%.4f,%.4f,%.4f) pre (%.4f,%.4f,%.4f) m, icon post (%.4f,%.4f,%.4f) "
+                            "pre (%.4f,%.4f,%.4f) m; turret yaw rate %s",
+                            s.frame, eye, g_pair.stamp, s.dumpIndex + 1, kPairDumpFrames, dPost[0], dPost[1], dPost[2], dPre[0], dPre[1], dPre[2], iPost[0], iPost[1], iPost[2], iPre[0], iPre[1],
+                            iPre[2], rate);
+        } else {
+            Log::get().note("srv turret radar pair: lock: frame %u eye %d (dump %ls, frame %u of %u): no eye pose at the draw; turret yaw rate %s", s.frame, eye, g_pair.stamp, s.dumpIndex + 1,
+                            kPairDumpFrames, rate);
+        }
+    }
+}
+
+// The frame boundary: each pending slot's entries read when the GPU has them, without waiting; a slot is closed when all are read or kPairGiveUpFrames have passed.
+void pairReadSlot(ID3D11DeviceContext* ctx, PairSlot& s) {
+    bool waiting = false;
+    for (int eye = 0; eye < 2; ++eye) {
+        for (int k = 0; k < 2; ++k) {
+            PairEntry& e = s.e[eye][k];
+            if (!e.armed || !e.copied || e.read) continue;
+            D3D11_QUERY_DATA_SO_STATISTICS so{};
+            HRESULT hr = S_FALSE;
+            const bool ran = guarded("srv.turret.pair.stats", [&] { hr = ctx->GetData(e.stats, &so, sizeof(so), D3D11_ASYNC_GETDATA_DONOTFLUSH); });
+            if (!ran || FAILED(hr)) {
+                e.read = true;
+                g_pc.lost.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            if (hr != S_OK) {
+                waiting = true;
+                continue;
+            }
+            D3D11_MAPPED_SUBRESOURCE m{};
+            HRESULT mh = E_FAIL;
+            const bool mapped = guarded("srv.turret.pair.map", [&] { mh = ctx->Map(e.stage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+            if (mapped && mh == DXGI_ERROR_WAS_STILL_DRAWING) {
+                waiting = true;
+                continue;
+            }
+            if (!mapped || FAILED(mh) || !m.pData) {
+                e.read = true;
+                g_pc.lost.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            guarded("srv.turret.pair.log", [&] { pairLogEntry(s, eye, k + 1, e, static_cast<const float*>(m.pData), so); });
+            guarded("srv.turret.pair.unmap", [&] { ctx->Unmap(e.stage, 0); });
+            e.read = true;
+        }
+    }
+    if (waiting && ++s.waited <= kPairGiveUpFrames) return;
+    if (waiting)
+        for (auto& row : s.e)
+            for (PairEntry& e : row)
+                if (e.armed && e.copied && !e.read) {
+                    e.read = true;
+                    g_pc.lost.fetch_add(1, std::memory_order_relaxed);
+                }
+    pairLogFrame(s);
+    s.pending = false;
+}
+
+// THE PICTURES: eye 0's t4 of a radar billboard in the dump window, copied once (the first frame of the window that draws it moved), at the bind; written at a later boundary.
+void pictureTake(ID3D11DeviceContext* ctx, int kind) {
+    PairPicture& p = g_pair.picture[kind - 1];
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11Resource* res = nullptr;
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11Device* d = nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    HRESULT hr = E_FAIL;
+    const char* why = nullptr;
+    const bool ran = guarded("srv.turret.picture.take", [&] {
+        ctx->PSGetShaderResources(4, 1, &srv);
+        if (!srv) { why = "no t4"; return; }
+        srv->GetResource(&res);
+        if (!res || FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) || !tex) { why = "t4 is not a 2D texture"; return; }
+        tex->GetDesc(&td);
+        if (td.SampleDesc.Count != 1) { why = "t4 is multisampled"; return; }
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        ctx->GetDevice(&d);
+        if (!d) { why = "no device"; return; }
+        hr = d->CreateTexture2D(&sd, nullptr, &p.stage);
+        if (FAILED(hr) || !p.stage) { why = "the staging texture could not be made"; return; }
+        vScreenCopyResourceRaw(ctx, p.stage, res);
+    });
+    p.id = res;
+    p.w = td.Width;
+    p.h = td.Height;
+    p.format = static_cast<uint32_t>(td.Format);
+    p.frame = g_frame;
+    p.waited = 0;
+    if (!ran || why) {
+        st::release(p.stage);
+        p.state = PictureState::kFailed;
+        std::snprintf(p.why, sizeof(p.why), "%s (0x%08X)", why ? why : "a fault", static_cast<unsigned>(hr));
+    } else {
+        p.state = PictureState::kPending;
+    }
+    st::release(d);
+    st::release(tex);
+    st::release(res);
+    st::release(srv);
+}
+// A 24-bit BMP of a grayscale picture (top row first in `gray`).
+bool writeGrayBmp(const std::wstring& path, uint32_t w, uint32_t h, const std::vector<uint8_t>& gray) {
+    const uint32_t row = (w * 3 + 3) & ~3u, image = row * h;
+    BITMAPFILEHEADER fh{};
+    BITMAPINFOHEADER ih{};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(ih);
+    fh.bfSize = fh.bfOffBits + image;
+    ih.biSize = sizeof(ih);
+    ih.biWidth = static_cast<LONG>(w);
+    ih.biHeight = static_cast<LONG>(h);
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    ih.biCompression = BI_RGB;
+    ih.biSizeImage = image;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return false;
+    bool ok = fwrite(&fh, sizeof(fh), 1, f) == 1 && fwrite(&ih, sizeof(ih), 1, f) == 1;
+    std::vector<uint8_t> line(row, 0);
+    for (uint32_t y = 0; ok && y < h; ++y) {
+        const uint8_t* src = gray.data() + static_cast<size_t>(h - 1 - y) * w;   // bottom-up
+        for (uint32_t x = 0; x < w; ++x) line[x * 3] = line[x * 3 + 1] = line[x * 3 + 2] = src[x];
+        ok = fwrite(line.data(), 1, row, f) == row;
+    }
+    return fclose(f) == 0 && ok;
+}
+void picturesRead(ID3D11DeviceContext* ctx) {
+    for (int k = 0; k < 2; ++k) {
+        PairPicture& p = g_pair.picture[k];
+        if (p.state != PictureState::kPending || !p.stage) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT mh = E_FAIL;
+        const bool mapped = guarded("srv.turret.picture.map", [&] { mh = ctx->Map(p.stage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+        if (mapped && mh == DXGI_ERROR_WAS_STILL_DRAWING && ++p.waited <= kPairGiveUpFrames) continue;
+        if (!mapped || FAILED(mh) || !m.pData) {
+            st::release(p.stage);
+            p.state = PictureState::kFailed;
+            std::snprintf(p.why, sizeof(p.why), "the copy could not be read (0x%08X)", static_cast<unsigned>(mh));
+            Log::get().note("srv turret radar picture: dump %ls frame %u eye 0 %s: t4 %06X %ux%u: %s", g_pair.stamp, p.frame, kKindName[k + 1], holoShortId(p.id), p.w, p.h, p.why);
+            continue;
+        }
+        const bool r32 = p.format == static_cast<uint32_t>(DXGI_FORMAT_R32_FLOAT) || p.format == static_cast<uint32_t>(DXGI_FORMAT_R32_TYPELESS);
+        uint32_t content = 0;
+        float lo = 0.0f, hi = 0.0f;
+        bool written = false;
+        std::wstring name;
+        if (r32) {
+            std::vector<float> v(static_cast<size_t>(p.w) * p.h);
+            for (uint32_t y = 0; y < p.h; ++y) std::memcpy(v.data() + static_cast<size_t>(y) * p.w, static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(y) * m.RowPitch, p.w * 4u);
+            for (float f : v)
+                if (std::isfinite(f) && f < 1000.0f) {
+                    lo = content ? std::min(lo, f) : f;
+                    hi = content ? std::max(hi, f) : f;
+                    ++content;
+                }
+            std::vector<uint8_t> gray(v.size(), 0);
+            const float span = hi - lo;
+            for (size_t i = 0; i < v.size(); ++i)
+                if (std::isfinite(v[i]) && v[i] < 1000.0f) gray[i] = static_cast<uint8_t>(64.0f + (span > 0.0f ? 191.0f * (v[i] - lo) / span : 191.0f) + 0.5f);
+            const std::wstring dir = Log::get().dir() + L"\\eyes";
+            CreateDirectoryW(dir.c_str(), nullptr);
+            name = std::wstring(L"eye_") + g_pair.stamp + (k == 0 ? L"_RadarDiscT4.bmp" : L"_RadarIconT4.bmp");
+            written = writeGrayBmp(dir + L"\\" + name, p.w, p.h, gray);
+        }
+        guarded("srv.turret.picture.unmap", [&] { ctx->Unmap(p.stage, 0); });
+        st::release(p.stage);
+        p.state = written ? PictureState::kWritten : PictureState::kFailed;
+        if (!r32)
+            std::snprintf(p.why, sizeof(p.why), "format %u is not read", p.format);
+        else if (!written)
+            std::snprintf(p.why, sizeof(p.why), "the file could not be written");
+        Log::get().note("srv turret radar picture: dump %ls frame %u eye 0 %s: t4 %06X %ux%u format %u, content (t4 < 1000) %u of %u texels, t4 %.4f to %.4f; %ls%ls%s",
+                        g_pair.stamp, p.frame, kKindName[k + 1], holoShortId(p.id), p.w, p.h, p.format, content, p.w * p.h, static_cast<double>(lo), static_cast<double>(hi),
+                        written ? L"written " : L"", written ? name.c_str() : L"", written ? " (black: empty, t4 >= 1000; gray 64..255: content, brighter is a larger t4)" : p.why);
+    }
+}
+const char* pictureText(const PairPicture& p) {
+    switch (p.state) {
+        case PictureState::kPending: return "copied, not yet written";
+        case PictureState::kWritten: return "written";
+        case PictureState::kFailed: return "FAILED";
+        default: return "not taken (no eye-0 billboard of the kind moved in the window)";
+    }
+}
+
+// THE CONSTANTS' COMPARISON for the frame that just ended: each eye with both kinds moved.
+void constantsCompare(uint32_t frame) {
+    for (int eye = 0; eye < 2; ++eye) {
+        const FrameMove& d = g_frameMove[eye][0];
+        const FrameMove& i = g_frameMove[eye][1];
+        if (d.frame != frame || i.frame != frame) continue;
+        if (!(d.contentInv > 0.0f) || !(i.contentInv > 0.0f)) {
+            g_pc.constNoDepth.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        st::TurretParams td, ti;
+        td.l = d.tan[0];
+        td.r = d.tan[1];
+        td.dn = d.tan[2];
+        td.up = d.tan[3];
+        ti.l = i.tan[0];
+        ti.r = i.tan[1];
+        ti.dn = i.tan[2];
+        ti.up = i.tan[3];
+        double sd[2], si[2];
+        if (!st::contentShiftNdc(td, g_refNdc[eye][0], g_refNdc[eye][1], d.dEye, 1.0 / double(d.contentInv), sd) ||
+            !st::contentShiftNdc(ti, g_refNdc[eye][0], g_refNdc[eye][1], i.dEye, 1.0 / double(i.contentInv), si))
+            continue;
+        const double dx = (sd[0] - si[0]) * double(d.vpW) * 0.5, dy = (sd[1] - si[1]) * double(d.vpH) * 0.5;
+        g_pc.constFrames.fetch_add(1, std::memory_order_relaxed);
+        if (std::sqrt(dx * dx + dy * dy) > 1.0) g_pc.constApart.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// srvTurretHudFrameBoundary, after the frame count moved on: the ended frame's slot goes in flight, the constants are compared, what the GPU has done is read, an eye dump taken up, and
+// whether the frame now starting is a capture frame decided.
+void pairBoundary(ID3D11DeviceContext* ctx) {
+    if (g_pair.current >= 0) {
+        PairSlot& s = g_pair.slot[g_pair.current];
+        s.open = false;
+        bool any = false;
+        for (auto& row : s.e)
+            for (PairEntry& e : row) any = any || (e.armed && e.copied);
+        s.pending = any;
+        s.waited = 0;
+        if (any) g_pc.captured.fetch_add(1, std::memory_order_relaxed);
+        g_pair.current = -1;
+    }
+    constantsCompare(g_frame - 1u);
+    if (ctx) {
+        for (PairSlot& s : g_pair.slot)
+            if (s.pending) pairReadSlot(ctx, s);
+        picturesRead(ctx);
+    }
+    const uint32_t serial = g_eyeDumpSerial.load(std::memory_order_acquire);
+    const bool newDump = serial != g_pair.dumpSerial;
+    if ((newDump || g_pair.dumpLeft == 0) && g_pair.windowOpen) {   // the window that ran is over (or a new dump cuts it short)
+        g_pair.windowOpen = false;
+        if (g_pair.windowRadar > 0)
+            Log::get().note("srv turret radar pair: dump %ls window ended: %u of %u frames captured (eye 0 disc %u, icon %u; eye 1 disc %u, icon %u); pictures: disc %s, icon %s; radar "
+                            "billboard draws seen %u",
+                            g_pair.stamp, g_pair.windowFrames, kPairDumpFrames, g_pair.windowCaptured[0][0], g_pair.windowCaptured[0][1], g_pair.windowCaptured[1][0],
+                            g_pair.windowCaptured[1][1], pictureText(g_pair.picture[0]), pictureText(g_pair.picture[1]), g_pair.windowRadar);
+    }
+    if (newDump) {
+        g_pair.dumpSerial = serial;
+        wcsncpy_s(g_pair.stamp, g_eyeDumpStamp, _TRUNCATE);
+        g_pair.dumpLeft = kPairDumpFrames;
+        g_pair.windowOpen = true;
+        g_pair.windowFrames = g_pair.windowRadar = 0;
+        for (auto& row : g_pair.windowCaptured)
+            for (uint32_t& n : row) n = 0;
+        for (PairPicture& p : g_pair.picture) {
+            st::release(p.stage);
+            p = PairPicture{};
+        }
+    }
+    g_pair.dumpFrame = g_pair.dumpLeft > 0;
+    if (g_pair.dumpFrame) {
+        g_pair.dumpIndex = kPairDumpFrames - g_pair.dumpLeft;
+        --g_pair.dumpLeft;
+    }
+    g_pair.wantFrame = g_pair.dumpFrame || GetTickCount64() - g_pair.lastMs >= kPairEveryMs;
+}
+
+// The frame tick's 10 s line (with the correction line, whenever the anchor yield was on in the window).
+void pairWindow(bool yieldSeen) {
+    uint64_t v[2][9];
+    for (int k = 0; k < 2; ++k) {
+        v[k][0] = g_pc.draws[k].exchange(0, std::memory_order_relaxed);
+        v[k][1] = g_pc.issuesMoved[k].exchange(0, std::memory_order_relaxed);
+        v[k][2] = g_pc.inScopeOther[k].exchange(0, std::memory_order_relaxed);
+        v[k][3] = g_pc.declined[k].exchange(0, std::memory_order_relaxed);
+        v[k][4] = g_pc.outside[k].exchange(0, std::memory_order_relaxed);
+        for (int n = 0; n < 4; ++n) v[k][5 + n] = g_pc.perDraw[k][n].exchange(0, std::memory_order_relaxed);
+    }
+    const uint64_t constFrames = g_pc.constFrames.exchange(0, std::memory_order_relaxed), constApart = g_pc.constApart.exchange(0, std::memory_order_relaxed),
+                   constNoDepth = g_pc.constNoDepth.exchange(0, std::memory_order_relaxed), capFrames = g_pc.capFrames.exchange(0, std::memory_order_relaxed),
+                   capApart = g_pc.capApart.exchange(0, std::memory_order_relaxed), captured = g_pc.captured.exchange(0, std::memory_order_relaxed),
+                   skipped = g_pc.skippedBusy.exchange(0, std::memory_order_relaxed), lost = g_pc.lost.exchange(0, std::memory_order_relaxed);
+    if (!yieldSeen) return;
+    char kinds[2][256];
+    for (int k = 0; k < 2; ++k)
+        std::snprintf(kinds[k], sizeof(kinds[k]),
+                      "%s: draws moved %llu, issues moved %llu, issues not moved %llu (another shader in the scope %llu, declined draws %llu, outside a scope %llu), issues per moved draw "
+                      "0/1/2/3+: %llu/%llu/%llu/%llu",
+                      kKindName[k + 1], static_cast<unsigned long long>(v[k][0]), static_cast<unsigned long long>(v[k][1]),
+                      static_cast<unsigned long long>(v[k][2] + v[k][3] + v[k][4]), static_cast<unsigned long long>(v[k][2]), static_cast<unsigned long long>(v[k][3]),
+                      static_cast<unsigned long long>(v[k][4]), static_cast<unsigned long long>(v[k][5]), static_cast<unsigned long long>(v[k][6]),
+                      static_cast<unsigned long long>(v[k][7]), static_cast<unsigned long long>(v[k][8]));
+    Log::get().note("srv turret radar pair: 10 s: %s; %s; disc and icon moved apart on screen (over 1 px): by the constants %llu of %llu eye frames (no content depth %llu), by the capture %llu "
+                    "of %llu captured eye frames; capture frames %llu, skipped (ring busy) %llu, entries lost %llu%s",
+                    kinds[0], kinds[1], static_cast<unsigned long long>(constApart), static_cast<unsigned long long>(constFrames), static_cast<unsigned long long>(constNoDepth),
+                    static_cast<unsigned long long>(capApart), static_cast<unsigned long long>(capFrames), static_cast<unsigned long long>(captured),
+                    static_cast<unsigned long long>(skipped), static_cast<unsigned long long>(lost), g_pair.failed ? "; the capture is OFF (its objects could not be made)" : "");
+}
 
 // srvTurretHudBegin, at a draw of family 7 or 8 while the anchor yield is on (anchorLeaves): true when the draw is moved and bound (srvTurretHudEnd puts the game's stage back).
 bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
@@ -1972,10 +2743,12 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    const auto leave = [](int why) {
+    const auto leave = [kind](int why) {
         g_cc.left[why].fetch_add(1, std::memory_order_relaxed);
+        if (kind) g_pc.declined[kind - 1].fetch_add(1, std::memory_order_relaxed);   // THE PAIR CAPTURE's count: a radar billboard's issue that goes out unmoved
         return false;
     };
+    if (g_pair.windowOpen) ++g_pair.windowRadar;
     if (lastFrameOnly) g_cc.lastFrameOnly.fetch_add(1, std::memory_order_relaxed);
     if (!kind) return leave(kCorrNoMatch);
     if (g_movedAt[eye][kind - 1] == g_frame + 1u) return leave(kCorrExtra);   // one disc and one icon in each eye each frame
@@ -2005,11 +2778,39 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!cbuf) return leave(kCorrNotReady);
     st::ExtraCb camera;
     if (!st::readGameCb(ctx, st::kGameCbSlot, camera)) return leave(kCorrNoGameCb);   // signature H's lighting position needs the draw's own camera rows at GS slot 1
+    // THE PAIR CAPTURE (TEMPORARY): in a capture frame each eye's disc and icon go through the twin into the frame's slot; the probe's sample stands aside for such a draw (probeDue).
+    PairEntry* const pair = pairTake(ctx, eye, kind);
     // THE GPU INSTRUMENT on the corrected path: once a second per eye, the disc and the icon in turn, through the stream-output twin (the quad probe line at the readback, logQuadProbe)
     Probe& probe = g_probe[eye][family];
+    g_pairTaking = pair != nullptr;
     const bool sample = g_corrProbeKind[eye] == kind && probeDue(ctx, eye, family, probe.wantOrd);
-    const bool twin = sample && g_soGs[st::kSceneSignature] && probe.soBuf && probe.soStats && probe.staging;
+    g_pairTaking = false;
+    const bool twin = pair || (sample && g_soGs[st::kSceneSignature] && probe.soBuf && probe.soStats && probe.staging);
     if (g_binding.begin(ctx, twin ? g_soGs[st::kSceneSignature] : g_gs[st::kSceneSignature], cbuf, st::directSetGs, &camera) != st::Binding::Begin::kBound) return leave(kCorrBeginFailed);
+    // every issue of the moved billboard is counted, with the shader bound when it went out (srvTurretHudNoteIssue; radarScopeEnd tallies it)
+    g_radarScope = RadarScope{};
+    g_radarScope.ctx = ctx;
+    g_radarScope.gs = twin ? g_soGs[st::kSceneSignature] : g_gs[st::kSceneSignature];
+    g_radarScope.kind = kind;
+    detail::g_srvTurretHudCounting.store(true, std::memory_order_relaxed);
+    if (pair) pairBegin(ctx, *pair, eye, dEye, cparams, camera.buffer, rows);
+    if (eye == 0 && g_pair.dumpFrame && g_pair.picture[kind - 1].state == PictureState::kNone) pictureTake(ctx, kind);   // THE PICTURES
+    {   // THE CONSTANTS' COMPARISON: what this eye's billboard of this kind ran with
+        FrameMove& fm = g_frameMove[eye][kind - 1];
+        fm.frame = g_frame;
+        for (int i = 0; i < 3; ++i) fm.dEye[i] = dEye[i];
+        fm.contentInv = cparams.invZc;
+        fm.tan[0] = cparams.l;
+        fm.tan[1] = cparams.r;
+        fm.tan[2] = cparams.dn;
+        fm.tan[3] = cparams.up;
+        D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+        UINT n = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        if (guarded("srv.turret.pair.framevp", [&] { ctx->RSGetViewports(&n, vp); }) && n > 0) {
+            fm.vpW = vp[0].Width;
+            fm.vpH = vp[0].Height;
+        }
+    }
     if (sample) {
         probeBegin(ctx, eye, family, probe.wantOrd, twin, cparams);
         probe.corr = true;
@@ -2124,9 +2925,25 @@ void correctionWindow(bool yieldSeen) {
                         static_cast<unsigned long long>(n.cwExtraFrames - b.cwExtraFrames));
     }
     b = n;
+    pairWindow(yieldSeen);   // THE PAIR CAPTURE's 10 s line (TEMPORARY), beside this one
 }
 
 }  // namespace
+
+// THE PAIR CAPTURE (TEMPORARY, issue 140): an eye dump was asked for (temporal_pass.cpp beginEyeRun, any thread). The render thread takes it up at its next frame boundary.
+void srvTurretNoteEyeDump(const wchar_t* stamp) {
+    wcsncpy_s(g_eyeDumpStamp, stamp ? stamp : L"", _TRUNCATE);
+    g_eyeDumpSerial.fetch_add(1, std::memory_order_release);
+}
+
+// THE PAIR CAPTURE (TEMPORARY): a family-7 issue that went out without the pass's shader (vscreen.cpp srvTurretUnmovedNote, owner context, while the writers are watched), counted by the radar
+// picture its t4 is (none: not a radar billboard).
+void srvTurretRadarNoteUnmovedIssue(ID3D11DeviceContext* ctx, int family) {
+    if (family != kRadarFamily || !ctx) return;
+    bool lastFrameOnly = false;
+    const int kind = billboardKind(ctx, lastFrameOnly);
+    if (kind == 1 || kind == 2) g_pc.outside[kind - 1].fetch_add(1, std::memory_order_relaxed);
+}
 
 // The scene camera block's writes (vscreen.cpp hookedUnmap, before the real Unmap, while srvTurretWantsCameraRows()): rows 277..279 kept by buffer with the host frame, for the radar
 // anchor's CPU path (anchorDirSample). 48 bytes read from the mapped block.
@@ -2328,6 +3145,16 @@ bool srvTurretHudScopeActive() { return g_binding.needsRestore(); }
 // vscreen.cpp, each issue of a matched draw while a scope is counting (srv_turret.h srvTurretHudCountIssue): counted for the sampled scope's statistics line, and said for a family's first scope.
 void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {
     detail::g_srvTurretHudIssues.fetch_add(1, std::memory_order_relaxed);
+    if (g_radarScope.kind && ctx == g_radarScope.ctx) {   // THE PAIR CAPTURE's count: a moved radar billboard's issue, with the geometry shader it went out with
+        ++g_radarScope.issues;
+        ID3D11GeometryShader* gs = nullptr;
+        guarded("srv.turret.radar.issue", [&] { ctx->GSGetShader(&gs, nullptr, nullptr); });
+        if (gs && static_cast<const void*>(gs) == g_radarScope.gs)
+            ++g_radarScope.ours;
+        else
+            ++g_radarScope.other;
+        st::release(gs);
+    }
     if (g_noteFamily >= 0 && ctx == g_noteCtx && g_noteIssue < kNoteIssues) {
         ++g_noteIssue;
         noteState(ctx);
@@ -2506,8 +3333,11 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
 void srvTurretHudEnd(ID3D11DeviceContext* ctx) {
     noteEnd();
     probeEnd(ctx);   // the queries end and the stream-output target comes off, right before the game's geometry stage goes back
+    pairEnd(ctx);    // ... and THE PAIR CAPTURE's (TEMPORARY)
+    radarScopeEnd();
     const auto done = g_binding.finish(ctx);
     probeFinish(ctx);
+    pairFinish(ctx);
     if (!g_scissor.restore(ctx) && !g_scissorRestoreNoted) {
         g_scissorRestoreNoted = true;
         Log::get().note("srv turret hud: the game's scissor rectangles could not be put back after an issue; the frame boundary settles them and draws are refused (not-ready) until then.");
@@ -2533,6 +3363,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
     holoBoundary(ctx);
     radarCamBoundary(ctx);
     anchorDirBoundary(ctx);
+    pairBoundary(ctx);   // THE PAIR CAPTURE (TEMPORARY)
     if (g_scissor.owed() && ctx) (void)g_scissor.settle(ctx);
     if (g_binding.needsRestore() && ctx && g_binding.settle(ctx) && !g_settleNoted) {
         g_settleNoted = true;
@@ -2565,6 +3396,10 @@ void srvTurretShutdown() {
     g_dir = DirWatch{};
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
+    pairReleaseObjects();   // THE PAIR CAPTURE (TEMPORARY)
+    pairResetSlots();
+    g_pair.device = nullptr;
+    g_radarScope = RadarScope{};
     g_binding.clear();
     g_scissor.clear();
     for (auto& c : g_constants) c.reset();

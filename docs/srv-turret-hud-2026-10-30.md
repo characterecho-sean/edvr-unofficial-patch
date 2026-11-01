@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-31):** Sean's goal: stock camera; the arcs, ammo counts
+- **State (2026-11-01):** Sean's goal: stock camera; the arcs, ammo counts
   and INFO strip pushed out behind the location panel (Cranfield
   Nutrition); the radar near field on its own. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
@@ -19,11 +19,13 @@
   (0x38563A0, build 334925 only) adds radar forward along the turret's
   seated forward, in the anchor's axes, to the translation the game sets;
   the radar's picture billboards are corrected at draw time from the
-  frame's own camera. FLOWN (e64866f9): a Scorpion-shaped hole in the disc's
-  picture trails the icon; a far depth at t1 changed nothing (ruled out).
-  BUILT, NOT FLOWN: each billboard vertex moves by delta * w / z_c, so both
-  quads shift on screen as their content at z_c (V0's schematic origin)
-  would (journal, "the hole is in the disc's own picture").
+  frame's own camera, each vertex by delta * w / z_c. FLOWN (15b659b2): both
+  quads sit at the content depth (a far quad ruled out), yet the
+  Scorpion-shaped hole in the disc still sits beside the icon and the disc
+  trails the barrel. BUILT, NOT FLOWN: the pair capture, an instrument only
+  (journal, "the pair capture and the relief radius").
+- **UI quality parity:** with UI quality off the radar's terrain is
+  brighter. BUILT, NOT FLOWN: the layer's relief radius fix (same entry).
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -52,12 +54,10 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
-  radar forward = 65 minus camera back. Fast and slow turret sweeps, then
-  drive forward and turn the vehicle; watch for the hole, jitter and pops.
-  Read `--grep "srv turret radar anchor: quad probe"` (each quad's w; moved
-  by against expected) and the 10 s line's content depth (no content depth
-  near 0).
+- **Next flight (this branch):** radar anchor on, camera back 0 to 35,
+  radar forward = 65 minus camera back. A fast turret sweep with INSERT
+  during it; then still, INSERT at UI quality 100 and again at off. Read
+  `--grep "srv turret radar pair"` and `--grep "relief radius"`.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -204,6 +204,11 @@ same amount. Matching them needs a change to one layer's stereo depth.
 - ruled out: the billboard's t1 scene-depth discard as the Scorpion ghost,
   because with a far t1 on every moved draw (t1 far 2932, kept 0) the ghost
   stayed (flight e64866f9, `edvr_gfx_20261101_055340.log`).
+- ruled out: a far disc quad (the disc moving less on screen than the icon
+  because its quad sits deeper), because the quad probe read disc w 0.297 to
+  0.305 m, icon w 0.315 to 0.323 m and z_c 0.31 to 0.33 m: both quads
+  already sit at the content's depth, and "moved by" equalled "expected" for
+  both (flight 15b659b2, `edvr_gfx_20261101_062714.log`).
 
 ## Journal
 
@@ -1479,4 +1484,140 @@ Unconfirmed until it flies: the two quads' depths (the quad probe's w will
 show them); z_c as the depth of the picture's content (the schematic's
 origin). If the content sits at another depth, moved by will match expected
 and the hole will still trail.
+
+### 2026-11-01: the content depth flown (flight 15b659b2); the pair capture and the relief radius (built, not flown)
+
+Steam, `edvr_gfx_20261101_062714.log`, two dumps: `eye_062950164001` (UI
+quality off, turret moving) and `eye_063005251002` (UI quality 100, still).
+Sean:
+- with UI quality off the radar's terrain shows brighter and more visible,
+  and he wants the two to match;
+- "The whole disc seems to trail the turret motion and does not stay
+  perfectly locked to the barrel";
+- the Scorpion ghost is still there in the moving dump, on the left of the
+  icon this time.
+
+What the flight says:
+- **The quad probe refutes the far quad.** Disc w 0.297 to 0.305 m, icon w
+  0.315 to 0.323 m, z_c 0.31 to 0.33 m, and "moved by" equals "expected" for
+  both: the geometry shader applies what we intend, and both quads already
+  sit at the content's depth (ruled out above).
+- **The ghost came with the correction.** In flight a8465cb3 (the native
+  move alone, no draw-time correction) the dump `eye_213337152001`, taken
+  mid-sweep at about 88 deg/s, shows the icon cleanly over the hole. The
+  ghost first appeared with da716942. So natively the icon and the disc
+  agree within a frame, and the correction separates them by about
+  |delta|: the hole sits 70 to 85 px (about 1.6 cm) from the icon, the size
+  of delta. One of the two billboards does not get the same move on screen
+  as the other, though the counters say both do.
+- **Why UI quality darkens the radar.** EA02FAC2's relief comes from an
+  8-tap Sobel of t4 at UV +- ddx/ddy(UV) * r, r = max(cb1[120].z, 1) *
+  cb2[21].y; the gradient's length * 32 * cb2[20].w (capped by cb2[21].x)
+  drives the colour and the alpha. The crisp layer runs the program at the
+  layer's density (4032 against the game's 2016 at UI quality 100): the
+  derivatives halve, the taps sit half as far apart in UV, and the gradient
+  term halves. E95634B0 has the same taps, through r1.w.
+- **cb1[120].z is not 1 in VR.** In the scene block of every VR dump from
+  `eye_213337152001` to `eye_063005251002` (`EngineNow`, the 5376-byte
+  block; its rows 277 and 279 are the camera's unit axes) row 120 reads (0,
+  1.8676, 1.3666, 0). So the factor is read from the block, not taken as 1.
+
+**The build.**
+- **The relief radius (a fix, inside fix.ui_quality; `ui_holo_remap.h` THE
+  RELIEF).** The layer's remapped programs get a second, same-size edit:
+  `max r1.x, cb1[120].z, l(1.0)` (EA02FAC2, token 146 of the program;
+  E95634B0's `max r1.w` at token 389) becomes `max r1.x, cb13[1].x,
+  l(0.0)`, the `mul` by cb2[21].y after it unchanged. b13 is now two
+  registers for these programs (the frosted base keeps one), and cb13[1].x
+  = k * max(cb1[120].z, 1), k = layer pixels / game pixels (the inverse of
+  the position map's scale, the geometric mean of its axes). l(0.0) takes
+  that as it is for any k; l(1.0) would floor a layer smaller than the
+  game's target at 1. cb1[120].z comes from the scene camera block's Unmap
+  tee while the layer is live, kept by buffer and looked up by the draw's
+  PS b1; a b1 not seen written takes the latest write of any scene block,
+  none at all 1. With UI quality off the game's own program draws, as
+  before. No new key.
+- **Its rig** (ui_holo_test, on WARP): each program's edit pinned at its
+  token index, the frosted base without it, a program with no pair or with
+  two refused. At k 1 the edited program is the stock one bit for bit. On a
+  linear ramp at t4 the stock program's gradient term is 0.4883 at the
+  game's density and 0.2441 at twice it; the edited program at twice it
+  gives 0.4883 (with cb1[120].z 0.5: 0.3906, 0.1953, 0.3906), and the
+  factor without k leaves it halved.
+- **The pair capture (an instrument only; nothing moves differently).** In
+  a capture frame each eye's disc and icon billboard both go through the
+  stream-output twin, every issue captured, into a ring of six frames read
+  back without stalling. Every frame for the 16 frames after an eye dump
+  (the dump key), else one frame every 2 s. Each billboard says its t4, its
+  VS b1, the forward row (279) its delta was turned with, the setter call
+  the frame's correction was paired with (its number, new in the call
+  ring, and d), the delta in the eye and z_c, its issues (with our shader
+  bound or another), and for each issue the quad's w range, its centre in
+  the eye before and after the move, its NDC centre, its move on screen in
+  px against content at z_c, and its UV corners. Each eye then compares the
+  disc's move with the icon's.
+- **The pictures.** In the dump window eye 0's disc t4 (512x512) and icon t4
+  (256x256) are copied once each at the bind and written next to the eye
+  dump as `eye_<stamp>_RadarDiscT4.bmp` and `eye_<stamp>_RadarIconT4.bmp`:
+  black where t4 >= 1000 (empty), gray 64 to 255 for content (brighter is a
+  larger t4). The hole should show in the disc's picture; the icon's sits
+  in its own.
+- **The lock.** In the dump window each eye's post-move disc and icon
+  centres (and the pre-move ones) are put in the seated frame with that
+  eye's pose at the draw, beside the turret's yaw rate (the desired aim's
+  yaw in the anchor's axes, frame to frame). Locked to the turret, the
+  seated disc centre stays put through a sweep; trailing, it moves.
+- **The issues.** Every moved radar billboard's scope counts its issues and
+  the geometry shader bound at each; a radar billboard declined by the
+  correction, or a family-7 issue outside any scope whose t4 is a radar
+  picture, counts as an issue not moved. A draw moved twice would show as
+  a second issue whose pre-move centre is the first's post-move one; one
+  not moved, as "another" shader or an issue outside a scope.
+- No key: it runs whenever the correction does. The quad probe stands
+  aside for a draw the pair capture takes.
+
+The log lines:
+- `srv turret radar pair: frame F eye E disc|icon[ (dump S, frame n of
+  16)]: t4 ID, VS b1 ID, forward row 279 (x,y,z), setter call #N d (x,y,z)
+  cm, delta in the eye (x,y,z) cm, z_c Z m, viewport WxH; issues I (our
+  shader O, another A), prims P (needed Q); issue 0: w=[a,b], centre in
+  the eye pre (x,y,z) post (x,y,z) m, ndc pre (x,y), moved (x,y) px,
+  expected (x,y) px, uv (u,v) ...; issue k: pre (x,y) px from issue 0's,
+  moved (x,y) px, w=[a,b]`. Pixels are the game's target's, x right, y up.
+- `srv turret radar pair: frame F eye E: disc moved (x,y) px (expected
+  ..), icon moved (x,y) px (expected ..); disc minus icon (x,y) px, |D| px[
+  -- APART]` (APART: over 1 px). If only one was captured: `... disc
+  measured|lost|not captured, icon ...; nothing to compare`.
+- `srv turret radar pair: lock: frame F eye E (dump S, frame n of 16): disc
+  centre seated post (x,y,z) pre (x,y,z) m, icon post (..) pre (..) m;
+  turret yaw rate R deg/s`, in the dump window only.
+- `srv turret radar picture: dump S frame F eye 0 disc|icon: t4 ID WxH
+  format N, content (t4 < 1000) C of T texels, t4 a to b; written
+  eye_S_RadarDiscT4.bmp ...`, once per picture per dump (or why not).
+- `srv turret radar pair: dump S window ended: N of 16 frames captured (eye
+  0 disc a, icon b; eye 1 disc c, icon d); pictures: disc ..., icon ...;
+  radar billboard draws seen R`, once per dump while the correction ran.
+- `srv turret radar pair: 10 s: disc: draws moved A, issues moved B, issues
+  not moved C (another shader in the scope c1, declined draws c2, outside a
+  scope c3), issues per moved draw 0/1/2/3+: ..; icon: ...; disc and icon
+  moved apart on screen (over 1 px): by the constants X of F eye frames (no
+  content depth n), by the capture Y of Z captured eye frames; capture
+  frames N, skipped (ring busy) S, entries lost L`, with the 10 s
+  correction line. "By the constants" compares the delta and z_c each was
+  given; "by the capture", the measured moves.
+- `crisp holo remap: relief radius applied to PS P (VS V): k K (layer WxH
+  over the game's WxH), cb1[120].z Z from <source>, radius factor F = k x
+  max(z, 1)`, once per program; a later fallback source is said once.
+- No pair line at all with the correction line present means the
+  instrument never ran; "capture frames 0" means it ran and took nothing.
+
+To fly: radar anchor on, camera back 0 to 35, radar forward = 65 minus
+camera back, UI quality 100. A fast turret sweep with INSERT pressed during
+it; then the turret still, INSERT at UI quality 100 and again at off.
+
+Unconfirmed until it flies: that the hologram draw's PS b1 is the scene
+block the tee sees (the relief line names its source); that the relief fix
+brings the fill to the UI-quality-off look; which billboard's on-screen move
+differs, and whether the hole moves with the disc's quad or inside its
+picture.
 
