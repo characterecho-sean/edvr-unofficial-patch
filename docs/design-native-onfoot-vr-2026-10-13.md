@@ -4458,6 +4458,12 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
   - **CLOSED 2026-11-01 by the pilot's word ("Leave it magnified").** With Anti-aliasing off the gunsight mark is magnified with the picture. Do not re-propose route (a) unless he asks.
 - **Installed for one flight:** F203 on top of F196-F202, as the build after this doc commit.
   - **Next flight** (Anti-aliasing off, mouse look, `fix.native_on_foot_ads_head_aim = on`): ADS presses should leave the sight where the mouse put it. Read the press lines' `kept ... injected +0.00 +0.00`.
+- **F203 flown and REVERTED (2026-11-01, `f6ed3265`, on the pilot's word).**
+  - The pilot: "203 works, but I think I prefer the ADS to jump to where the headset is looking." So F69i's snap onto the headset's forward axis is the behaviour again.
+  - That snap had flown correctly before F203. At 04:12:33 the sight read 3.65 deg off; 0.25 s after the snap it read yaw +0.00 pitch +0.14 deg from the head's forward, and the view moved at most 0.01 deg.
+  - The pilot's first report ("the ADS spot does not match where the mouse was") described the design, not a fault.
+  - The revert's full build gave the same receipt as F202 (`b0b6f735...`): the tree is F202's again. Installed on Frontier as v0.22.0-rc.4-48-gf6ed3265, verified.
+- ruled out: a fault in F69i's ADS press snap under mouse look, because its proof lines read the sight within 0.0-0.4 deg of the headset's forward axis after the snap with the view still; it does what it was designed to do, and the pilot prefers it to F203's keep.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
