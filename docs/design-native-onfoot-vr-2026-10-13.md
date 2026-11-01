@@ -4488,6 +4488,21 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - **F113's first window:** 136 frames, `none 1` per eye (the edge frame), the rest from the terrain. Every window after reads `none 0`.
     - **Draw hook CPU with Anti-aliasing off:** 0.022-0.071 ms a frame off foot (F196's flight: 0.041-0.21), and 0.35-0.50 ms on foot.
     - `--health`: build matched. Only F91 and F87p read NEVER APPLIED; both predate this arc.
+- **The suit shop camera (2026-11-01):** the pilot on rc.5, at Pioneer Supplies' "Buy suits": "It looked like it was vibrating rapidly and set strangely low."
+  - **Evidence:** `edvr_gfx_20261101_114724.log` (v0.22.0-rc.5, build matched) and the eye dumps `eye_115559185001` (in the shop) and `eye_115621933002` (after it).
+  - **The vibration.** The Animate hook reads two cameras on alternate calls: the showroom's, 710.5 m from the neck, and one 46 cm over the commander's neck. F107 began an episode on every far call and ended it on every near one: 632 episodes, 1268 lines in 90 s, about 45 a second.
+    - Each edge ramped the neck reference's raise and the pin in or out.
+    - F95a: the view moved up to 22.6 mm a frame with the head still, against about 0.3 mm in steady seconds.
+  - **The low view.** The flapping kept F94's raise in scope, following the near camera's target: -27 to -29 cm (F119's neck term +27 to +29 in the shop against -16 walking).
+    - In the dump the view's centre sits at 58% of the shown character's height: about 112 cm, hip or belt level, if the character is 1.83 m.
+    - The game's own showroom camera is the view plus those 27 cm, about 139-141 cm (chest height); the character's eyes are about 171 cm.
+  - **F208 (`9b1b1f86` on `claude/suit-shop-camera` from 921647d6; full build green; installed on Frontier as v0.22.0-rc.5-1-g9b1b1f86, verified; NOT FLOWN).**
+    - **The episode's end.** It ends only after the camera has stayed near the commander for 1.0 s of consecutive near calls. A far call inside the hold keeps the episode and counts one alternation. A stale report alone ends nothing; 5 s of silence does. The shop's longest near runs were 0.47 and 0.51 s; the real return was 2.1 s.
+    - **While an episode is open,** every call is refused, near ones too. So the pin, the neck reference, the standing calibration and the settle take nothing from the alternating camera, and the raise ramps to 0 and stays there. The shop's view is then the game's own camera, about 27 cm higher than before.
+    - **Lines.** One "left" and one "ended" line per real episode; the ended line counts the alternations the hold absorbed. `--health` reads both forms and marks hundreds of 0.0 s episodes PARTIAL.
+    - **Rig.** The alternating camera at the call rate and at 8 Hz gives one episode. A return ends it once after the hold. A 3 s gap ends nothing; 6 s of silence does. The raise reads exactly 0 throughout.
+  - **Open, the pilot's choice:** the game's own showroom camera still sits about 30 cm below the character's eyes. Leave it, or add a shop-only lift of about +30 cm to his eye level.
+  - **Next flight (`--expect-build 9b1b1f86`):** the suit shop. The view should be still and higher, with one F107 episode logging its alternation count.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
