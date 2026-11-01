@@ -6663,7 +6663,10 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     }
     // The scope lens (scope_zoom.h): the aiming (right) eye's picture inside the scope's frame, magnified by the game's zoom, after the upscaler and RCAS and before the weapons/HUD
     // composite (which must not be magnified). A frame EDVR rewrites in full every frame, or the ripple's private copy of one, is written in place; any other comes back as the lens's
-    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered.
+    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered. F202: with no temporal mode running
+    // (g_temporal false: fix.temporal_aa, the gate temporalPassWantsFssChrome reads) the game's own picture is that picture, unjittered, and the lens takes it (scopezoom::lensPictureResolved;
+    // with a mode running the answer is e.doorFromPass, as before). The gunsight mark (C1a) rides the weapons layer, which is not live then: it stays in the scene and is magnified with
+    // the picture. A frame that is not EDVR's own comes back as the lens's copy, and the share the runtime makes of the right eye's finished picture to the left (F106) is taken after this.
     // B3: the left eye's picture, copied for that lens before the left eye's own UI composite (the part of it the lens may read, when the left eye is drawn as the zoomed view).
     if (eye == 0 && scopeZoomWanted()) {
         guarded("scopeZoom.leftDoor", [&] {
@@ -6683,7 +6686,8 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
             lensArgs.frame = frame;
             lensArgs.region = region;
             lensArgs.inPlace = ownedFrame || rewritten;
-            lensArgs.resolved = e.doorFromPass;
+            lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);
+            lensArgs.gameOwn = lensArgs.resolved && !e.doorFromPass;
             Ptr<ID3D11Texture2D> lensCopy;
             scopeZoomDoor(lensArgs, &lensCopy);
             if (lensCopy) {

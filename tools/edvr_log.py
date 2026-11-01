@@ -23159,6 +23159,13 @@ def self_test_health():
         # the first frame of every press is at M 1: it is qualifying and not applied, so a press the door declined on every other frame is applied 0
         check("S1: the depth null on every frame and the first at M 1 is applied 0 of 201 and NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=200, open_=0)], 3, [("NEVER APPLIED", S1R)],
               has=["the door applied 0 of 201 qualifying; declined: depth unavailable 200", "the lens applied on none of the 1 press(es) it was due on (press 1)"], lacks=["the door counted no frame at all"])
+        # F202: the pilot's flight of 2026-11-01 (edvr_gfx_20261101_033457, Anti-aliasing off, the plasma sniper): the door ran on every qualifying frame and refused the game's own picture, "applied 0 of 612 ...
+        # format refused 612" and "applied 0 of 172 ... format refused 172" (the gunsight mark armed on every frame and never taken: there is no weapons layer with Anti-aliasing off). A session of format-refused
+        # presses alone is the lens never applied, with the count named.
+        check("S1: F202 the pilot's Anti-aliasing off presses, every qualifying frame format refused (612 and 172), are NEVER APPLIED naming the count",
+              [s1_announce(), s1_nohole(n=1, disp=0, noop=0, stale=0, depth=0, fmt=612, open_=0, mark_l=0, mark_r=0, armed=612, nodraw=612, gap=(0, 0, 612, 0, 0)),
+               s1_nohole(n=2, scope="no", ads="35.000", m="1.697", disp=0, noop=0, stale=0, depth=0, fmt=172, open_=0, mark_l=0, mark_r=0, armed=172, nodraw=172, gap=(0, 0, 172, 0, 0))], 3, [("NEVER APPLIED", S1R)],
+              has=["the door applied 0 of 784 qualifying; declined: format refused 784", "the lens applied on none of the 2 press(es) it was due on (press 1, 2)"], lacks=["UNPARSED", "the door counted no frame at all"])
         check("S1: the tick qualified and the door never ran is NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=0, stale=0, depth=0, open_=0, fq=200)], 3, [("NEVER APPLIED", S1R)],
               has=["the tick qualified 200 frame(s), the door applied 0 of 0 qualifying", "the door counted no frame at all in press 1 although the tick qualified 200 (uiLayerComposite never ran for the right eye"])
         check("S1: S never there (no S, counted by both sides) is a lens that never ran", [s1_announce(), s1_zero(nos=90)], 3, [("NEVER APPLIED", S1R)], has=["declined: no S 90"])

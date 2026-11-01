@@ -24,6 +24,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
 
+#include "../../src/common/temporal_math.h"   // F202: temporalSceneProjection, temporalDepthToMetres: the pass's own reading of the scene depth
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/gpu_timing.h"
 #include "../../src/d3d11/scope_zoom.h"
@@ -105,15 +107,16 @@ static std::string replaced(std::string text, const std::string& from, const std
 static bool wiredDoor(const std::string& layer) {
     const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
     if (fn == std::string::npos) return false;
-    const std::string body = layer.substr(fn, 8900);   // the function is about 8600 bytes with B3's left door; a margin for a line or two, so a window can't reach into the next function and satisfy a pin there
+    const std::string body = layer.substr(fn, 9400);   // the function is about 9200 bytes with B3's left door and F202's comment; a margin for a line or two, so a window can't reach into the next function and satisfy a pin there
     return before(body, "rippleDoor(e, eye, sequence", "scopeZoomDoor(lensArgs") && before(body, "scopeZoomDoor(lensArgs", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") &&
-           before(body, "scopeZoomDoor(lensArgs", "compositeInner(e, eye, frame") && has(body, "if (eye == 1 && scopeZoomWanted())") && has(body, "lensArgs.resolved = e.doorFromPass;");
+           before(body, "scopeZoomDoor(lensArgs", "compositeInner(e, eye, frame") && has(body, "if (eye == 1 && scopeZoomWanted())") &&
+           has(body, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);") && has(body, "lensArgs.gameOwn = lensArgs.resolved && !e.doorFromPass;");
 }
 // B3: the left eye's door copies the zoomed picture's window after the ripple and before the left eye's own UI composite, and before the right eye's lens reads it.
 static bool wiredLeftDoor(const std::string& layer) {
     const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
     if (fn == std::string::npos) return false;
-    const std::string body = layer.substr(fn, 8900);
+    const std::string body = layer.substr(fn, 9400);
     return before(body, "rippleDoor(e, eye, sequence", "scopeZoomLeftDoor(leftArgs)") && before(body, "scopeZoomLeftDoor(leftArgs)", "scopeZoomDoor(lensArgs") &&
            before(body, "scopeZoomLeftDoor(leftArgs)", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") && has(body, "if (eye == 0 && scopeZoomWanted())") &&
            has(body, "leftArgs.resolved = e.doorFromPass;") && has(body, "leftArgs.frame = frame;");
@@ -188,12 +191,85 @@ static bool wiredMark(const std::string& layer, const std::string& vscreen) {
            has(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") && has(layer, "} markFrame{e, sequence};") && has(layer, "markFrame.composited = result != nullptr;") &&
            has(layer, "e.wPubMatched = plan.sourcePass;") && has(layer, "scopeZoomNoteMarkComposite(!composited || e.wPubSeq != sequence ? scopezoom::kMarkCompositeNone");
 }
+// F202: the lens with Anti-aliasing off. The right eye's door is told the game's own picture is resolved when no temporal mode runs (the predicate, g_temporal), the left (B3) door is not; the
+// temporal client's mode-off branch tells the scope lens's depth step before it returns, with the picture, the region and the near plane; the step clears the slot first, fills the right
+// eye's from the depth probe's scene depth while a press is open, and gives it the infinite-far near depth.
+static bool wiredOffAa(const std::string& layer, const std::string& nt, const std::string& tp, const std::string& door) {
+    const size_t off = nt.find("if(!s->currentSettings.on){"), call = nt.find("edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,"), early = nt.find("if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated");
+    const size_t fn = tp.find("void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {");
+    if (fn == std::string::npos) return false;
+    const std::string body = tp.substr(fn, 3400);
+    return has(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);") && has(layer, "leftArgs.resolved = e.doorFromPass;") && off != std::string::npos && call != std::string::npos &&
+           early != std::string::npos && off < call && call < early && has(nt, "(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]") && has(nt, "s->nearLast[eye]=s->nearZ[eye];") &&
+           before(body, "scopeZoomDepthClear(eye);", "if (eye != 1 || !source || !region || !scopeZoomWanted()) return;") &&
+           before(body, "if (eye != 1 || !source || !region || !scopeZoomWanted()) return;", "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)") &&
+           before(body, "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)", "scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);") &&
+           has(body, "const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);") && has(body, "region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height") &&
+           has(door, "if (a.gameOwn && !g_firstOwnNoted) {") && has(door, "the game's own, Anti-aliasing off") && has(door, "} else if (!a.gameOwn && !g_firstNoted) {");
+}
+// F202: the lens with Anti-aliasing off, the pure parts. (1) The right eye's door takes the game's own picture as resolved when no temporal mode runs, in all four combinations of the mode and
+// the door's picture being the pass's. (2) The depth the lens marches: with Anti-aliasing off the near depth comes from the runtime's near plane as Elite's infinite-far reversed Z, and a known
+// depth gives the same linear distance by that reading, by the temporal pass's own (temporalSceneProjection / temporalPassDepthAt) and by its finite-plane conversion (temporalDepthToMetres).
+static void offAaTests() {
+    check(sz::lensPictureResolved(true, true), "F202: a temporal mode running and the picture the pass's own: resolved, as before");
+    check(!sz::lensPictureResolved(false, true), "F202: a temporal mode running and a picture the pass did not make (declined, stood down): refused, as before");
+    check(sz::lensPictureResolved(false, false), "F202: no temporal mode and the game's own picture: resolved");
+    check(sz::lensPictureResolved(true, false), "F202: no temporal mode and the pass's picture (cannot happen): resolved");
+    bool same = true;
+    for (int fromPass = 0; fromPass < 2; ++fromPass) same = same && sz::lensPictureResolved(fromPass != 0, true) == (fromPass != 0);
+    check(same, "F202: with a temporal mode running the answer is the door-from-pass flag itself, bit for bit what it was");
+
+    const float nears[] = {0.025f, 0.05f, 0.1f};
+    const double zs[] = {0.2, 0.45, 0.59, 0.61, 0.8, 3.0, 40.0};
+    for (const float nearZ : nears) {
+        float a = -1.0f, b = -1.0f;
+        check(!temporalSceneProjection(0.0f, 0.0f, nearZ, &a, &b) && a == 0.0f && b == nearZ, "F202: with no measured scene row the pass reads Elite's infinite-far reversed Z: A = 0, B = the near plane");
+        const float lens = sz::lensNearDepthInfiniteFar(nearZ);
+        check(lens == a + b / static_cast<float>(sz::kLensNearM), "F202: the lens's near depth is the temporal pass's own arithmetic (lensA + lensB / kLensNearM with lensA = 0), bit for bit");
+        for (const double z : zs) {
+            const float d = a + b / static_cast<float>(z);   // temporalPassDepthAt(z): the depth the game's buffer holds at z metres
+            check((d > lens) == (z < sz::kLensNearM), "F202: the lens's hole test (depth > near depth, larger is nearer) is z < 0.6 m");
+            const double viaInfinite = static_cast<double>(b) / (static_cast<double>(d) - a);   // d = A + B / z, inverted
+            const double viaPlanes = temporalDepthToMetres(d, nearZ, 50000.0f);                 // the pass's finite-plane conversion with the planes the runtime named (0.025..50000)
+            check(std::fabs(viaInfinite - z) <= 1.0e-4 * z, "F202: a known depth gives its distance by the infinite-far reading");
+            check(std::fabs(viaPlanes - z) <= 2.0e-3 * z, "F202: and the same distance through the pass's finite-plane conversion (within the far plane's own 1/50000)");
+        }
+    }
+    check(std::fabs(sz::lensNearDepthInfiniteFar(0.025f) - 0.041667f) < 1.0e-6f, "F202: near 0.025 gives the 0.041667 the DLSS press line of 2026-11-01 reported as the near line");
+    check(sz::lensNearDepthInfiniteFar(0.0f) == 0.0f && sz::lensNearDepthInfiniteFar(-1.0f) == 0.0f && sz::lensNearDepthInfiniteFar(std::numeric_limits<float>::quiet_NaN()) == 0.0f &&
+              sz::lensNearDepthInfiniteFar(std::numeric_limits<float>::infinity()) == 0.0f,
+          "F202: a near plane that is not a positive number gives 0, which the door counts as no depth");
+    // the production march over a synthetic image whose depths are what the game's buffer holds at known distances: a frame 0.3 m away is found, a frame 0.7 m away is not
+    const float tan4[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+    const double nearDepth = sz::lensNearDepthInfiniteFar(0.025f);
+    const auto depthOf = [](double metres) { return 0.025 / metres; };
+    const auto march = [&](double frameMetres) {
+        return sz::lensMarchRef([&](int x, int) { return x >= 120 ? depthOf(frameMetres) : depthOf(20.0); }, 400, 400, 100.0, 200.0, 0, tan4, nearDepth);
+    };
+    const sz::LensRay hitNear = march(0.3), hitFar = march(0.7);
+    check(!hitNear.escaped && hitNear.rPx == 20.0, "F202: a frame 0.3 m from the eye, depth 0.025 / 0.3, is found by the lens's march at its first pixel");
+    check(hitFar.escaped, "F202: a surface 0.7 m from the eye, depth 0.025 / 0.7, is not the frame");
+}
 static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), temporal = readFile("src/d3d11/temporal_pass.cpp"), native = readFile("src/d3d11/native_on_foot.cpp"), ini = readFile("edvr.ini");
     check(!layer.empty() && !temporal.empty() && !native.empty() && !ini.empty(), "the sources the wiring scans read are readable from the repository root");
     check(wiredDoor(layer), "the lens is at the door, after the ripple, before the weapons/HUD composite, for the right eye, over the upscaler's picture");
     check(!wiredDoor(replaced(layer, "if (eye == 1 && scopeZoomWanted())", "if (eye == 0 && scopeZoomWanted())")), "control: the lens in the left eye is not the wiring");
-    check(!wiredDoor(replaced(layer, "lensArgs.resolved = e.doorFromPass;", "lensArgs.resolved = true;")), "control: a lens over a picture that is not the upscaler's is not the wiring");
+    check(!wiredDoor(replaced(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);", "lensArgs.resolved = true;")), "control: a lens over a picture that is not the upscaler's, whatever the mode, is not the wiring");
+    check(!wiredDoor(replaced(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);", "lensArgs.resolved = e.doorFromPass;")), "control: a lens that still refuses the game's own picture with Anti-aliasing off (F202) is not the wiring");
+    {   // F202: the lens with Anti-aliasing off
+        const std::string nt = readFile("src/d3d11/native_temporal.cpp"), door = readFile("src/d3d11/scope_zoom.cpp");
+        check(!nt.empty() && !door.empty(), "F202: the sources the scans read are readable");
+        check(wiredOffAa(layer, nt, temporal, door), "F202: the door takes the game's own picture as resolved with no temporal mode; the mode-off branch tells the lens's depth step before it returns; the step clears, asks the probe, and sets the near depth");
+        check(!wiredOffAa(replaced(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);", "lensArgs.resolved = e.doorFromPass;"), nt, temporal, door), "control: a door that never takes the game's own picture is not the wiring");
+        check(!wiredOffAa(replaced(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);", "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, false);"), nt, temporal, door), "control: a door that takes the game's own picture whatever the mode (it would break the DLSS path's refusal of a picture the pass did not make) is not the wiring");
+        check(!wiredOffAa(replaced(layer, "leftArgs.resolved = e.doorFromPass;", "leftArgs.resolved = true;"), nt, temporal, door), "control: B3's left door taking the game's own picture is not what F202 builds");
+        check(!wiredOffAa(layer, replaced(nt, "edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,", "edvr::temporalPassNoteEyeTanX(int(eye),source,region,"), temporal, door), "control: a mode-off branch that never tells the depth step is not the wiring");
+        check(!wiredOffAa(layer, replaced(nt, "s->nearLast[eye]=s->nearZ[eye];", ""), temporal, door), "control: a near plane not kept across frames is not the wiring");
+        check(!wiredOffAa(layer, nt, replaced(temporal, "    scopeZoomDepthClear(eye);\n    if (eye != 1 || !source", "    if (eye != 1 || !source"), door), "control: a step that does not clear the slot first (a view from an earlier frame could stay) is not the wiring");
+        check(!wiredOffAa(layer, nt, replaced(temporal, "const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);", "const float lensNear = 0.04f;"), door), "control: a near depth that is not the infinite-far reading of the runtime's near plane is not the wiring");
+        check(!wiredOffAa(layer, nt, replaced(temporal, "scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);", ""), door), "control: a step that never sets the slot is not the wiring");
+    }
     check(!wiredDoor(replaced(layer, "scopeZoomDoor(lensArgs, &lensCopy);", "scopeZoomDoorOff(a, &lensCopy);")), "control: a door call to something else is not the wiring");
     check(wiredTemporal(temporal), "the temporal pass clears the eye's depth slot at the top of its depth step and sets it from the view it made for the upscaler");
     check(!wiredTemporal(replaced(temporal, "scopeZoomDepthClear(eye);", "")), "control: no clear is not the wiring");
@@ -592,6 +668,7 @@ struct Run {
 struct RunIn {
     DXGI_FORMAT fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     bool inPlace = true, resolved = true, hasDepth = true, covers = true;
+    bool gameOwn = false;          // F202: the picture is the game's own with Anti-aliasing off (resolved, the depth the probe's): only the first log line differs
     uint32_t regionTrim = 0;       // the region handed to the door is this many px narrower than the texture
     int jitterSeqDelta = 0;        // the record's jitter sequence differs from the door's sequence by this
     sz::LensVerdict verdict = sz::LensVerdict::kQualifies;
@@ -641,6 +718,7 @@ Run runDoor(Fx& f, const Scene& sc, const Image& orig, const RunIn& in) {
         a.region = region;
         a.inPlace = in.inPlace;
         a.resolved = in.resolved;
+        a.gameOwn = in.gameOwn;
         copy.Reset();
         scopeZoomDoor(a, &copy);
         f.ctx->Flush();
@@ -747,6 +825,17 @@ void lensTests(Fx& f) {
         const Verdict v = compare(r.image, orig, expectedLens(ring, orig, in.m, cx, cy, 1.0, 0.0), 1);
         check(r.gotCopy && v.insideBad == 0 && v.outsideBad == 0 && v.insideChanged * 10 > v.inside * 9, "a frame that is not EDVR's to rewrite comes back as the lens's copy, magnified as in place");
         check(sameImage(r.original, orig), "and the original frame is not written");
+    }
+
+    // ---- F202: the game's own picture (Anti-aliasing off) goes to the door as resolved and not the pass's: not EDVR's to write, so the copy route; the same lens as over the upscaler's picture ----
+    {
+        RunIn in;
+        in.inPlace = false;
+        in.gameOwn = true;
+        const Run r = runDoor(f, ring, orig, in);
+        const Verdict v = compare(r.image, orig, expectedLens(ring, orig, in.m, cx, cy, 1.0, 0.0), 1);
+        check(r.gotCopy && v.insideBad == 0 && v.outsideBad == 0 && v.insideChanged * 10 > v.inside * 9, "F202: the game's own picture, told as resolved, comes back as the lens's copy, magnified as over the upscaler's");
+        check(r.stats.dispatched >= 1 && r.stats.formatRefused == 0 && r.stats.depthUnavailable == 0 && sameImage(r.original, orig), "F202: and it is dispatched, not refused, and the game's frame is not written");
     }
 
     // ---- a ring with a two-ray gap still has a lens, the gap clamped to its neighbours ----
@@ -1273,6 +1362,7 @@ int main(int argc, char** argv) {
     }
     try {
         wiringTests();
+        offAaTests();
         c1cases::gateTests();
         c1cases::lineTests();
         c1cases::doorTests();

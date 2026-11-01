@@ -88,6 +88,7 @@ struct State {
   uint32_t verdictSeen[2]{}, verdictWaits[2]{};
   uint64_t skipped=0, spared=0, returned=0, unjudged=0;
   float nearZ[2]{}, farZ[2]{};
+  float nearLast[2]{};   // F202: the near plane the last matrix query gave for the eye, kept across frames (nearZ is per frame): the scope lens's depth with the temporal mode off
   uint64_t projectionSequence[2]{};
   bool projectionKnown[2]{};
   Settings currentSettings{}, pendingSettings{};
@@ -460,6 +461,7 @@ HRESULT WINAPI noteProjection(void* p,uint64_t seq,uint32_t eye,float nearZ,floa
   if(!s||!s->active||s!=current||!s->begun||eye>1||seq!=s->sequence||
      !std::isfinite(nearZ)||!std::isfinite(farZ)||!(nearZ>0&&farZ>nearZ)) return E_INVALIDARG;
   if(!s->projectionKnown[eye]||nearZ<s->nearZ[eye]){s->nearZ[eye]=nearZ;s->farZ[eye]=farZ;}
+  s->nearLast[eye]=s->nearZ[eye];
   s->projectionSequence[eye]=seq;s->projectionKnown[eye]=true;++s->projectionReads;return S_OK;
 }
 
@@ -503,6 +505,8 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     edvr::temporalPassNoteEyeTan(int(eye),s->frusta[eye]);
     const float offAaEyeOffset[3]={s->eyes[eye][3],s->eyes[eye][7],s->eyes[eye][11]};
     edvrTemporalAaNoteHead(int(eye),nullptr,nullptr,offAaEyeOffset);
+    // F202: and the eye's scene depth for the scope lens (the right eye's, while a press of the sights is open): the near plane is this frame's matrix query's when the game made one, else the last one's.
+    edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]);
   }
   if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){

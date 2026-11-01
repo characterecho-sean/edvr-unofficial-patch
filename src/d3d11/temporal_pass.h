@@ -128,6 +128,11 @@ bool temporalPassEyeOffsetX(int eye, float* x);
 // own frustum, unjittered (its optical axis is -(R + L) / (R - L), -(U + D) / (U - D)). False before the first treat. Relaxed atomics: any thread.
 bool temporalPassEyeTan(int eye, float tan[4]);
 void temporalPassNoteEyeTan(int eye, const float* tan);
+// F202 (the scope lens with Anti-aliasing off): native_temporal.cpp treat, with the temporal mode off, tells the eye's scene depth to the scope lens (scope_zoom.h g_scopeZoomDepth) -- the
+// depth the pass would have made for the upscaler, here the depth probe's scene depth for the same eye at the same moment (the game's Submit of the eye). Clears the eye's slot every
+// call; the right eye's is filled only while a press of the sights is open (scopeZoomWanted). `source` is the submitted texture, `region` the Submit region in its pixels, `nearZ` the near
+// plane the runtime's projection query gave (0: none). Render thread; never called with a temporal mode on.
+void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,

@@ -6966,6 +6966,64 @@ float temporalPassDepthAt(float metres) {
     return a+b/metres;
 }
 
+// F202: the scope lens's depth with the temporal mode OFF (declared in temporal_pass.h; native_temporal.cpp treat calls it in its mode-off branch, once for each eye, before the door runs).
+// With a mode on, temporalInner makes the depth view for the upscaler and tells the lens (scopeZoomDepthSet above); with it off no treat runs, so the same two facts are told here:
+//  - the view: the depth probe's scene depth for the eye at the submitted texture's size (depthProbeSceneDepth, the very call and the very texture temporalInner reads, F199 having opened
+//    it to Anti-aliasing off), seen through a depth-channel view, kept in the eye's own slot (e.depthRes / e.depthSrv, so a later switch to a mode finds the view it would have made);
+//  - nearDepth: Elite's infinite-far reversed-Z depth of scopezoom::kLensNearM, from the near plane the runtime's projection query gave (scope_zoom_s1.h lensNearDepthInfiniteFar, the
+//    arithmetic temporalSceneProjection falls back to without a measured scene row, which is what the DLSS press of 2026-11-01 ran on: depth = 0.025 / metres).
+// WHEN: at the game's Submit of the eye, which is when temporalInner reads the depth too. The game has drawn the whole frame's scene into the target by then and clears it again only for the
+// next frame, after the Submit returns; the probe refuses a pair whose target was not drawn into last frame, and the slot is cleared at the top of every call, so a failed fill leaves none,
+// never a view an earlier frame filled. The lens's dispatch is queued on the same context after those draws, in the same Submit (the door runs right after, in sharpen's treatEye).
+// Only the right eye's slot is filled, and only while a press of the sights is open (scopeZoomWanted), so outside one this costs a clear and a relaxed load.
+void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {
+    if (eye < 0 || eye > 1) return;
+    scopeZoomDepthClear(eye);
+    if (eye != 1 || !source || !region || !scopeZoomWanted()) return;
+    guarded("scopeZoom.offAaDepth", [&] {
+        const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);
+        if (!(lensNear > 0.0f)) return;   // no near plane yet: the door counts "depth unavailable"
+        D3D11_TEXTURE2D_DESC sd{};
+        source->GetDesc(&sd);
+        ID3D11Texture2D* dtex = nullptr;
+        if (!depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex) || !dtex) return;
+        D3D11_TEXTURE2D_DESC dd{};
+        dtex->GetDesc(&dd);
+        EyeState& e = g_eye[eye];
+        if (e.depthRes != static_cast<void*>(dtex) || !e.depthSrv) {
+            releaseDepth(e);
+            DXGI_FORMAT rf = DXGI_FORMAT_UNKNOWN;
+            switch (dd.Format) {   // the depth channel of the game's texture, as temporalInner views it
+                case DXGI_FORMAT_R32G8X24_TYPELESS:
+                case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+                    rf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+                case DXGI_FORMAT_R32_TYPELESS:
+                case DXGI_FORMAT_D32_FLOAT:
+                    rf = DXGI_FORMAT_R32_FLOAT; break;
+                case DXGI_FORMAT_R24G8_TYPELESS:
+                case DXGI_FORMAT_D24_UNORM_S8_UINT:
+                    rf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+                default: break;
+            }
+            ID3D11Device* dev = nullptr;
+            if (rf != DXGI_FORMAT_UNKNOWN && (dd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) dtex->GetDevice(&dev);
+            if (dev) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = rf;
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipLevels = 1;
+                if (SUCCEEDED(dev->CreateShaderResourceView(dtex, &vd, &e.depthSrv)) && e.depthSrv) e.depthRes = dtex;
+                else e.depthSrv = nullptr;
+                dev->Release();
+            }
+        }
+        if (!e.depthSrv) return;
+        // a uv of the picture is a uv of the depth when the Submit region is the whole source and the depth is the source's size (with Anti-aliasing off the render is the picture)
+        const bool covers = region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height;
+        scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);
+    });
+}
+
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void edvrEyeCaptureUntreated(void* texture,int eye,const float* bounds) {
