@@ -24,10 +24,18 @@
        loads msdia140.dll from beside its own assembly. The CLSID is not
        registered on a machine with only the VS build tools, so the local copy
        from the same Visual Studio install is placed next to the analyzer. It is
-       copied, never downloaded, and its absence only disables symbolization. -->
+       copied, never downloaded, and its absence only disables symbolization.
+       The analyzer is x64. A Build Tools install keeps an x86 msdia140.dll
+       beside PrivateAssemblies and the x64 one in PrivateAssemblies\amd64, so
+       that one is taken first; the x86 copy failed DiaLoader's initializer. -->
   <ItemGroup>
+    <None Include="$(TraceEventDirectory)\amd64\msdia140.dll"
+          Condition="Exists('$(TraceEventDirectory)\amd64\msdia140.dll')">
+      <Link>msdia140.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="$(TraceEventDirectory)\..\msdia140.dll"
-          Condition="Exists('$(TraceEventDirectory)\..\msdia140.dll')">
+          Condition="!Exists('$(TraceEventDirectory)\amd64\msdia140.dll') And Exists('$(TraceEventDirectory)\..\msdia140.dll')">
       <Link>msdia140.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
