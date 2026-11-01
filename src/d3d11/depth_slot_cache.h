@@ -1,6 +1,6 @@
 #pragma once
 // The pure logic of ui_depth's depth-surface slot cache, VR draw-path test build 1, item 4 (docs\vr-draw-path-cpu-2026-11-01.md). No Windows and no D3D here, so
-// tools\ui_depth_test drives every decision without a device.
+// the UI depth rig drives every decision without a device.
 //
 // uiDepthSampledSurfaceSlot asks, for each qualifying eye draw, which of PS SRV 0..3 holds a sampled depth surface (viewIsSurface on up to four views). The answer
 // depends on the bindings (bindingEyeKeyGeneration moves with PS SRV 0..3, binding_shadow.h), the classifier's epoch (which bumps on every surface-table write, on
