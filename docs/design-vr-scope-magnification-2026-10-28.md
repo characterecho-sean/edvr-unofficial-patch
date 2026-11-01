@@ -8,7 +8,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 - **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
 - **F205 (`25b94de6`, `claude/full-detail-scope`, installed on Frontier 2026-11-01, NOT FLOWN, not merged):** B3 on by default and taking both eyes; every ADS press a circle in
-  both eyes sized as flat's ADS FOV (`fix.native_on_foot_ads_view_circle`, default on), Anti-aliasing on or off. Journal: F205 at the end.
+  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. Journal: F205 at the end.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
@@ -1130,3 +1130,11 @@ He then amended them: "make the stencil appear in both eyes for all ADS actions 
    - Judge the circle's size against flat, and B3's look with the circle.
    - Try the sight eye at right, to see the B3 override.
    - Read the press lines' radius and mode, the runtime's circle frames, and `--health`.
+
+**F205 flown, F205b** (2026-11-01). The pilot flew F205 (`edvr_gfx` at 05:49, v0.22.0-rc.4-51-g386229c0, build matched): "Looks great". Every ADS press drew its circle; the scoped Executioner's radius was 12.47 deg on that session's frustum. His word, given after the key was quoted: remove the circle's own toggle and tie it to the scope zoom setting.
+
+F205b (`143b4f04`, full build green, `native_frame_test` 3784, `openxr_stereo_test` 29724):
+- `fix.native_on_foot_ads_view_circle` is removed: its reader, `edvr.ini` line and `# ui:` row, menu row and hotkey pin. It never shipped in a release, so there is no retired-key note.
+- `circleTick` reads `g_scopeZoomKey`, the one live reader of `fix.native_on_foot_ads_scope_zoom`. With the scope zoom on, every ADS press with any weapon gets the circle; with it off, there is none.
+- The off press line reads `ADS view circle (F205): press N: no circle (fix.native_on_foot_ads_scope_zoom is off)`, and `--health` reads it IDLE.
+- Nothing else about the circle changed.

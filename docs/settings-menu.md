@@ -931,9 +931,9 @@ they were there (flown 2026-09-07).
      row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default on since F205, the user's choice of the scoped
      Executioner's optic: on takes the lens from the left eye drawn as the zoomed view, at full detail, with an equal black edge in each eye's outer view
      while the zoom stands, the press taking both eyes whatever ADS: sight in both eyes says, and needing a temporal Anti-aliasing mode; off is the digital
-     zoom with no edge; ADS: view circle, `fix.native_on_foot_ads_view_circle`, on | off, default on, F205: every ADS press shows the view inside a circle
-     around the sight in both eyes, black outside, its radius the same share of the headset's view that flat's ADS FOV keeps of the screen, with
-     Anti-aliasing on or off); **Body and
+     zoom with no edge; with ADS: scope zoom on, every ADS press also shows the view inside a circle around the sight in both eyes, black outside, its
+     radius the same share of the headset's view that flat's ADS FOV keeps of the screen, with Anti-aliasing on or off: F205, with no row of its own
+     since F205b, the pilot's word); **Body and
      view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
      breathable air); **HUD** (HUD distance, HUD size, HUD
      element scale, HUD spread, HUD follow). The headings are the ini's own
