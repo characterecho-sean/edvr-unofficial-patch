@@ -17123,6 +17123,10 @@ PERF_KEY_RE = re.compile(r"vr draw path key: (?P<key>experimental\.vr_(?:eye_row
 PERF_WINDOW_RE = re.compile(r"draw hook CPU: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, (?P<samples>\d+) sampled frames")
 
 
+# Beside each window: `depth slot cache: 1800-frame window ending N; H hits, M misses` (perf_monitor.cpp; item 4's cache, 0 and 0 when the key is off). Joined to the window with the same end.
+PERF_SLOT_RE = re.compile(r"depth slot cache: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<hits>\d+) hits, (?P<misses>\d+) misses")
+
+
 def parse_perf_keys(text):
     """Every `vr draw path key:` line, in order: dicts key, value, was ('none' on the start-up line), frame."""
     out = []
@@ -17136,6 +17140,11 @@ def parse_perf_keys(text):
 def perf_windows(text):
     """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples, dropped (a key changed inside it) and flips (those changes)."""
     flips = [k for k in parse_perf_keys(text) if k["was"] != "none"]
+    slots = {}
+    for line in text.splitlines():
+        m = PERF_SLOT_RE.search(line)
+        if m:
+            slots[int(m.group("end"))] = (int(m.group("hits")), int(m.group("misses")))
     out = []
     for line in text.splitlines():
         m = PERF_WINDOW_RE.search(line)
@@ -17145,7 +17154,7 @@ def perf_windows(text):
         start = end - size + 1
         inside = [k for k in flips if start <= k["frame"] <= end]
         out.append({"end": end, "start": start, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
-                    "dropped": bool(inside), "flips": inside})
+                    "dropped": bool(inside), "flips": inside, "slot_hits": slots.get(end, (None, None))[0], "slot_misses": slots.get(end, (None, None))[1]})
     return out
 
 
@@ -17158,7 +17167,8 @@ def print_perf_windows(text):
     for k in parse_perf_keys(text):
         print("[edvr] key %s = %s at frame %d%s" % (k["key"], k["value"], k["frame"], " (start-up)" if k["was"] == "none" else " (was %s)" % k["was"]))
     for w in wins:
-        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s" % (w["end"], w["mean"], w["max"], w["samples"], "kept" if not w["dropped"] else "dropped: " + "; ".join(
+        slot = "slot cache %d hits, %d misses" % (w["slot_hits"], w["slot_misses"]) if w["slot_hits"] is not None else "no slot cache line"
+        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s, %s" % (w["end"], w["mean"], w["max"], w["samples"], slot, "kept" if not w["dropped"] else "dropped: " + "; ".join(
             "%s changed to %s at frame %d" % (k["key"], k["value"], k["frame"]) for k in w["flips"])))
     kept = sum(1 for w in wins if not w["dropped"])
     print("[edvr] %d of %d window(s) kept, %d dropped: a window a temporary key changed in mixes two settings." % (kept, len(wins), len(wins) - kept))
@@ -23757,6 +23767,18 @@ def self_test_perf_keys():
         fail("the windows parsed to %r" % ([(w["end"], w["mean"], w["dropped"]) for w in wins],))
     if parse_perf_keys("[10:00:01.000] vr draw path key: experimental.other = on (was none) at frame 1\n") != [] or perf_windows("nothing here\n") != []:
         fail("a line of another instrument parsed as a draw-path key or window")
+    # The depth slot cache's line (perf_monitor.cpp), written beside each window: its counts ride on the window it ends with; a window without one reads None.
+    slot = "[10:00:02.001] depth slot cache: 1800-frame window ending %d; %d hits, %d misses\n"
+    stext = win % (1800, "0.500") + slot % (1800, 41000, 120) + win % (3600, "0.600") + slot % (3600, 0, 0) + win % (5400, "0.700")
+    got = [(w["end"], w["slot_hits"], w["slot_misses"]) for w in perf_windows(stext)]
+    if got != [(1800, 41000, 120), (3600, 0, 0), (5400, None, None)]:
+        fail("the depth slot cache counts parsed to %r" % (got,))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_perf_windows(stext)
+    for want in ("slot cache 41000 hits, 120 misses", "slot cache 0 hits, 0 misses", "no slot cache line"):
+        if want not in buf.getvalue():
+            fail("--perf-windows output lacks %r:\n%s" % (want, buf.getvalue()))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(text)
