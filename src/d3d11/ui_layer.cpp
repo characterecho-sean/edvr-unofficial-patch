@@ -5370,8 +5370,8 @@ void crispArm(int eye, uint64_t seq, int hdrSlot, const void* rtvRes, const void
 }
 }  // namespace
 
-bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                             uint32_t startInstance) {
+bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                 uint32_t startInstance) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
     if (!detail::g_uiLayerCrispOn || !ctx) return false;

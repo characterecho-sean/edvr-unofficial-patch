@@ -470,6 +470,11 @@ size_t nativeOnFootLabelDrawsJson(uint32_t renderFrame, char* buf, size_t cap);
 // F87p (read only; owner context, vscreen.cpp): right before the game's own issue of a draw, with whether the UI layer's bracket was begun for it. A draw the marker
 // instrument named at fixDecide's untagged return is completed here (the viewport as mapped, the b0 bound); every other draw returns at once.
 void nativeOnFootLabelIssue(ID3D11DeviceContext* ctx, bool layered);
+// The label-pending record's valid flag (native_on_foot.cpp, f44::LabPending): set by the draw that identified a label draw, cleared at its issue, at the next
+// identification and at shutdown. Atomic because the shutdown reset runs on the thread that unloads EDVR, not the render thread. vscreen asks it before the call,
+// so the draws that name no label (nearly all of them) do not leave the translation unit.
+inline std::atomic<bool> g_nativeOnFootLabelPendingValid{false};
+inline bool nativeOnFootLabelPending() { return g_nativeOnFootLabelPendingValid.load(std::memory_order_relaxed); }
 struct NativeOnFootPoseStamp {
     bool valid = false, writePresent = false, matricesValid = false, sourceFresh = false;
     uint32_t renderFrame = 0, fpFrame = 0, fpSequence = 0, gGameFrame = 0, itemSerial = 0, rigGeneration = 0;

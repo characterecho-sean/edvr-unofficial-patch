@@ -200,8 +200,17 @@ inline bool uiLayerCrispOn() { return detail::g_uiLayerCrispOn; }
 // eye's HDR layer holds this frame's HUD draws and every ordering guard
 // passes; then the caller skips its after-UI read check for the draw and
 // brackets the draw's own issue with uiLayerCrispToneBegin/End.
-bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                             uint32_t startInstance);
+bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                 uint32_t startInstance);
+// The per-draw entry, inline: the body's first act is to clear a pending tonemap record, and its second is the shape test, so
+// it is needed only when a tonemap draw is pending (the header flag, set and cleared together with the record on every
+// path) or this draw has the tonemap's shape. Anything else it would leave at that test with nothing to clear.
+inline bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                    uint32_t startInstance) {
+    if (!detail::g_uiLayerCrispPending && ((kind != 'D' && kind != 'N') || count != 3 || instances != 1 || startInstance != 0))
+        return false;
+    return uiLayerCrispNoteEyeDrawBody(ctx, kind, count, instances, startInstance);
+}
 // One load for the ordinary draw between admission and issue: an admission is
 // outstanding, so forwardWithVerdict must run the re-issue bracket after the
 // game's own issue.

@@ -30180,7 +30180,7 @@ uint64_t g_labRingLost = 0, g_labDecodeDueMs[2] = {}, g_labDropped = 0;
 uint32_t g_labRefusals = 0;
 float g_privRows[12] = {};   // the rows 4, 5 and 7 the private b0 was last written with (nativeOnFootMarkerFixBegin)
 struct LabPending {
-    bool valid = false, wantDecode = false;
+    bool wantDecode = false;   // `valid` is g_nativeOnFootLabelPendingValid (native_on_foot.h): the vscreen call site reads it
     uint64_t serial = 0;
     LabDraw* d = nullptr;
     const void* b0 = nullptr;
@@ -30254,7 +30254,7 @@ void labFocusNdc(int e, uint32_t frame, uint32_t key, const double T[2], const d
 }
 // fixDecide's untagged return: is this draw one of the label's? Recorded into the frame's cell; completed at the issue.
 void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r, const CbShadow* sh, ID3D11Buffer* b0Plain, const float* oHud) {
-    g_labPending.valid = false;
+    g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
     if (!(r.ps == nofoot::f87::kLabelPs && r.vs == nofoot::f87::kLabelVs && r.kind == 'X' && r.instances == 1 && r.cpuHave && r.pool && (e == 0 || e == 1))) return;
     LabRec* lr = labRecFind(r.pool, r.cpuRec, frame);
     LabFrame& lf = g_labFrame[frame % kLabFrames];
@@ -30302,7 +30302,7 @@ void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r
         std::memcpy(d.oHud, oHud, sizeof(d.oHud));
         d.oHudOk = true;
     }
-    g_labPending.valid = true;
+    g_nativeOnFootLabelPendingValid.store(true, std::memory_order_relaxed);
     g_labPending.serial = g_drawSerial;
     g_labPending.d = &d;
     g_labPending.b0 = b0Plain;
@@ -30311,7 +30311,7 @@ void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r
 }
 // markerDraw, after fixDecide: the small draw's index and vertex ranges copied for the decode (the icon capture's way, with a larger window).
 void labelCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8], char kind) {
-    if (!g_labPending.valid || !g_labPending.wantDecode || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
+    if (!g_nativeOnFootLabelPendingValid.load(std::memory_order_relaxed) || !g_labPending.wantDecode || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
     g_labPending.wantDecode = false;
     const LabDraw& d = *g_labPending.d;
     const int e = d.eye;
@@ -30492,8 +30492,8 @@ void labOnData(int slot, const uint8_t* data) {
 // vscreen.cpp, right before the game's own issue of the draw: layered or not, the viewport as mapped, the b0 bound (the game's, ours, or another) and its rows 4/5/7; the
 // leader's NDC through those rows for the draw that was decoded.
 void labelIssue(ID3D11DeviceContext* ctx, bool layered) {
-    if (!g_labPending.valid || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
-    g_labPending.valid = false;
+    if (!g_nativeOnFootLabelPendingValid.load(std::memory_order_relaxed) || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
+    g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
     LabDraw& d = *g_labPending.d;
     d.issued = true;
     d.layered = layered;
@@ -35877,6 +35877,7 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_iconRing.release();   // F66f
     f44::g_labRing.release();    // F87p
     f44::g_labPending = f44::LabPending{};
+    g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
     for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
     f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
     f44::g_iconLastHit = -1;   // F142
