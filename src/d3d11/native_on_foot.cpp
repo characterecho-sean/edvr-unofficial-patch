@@ -95,7 +95,7 @@
 #include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
 #include "native_on_foot_f195.h"   // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred (pure parts)
 #include "native_on_foot_f205.h"   // F205: the full-detail scope takes both eyes (the effective sight eye) and every ADS press shows its view inside a circle sized as flat's ADS FOV (pure parts)
-#include "../common/view_circle.h" // F205: the circle's request between the halves, its radius and weight
+#include "../common/view_circle.h" // F206: the circle's request (its centre) between the halves
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -36872,7 +36872,7 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
     s0::Vr& v = s0::g_vr;
     constexpr double nan = std::numeric_limits<double>::quiet_NaN();
     // F205: B3's full detail needs the upscaler's picture at the left door (F202 left it so), so it waits for a temporal mode: with Anti-aliasing off the key being on (it is by default) asks nothing of
-    // the left eye -- no window, no strip, no black bars -- and the lens is F202's. The press keeps the player's sight eye then (f205B3Applies asks the same mode); the ADS view circle (circleTick) has no such gate.
+    // the left eye -- no window, no strip, no black bars -- and the lens is F202's. The press keeps the player's sight eye then (f205B3Applies asks the same mode), and has no circle (F206: the circle is B3's alone).
     const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn && temporalPassWantsFssChrome();
     const bool rendered = sz::lensRenderedEntry(s.item.name, s.item.scope);
     const bool asked = keyB3 && rendered;
@@ -37016,61 +37016,59 @@ void endPress(State& s) noexcept {
     }
 }
 
-// ---- F205: the ADS view circle (view_circle.h; nofoot::f205) ----------------------------------------------------------------------------------------------------------------------
-// Every ADS press with a weapon whose ADS FOV is known shows each eye's view inside a circle, black outside, whose radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV, centred on the
-// direction of the sight's far point in each eye's own view (so with the sight eye at right or left, where each eye shows its own view, the two circles fuse into one; with the share the left
-// eye's circle is the right eye's turned into its view, the same direction). Its inputs all exist with Anti-aliasing off, and nothing here asks for a temporal mode: the sight point S and the scene
-// rows (F196: the depth probe's scene pair names the eyes), the ADS FOV (the weapon's table row), the hip FOV (the scope zoom's reference), the eye's frustum (F198 publishes it with the mode
-// off). The weight rises with the sight lock (0.15 s from the first frame the centre is known) and falls with it (0.3 s from the first frame the sights are no longer up). The runtime draws it
-// (D3D11Stereo::renderCaptured); this publishes the request every tick and writes one line a press. Frame thread only.
+// ---- F206: the ADS view circle (view_circle.h; nofoot::f205) ----------------------------------------------------------------------------------------------------------------------
+// The circle is the full-detail scope's alone (the pilot's word, 2026-11-01: "back off on the stencil entirely for all weapons except the sniper with scope mod so that it hides the black vertical
+// bars and then have the widest radius possible that does"). A press has one when B3's full-detail view runs in it: the F205 latch forced both at the engage (the scoped Executioner, B3 on, the scope
+// zoom on and a temporal mode), so no other weapon, no B3-less scoped press and no Anti-aliasing-off press asks for one and the circle needs no sight-eye condition of its own. This asks for its
+// centre alone, the direction of the sight's far point in each eye's own view, from the very rows and S the lens works from, every tick of such a press; the runtime draws it exactly while B3's
+// right-eye mirror strip is, by the mirror's weight, at the widest radius that keeps the bars in the black, and tells the way back (edvrNoteNativeViewCircle writes the press's line). A press that
+// had a circle and whose window stood, and that got no run reported, says why after it. Frame thread only (the export is the runtime thread's: it touches the two atomics only).
 struct CircleState {
-    viewcircle::Ramp ramp;
     double lastT = 0.0;
-    bool inPress = false, lineDone = false, haveCentre = false;
+    bool inPress = false, hasCircle = false, haveCentre = false, windowSeen = false, lineDone = false;
     uint32_t press = 0;
-    uint64_t pressMs = 0, centreMs = 0;
+    uint64_t overMs = 0;   // the later of the press being over and the window last standing: the wait for the runtime's report runs from it
     float tc[2][2] = {};
-    double radiusRad = std::numeric_limits<double>::quiet_NaN();
-    bool keyLogged = false;
+    char item[64] = {};
+    int scope = 0;
 } g_circle;
-constexpr uint64_t kCircleCentreFreshMs = 250;   // a centre this old or younger is believed
-constexpr uint64_t kCircleDecideMs = 500;        // a press whose circle cannot be worked out by now says why
+std::atomic<uint32_t> g_circlePress{0};        // the press the circle's current run belongs to (the export names its line with it)
+std::atomic<uint32_t> g_circleRunPress{0};     // the last press a run was reported for
 void circleTick(uint64_t nowMs) noexcept {
     CircleState& c = g_circle;
     State& s = g_s1;
     s0::Vr& v = s0::g_vr;
     if (g_install != InstallState::Armed || runtimeFlatProfile()) {
-        c.ramp = viewcircle::Ramp{};
         c.inPress = false;
+        c.hasCircle = false;
         viewcircle::publish(viewcircle::Request{}, nowMs);
         return;
     }
-    const double t = s0::seconds();
-    const double dt = c.lastT > 0.0 ? std::fmin(std::fmax(t - c.lastT, 0.0), 0.25) : 0.0;
-    c.lastT = t;
     const bool onFoot = nativeOnFootActive();
     const bool inSights = onFoot && g_adsState != kAdsIdle;   // the press: from the raise to the end of the lower
     const bool up = onFoot && g_adsState == kAdsActive;       // the sights are up (not lowering)
-    // F205b: the circle has no key of its own (the pilot's word, 2026-11-02): it is on whenever the scope zoom is, by the very read the lens uses (g_scopeZoomKey, fix.native_on_foot_ads_scope_zoom, live).
-    const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
-    const char* mode = temporalPassWantsFssChrome() ? "on" : "off";
-    if (inSights && !c.inPress) {   // a press begins
+    const scopewin::Request window = scopewin::read(nowMs);   // B3's own request: whether its strip or its narrowed left eye stands
+    const bool standing = window.zoom || window.strip > 0.0f;
+    if (inSights && !c.inPress) {   // a press begins (adsAimTick, earlier in this tick, latched it at this engage)
         c.inPress = true;
         c.lineDone = false;
         c.haveCentre = false;
+        c.windowSeen = false;
         c.press = v.press;
-        c.pressMs = nowMs;
+        c.hasCircle = nofoot::f205::pressHasCircle(g_f205Latch);
+        g_circlePress.store(c.press, std::memory_order_release);
+        std::snprintf(c.item, sizeof(c.item), "%s", s.item.name);
+        c.scope = s.item.scope;
+    } else if (!inSights && c.inPress) {
+        c.inPress = false;
+        c.overMs = nowMs;
     }
-    nofoot::f205::Radius r;
-    double adsDeg = std::numeric_limits<double>::quiet_NaN();
-    bool fromBare = false, fovKnown = false;
-    if (inSights) {
-        fovKnown = sz::adsFovDeg(s.item.name, s.item.scope, &adsDeg, &fromBare);
-        float tan4[4];
-        const bool haveTan = temporalPassEyeTan(1, tan4);   // the right eye's frustum: eye 0's is narrowed while the full-detail scope's window stands
-        r = nofoot::f205::circleRadius(key, fovKnown, adsDeg, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)), haveTan ? tan4 : nullptr);
-        if (r.why == nofoot::f205::Why::kOk) c.radiusRad = r.radiusRad;
-        if (r.why == nofoot::f205::Why::kOk && up) {   // the sight's far point in each eye's own view, from the very rows and S the lens works from
+    if (c.hasCircle) {
+        if (standing) {
+            c.windowSeen = true;
+            c.overMs = nowMs;
+        }
+        if (up) {   // the sight's far point in each eye's own view, from the very rows and S the lens works from
             const s0::Geometry g = s0::geometryNow(v, nowMs);
             const bool sFresh = v.haveS && s0::freshMs(nowMs, v.sMs);
             const double S[3] = {v.S[0], v.S[1], v.S[2]};
@@ -37087,36 +37085,31 @@ void circleTick(uint64_t nowMs) noexcept {
                     sz::tangentOfNdc(ndc, tj, tcE[e]);
                     ok[e] = std::isfinite(tcE[e][0]) && std::isfinite(tcE[e][1]);
                 }
-                if (ok[0] && ok[1]) {
+                if (ok[0] && ok[1]) {   // held through the lower and the strip's exit hold: the bars and the circle go together
                     for (int e = 0; e < 2; ++e)
                         for (int a = 0; a < 2; ++a) c.tc[e][a] = static_cast<float>(tcE[e][a]);
                     c.haveCentre = true;
-                    c.centreMs = nowMs;
                 }
             }
         }
-        if (!c.lineDone) {   // the press's one line: the radius with its three figures once the centre is known, or why there is no circle
-            const bool decided = r.why == nofoot::f205::Why::kOk ? c.haveCentre : r.why == nofoot::f205::Why::kScopeZoomOff || nowMs - c.pressMs >= kCircleDecideMs;
-            if (decided || (r.why == nofoot::f205::Why::kOk && nowMs - c.pressMs >= 2 * kCircleDecideMs)) {
-                nofoot::f205::Radius shown = r;
-                if (shown.why == nofoot::f205::Why::kOk && !c.haveCentre) shown.why = nofoot::f205::Why::kNoCentre;
-                char line[420];
-                nofoot::f205::formatLine(line, sizeof(line), c.press, mode, shown, adsDeg, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)), fromBare, s.item.name,
-                                         loadout::scopeName(s.item.scope), shown.why == nofoot::f205::Why::kOk ? c.tc : nullptr);
-                Log::get().note("%s", line);
-                c.lineDone = true;
-            }
-        }
-    } else if (c.inPress) {
-        c.inPress = false;
     }
-    const bool fresh = c.haveCentre && nowMs >= c.centreMs && nowMs - c.centreMs <= kCircleCentreFreshMs;
-    const bool want = key && up && r.why == nofoot::f205::Why::kOk && fresh;
-    c.ramp.step(want, dt);
+    if (c.hasCircle && !c.lineDone && !inSights && !standing && c.windowSeen) {   // the press is over and its window gone: the runtime's report, if one is coming, has come
+        nofoot::f205::PressEnd pe;
+        pe.hasCircle = c.hasCircle;
+        pe.windowSeen = c.windowSeen;
+        pe.runReported = g_circleRunPress.load(std::memory_order_acquire) == c.press;
+        pe.haveCentre = c.haveCentre;
+        if (pe.runReported) {
+            c.lineDone = true;
+        } else if (nofoot::f205::noCircleDue(pe, nowMs >= c.overMs ? nowMs - c.overMs : 0)) {
+            char line[360];
+            nofoot::f205::formatNoCircle(line, sizeof(line), c.press, nofoot::f205::noCircleWhy(pe), c.item, loadout::scopeName(c.scope));
+            Log::get().note("%s", line);
+            c.lineDone = true;
+        }
+    }
     viewcircle::Request req;
-    req.on = key && c.ramp.w > 0.0 && c.haveCentre && std::isfinite(c.radiusRad);
-    req.radiusRad = static_cast<float>(c.radiusRad);
-    req.weight = static_cast<float>(c.ramp.w);
+    req.on = nofoot::f205::requestOn(c.hasCircle, c.haveCentre);
     std::memcpy(req.tc, c.tc, sizeof(req.tc));
     viewcircle::publish(req, nowMs);
 }
@@ -37467,7 +37460,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain
     s1::tick(GetTickCount64());    // A1: the scope lens: its verdict, c and M for the door; after S0's tick, whose press number and samples it takes
-    s1::circleTick(GetTickCount64());   // F205: the ADS view circle's request (radius, weight, centre in each eye), every tick; after the lens tick, whose item it reads
+    s1::circleTick(GetTickCount64());   // F206: the ADS view circle's request (its centre in each eye), every tick of a press B3 applies to; after the lens tick, whose item it reads
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
@@ -37535,13 +37528,15 @@ void nativeOnFootShutdown() {
 
 // B3: the runtime's report of one press of the scope zoom's window (scope_zoom_window.h): what it told the game for the left eye, and what the game's getters answered. Called on the
 // runtime's owner thread once a press, when the window has ended; writes the line --health reads (scope zoom (B3) runtime). E_INVALIDARG, and no line, for a report it cannot read.
-// F205: the runtime's report of one run of the ADS view circle (view_circle.h): what it drew. Called on the runtime's render thread once a run, when the weight has come back to 0; writes the
-// line --health reads. E_INVALIDARG, and no line, for a report it cannot read.
+// F206: the runtime's report of one run of the ADS view circle (view_circle.h): what it drew. Called on the runtime's render thread once a run, when the mirror strip has gone; writes the press's
+// line --health reads (the press is the frame thread's current or last one). E_INVALIDARG, and no line, for a report it cannot read.
 extern "C" long __stdcall edvrNoteNativeViewCircle(const EdvrNativeViewCircleReport* r) {
     if (!edvr::nofoot::f205::reportReadable(r)) return E_INVALIDARG;
-    char line[edvr::nofoot::f205::kRuntimeLineBytes];
-    edvr::nofoot::f205::formatRuntime(line, sizeof(line), *r);
+    char line[edvr::nofoot::f205::kRunLineBytes];
+    const uint32_t press = edvr::s1::g_circlePress.load(std::memory_order_acquire);
+    edvr::nofoot::f205::formatRun(line, sizeof(line), press, *r);
     edvr::Log::get().note("%s", line);
+    edvr::s1::g_circleRunPress.store(press, std::memory_order_release);
     return S_OK;
 }
 

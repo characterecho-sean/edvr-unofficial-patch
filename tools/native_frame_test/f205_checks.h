@@ -1,11 +1,13 @@
-// F205 checks (native on-foot VR), run205 below. Header only, run by native_frame_test.
+// F205/F206 checks (native on-foot VR), run205 below. Header only, run by native_frame_test.
 //
-// F205 (native_on_foot_f205.h, view_circle.h, scope_zoom_s1.h adsFovDeg; native_on_foot.cpp; the runtime's renderer is openxr_stereo_test's): three things the pilot asked for. (1) The full-detail scope (B3)
-// is on by default. (2) While it applies the press takes both eyes whatever fix.native_on_foot_ads_sight_eye says: one effective sight eye, decided once at the press's start. (3) Every ADS press shows each
-// eye's view inside a circle, black outside, whose angular radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV, as flat's narrowed view loses its periphery. The rig runs the effective sight eye over
-// every key and both B3 states and the press latch; the ADS FOV table; the radius rule on the Pimax and the Quest 3 for the Executioner's two FOVs and the others, an unknown FOV, a frustum that is no eye, the key
-// off and a ratio past 1; that no input of the circle looks at the Anti-aliasing mode (the same inputs give the same radius and request on and off); the request's wire form, sanitising, staleness and ramp; the
-// press, runtime and override lines; and the sites.
+// F205 (native_on_foot_f205.h): (1) The full-detail scope (B3) is on by default. (2) While it applies the press takes both eyes whatever fix.native_on_foot_ads_sight_eye says: one effective sight eye,
+// decided once at the press's start. The rig runs the effective sight eye over every key and both B3 states and the press latch.
+//
+// F206 (the pilot's word: "back off on the stencil entirely for all weapons except the sniper with scope mod so that it hides the black vertical bars and then have the widest radius possible that
+// does"): the ADS view circle is the full-detail scope's alone. The rig runs which presses have one (B3's latch only: the scoped Executioner with a temporal mode, whatever the key says; no other
+// weapon, no B3-less scoped press, no Anti-aliasing-off press, and nothing depends on a sight eye of its own), the request (a centre alone: no radius, no weight, no flat rule, no FOV table), its
+// wire form, sanitising and staleness, the lines (the run's, the one for a B3 press that got no circle, health's), and the sites. The radius itself is the runtime's (scope_circle.h coverageRadius,
+// run by openxr_stereo_test on known windows) and the weight is the mirror strip's, not the ADS weight.
 #pragma once
 
 #include "../../src/common/view_circle.h"
@@ -44,8 +46,6 @@ inline size_t countOf(const std::string& text, const std::string& needle) {
 
 template <class Check>
 void run205(Check&& check) {
-    constexpr double kDeg = 180.0 / vc::kPi;
-    const double nan = std::numeric_limits<double>::quiet_NaN();
     const char* kExecutioner = "$wpn_m_sniper_plasma_charged_name;";
     // ---- 1. the effective sight eye -----------------------------------------------------------------------------------------------------------------------------------------------------------
     {
@@ -94,94 +94,68 @@ void run205(Check&& check) {
                   std::string(line) == "scope zoom (B3): the sight eye is both for this press (fix.native_on_foot_ads_sight_eye is left): full detail needs both eyes",
               "F205: the press's one line when it overrides names the key's value");
     }
-    // ---- 2. the ADS FOV of every measured weapon ----------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 2. which presses have a circle -------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
-        struct Want { const char* item; int scope; double deg; bool bare; };
-        const Want wants[] = {
-            {"$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeYes, 15.0, false}, {"$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeNo, 35.0, false},
-            {"$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeNo, 48.0, false}, {"$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeYes, 48.0, true},
-            {"$wpn_m_assaultrifle_laser_fauto_name;", sz::kLensScopeNo, 48.0, false}, {"$wpn_m_assaultrifle_kinetic_fauto_name;", sz::kLensScopeNo, 48.0, false},
-            {"$wpn_m_assaultrifle_kinetic_fauto_name;", sz::kLensScopeYes, 48.0, true}, {"$wpn_m_submachinegun_kinetic_fauto_name;", sz::kLensScopeNo, 50.0, false},
-            {"$wpn_m_submachinegun_laser_fauto_name;", sz::kLensScopeNo, 50.0, false}, {"$wpn_m_submachinegun_laser_fauto_name;", sz::kLensScopeYes, 50.0, true},
-            {"$wpn_m_shotgun_plasma_doublebarrel_name;", sz::kLensScopeNo, 52.0, false}, {"$wpn_s_pistol_plasma_charged_name;", sz::kLensScopeNo, 52.0, false},
-            {"$wpn_s_pistol_kinetic_sauto_name;", sz::kLensScopeNo, 52.0, false}, {"$wpn_s_pistol_laser_sauto_name;", sz::kLensScopeNo, 52.0, false},
-            {"$wpn_m_launcher_rocket_sauto_name;", sz::kLensScopeNo, 52.0, false}, {"wpn_s_pistol_laser_sauto", sz::kLensScopeNo, 52.0, false},
-        };
-        bool all = true;
-        for (const Want& w : wants) {
-            double deg = nan;
-            bool bare = true;
-            all = all && sz::adsFovDeg(w.item, w.scope, &deg, &bare) && eq(deg, w.deg, 1e-12) && bare == w.bare;
+        // the circle is B3's: a press has one exactly when its latch forced both. The scoped Executioner with B3 on, the scope zoom on and a temporal mode is the one such press.
+        bool b3Only = true, everyKey = true;
+        for (int key : {int(f162::kBoth), int(f162::kRight), int(f162::kLeft)}) {
+            f205::PressLatch on, off;
+            on.begin(f205::b3Applies(true, true, true, true), key);
+            off.begin(f205::b3Applies(true, true, true, false), key);
+            everyKey = everyKey && f205::pressHasCircle(on) && !f205::pressHasCircle(off) && f205::effectiveSightEye(key, on.forced) == f162::kBoth;
+            // a weapon that is not B3's entry (the bare Executioner, the assault rifle, a pistol), whatever the key says: no circle, no sight-eye condition of its own
+            for (const char* item : {"$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_s_pistol_laser_sauto_name;", "$wpn_m_shotgun_plasma_doublebarrel_name;"}) {
+                f205::PressLatch other;
+                other.begin(f205::b3Applies(true, true, sz::lensRenderedEntry(item, sz::kLensScopeYes), true), key);
+                b3Only = b3Only && !f205::pressHasCircle(other);
+            }
+            f205::PressLatch bare;
+            bare.begin(f205::b3Applies(true, true, sz::lensRenderedEntry(kExecutioner, sz::kLensScopeNo), true), key);
+            b3Only = b3Only && !f205::pressHasCircle(bare);
+            f205::PressLatch unknown;
+            unknown.begin(f205::b3Applies(true, true, sz::lensRenderedEntry(kExecutioner, sz::kLensScopeUnknown), true), key);
+            b3Only = b3Only && !f205::pressHasCircle(unknown);
         }
-        check(all, "F205: the ADS FOV of every weapon the flat flights measured (15 scoped and 35 bare Executioner, 48 assault rifles, 50 sub-machine guns, 52 shotgun, pistols and launcher) comes from the table, an unmeasured scoped copy taking its item's");
-        double deg = 1.0;
-        check(!sz::adsFovDeg("$wpn_m_unmeasured_thing_name;", sz::kLensScopeNo, &deg) && std::isnan(deg) && !sz::adsFovDeg(kExecutioner, sz::kLensScopeUnknown, &deg) &&
-                  !sz::adsFovDeg("$wpn_s_pistol_laser_sauto_name;", sz::kLensScopeUnknown, &deg) && !sz::adsFovDeg("", sz::kLensScopeNo, &deg) && !sz::adsFovDeg(nullptr, sz::kLensScopeNo, &deg),
-              "F205: a weapon no row names, an unknown scope state, an empty name: no ADS FOV (no circle, never a guess)");
+        check(everyKey, "F206: the scoped Executioner's press with B3 on and a temporal mode has the circle for the key both, right and left alike (the latch forces both), and with Anti-aliasing off (no temporal mode) has none");
+        check(b3Only, "F206: no other weapon (the assault rifle, a pistol, the shotgun), no bare Executioner and no press of an unknown scope has a circle, for any key");
+        bool keysOff = true;
+        for (int key : {int(f162::kBoth), int(f162::kRight), int(f162::kLeft)}) {
+            f205::PressLatch noScopeZoom, noFull;
+            noScopeZoom.begin(f205::b3Applies(true, false, true, true), key);
+            noFull.begin(f205::b3Applies(false, true, true, true), key);
+            keysOff = keysOff && !f205::pressHasCircle(noScopeZoom) && !f205::pressHasCircle(noFull);
+        }
+        check(keysOff, "F206: with the scope zoom off, or the full-detail view off, the press has no circle (the circle is part of B3's full-detail view and has no setting of its own)");
+        // decided once, with the press's other state: a setting changed in the middle of a press changes nothing, a re-engage from the release keeps it, the press's end clears it
+        f205::PressLatch l;
+        l.begin(true, f162::kRight);
+        const bool began = f205::pressHasCircle(l);
+        l.reengage();
+        const bool kept = f205::pressHasCircle(l);
+        l.end();
+        const bool ended = !f205::pressHasCircle(l);
+        f205::PressLatch noB3;
+        noB3.begin(false, f162::kBoth);
+        check(began && kept && ended && !f205::pressHasCircle(noB3), "F206: the press's circle is decided at its engage, kept through a re-engage from the release, and cleared when the press has fully ended; a press without B3 and the key both has none");
+        // the request: the centre alone, once it is known, in a press that has a circle
+        check(f205::requestOn(true, true) && !f205::requestOn(true, false) && !f205::requestOn(false, true) && !f205::requestOn(false, false),
+              "F206: the circle's centre is asked for in a press that has a circle once the sight's far point is known in both eyes, and in no other");
     }
-    // ---- 3. the radius ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 3. nothing of the flat rule is left --------------------------------------------------------------------------------------------------------------------------------------------------------
     {
-        // the headsets' vertical half-FOV: the Pimax's tangents up 1.2648 and down 1.2648, the Quest 3's up 0.9657 and down 1.4281 (L and D negative: temporalPassEyeTan's order)
-        const float pimax[4] = {-1.2543f, 0.8746f, -1.2648f, 1.2648f}, quest[4] = {-1.3498f, 0.8213f, -1.4281f, 0.9657f}, session[4] = {-1.2543f, 0.8746f, -1.065f, 1.065f};
-        const double vPimax = vc::halfFovRad(pimax), vQuest = vc::halfFovRad(quest), vSession = vc::halfFovRad(session);
-        check(eq(vPimax * kDeg, std::atan(1.2648) * kDeg, 1e-4) && eq(vPimax * kDeg, 51.67, 0.01) && eq(vQuest * kDeg, 0.5 * (std::atan(0.9657) + std::atan(1.4281)) * kDeg, 1e-4) && eq(vQuest * kDeg, 49.50, 0.01) &&
-                  eq(vSession * kDeg, 46.80, 0.01),
-              "F205: the half-FOV is the vertical half-angle of the eye's frustum: 51.67 deg on the Pimax (up and down 1.2648), 49.50 on the Quest 3 (up 0.9657, down 1.4281, not symmetric), 46.80 on the pilot's 04:12 session (1.065)");
-        // the flat rule: the ADS FOV over the hip FOV (56.3) times the half-FOV
-        struct Row { double ads; double pimaxDeg, questDeg; };
-        const Row rows[] = {{15.0, 13.77, 13.19}, {35.0, 32.12, 30.77}, {48.0, 44.05, 42.20}, {50.0, 45.89, 43.96}, {52.0, 47.72, 45.72}};
-        bool rule = true;
-        for (const Row& r : rows) {
-            const f205::Radius rp = f205::circleRadius(true, true, r.ads, 56.3, pimax), rq = f205::circleRadius(true, true, r.ads, 56.3, quest);
-            rule = rule && rp.why == f205::Why::kOk && rq.why == f205::Why::kOk && eq(rp.radiusRad * kDeg, r.ads / 56.3 * vPimax * kDeg, 1e-9) && eq(rq.radiusRad * kDeg, r.ads / 56.3 * vQuest * kDeg, 1e-9) &&
-                   eq(rp.radiusRad * kDeg, r.pimaxDeg, 0.02) && eq(rq.radiusRad * kDeg, r.questDeg, 0.02);
-        }
-        check(rule, "F205: the radius is ADS FOV / hip FOV x the half-FOV: the scoped Executioner 13.77 deg on the Pimax and 13.19 on the Quest 3, the bare one 32.12 and 30.77, the assault rifles 44.05 and 42.20, "
-                    "the sub-machine guns 45.89 and 43.96, the pistols, shotgun and launcher 47.72 and 45.72");
-        const f205::Radius off = f205::circleRadius(false, true, 15.0, 56.3, pimax), unknown = f205::circleRadius(true, false, nan, 56.3, pimax), noFov = f205::circleRadius(true, true, nan, 56.3, pimax),
-                           noHip = f205::circleRadius(true, true, 15.0, nan, pimax), noEye = f205::circleRadius(true, true, 15.0, 56.3, nullptr);
-        const float badEye[4] = {-1.f, 1.f, 1.f, -1.f};   // up below down: not an eye
-        const f205::Radius flipped = f205::circleRadius(true, true, 15.0, 56.3, badEye);
-        check(off.why == f205::Why::kScopeZoomOff && !std::isfinite(off.radiusRad) && unknown.why == f205::Why::kAdsFovUnknown && noFov.why == f205::Why::kAdsFovUnknown && noHip.why == f205::Why::kAdsFovUnknown &&
-                  noEye.why == f205::Why::kNoFrustum && flipped.why == f205::Why::kNoFrustum && !std::isfinite(unknown.radiusRad) && !std::isfinite(noEye.radiusRad),
-              "F205b: the scope zoom off gives no circle; an ADS FOV or hip FOV that is not known, and a frustum that is not an eye, give none with their reason, and never a size");
-        // F205b: the circle's one switch is the scope zoom setting: on, every weapon with a measured ADS FOV has its circle; off, none, for every weapon, and the line says so
-        bool follows = true;
-        for (double ads : {15.0, 35.0, 48.0, 50.0, 52.0}) {
-            const f205::Radius onR = f205::circleRadius(true, true, ads, 56.3, pimax), offR = f205::circleRadius(false, true, ads, 56.3, pimax);
-            follows = follows && onR.why == f205::Why::kOk && std::isfinite(onR.radiusRad) && offR.why == f205::Why::kScopeZoomOff && !std::isfinite(offR.radiusRad);
-        }
-        char offLine[240];
-        f205::formatLine(offLine, sizeof(offLine), 4, "off", f205::circleRadius(false, true, 15.0, 56.3, pimax), 15.0, 56.3, false, kExecutioner, "yes");
-        check(follows && std::string(offLine) == "ADS view circle (F205): press 4: no circle (fix.native_on_foot_ads_scope_zoom is off)",
-              "F205b: the circle follows the scope zoom setting on and off for every weapon, and with it off the press line says: press N: no circle (fix.native_on_foot_ads_scope_zoom is off)");
-        const f205::Radius wide = f205::circleRadius(true, true, 80.0, 56.3, pimax);
-        check(wide.why == f205::Why::kOk && eq(wide.radiusRad, vPimax, 1e-12), "F205: an ADS FOV wider than the hip is held to the whole half-FOV");
-        // Anti-aliasing on and off: the rule takes no mode; the same inputs are the same radius, the same request and the same wire form
-        const f205::Radius a = f205::circleRadius(true, true, 15.0, 56.3, pimax), b = f205::circleRadius(true, true, 15.0, 56.3, pimax);
-        vc::Request ra, rb;
-        ra.on = rb.on = true;
-        ra.radiusRad = float(a.radiusRad);
-        rb.radiusRad = float(b.radiusRad);
-        ra.weight = rb.weight = 1.f;
-        uint32_t wa[vc::kWords], wb[vc::kWords];
-        vc::toWords(ra, wa);
-        vc::toWords(rb, wb);
-        check(a.radiusRad == b.radiusRad && std::memcmp(wa, wb, sizeof(wa)) == 0, "F205: the radius and the request are functions of the weapon, the hip FOV and the eye's frustum alone: the same inputs, the same words, with a temporal mode on or off");
-        char la[420], lb[420];
-        f205::formatLine(la, sizeof(la), 1, "on", a, 15.0, 56.3, false, kExecutioner, "yes");
-        f205::formatLine(lb, sizeof(lb), 1, "off", b, 15.0, 56.3, false, kExecutioner, "yes");
-        std::string sa = la, sb = lb;
-        const size_t pa = sa.find("Anti-aliasing on"), pb = sb.find("Anti-aliasing off");
-        check(pa != std::string::npos && pb != std::string::npos && sa.replace(pa, 16, "Anti-aliasing off") == sb,
-              "F205: the press line differs between the two modes only in the word that states the mode, so one flight in each can be compared");
+        const std::string s1 = slurp("src/d3d11/scope_zoom_s1.h"), f205h = slurp("src/d3d11/native_on_foot_f205.h"), vch = slurp("src/common/view_circle.h"), cpp = slurp("src/d3d11/native_on_foot.cpp");
+        check(!s1.empty() && !f205h.empty() && !vch.empty() && !cpp.empty() && s1.find("adsFovDeg") == std::string::npos && s1.find("kAdsOnlyTable") == std::string::npos && cpp.find("adsFovDeg") == std::string::npos,
+              "F206: the circle's ADS FOV table (adsFovDeg, the weapons-only rows) is gone; the lens table stays");
+        check(f205h.find("circleRadius") == std::string::npos && f205h.find("halfFovRad") == std::string::npos && vch.find("halfFovRad") == std::string::npos && vch.find("radiusRad") == std::string::npos &&
+                  vch.find("struct Ramp") == std::string::npos && vch.find("float weight =") == std::string::npos,
+              "F206: the flat rule (ADS FOV / hip FOV x the headset's half-FOV), its helpers, the request's radius and weight and the sight lock's ramp are gone");
+        check(sz::lensAdsDeg(kExecutioner, sz::kLensScopeYes, nullptr) && sz::lensAdsDeg(kExecutioner, sz::kLensScopeNo, nullptr) && sz::lensAdsDeg("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeNo, nullptr),
+              "F206: the lens table the scope zoom magnifies by is untouched (the Executioner's two rows, the Oppressor)");
     }
     // ---- 4. the wire --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         vc::Request r;
         r.on = true;
-        r.radiusRad = 0.2403f;
-        r.weight = 0.75f;
         r.tc[0][0] = -0.0213f;
         r.tc[0][1] = 0.0342f;
         r.tc[1][0] = 0.0211f;
@@ -189,100 +163,99 @@ void run205(Check&& check) {
         uint32_t w[vc::kWords];
         vc::toWords(r, w);
         const vc::Request back = vc::fromWords(w);
-        check(back.on && back.radiusRad == r.radiusRad && back.weight == r.weight && std::memcmp(back.tc, r.tc, sizeof(r.tc)) == 0 && (w[0] & 0xFFFF0000u) == vc::kMagic && vc::kWordsAt + vc::kWords == 12,
-              "F205: the request round-trips through its seven words (5..11 of the retired guard's), magic and flag first");
+        check(back.on && std::memcmp(back.tc, r.tc, sizeof(r.tc)) == 0 && (w[0] & 0xFFFF0000u) == vc::kMagic && vc::kWordsAt + vc::kWords == 10,
+              "F206: the request round-trips through its five words (5..9 of the retired guard's: the flag and the centre in each eye), magic and flag first");
         vc::Request none;
         uint32_t z[vc::kWords];
         vc::toWords(none, z);
         bool zeros = true;
         for (uint32_t v : z) zeros = zeros && v == 0;
         check(zeros && !vc::fromWords(z).on, "F205: no circle is all zeros, which a reader of any age reads as none");
-        vc::Request bad = r;
-        bad.weight = 0.f;
-        vc::Request nanR = r, big = r, outRange = r, off = r;
-        nanR.radiusRad = std::numeric_limits<float>::quiet_NaN();
-        big.radiusRad = 1.5f;
+        vc::Request nanR = r, outRange = r, off = r;
+        nanR.tc[0][1] = std::numeric_limits<float>::quiet_NaN();
         outRange.tc[1][0] = 9.f;
         off.on = false;
         uint32_t t[vc::kWords];
         bool refused = true;
-        for (const vc::Request* q : {&bad, &nanR, &big, &outRange, &off}) {
+        for (const vc::Request* q : {&nanR, &outRange, &off}) {
             vc::toWords(*q, t);
             refused = refused && !vc::fromWords(t).on;
         }
         uint32_t noMagic[vc::kWords];
         vc::toWords(r, noMagic);
         noMagic[0] &= 0x0000FFFFu;
-        check(refused && !vc::fromWords(noMagic).on, "F205: a weight of 0, a radius that is no number or past 80 degrees, a centre out of range, an off request and a word set without the magic all read as none");
-        // staleness: a request not republished decays over 200 ms after 200 ms of silence
+        check(refused && !vc::fromWords(noMagic).on, "F206: a centre that is no number or out of range, an off request and a word set without the magic all read as none");
+        // staleness: a request not republished is read as published for 400 ms (B3's strip decays in that span), then none
         vc::publish(r, 1000);
-        const vc::Request fresh = vc::read(1100), mid = vc::read(1300), gone = vc::read(1500);
-        check(fresh.on && fresh.weight == 0.75f && mid.on && mid.weight > 0.f && mid.weight < 0.75f && !gone.on, "F205: a request not republished decays to none after 400 ms (200 held, 200 ramping)");
+        const vc::Request fresh = vc::read(1100), held = vc::read(1399), gone = vc::read(1401);
+        check(fresh.on && held.on && std::memcmp(held.tc, r.tc, sizeof(r.tc)) == 0 && !gone.on, "F206: a request not republished is read as published for 400 ms (200 held and 200 for the strip's decay), then as none");
         vc::clear();
         check(!vc::read(1000).on, "F205: a forgotten request reads none");
-        vc::Ramp ramp;
-        ramp.step(true, 0.075);
-        const double half = ramp.w;
-        ramp.step(true, 0.2);
-        const double full = ramp.w;
-        ramp.step(false, 0.15);
-        const double out = ramp.w;
-        ramp.step(false, 1.0);
-        check(eq(half, 0.5, 1e-9) && full == 1.0 && eq(out, 0.5, 1e-9) && ramp.w == 0.0, "F205: the weight comes in over 0.15 s and goes over 0.3 s, with the sight lock's times");
     }
     // ---- 5. the lines -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
-        const float pimax[4] = {-1.2543f, 0.8746f, -1.2648f, 1.2648f};
-        const f205::Radius r = f205::circleRadius(true, true, 15.0, 56.3, pimax);
         char line[480];
-        const float tc[2][2] = {{-0.0213f, 0.0342f}, {0.0211f, 0.0339f}};
-        f205::formatLine(line, sizeof(line), 7, "off", r, 15.0, 56.3, false, kExecutioner, "yes", tc);
-        const std::string s = line;
-        check(s.find("ADS view circle (F205): press 7, Anti-aliasing off: radius 13.77 deg (ADS FOV 15.00 / hip FOV 56.30 x the headset's half-FOV 51.67 deg, vertical)") == 0 &&
-                  s.find("; item $wpn_m_sniper_plasma_charged_name;, scope yes; centre (tangents) left -0.0213/+0.0342 right +0.0211/+0.0339") != std::string::npos,
-              "F205: the press line states the radius with its three figures, the Anti-aliasing mode, the item and scope and the centre in each eye");
-        check(s.size() > 24 && s.compare(s.size() - 23, 23, " (the scope zoom is on)") == 0, "F205b: ... and ends with what switched it: (the scope zoom is on)");
-        const f205::Radius none = f205::circleRadius(true, false, nan, 56.3, pimax);
-        f205::formatLine(line, sizeof(line), 8, "on", none, nan, 56.3, false, "$wpn_m_unmeasured_thing_name;", "no");
-        check(std::string(line) == "ADS view circle (F205): press 8, Anti-aliasing on: no circle: the ADS FOV of the held weapon is not known (item $wpn_m_unmeasured_thing_name;, scope no)",
-              "F205: a weapon with no ADS FOV says why it has no circle");
         EdvrNativeViewCircleReport rep{};
         rep.size = sizeof(rep);
-        rep.version = EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_1;
+        rep.version = EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_2;
         rep.frames = 410;
-        rep.cappedFrames = 0;
         rep.refusedFrames = 2;
         rep.sharedFrames = 400;
         rep.seconds = 4.2f;
-        rep.radiusDeg = 13.77f;
-        rep.requestedDeg = 13.77f;
+        rep.radiusDeg = 39.42f;
+        rep.radiusMinDeg = 38.9f;
+        rep.radiusMaxDeg = 39.6f;
+        rep.edgeDeg = 41.17f;
         rep.weightPeak = 1.f;
         rep.centre[0] = 0.512f;
         rep.centre[1] = 0.488f;
         rep.centre[2] = 0.488f;
         rep.centre[3] = 0.488f;
-        f205::formatRuntime(line, sizeof(line), rep);
-        check(f205::reportReadable(&rep) && std::string(line).find("ADS view circle (F205) runtime: ADS view circle on 410 frames, radius 13.77 deg (the d3d11 half asked 13.77 deg), over 4.20 s; refused 2, with the share 400; weight peak 1.00;") == 0 &&
-                  std::strlen(line) < f205::kRuntimeLineBytes,
-              "F205: the runtime's line says the frames drawn and the radius, and fits its buffer");
+        f205::formatRun(line, sizeof(line), 7, rep);
+        const std::string run = line;
+        check(f205::reportReadable(&rep) &&
+                  run.find("ADS view circle (F206): press 7: radius 39.42 deg (the widest that keeps the full-detail view's side bars in the black: nearest edge 41.17 deg less the band 1.75 deg); over the run 38.90 to 39.60 deg; "
+                           "drawn on 410 frames over 4.20 s; refused 2, with the share 400; weight peak 1.00; centre (u, v) left 0.512/0.488 right 0.488/0.488") == 0 &&
+                  run.size() < f205::kRunLineBytes,
+              "F206: the press's line states the radius, the nearest edge and the band it is less than (the margin and half the 3 deg soft edge: 1.75 deg), the run's range, the frames and the centre, and fits its buffer");
         EdvrNativeViewCircleReport badRep = rep;
         badRep.radiusDeg = std::numeric_limits<float>::quiet_NaN();
         EdvrNativeViewCircleReport oldRep = rep;
-        oldRep.version = 0;
-        check(!f205::reportReadable(&badRep) && !f205::reportReadable(&oldRep) && !f205::reportReadable(nullptr), "F205: a report with a figure that is no number, from another version, or none, is not written");
+        oldRep.version = 1;
+        check(!f205::reportReadable(&badRep) && !f205::reportReadable(&oldRep) && !f205::reportReadable(nullptr), "F206: a report with a figure that is no number, from the F205 layout (version 1), or none, is not written");
+        // a press that had a circle and a window and got no circle says why, once, after the window has gone
+        f205::PressEnd pe;
+        pe.hasCircle = pe.windowSeen = true;
+        pe.haveCentre = false;
+        const bool due = f205::noCircleDue(pe, f205::kNoCircleWaitMs) && !f205::noCircleDue(pe, f205::kNoCircleWaitMs - 1) && f205::noCircleWhy(pe) == f205::NoCircle::kNoCentre;
+        pe.haveCentre = true;
+        const bool why2 = f205::noCircleWhy(pe) == f205::NoCircle::kNoFrame;
+        f205::PressEnd reported = pe;
+        reported.runReported = true;
+        f205::PressEnd noWindow = pe;
+        noWindow.windowSeen = false;
+        f205::PressEnd noCircle = pe;
+        noCircle.hasCircle = false;
+        check(due && why2 && !f205::noCircleDue(reported, 5000) && !f205::noCircleDue(noWindow, 5000) && !f205::noCircleDue(noCircle, 5000),
+              "F206: a press that had a circle and a window and no report says why once the window has been gone a second; a press with a run reported, with no window (B3 never stood) or without a circle writes nothing");
+        f205::formatNoCircle(line, sizeof(line), 8, f205::NoCircle::kNoCentre, kExecutioner, "yes");
+        const std::string nc = line;
+        check(nc == "ADS view circle (F206): press 8: no circle: the sight's far point was not known in both eyes while the full-detail view stood (item $wpn_m_sniper_plasma_charged_name;, scope yes)",
+              "F206: the line for a B3 press that got no circle names the press, the reason, the item and the scope");
     }
     // ---- 6. the sites -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         const std::string cpp = slurp("src/d3d11/native_on_foot.cpp"), frame = slurp("src/d3d11/native_frame.cpp"), client = slurp("src/openxr/native_frame_client.h"), host = slurp("src/openxr/native_runtime_host.h"),
-                          ini = slurp("edvr.ini"), build = slurp("build.bat");
-        check(!cpp.empty() && !frame.empty() && !client.empty() && !host.empty() && !ini.empty() && !build.empty(), "F205: the sources the pins read are readable from the repo root");
+                          ini = slurp("edvr.ini"), build = slurp("build.bat"), stereo = slurp("src/openxr/d3d11_stereo.cpp");
+        check(!cpp.empty() && !frame.empty() && !client.empty() && !host.empty() && !ini.empty() && !build.empty() && !stereo.empty(), "F205: the sources the pins read are readable from the repo root");
         // the one point: the key is read in four places only (the config compare, its store, the latch's start and the effective function), everything else asks adsSightEyeMode
         check(countOf(cpp, "g_adsSightEyeKey.load(") == 3 && cpp.find("int adsSightEyeMode() noexcept {\n    return nofoot::f205::effectiveSightEye(g_adsSightEyeKey.load(std::memory_order_relaxed), g_adsSightForceBoth.load(std::memory_order_relaxed));") != std::string::npos &&
                   cpp.find("int adsAimEye() noexcept { return nofoot::f162::aimingEye(adsSightEyeMode()); }") != std::string::npos && cpp.find("const bool key = nofoot::f162::sharesView(adsSightEyeMode());") != std::string::npos &&
                   cpp.find("const bool shareMode = nofoot::f162::sharesView(adsSightEyeMode());") != std::string::npos,
               "F205: the sight eye choice has one reader: the F106 share, B3's gate and the aiming eye all ask adsSightEyeMode, which asks the latch");
-        const size_t idle = cpp.find("if (g_adsState == kAdsIdle && g_f205Latch.forced) {"), tick = cpp.find("void adsAimTick(uint64_t now, bool session) noexcept {"), engage = cpp.find("g_f205Latch.begin(applies, g_adsSightEyeKey.load(std::memory_order_relaxed));"),
-                     f176 = cpp.find("f176PressBegin(now);   // F176\n"), reengage = cpp.find("f176PressBegin(now);   // F176: an engage from the release is a press too");
+        const size_t idle = cpp.find("if (g_adsState == kAdsIdle && g_f205Latch.forced) {"), tick = cpp.find("void adsAimTick(uint64_t now, bool session) noexcept {"),
+                     engage = cpp.find("g_f205Latch.begin(applies, g_adsSightEyeKey.load(std::memory_order_relaxed));"), f176 = cpp.find("f176PressBegin(now);   // F176\n"),
+                     reengage = cpp.find("f176PressBegin(now);   // F176: an engage from the release is a press too");
         check(tick != std::string::npos && idle != std::string::npos && idle > tick && idle - tick < 400 && engage != std::string::npos && f176 != std::string::npos && engage > f176 && engage - f176 < 600 &&
                   reengage != std::string::npos && cpp.substr(reengage, 600).find("g_f205Latch") == std::string::npos,
               "F205: the latch starts at the engage from idle (and nowhere else: a re-engage from the release does not touch it) and ends at the top of the tick once the press has fully ended");
@@ -292,31 +265,40 @@ void run205(Check&& check) {
         check(cpp.find("std::atomic<bool> g_scopeZoomFullKey{true};") != std::string::npos && cpp.find("cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"") != std::string::npos &&
                   ini.find("native_on_foot_ads_scope_zoom_full_detail = on\n") != std::string::npos && ini.find("# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended on | live\n") != std::string::npos,
               "F205: the full-detail scope is on by default in the code, the reader's fallback, the ini line and its menu row");
-        // F205b: the circle's own key (fix.native_on_foot_ads_view_circle) is gone from the code, the ini and the menu's test, and the circle reads the lens's key by the lens's one reader
+        // the circle has no key of its own (F205b) and no flat rule (F206)
         const std::string menuTest = slurp("tools/hotkey_capture_test/hotkey_capture_test.cpp");
         check(!menuTest.empty() && cpp.find("ads_view_circle") == std::string::npos && cpp.find("g_adsViewCircleKey") == std::string::npos && ini.find("ads_view_circle") == std::string::npos &&
                   ini.find("ADS: view circle") == std::string::npos && menuTest.find("ads_view_circle") == std::string::npos && frame.find("ads_view_circle") == std::string::npos && host.find("ads_view_circle") == std::string::npos,
-              "F205b: fix.native_on_foot_ads_view_circle is gone: no reader, atomic or log note in the code, no line or row in edvr.ini, no pin in the menu's test");
-        check(countOf(cpp, "g_scopeZoomKey.store(") == 1 && countOf(cpp, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")") == 1 &&
-                  cpp.find("    const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);\n    const char* mode = temporalPassWantsFssChrome()") != std::string::npos &&
-                  ini.find("# This setting also decides the ADS view circle: while it is on, every ADS press") != std::string::npos,
-              "F205b: the circle reads g_scopeZoomKey, the one atomic the lens's one reader sets (fix.native_on_foot_ads_scope_zoom, live), and the key's row says it also decides the circle");
-        // no gate on a temporal mode: the circle's tick names the mode once, in the string the press line states, and nowhere in its decisions
+              "F205b: the circle has no setting of its own: no reader, atomic or log note in the code, no line or row in edvr.ini, no pin in the menu's test");
+        check(ini.find("# The scoped Executioner's full-detail view (ADS: scope zoom full detail, below) is part of this setting: its two black side bars are hidden by a circle") != std::string::npos &&
+                  ini.find("a circle, black outside, about the sight in each eye,\n# the widest that still hides those black bars, comes and goes with them (it is part of this view and has no setting of its own).") != std::string::npos &&
+                  ini.find("shows each eye's view inside a circle") == std::string::npos,
+              "F206: the scope zoom's ini row and the full-detail row say the circle is the full-detail view's: the scoped Executioner's, the widest that hides its bars, with no setting of its own");
+        // the circle's tick: the centre alone, from the press's latch; no flat rule, no weight, no ramp, no ADS weight, no temporal mode, no sight eye or key of its own
         const size_t tickAt = cpp.find("void circleTick(uint64_t nowMs) noexcept {"), tickEnd = cpp.find("\nvoid tick(uint64_t nowMs) noexcept {", tickAt);
         const std::string body = tickAt == std::string::npos || tickEnd == std::string::npos ? std::string() : cpp.substr(tickAt, tickEnd - tickAt);
-        check(!body.empty() && countOf(body, "temporalPassWantsFssChrome") == 1 && body.find("const char* mode = temporalPassWantsFssChrome() ? \"on\" : \"off\";") != std::string::npos &&
-                  body.find("doorFromPass") == std::string::npos && body.find("uiLayerLive") == std::string::npos && body.find("g_uiLayerLive") == std::string::npos && body.find("uiDepth") == std::string::npos &&
-                  body.find("const bool want = key && up && r.why == nofoot::f205::Why::kOk && fresh;") != std::string::npos && body.find("temporalPassEyeTan(1, tan4)") != std::string::npos &&
-                  body.find("s0::geometryNow(v, nowMs)") != std::string::npos,
-              "F205: the circle's tick asks for no temporal mode, interface layer, door or ui depth: its inputs are S and the scene rows (F196), the weapon's table row, the scope zoom's hip FOV and the eye's frustum (F198), all of which exist with Anti-aliasing off");
+        check(!body.empty() && body.find("c.hasCircle = nofoot::f205::pressHasCircle(g_f205Latch);") != std::string::npos && countOf(body, "pressHasCircle(") == 1 &&
+                  body.find("req.on = nofoot::f205::requestOn(c.hasCircle, c.haveCentre);") != std::string::npos && body.find("radius") == std::string::npos && body.find("weight") == std::string::npos &&
+                  body.find("ramp") == std::string::npos && body.find("g_adsW") == std::string::npos && body.find("adsFov") == std::string::npos && body.find("g_scopeZoomKey") == std::string::npos &&
+                  body.find("temporalPass") == std::string::npos && body.find("adsSightEyeMode") == std::string::npos && body.find("g_adsSightEyeKey") == std::string::npos &&
+                  body.find("s0::geometryNow(v, nowMs)") != std::string::npos && body.find("scopewin::read(nowMs)") != std::string::npos,
+              "F206: the circle's tick decides the press's circle once from the F205 latch and asks for the centre alone (from S and the scene rows) in such a press: no radius, weight, ramp, ADS weight, FOV table, "
+              "temporal mode, sight eye or setting of its own");
         check(cpp.find("s1::circleTick(GetTickCount64());") != std::string::npos && cpp.find("extern \"C\" long __stdcall edvrNoteNativeViewCircle(const EdvrNativeViewCircleReport* r) {") != std::string::npos &&
-                  build.find("--extra-export edvrNoteNativeViewCircle") != std::string::npos,
-              "F205: the circle is published every tick after the lens tick, and the runtime's report has its export");
+                  cpp.find("edvr::nofoot::f205::formatRun(line, sizeof(line), press, *r);") != std::string::npos && build.find("--extra-export edvrNoteNativeViewCircle") != std::string::npos,
+              "F205: the circle is published every tick after the lens tick, and the runtime's report has its export (it writes the press's line)");
         check(frame.find("edvr::viewcircle::toWords(edvr::viewcircle::read(GetTickCount64()), circleWords);") != std::string::npos && frame.find("result.reservedTerrainGuard + edvr::viewcircle::kWordsAt") != std::string::npos &&
                   client.find("for(unsigned i=0;i<12;++i)out.reservedTerrainGuard[i]=0;") != std::string::npos &&
                   host.find("circleNow=carries?viewcircle::fromWords(featureFrame.reservedTerrainGuard+viewcircle::kWordsAt):viewcircle::Request{};") != std::string::npos &&
                   host.find("&frameOrigin,&circleArg);") != std::string::npos && host.find("&previousOrigin,&circleArg):") != std::string::npos && host.find("circlePress(r==XR_SUCCESS);") != std::string::npos,
-              "F205: the request rides words 5..11 of a version 11 answer (older answers read none), the host reads it every frame, draws it on a fresh and on a replayed pair, and reports each run");
+              "F206: the request rides words 5..9 of a version 11 answer (older answers read none), the host reads it every frame, draws it on a fresh and on a replayed pair, and reports each run");
+        // the runtime draws the circle with the mirror, by its weight, at the radius that hides the bars: the three pins of the one point
+        const size_t ringAt = stereo.find("if(circle&&circle->on&&mirrorOn&&mirrorWeight>0.f&&fade<1.f) {"), ringEnd = stereo.find("auto failed=[&](XrResult r)", ringAt);
+        const std::string ring = ringAt == std::string::npos || ringEnd == std::string::npos ? std::string() : stereo.substr(ringAt, ringEnd - ringAt);
+        check(!ring.empty() && ring.find("radius=scopecircle::coverageRadius(shareMap,mirrorMap,circle->tc[0],circle->tc[1]);") != std::string::npos && ring.find("k.band[2]=mirrorWeight;") != std::string::npos &&
+                  ring.find("radiusRad") == std::string::npos && ring.find("circle->weight") == std::string::npos && stereo.find("mirrorOn=true;mirrorMap=mm;mirrorWeight=weight;") != std::string::npos &&
+                  stereo.find("const float weight=leftZoomed?1.f:leftStripBlack;") != std::string::npos,
+              "F206: the renderer draws the circle only while the mirror is, by the mirror's own weight (the strip's, full on a narrowed frame; never the ADS weight), at the radius coverageRadius works out from the actual centre each frame");
     }
 }
 

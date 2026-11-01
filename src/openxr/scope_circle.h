@@ -1,7 +1,7 @@
 #pragma once
-// F205: the runtime's pure half of the ADS view circle (src\common\view_circle.h is the request). The renderer draws black outside a circle about a direction of each eye's own view; this is the
+// F205/F206: the runtime's pure half of the ADS view circle (src\common\view_circle.h is the request). The renderer draws black outside a circle about a direction of each eye's own view; this is the
 // arithmetic it and its rig share: the circle's constants for the share shader's circle mode (misc.w = 2), the black weight the shader computes, and the radius that keeps the full-detail
-// scope's (B3) side bars inside the black.
+// scope's (B3) side bars inside the black. F206: that radius IS the circle's radius: the widest circle that still hides the bars, worked out every frame from the actual centre in each eye.
 //
 // The shader (kStereoShareHlsl, circle mode). A pixel's direction d in THIS eye's view is (lerp(leftTan.x, leftTan.y, u), lerp(leftTan.z, leftTan.w, v), -1); its angle from the centre's unit
 // direction c is theta = acos(dot(d / |d|, c)); the black weight is weight x (1 - saturate((E - theta - margin) / band)) with E = R + margin + band / 2, so the pixel is half black at theta = R
@@ -59,8 +59,10 @@ inline void turn(const double rot[3][3], const double u[3], double out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = rot[i][0] * u[0] + rot[i][1] * u[1] + rot[i][2] * u[2];
 }
 
-// The largest radius at which the circle's black (fully black from R + band / 2 out) stays inside the black the full-detail scope's side bars already take, so the bars are always inside it: the
-// distance from the centre to the nearest edge of what the other eye covers, less the margin and half the band. The left eye's circle is judged in the right view (the share's rectangle,
+// The largest radius at which the circle hides the full-detail scope's side bars: the distance from the centre to the nearest edge of what the other eye covers, less the margin and half the band.
+// Both ramps are 3 deg wide and linear, the bars' from fully black at the margin inside the edge to clear a band further in, the circle's from clear at R - band / 2 to fully black at R + band / 2;
+// at R = D - margin - band / 2 they are the same ramp along the nearest direction, so the circle's black is at least the bars' at every pixel (a smaller R only blackens more) and a larger R lets a
+// bar's ramp show inside the circle's clear part: this is the widest circle that hides them. (Half a band, not a whole one: the radius is where the circle is HALF black.) The left eye's circle is judged in the right view (the share's rectangle,
 // share.rot turning the left view into it), the right eye's in the left view (the mirror's rectangle, mirror.rot turning the right view into it); the smaller wins. Radians; negative or
 // NaN when a centre or a mapping is unusable. cl, cr: the circle's centre as tangents in the left and the right eye's view.
 inline double coverageRadius(const shareview::Mapping& share, const shareview::Mapping& mirror, const float cl[2], const float cr[2]) {

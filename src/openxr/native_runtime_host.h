@@ -30,7 +30,7 @@
 #include "../common/left_eye_share.h"
 #include "../common/scope_zoom_window.h"
 #include "scope_zoom_state.h"
-#include "../common/view_circle.h"   // F205: the ADS view circle's request, between the halves
+#include "../common/view_circle.h"   // F206: the ADS view circle's request (its centre), between the halves
 #include "../common/frame_flag.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/periodic_work.h"
@@ -299,7 +299,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   ScopeZoomCallers zoomCallers;
   bool zoomAppliedNow=false,previousZoomed=false;   // eye 0 was told the window for this frame / for the kept pair a replay draws
   float zoomStripNow=0.f;
-  viewcircle::Request circleNow;   // F205: the ADS view circle this frame (the provider's version 11 answer, words 5..11 of the retired guard), or none
+  viewcircle::Request circleNow;   // F206: the ADS view circle's centre this frame (the provider's version 11 answer, words 5..9 of the retired guard), or none
   ScopeZoomMirrorTally zoomMirror; // B3-3: the right eye's mirror of the left eye's strip as the compositor drew it, over the run of the strip
   std::atomic<bool> zoomReadsOn{false};
   std::atomic<uint32_t> zoomRawReads{0},zoomMatrixReads{0};
@@ -2724,9 +2724,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // F189, the submit edge: the views are seated numbers of the origin their frame began with, and the layer is in the natural space, so each pose is that origin applied.
     // A replayed pair goes out with the origin IT was located with (previousOrigin), at its own physical pose, never the current one.
-    // F205: the ADS view circle, also on a replayed pair (this frame's weight over the kept pixels, as the fade and the share are).
+    // F206: the ADS view circle's centre, also on a replayed pair (drawn with the mirror, by its weight, over the kept pixels, as the fade and the share are).
     StereoViewCircle circleArg;
-    circleArg.on=circleNow.on;circleArg.radiusRad=circleNow.radiusRad;circleArg.weight=circleNow.weight;
+    circleArg.on=circleNow.on;
     std::memcpy(circleArg.tc,circleNow.tc,sizeof(circleArg.tc));
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
                                                      previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed,&previousOrigin,&circleArg):
@@ -2838,22 +2838,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       double(report.rightTangents[0]),double(report.rightTangents[1]),double(report.rightTangents[2]),double(report.rightTangents[3]),
       double(report.coverage),double(report.coverageWhole),report.hiddenTriangles,told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
-  // F205: one run of the ADS view circle, from the first frame with a weight above 0 to the first back at 0. Counted here; at its end traced (view_circle_press) and told to the d3d11 half
-  // (edvrNoteNativeViewCircle), which writes the graphics log's "ADS view circle (F205) runtime" line. A d3d11.dll without the export is not told.
+  // F206: one run of the ADS view circle, from the first frame it was asked (the request on with the mirror drawn, a weight above 0) to the first without. Counted here; at its end traced
+  // (view_circle_press) and told to the d3d11 half (edvrNoteNativeViewCircle), which writes the graphics log's "ADS view circle (F206)" line. A d3d11.dll without the export is not told.
   struct CirclePressState {
-    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,capped=0,refused=0,shared=0;float radiusDeg=0.f,requestedDeg=0.f,coverageDeg=0.f,centre[4]{};
+    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,refused=0,shared=0;float radiusDeg=0.f,radiusMinDeg=0.f,radiusMaxDeg=0.f,edgeDeg=0.f,centre[4]{};
   } circleRun;
   void circlePress(bool rendered) {
     auto& p=circleRun;
     const StereoShareFacts& f=stereo.shareFacts();
-    const float weight=circleNow.on?circleNow.weight:0.f;
+    const float weight=circleNow.on?f.circleWeight:0.f;
     if(weight>0.f) {
       if(!p.open){p=CirclePressState{};p.open=true;p.firstUs=p.lastUs=frameCycleUs();}
       p.peak=(std::max)(p.peak,weight);
-      p.requestedDeg=float(double(circleNow.radiusRad)*180.0/viewcircle::kPi);
       if(rendered&&f.circleDrawn) {
-        ++p.frames;if(f.circleCapped)++p.capped;if(f.drawn)++p.shared;
-        p.radiusDeg=f.circleRadiusDeg;if(f.circleCoverageDeg>0.f)p.coverageDeg=f.circleCoverageDeg;
+        ++p.frames;if(f.drawn)++p.shared;
+        p.radiusDeg=f.circleRadiusDeg;p.radiusMinDeg=p.frames==1?f.circleRadiusDeg:(std::min)(p.radiusMinDeg,f.circleRadiusDeg);p.radiusMaxDeg=(std::max)(p.radiusMaxDeg,f.circleRadiusDeg);
+        if(f.circleEdgeDeg>0.f)p.edgeDeg=f.circleEdgeDeg;
         for(int k=0;k<4;++k)p.centre[k]=f.circleCentreUv[k];
         p.lastUs=frameCycleUs();
       } else if(f.circleRefused) ++p.refused;
@@ -2861,18 +2861,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(!p.open)return;
     p.open=false;
-    EdvrNativeViewCircleReport report{};report.size=sizeof(report);report.version=EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_1;
-    report.frames=p.frames;report.cappedFrames=p.capped;report.refusedFrames=p.refused;report.sharedFrames=p.shared;
-    report.seconds=float(double(p.lastUs-p.firstUs)/1e6);report.radiusDeg=p.radiusDeg;report.requestedDeg=p.requestedDeg;report.coverageDeg=p.coverageDeg;report.weightPeak=p.peak;
+    EdvrNativeViewCircleReport report{};report.size=sizeof(report);report.version=EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_2;
+    report.frames=p.frames;report.refusedFrames=p.refused;report.sharedFrames=p.shared;
+    report.seconds=float(double(p.lastUs-p.firstUs)/1e6);report.radiusDeg=p.radiusDeg;report.radiusMinDeg=p.radiusMinDeg;report.radiusMaxDeg=p.radiusMaxDeg;report.edgeDeg=p.edgeDeg;report.weightPeak=p.peak;
     for(int k=0;k<4;++k)report.centre[k]=p.centre[k];
     HRESULT told=S_FALSE;
     if(graphicsProxy) {
       const auto note=reinterpret_cast<EdvrNoteNativeViewCircle>(GetProcAddress(graphicsProxy,"edvrNoteNativeViewCircle"));
       if(note)told=note(&report);
     }
-    nativeTracePrintf("view_circle_press,frames=%u,capped=%u,refused=%u,shared=%u,seconds=%.3f,radius_deg=%.3f,requested_deg=%.3f,coverage_deg=%.3f,weight_peak=%.3f,"
+    nativeTracePrintf("view_circle_press,frames=%u,refused=%u,shared=%u,seconds=%.3f,radius_deg=%.3f,radius_min_deg=%.3f,radius_max_deg=%.3f,edge_deg=%.3f,weight_peak=%.3f,"
                       "centre_uv=%.4f/%.4f/%.4f/%.4f,told_graphics=%s\n",
-      report.frames,report.cappedFrames,report.refusedFrames,report.sharedFrames,double(report.seconds),double(report.radiusDeg),double(report.requestedDeg),double(report.coverageDeg),
+      report.frames,report.refusedFrames,report.sharedFrames,double(report.seconds),double(report.radiusDeg),double(report.radiusMinDeg),double(report.radiusMaxDeg),double(report.edgeDeg),
       double(report.weightPeak),double(report.centre[0]),double(report.centre[1]),double(report.centre[2]),double(report.centre[3]),told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
   // B3, the scope zoom's window (scope_zoom_state.h; the request is the provider's version 11 answer, scope_zoom_window.h): whether eye 0's told frustum is narrowed this frame. Set in
@@ -2880,7 +2880,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // true (the callers). A press of it is traced when it opens (state=on) and when it ends (scope_zoom_press), and at the end told to the d3d11 half (edvrNoteNativeScopeZoom).
   bool applyScopeZoom(GeometryInput& game,RawFov& preRaw,RawFov (&toldRaw)[2]) {
     const bool carries=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_11;
-    // F205: the ADS view circle rides the same answer and is read every frame this runs, whether or not the window is asked for (it is the sights', not the full-detail scope's).
+    // F206: the ADS view circle's centre rides the same answer and is read every frame this runs; the renderer draws it only with the mirror, that is, with the full-detail scope's strip.
     circleNow=carries?viewcircle::fromWords(featureFrame.reservedTerrainGuard+viewcircle::kWordsAt):viewcircle::Request{};
     ScopeZoomInput in;
     in.answerCarries=carries;
