@@ -94,7 +94,6 @@
 #include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
 #include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
 #include "native_on_foot_f195.h"   // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred (pure parts)
-#include "native_on_foot_f203.h"   // F203: an ADS press under mouse look keeps the sight where the mouse put it; F69i's snap injects only the offset beyond 15 deg (pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -7924,7 +7923,6 @@ struct AdsCentreRun {
     uint32_t misses = 0;
     const char* missWhy = "nothing measured yet";
     double beforeYaw = 0.0, beforePitch = 0.0, wantYaw = 0.0, wantPitch = 0.0, durSec = 0.0;
-    double keptYaw = 0.0, keptPitch = 0.0;   // F203: the offset the snap leaves between the head's forward and the sight (the proof's target; 0 inside look to aim, where nothing is kept or injected)
     double resStart = 0.0, resMax = 0.0;
 };
 AdsCentreRun g_adsCentre;
@@ -13122,9 +13120,6 @@ void adsCentreTick(uint64_t now) noexcept {
         const char* note = "";
         double wantY = m.yawDeg, wantP = m.pitchDeg;
         bool bounded = false;
-        // F203: the snap keeps the offset up to 15 deg on each axis (the mouse's aim) and injects the rest; inside look to aim the press only measures and the line says nothing of a keep.
-        nofoot::f203::Plan keep;
-        char keptText[96] = {};
         if (c.measureOnly) {
             note = "; look to aim (F109): measured only, no snap (the aim is the head's)";
             wantY = wantP = 0.0;
@@ -13135,20 +13130,9 @@ void adsCentreTick(uint64_t now) noexcept {
             note = "; over 90 deg (the head is turned away from the weapon): no snap";
             wantY = wantP = 0.0;
         } else {
-            keep = nofoot::f203::plan(m.yawDeg, m.pitchDeg, offYaw);
-            wantY = keep.yawDeg;
-            wantP = keep.pitchDeg;
-            bounded = keep.bounded;
+            wantY = nofoot::adsCentreYawBounded(offYaw, m.yawDeg, &bounded);
             if (bounded) note = "; the yaw is BOUNDED by the game's cone (the weapon may not pass 37 deg off the body)";
-            else if (wantY == 0.0 && wantP == 0.0) note = "; within 15 deg on both axes: nothing to inject";
         }
-        if (!c.measureOnly) {   // the kept offset is what the injection leaves: the measured offset less it (all of it when the press made no snap)
-            keep.keptYawDeg = m.yawDeg - wantY;
-            keep.keptPitchDeg = m.pitchDeg - wantP;
-            nofoot::f203::keptText(keptText, sizeof(keptText), keep);
-        }
-        c.keptYaw = keep.keptYawDeg;
-        c.keptPitch = keep.keptPitchDeg;
         c.wantYaw = wantY;
         c.wantPitch = wantP;
         if (wantY != 0.0 || wantP != 0.0) {
@@ -13162,10 +13146,10 @@ void adsCentreTick(uint64_t now) noexcept {
         c.at025 = c.at1 = !c.snapping;   // nothing to report on when no snap was made
         if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %.0f ms after the engage (%u tries): the sight (the FP root's forward, P14's) is yaw %+.2f pitch %+.2f "
                         "deg from the head's forward (the mean of the two eyes' forwards; the right eye's lens axis is yaw %+.2f pitch %+.2f deg from it: the "
-                        "canted-display check, Pimax about -10.75 / 0); the weapon is yaw %+.1f deg off the body (%s; the cone is %.0f deg); %sinjected yaw %+.2f "
+                        "canted-display check, Pimax about -10.75 / 0); the weapon is yaw %+.1f deg off the body (%s; the cone is %.0f deg); injected yaw %+.2f "
                         "pitch %+.2f deg over %.2f s through F68a's path (its cancel keeps the view still; the release unwinds it)%s",
                         c.press, static_cast<double>(now - c.engageMs), c.misses + 1, m.yawDeg, m.pitchDeg, m.cantYawDeg, m.cantPitchDeg, offYaw,
-                        offAgeMs < 300.0 ? "measured" : "not measured: 0 assumed", nofoot::kAdsConeDeg, keptText, wantY, wantP, c.snapping ? c.durSec : 0.0, note);
+                        offAgeMs < 300.0 ? "measured" : "not measured: 0 assumed", nofoot::kAdsConeDeg, wantY, wantP, c.snapping ? c.durSec : 0.0, note);
         return;
     }
     if (!c.snapping) return;
@@ -13181,11 +13165,9 @@ void adsCentreTick(uint64_t now) noexcept {
         if (withView)
             std::snprintf(view, sizeof(view), "; the view moved at most %.2f deg against the head during the snap (the proof: under 0.3 deg; the residual %.2f deg at its start)",
                           c.resMax, c.resStart);
-        // F203: the proof is against the offset the snap was to leave (kept yaw/pitch, 0 when everything was injected), not against 0.
-        if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %s: the sight is yaw %+.2f pitch %+.2f deg from the head's forward (before: %+.2f %+.2f; kept %+.2f %+.2f; "
-                        "%.2f deg from the kept offset after the snap, the proof: under 1 deg)%s; carried seat yaw %+.2f pitch %+.2f deg",
-                        c.press, when, m.yawDeg, m.pitchDeg, c.beforeYaw, c.beforePitch, c.keptYaw, c.keptPitch,
-                        nofoot::f203::proofErrorDeg(m.yawDeg, m.pitchDeg, c.keptYaw, c.keptPitch), view, g_adsMap.yawCarried / kD, g_adsMap.pitchSeat / kD);
+        if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %s: the sight is yaw %+.2f pitch %+.2f deg from the head's forward (before: %+.2f %+.2f; the proof: under "
+                        "1 deg after the snap)%s; carried seat yaw %+.2f pitch %+.2f deg",
+                        c.press, when, m.yawDeg, m.pitchDeg, c.beforeYaw, c.beforePitch, view, g_adsMap.yawCarried / kD, g_adsMap.pitchSeat / kD);
     };
     const double endSec = std::max(c.durSec, nofoot::kAdsCentreSec) + 0.05;
     if (!c.at025 && since >= endSec) {
