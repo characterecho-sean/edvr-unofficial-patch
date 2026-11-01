@@ -55,6 +55,7 @@ internal static class SelfTests
         WindowGrouping();
         SymbolOptions();
         DiaLibraryMatchesProcess();
+        GameBuildIdentity();
         SymbolAnnotation();
         ReportShape();
         Console.WriteLine($"EdvrCpuProfile self-test: {_checks} checks");
@@ -481,6 +482,41 @@ internal static class SelfTests
         var expected = Environment.Is64BitProcess ? (ushort)0x8664 : (ushort)0x14C;
         Check(machine == expected,
               $"{path} is machine 0x{machine:X4} but this analyzer needs 0x{expected:X4}; the csproj must take PrivateAssemblies\\amd64\\msdia140.dll");
+    }
+
+    // The RVA table is valid for one game build. A capture of another build must
+    // not have its time attributed to the wrong functions, so the identity pair
+    // (PE timestamp, image size) of the traced game executable decides whether
+    // game frames may be named at all.
+    private static void GameBuildIdentity()
+    {
+        var ok = GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp, RvaTable.ExpectedImageSize);
+        Check(ok.NamesGameFunctions && ok.Warning.Length == 0, "the table's own identity pair names game functions");
+        var otherStamp = GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp + 1, RvaTable.ExpectedImageSize);
+        Check(!otherStamp.NamesGameFunctions && otherStamp.Warning.Contains("334925") &&
+              otherStamp.Warning.Contains("unresolved"), "another PE timestamp refuses and says why");
+        var otherSize = GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp, RvaTable.ExpectedImageSize + 0x1000);
+        Check(!otherSize.NamesGameFunctions && otherSize.Warning.Length > 0, "another image size refuses");
+        var unknown = GameBuildGuard.Decide(0, 0);
+        Check(!unknown.NamesGameFunctions && unknown.Warning.Contains("could not be read"),
+              "an identity the trace did not carry refuses and says so");
+        Check(new StackStore("c:\\game").Identity.NamesGameFunctions, "a self-test store keeps naming game functions");
+
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "AGENTS.md"))) root = root.Parent;
+        var source = root is null ? null : Path.Combine(root.FullName, "src", "common", "game_signatures.inc");
+        if (source is null || !File.Exists(source))
+        {
+            Console.WriteLine("self-test SKIP: game_signatures.inc not found; identity pair not cross-checked against the signature table");
+            return;
+        }
+        var text = File.ReadAllText(source);
+        Check(text.Contains($"kKnownStamp = 0x{RvaTable.ExpectedTimeDateStamp:X8}u", StringComparison.Ordinal),
+              "RvaTable.ExpectedTimeDateStamp is the build the signature table is keyed to; retarget both together");
+        Check(text.Contains($"kKnownImageSize = 0x{RvaTable.ExpectedImageSize:X}u", StringComparison.Ordinal),
+              "RvaTable.ExpectedImageSize is the build the signature table is keyed to; retarget both together");
+        Check(text.Contains($"kKnownBuild[] = \"{RvaTable.ExpectedBuild}\"", StringComparison.Ordinal),
+              "RvaTable.ExpectedBuild is the build the signature table is keyed to");
     }
 
     private static void StackLabels()

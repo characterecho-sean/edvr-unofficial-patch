@@ -64,6 +64,13 @@ internal static class RvaTable
         ("lod_evaluator_4333F60", 0x4333F60, 9, RvaKind.Lod, true),
     ];
 
+    // The identity pair of the game executable every address in this table was
+    // read from. A retarget updates these with the Seeds; the self-test checks
+    // them against src\common\game_signatures.inc.
+    public const int ExpectedBuild = 334925;
+    public const uint ExpectedTimeDateStamp = 0x6ADA8048;
+    public const uint ExpectedImageSize = 0x640C000;
+
     public const uint SchedulerStart = 0x5D6C20;
     public const uint SchedulerEnd = 0x5D7200;
 
@@ -106,6 +113,27 @@ internal static class RvaTable
         _ when SizeOf(item.Name) > 0 => $"decompile size ({SizeOf(item.Name)} bytes)",
         _ => item.Bound == item.Entry + BodyWindow ? "entry+0x2000" : "next known entry",
     };
+}
+
+/// Whether game frames may be named from RvaTable. Warning is empty when they may.
+internal sealed record GameIdentity(bool NamesGameFunctions, string Warning, uint Stamp, uint ImageSize);
+
+internal static class GameBuildGuard
+{
+    /// A stamp and size of zero mean the trace did not carry the executable's
+    /// image data; that cannot be shown to be the table's build, so it refuses.
+    public static GameIdentity Decide(uint stamp, uint imageSize)
+    {
+        if (stamp == RvaTable.ExpectedTimeDateStamp && imageSize == RvaTable.ExpectedImageSize)
+            return new GameIdentity(true, "", stamp, imageSize);
+        var what = stamp == 0 && imageSize == 0
+            ? "the game executable's PE timestamp and image size could not be read from the trace"
+            : $"the game executable has PE timestamp 0x{stamp:X8} and image size 0x{imageSize:X}";
+        return new GameIdentity(false,
+            $"{what}, but the RVA table is for build {RvaTable.ExpectedBuild} " +
+            $"(0x{RvaTable.ExpectedTimeDateStamp:X8}, 0x{RvaTable.ExpectedImageSize:X}); " +
+            "game functions are not named and game frames stay unresolved module+offset", stamp, imageSize);
+    }
 }
 
 internal sealed class ModuleInfo(int id, string path, string name, ulong imageBase, ModuleClass moduleClass,
@@ -171,6 +199,7 @@ internal sealed class StackStore
     private readonly List<ModuleInfo> _modules = [];
     private readonly List<int> _classScratch = [];
     public string GameDirectory { get; }
+    public GameIdentity Identity { get; }
     public long ResolvedFrames;
     public long RecoveredFrames;
     public long UnresolvedFrames;
@@ -184,6 +213,8 @@ internal sealed class StackStore
             string.Equals(System.IO.Path.GetFileName(module.FilePath), "elitedangerous64.exe",
                           StringComparison.OrdinalIgnoreCase));
         GameDirectory = exe is null ? "" : (System.IO.Path.GetDirectoryName(exe.FilePath) ?? "");
+        Identity = GameBuildGuard.Decide(exe is null ? 0 : unchecked((uint)exe.ImageId),
+                                         exe is null ? 0 : unchecked((uint)exe.ImageSize));
         // Anything mapped before the session started is only in the Loader
         // rundown, so a code address TraceEvent leaves unattributed is retried
         // against these ranges before it is called unresolved.
@@ -197,6 +228,7 @@ internal sealed class StackStore
     {
         _log = null;
         GameDirectory = gameDirectory;
+        Identity = GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp, RvaTable.ExpectedImageSize);
     }
 
     public int Count => _stacks.Count;
@@ -270,6 +302,7 @@ internal sealed class StackStore
             if (gameCount == 1) top1 = rva;
             else if (gameCount == 2) top2 = rva;
             else if (gameCount == 3) top3 = rva;
+            if (!Identity.NamesGameFunctions) continue;
             for (var c = 0; c < RvaTable.Classes.Length; c++)
                 if (RvaTable.Classes[c].Contains(rva) && !_classScratch.Contains(c))
                     _classScratch.Add(c);

@@ -145,6 +145,17 @@ internal static class Report
         var report = new Dictionary<string, object?>
         {
             ["schemaVersion"] = 1,
+            ["warnings"] = data.Stacks.Identity.NamesGameFunctions
+                ? Array.Empty<string>() : new[] { "game build mismatch: " + data.Stacks.Identity.Warning },
+            ["gameBuild"] = new Dictionary<string, object?>
+            {
+                ["expectedBuild"] = RvaTable.ExpectedBuild,
+                ["expectedPeTimeDateStamp"] = $"0x{RvaTable.ExpectedTimeDateStamp:X8}",
+                ["expectedImageSize"] = $"0x{RvaTable.ExpectedImageSize:X}",
+                ["capturePeTimeDateStamp"] = $"0x{data.Stacks.Identity.Stamp:X8}",
+                ["captureImageSize"] = $"0x{data.Stacks.Identity.ImageSize:X}",
+                ["namesGameFunctions"] = data.Stacks.Identity.NamesGameFunctions,
+            },
             ["input"] = input,
             ["pid"] = pid,
             ["providerGuid"] = Collector.EdvrProvider,
