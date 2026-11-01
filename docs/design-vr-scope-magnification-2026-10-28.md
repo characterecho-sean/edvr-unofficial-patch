@@ -7,6 +7,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 ## Status
 
 - **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
+- **F205 (`25b94de6`, `claude/full-detail-scope`, installed on Frontier 2026-11-01, NOT FLOWN, not merged):** B3 on by default and taking both eyes; every ADS press a circle in
+  both eyes sized as flat's ADS FOV (`fix.native_on_foot_ads_view_circle`, default on), Anti-aliasing on or off. Journal: F205 at the end.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
@@ -1083,3 +1085,48 @@ its `build.bat` gate. `temporal_pass.cpp`, `native_on_foot.h` and `build.bat` ar
 merge. Kept: the draw census's own line budget for eye draws and the end line's `eye_lines=` and `capture_id=` (a census fix, not the cycle). Rigs: the withhold cases are gone; `scope_zoom_test` checks the cycle is
 nowhere (the header absent, none of its names in the four sources), with controls that put the header, the arming and the json record back. The scope glass stays in the scene, through the upscaler, as the game draws it. Built `3d2944fc` (full build, all gates;
 `--dll-only` on the clean tree), installed on Epic `--scope both --xess`, `--verify-only` passed; the live `edvr.ini` needed no edit (the cycle had no key). Not flown.
+
+**F205** (2026-11-01, `25b94de6` on `claude/full-detail-scope` from origin/main 97acace1; full build green: `native_frame_test` 3781, `openxr_stereo_test` 29724, the `edvr_log.py` self-test; installed on Frontier as v0.22.0-rc.4-51-g386229c0, verified; NOT FLOWN).
+
+The pilot's asks, 2026-11-01, on the full-detail scope:
+- "make it turned on by default";
+- "override the ADS eye sight setting so it correctly uses both eyes";
+- "a wide circular black stencil centered on the scope so it hides the black bars on either side".
+
+He then amended them: "make the stencil appear in both eyes for all ADS actions so that it mimics the FOV effect flat uses for each weapon ... a similar loss in periphery between the two game modes", and "This should apply to AA off as well."
+
+1. **The default.** `experimental.native_on_foot_ads_scope_zoom_full_detail` is on by default (code, `edvr.ini`, the menu row). B3's window now also needs a temporal mode (`b3Tick`'s `keyB3`). Without one, the new default would narrow the left eye and black the bars with Anti-aliasing off for no gain, so F202's lens stays.
+   - Not built: B3 with Anti-aliasing off. It would take `leftArgs.resolved` for the game's own picture and dropping that term, and needs a flight.
+2. **Both eyes for B3.** One reader, `adsSightEyeMode()`, returns the key unless the press latch forced both. The latch is decided once at the press's engage, when the B3 key, the scope zoom and the scoped Executioner all hold. F106's share, B3's gate and `adsAimEye()` (F162's aiming eye, the lens's left-aim refusal) all ask it. It holds through a re-engage and clears when ADS goes idle. The line, once per press: `scope zoom (B3): the sight eye is both for this press (fix.native_on_foot_ads_sight_eye is right/left): full detail needs both eyes`.
+3. **The ADS view circle** (`fix.native_on_foot_ads_view_circle`, on | off, default on, live; a row on the Native on foot page).
+   - **Where it runs:** every ADS press, in both eyes, with Anti-aliasing on or off. `circleTick` has no temporal, layer, door or ui-depth gate.
+   - **The radius** = (the weapon's ADS FOV / the hip FOV 56.3) x the right eye's vertical half-FOV. The edge is half black at the radius, with a 3 deg soft band. It ramps in over 0.15 s and out over 0.3 s, as the sight lock does.
+   - **Values**, Pimax (half-FOV 51.67) / Quest 3 (49.50):
+
+     | Weapon | Pimax | Quest 3 |
+     |---|---|---|
+     | Scoped Executioner (15 deg) | 13.77 | 13.19 |
+     | Bare Executioner | 32.12 | 30.77 |
+     | Assault rifles | 44.05 | 42.20 |
+     | Sub-machine guns | 45.89 | 43.96 |
+     | Pistols, the shotgun, the launcher | 47.72 | 45.72 |
+
+     The B3 cap (the circle that keeps the side bars inside the black) is 39.42 deg on the Pimax and about 37.66 on the Quest 3, and never binds the Executioner. An unknown ADS FOV, a bad frustum or no far point gives no circle, with the reason in the line.
+   - **The centre** is the sight's far point in each eye's own view, so the two circles fuse.
+   - **The draw:** one triangle per eye over the finished image, before the fade, a circle mode of the share shader (`misc.w = 2`) in `D3D11Stereo::renderCaptured`. With weight 0, or no circle, no pass is drawn: B3-1's golden hashes and the weight-0 renders are unchanged. B3-3's narrowed-frame black is kept.
+   - **The wire:** words 5 to 11 of a version 11 answer, and the export `edvrNoteNativeViewCircle`.
+4. **Lines.**
+   - Press: `ADS view circle (F205): press N, Anti-aliasing on|off: radius X deg (ADS FOV A / hip FOV H x the headset's half-FOV V deg, vertical)`.
+   - Runtime: `ADS view circle on N frames, radius X deg (the d3d11 half asked Y)`.
+   - `--health`: a press with a radius and no frame drawn is PARTIAL.
+5. **Doubts.**
+   - The game's ADS and hip FOVs are taken as vertical. If they are horizontal, the circle is measured against the wrong half-FOV.
+   - The hip FOV is the 56.3 key, not read from the game.
+   - The scoped Executioner's circle is small: about 13.8 deg radius, the clear part about 12.
+   - Scoped copies of other weapons take the item's own (unmeasured) ADS FOV.
+   - The left eye's circle under the share assumes a far sight point.
+6. **Next flight** (Frontier, `--expect-build 386229c0`).
+   - A rifle, a pistol and the scoped Executioner in ADS, with DLSS and then with Anti-aliasing off.
+   - Judge the circle's size against flat, and B3's look with the circle.
+   - Try the sight eye at right, to see the B3 override.
+   - Read the press lines' radius and mode, the runtime's circle frames, and `--health`.
