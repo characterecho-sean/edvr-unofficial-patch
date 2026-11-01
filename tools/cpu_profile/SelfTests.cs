@@ -404,7 +404,7 @@ internal static class SelfTests
         Check(!Matches("record_drain", 0x42E2686), "record_drain ends at 134 bytes");
         Check(!Matches("thunk_42e2160", 0x42E25C0), "0x42e25c0 is not the earlier thunk");
         Check(RvaTable.Classes[ClassId("thunk_42e2160")].Bound == 0x42E2170, "a thunk takes 16 bytes");
-        Check(Matches("thunk_42e2160", 0x42E220F) && !Matches("thunk_42e2160", 0x42E2170),
+        Check(Matches("thunk_42e2160", 0x42E216F) && !Matches("thunk_42e2160", 0x42E2170),
               "thunk window edges");
         Check(Matches("reset_repopulate", 0x36A3C60) && !Matches("reset_repopulate", 0x36A3EFF),
               "reset_repopulate window edges");
