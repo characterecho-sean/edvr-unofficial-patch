@@ -27722,6 +27722,9 @@ struct Window {
     // (the read-back's entry 0 record equal or not), the stream shadow's Unmap copies (time, faults), writes it could not shadow.
     uint64_t cpuFind = 0, cpuHeldRec = 0, cpuOther = 0, cpuNoShadow = 0, cpuOutside = 0, cpuSkipped = 0, cpuAgree = 0, cpuDiffer = 0;
     uint64_t streamCopies = 0, streamCopyTicks = 0, streamFaults = 0, streamUpdates = 0, streamOtherMaps = 0, streamLearned = 0;
+    // #155: the tee's slow-path calls by the first term that held the fast frame back (nofoot::f100::teeHeldBy, kTeeHeldNone: published), and, while the
+    // depth probe is wanted, the world draws whose depth-size scene test agreed or disagreed with the probe's (eyeOfDraw >= 0).
+    uint64_t teeHeld[nofoot::f100::kTeeHeldCount] = {}, sceneSizeAgree = 0, sceneSizeDisagree = 0;
 };
 
 Pool g_pools[kPools];
@@ -27749,6 +27752,10 @@ uint32_t g_srvCacheN = 0, g_srvCacheFrame = ~0u;
 const void* g_eyeDsv = nullptr;
 uint32_t g_eyeDsvFrame = ~0u;
 int g_eyeDsvEye = -1;
+// #155: the bound depth view's texture size, asked once per depth view a frame like g_eyeDsv (sceneDepthSize).
+const void* g_sizeDsv = nullptr;
+uint32_t g_sizeDsvFrame = ~0u, g_sizeDsvW = 0, g_sizeDsvH = 0;
+bool g_sizeDsvOk = false;
 uint32_t g_worldOk[2] = {~0u, ~0u};
 uint32_t g_polledFrame = ~0u;
 Find g_lastFind;                     // the newest find (any window)
@@ -28591,6 +28598,22 @@ int eyeOfDraw(uint32_t frame) {
     return eye;
 }
 
+// #155: whether the bound depth view's texture has the colour target's size (nofoot::f100::sceneDepthSizeMatch); no depth view, or one that does not
+// resolve to a 2D texture, is not. Asked once per depth view a frame.
+bool sceneDepthSize(uint32_t frame, uint32_t colourW, uint32_t colourH) {
+    void* dsv = bindingGet(BindSlot::Dsv0);
+    if (!dsv) return false;
+    if (dsv != g_sizeDsv || g_sizeDsvFrame != frame) {
+        ResourceInfo ri;
+        g_sizeDsvOk = bindingResolveProbe(dsv, &ri) && ri.isTexture2D;
+        g_sizeDsvW = g_sizeDsvOk ? ri.a : 0;
+        g_sizeDsvH = g_sizeDsvOk ? ri.b : 0;
+        g_sizeDsv = dsv;
+        g_sizeDsvFrame = frame;
+    }
+    return nofoot::f100::sceneDepthSizeMatch(g_sizeDsvOk, g_sizeDsvW, g_sizeDsvH, colourW, colourH);
+}
+
 // F46: the world view for (frame, eye), or null; an eye-frame's first view stands.
 const WorldView* worldGet(uint32_t frame, int eye) {
     for (const WorldView& v : g_worldViews)
@@ -29304,7 +29327,20 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     }
     ++rn.draws;
     const uint64_t ps = bindingShaderHash(BindSlot::Ps);
-    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, eyeOfDraw(frame) >= 0);
+    // #155: with AA off the depth probe is not wanted and eyeOfDraw names no scene depth; with experimental.vr_eye_rows_without_aa on, the depth view's
+    // size against this colour target's stands in (nofoot::f100::worldSceneDepth). While the probe is wanted (DLAA) the size test is only counted against
+    // the probe's answer; with the key off it is not asked at all, so the decision is today's.
+    const bool probeScene = eyeOfDraw(frame) >= 0;
+    const bool probeWanted = depthProbeWanted();
+    const bool keyOn = vScreenVrEyeRowsWithoutAa();
+    bool sizeScene = false;
+    if (probeWanted) {
+        sizeScene = sceneDepthSize(frame, t->w, t->h);
+        ++(sizeScene == probeScene ? g_win.sceneSizeAgree : g_win.sceneSizeDisagree);
+    } else if (keyOn) {
+        sizeScene = sceneDepthSize(frame, t->w, t->h);
+    }
+    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, nofoot::f100::worldSceneDepth(probeWanted, keyOn, probeScene, sizeScene));
     // F100: a census frame still sends every world draw here (the F87f capture below sees the same draws as before); only the census's own note, its
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
@@ -35106,6 +35142,16 @@ void report(uint64_t nowMs) {
                     nofoot::f100::teeMsPerFrame(clockTicks, clockCalls, w.hookCalls + fastCalls, w.teeFrames, freq), windowSecs);
         else
             appendf(buf, sizeof(buf), len, ", tee clock: none; over %u s", windowSecs);
+        // #155, every mode: the slow-path calls by the first term that held the fast frame back ("clear": it was published), the world draws refused as not
+        // scene depth (before #155 only in the measurement line), and the depth-size scene test against the depth probe while the probe is wanted. A log
+        // without this text is a build without it; with it, every count prints, zero included.
+        const uint64_t* h = w.teeHeld;
+        appendf(buf, sizeof(buf), len, "; tee held (#155): measure %llu, pending %llu, bound %llu, census %llu, check %llu, polled %llu, world 0 %llu, world 1 %llu, "
+                "clear %llu; not scene depth %llu; scene size vs the depth probe: agree %llu, disagree %llu", ull(h[nofoot::f100::kTeeHeldMeasure]),
+                ull(h[nofoot::f100::kTeeHeldPending]), ull(h[nofoot::f100::kTeeHeldBound]), ull(h[nofoot::f100::kTeeHeldCensus]),
+                ull(h[nofoot::f100::kTeeHeldCheck]), ull(h[nofoot::f100::kTeeHeldPolled]), ull(h[nofoot::f100::kTeeHeldWorld0]),
+                ull(h[nofoot::f100::kTeeHeldWorld1]), ull(h[nofoot::f100::kTeeHeldNone]), ull(w.sceneRefused[drawtag::kSceneNotSceneDepth]),
+                ull(w.sceneSizeAgree), ull(w.sceneSizeDisagree));
         Log::get().note("%s", buf);
     }
     g_unmapsTaggedFold.reset(w.unmapsTagged);
@@ -35661,6 +35707,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     st.worldOk[0] = f44::g_worldOk[0];
     st.worldOk[1] = f44::g_worldOk[1];
     st.check = f44::rowsCheckPending(frame);   // F113: a source's rows wait for a scene mesh's check this frame
+    ++f44::g_win.teeHeld[nofoot::f100::teeHeldBy(st, frame)];   // #155: which term held the fast frame back (the cost line's "held by")
     g_nativeOnFootTeeFastFrame.store(nofoot::f100::teeFastFrame(st, frame), std::memory_order_relaxed);
 }
 
