@@ -1070,6 +1070,8 @@ void hookTickNote(const FrameTickSummary& t, uint64_t nowMs) {
     g_hookTickWindow.startMs = nowMs;
 }
 
+uint32_t perfMonitorFrameNo() { return g_s.frameNo; }
+
 void perfMonitorFrame(ID3D11Device* dev) {
     State& s = g_s;
     ++s.frameNo;
