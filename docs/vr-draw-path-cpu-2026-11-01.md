@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State (2026-11-01): design reviewed and agreed, not built.** Next: the
-  spec, then test build 1 and one flight.
+- **State (2026-11-01): design reviewed, spec #157 written, not built.**
+  Next: test build 1 and one flight. Writing the spec corrected three points
+  here: item 1's rig and item 3's two wrappers (see those sections).
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -54,7 +55,8 @@ concourse (13-14k eye draws a frame); nothing below is specific to it.
 - Nothing tuned to one headset: anything that varies is read at runtime.
 - One commit per item.
 - Each item has its own direct reading that tells "ran" from "never ran".
-- Pure logic gets a red/green rig test first (items 1, 2, 4).
+- Pure logic gets a red/green rig test first (items 1, 2, 4, and item 3's
+  crisp-HUD wrapper).
 
 ## Item 1: scene depth without AA
 
@@ -109,9 +111,14 @@ names another term, the cause is refuted: write it down and stop.
 pick-only mode of the depth probe, separate from `g_wanted` (which ui
 depth's `dsvIsSceneDepth`, ui_depth.cpp:878, also reads).
 
-**Test (red first), `tools\native_on_foot_hooks_test`.** The predicate:
-matching depth and colour sizes pass; mismatched size, no depth view, and
-the probe-wanted case (predicate not used) do not.
+**Test (red first), `tools\native_frame_test`** (its F100 checks).
+Corrected from `native_on_foot_hooks_test`, which does not compile
+native_on_foot.cpp. The predicate and the tally's first-failing-term
+function are pure functions in native_on_foot_f100.h, beside `teeFastFrame`.
+The predicate: matching depth and colour sizes pass; mismatched size, no
+depth view, and the probe-wanted case (predicate not used) do not. The
+tally: each term alone is reported, earlier terms win, all clear reports
+none.
 
 **Expected.** 0.6-1.0 ms a frame with AA off (the tee keeps its fast-path
 cost); none with DLAA.
@@ -150,15 +157,30 @@ No `/GL` or `/LTCG` (#154), so calls across source files never inline.
   (vscreen.cpp:2536) already checks `uiLayerCrispOn()` and `ctx` is never
   null, so every eye draw enters the body and leaves at the shape test
   (`kind`, `count == 3`, `instances`, `startInstance`, 5378). The inline
-  wrapper does the two clears, in order, then that shape test, and calls
-  the body only when it passes. The flat caller (flat_ui_layer.cpp:371) is
-  unaffected.
+  wrapper calls the body when `detail::g_uiLayerCrispPending` is set or
+  that shape test passes, and otherwise returns false. Corrected: the
+  wrapper cannot do the body's two clears itself, because `g_crispPending`
+  (ui_layer.cpp:4463) is in the anonymous namespace. Every path sets and
+  clears it together with the header flag (5361-5369, 5375-5376, 5485,
+  5673, 6825, 6937, 7064), except `uiLayerCrispToneBegin`'s null-context
+  return (5670-5671), which cannot happen in VR. So a clear flag means
+  nothing to clear. The flat caller (flat_ui_layer.cpp:371) is unaffected.
+  Test (red first), `tools\ui_layer_device_test`, which compiles
+  ui_layer.cpp whole: a non-matching draw with nothing pending does not
+  enter the body, a matching one does, and a non-matching draw while a
+  tonemap draw is pending clears it, as today.
 - **`nativeOnFootLabelIssue`** (native_on_foot.cpp about 30494, called at
   vscreen.cpp:4457). `g_labPending` is in the anonymous `f44` namespace
-  (30188), so a header cannot read it. Add one `extern bool` mirror of
-  `g_labPending.valid`, written beside every write of it (30257, 30305,
-  30496, 35879); the call site tests the mirror, the body keeps the full
-  test. The spec names the thread of the 35879 reset.
+  (30188), so a header cannot read it. Corrected: no mirror. `valid` leaves
+  `LabPending` and becomes one module-level `std::atomic<bool>`, relaxed,
+  which every site uses (30257, 30305, 30314, 30495-30496, 35879), the
+  vscreen call site included. The body keeps its full test. The 35879 reset
+  runs in `shutdownDeviceHooks` (device_hook.cpp:3313, by way of
+  `shutdownVScreenFixes`), on the thread that unloads EDVR and possibly
+  under the loader lock, not on the render thread. That is why the flag is
+  atomic; a relaxed load costs the same as a plain one on x64. There is no
+  rig, because no rig compiles native_on_foot.cpp; with one flag there is
+  nothing to drift.
 
 **Key.** None: always helps, and a key would add a branch to the path.
 **Shows it ran.** Only in total `draw hook CPU`. **Expected.** About 0.1 ms
