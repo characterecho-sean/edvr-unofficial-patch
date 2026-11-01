@@ -142,6 +142,20 @@ struct NativeOnFootCameraStats {
     uint64_t controller = 0, switches = 0, faults = 0, headHeld = 0, clipHeld = 0;
 };
 NativeOnFootCameraStats nativeOnFootCameraStats();
+// F209: the Pioneer Supplies buy screens (shop_screen_core.h). Five optional, build-gated hooks on the game (the base UI interaction's Show and Close, the UI state machine's SetState and
+// the armoury kiosk's start and stop; each stands down with one line on a build that differs) tell when the suit or the weapon buy screen is open: from its Show to its Close, re-read
+// once a frame from the remembered object (its vtable, then the byte +0x79) so a missed Close cannot leave it stuck. The Animate post-hook's F107 rule holds the camera away while it is.
+// Any thread; two atomic loads. False whenever the hooks are not armed.
+bool nativeOnFootShopOpen() noexcept;
+// What the frame thread's once-a-second line reports: the remembered objects' bytes (-1 none or unreadable, 0, 1), the kiosk session, the newest SuitUIStateMachine state ("" until one) and
+// how often the signal has changed. Frame thread only. False when no shop hook is armed.
+struct NativeOnFootShopRead {
+    bool armed = false, buyScreenOpen = false, kiosk = false;
+    int suitByte = -1, weaponsByte = -1, kioskByte = -1;
+    char state[40] = {};
+    uint32_t signalChanges = 0;
+};
+bool nativeOnFootShopRead(NativeOnFootShopRead* out) noexcept;
 // F95c: the commander's head kept in the shadows (native_on_foot_f95c.h). The avatar visibility job's hook (native_on_foot.cpp, every call) calls Begin before the
 // game's call and End after it: for the local third-person AMC, while the head hide writes, Begin reads the job context's views and gives the head parts the
 // game's shadow-only class for the call; End puts the game's classes back and leaves a ticket the fade hook's head hide takes (it then keeps the head's shadow
@@ -235,9 +249,11 @@ bool nativeOnFootOutfitClipTake(nofoot::f143::ClipSnap* out) noexcept;
 using NativeOnFootHooksSinkFn = void (*)(void* ctx, const char* line);
 struct NativeOnFootHooksTestTargets {
     uintptr_t controller = 0, avatarFade = 0, findJoint = 0;
+    uintptr_t shopShow = 0, shopClose = 0, shopSetState = 0, kioskStart = 0, kioskStop = 0;   // F209: the shop hooks are tried only for the ones given here (or all, shopTryReal)
 };
 namespace nofoothookstest {
 constexpr int kController = 0, kFade = 1, kFind = 2;   // the hooks, in the order stolenBytes, hookState and gateOpen take them
+constexpr int kShopShow = 3, kShopClose = 4, kShopSetState = 5, kKioskStart = 6, kKioskStop = 7;   // F209
 void setTargets(const NativeOnFootHooksTestTargets& targets);
 void setFadeGlobal(int32_t* mode, float* amount);   // the synthetic dither-fade global and its amount float (null: the build's real addresses)
 void setHeadImage(uintptr_t base, size_t size);     // the rig's synthetic game image for the skeleton reads' arming (base 0: the real module)
@@ -260,6 +276,9 @@ uint64_t hideZeroed();             // mask words that were non-zero and were zer
 uint64_t amcCalls();               // fade calls seen with the gate open
 uint64_t amcLocalMatches();        // ...that were the local third-person AMC
 uint64_t amcLocal();               // the local AMC pointer last matched
+void shopImageBase(uintptr_t base);   // F209: the rig's game image base for the buy screens' vtable compares (the vtables are base + RVA); 0: the armed hook's target minus its RVA
+void shopTryReal(bool on);            // F209: try the shop hooks against the real module too (the build-identity refusal); off: only those with a target
+void shopClock(uint64_t nowMs);       // F209: the shop lines' clock (ms); 0 restores the system clock
 void reset();                      // every hook uninstalled, every latch and counter cleared
 }  // namespace nofoothookstest
 #endif

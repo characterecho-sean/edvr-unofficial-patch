@@ -6,8 +6,10 @@
 //   avatar fade   avatarFadeHooked: the game's dither fade, then the head hide, the neck census, the first-person body and the clip modifiers, and
 //                 the F3 avatar census, on the game's submit job thread.
 //   FindJoint     findJointHooked: the game's FindJoint, then the capture of the local avatar's skeleton pair. Nothing is written.
+//   shop screens  F209: shopOpenClose (the base UI interaction's Show and Close), shopSetStateHooked, shopKiosk (the armoury kiosk's start and stop): the originals
+//                 run untouched, the suit and weapon buy screens' open byte is read before and after, and what they saw goes to atomics and a ring for the frame thread.
 //   frame thread  nativeOnFootHooksFrameBoundary, the Present boundary: installs the hooks when native on foot wants them, opens their gates, holds
-//                 the avatar dither-fade global for native stereo's body, and is the only code here that logs.
+//                 the avatar dither-fade global for native stereo's body, re-reads the remembered buy screens (shopFrameTick), and is the only code here that logs.
 // Every hook thread takes no lock it can wait on (a try-flag keeps a second concurrent caller out where one matters), allocates nothing and
 // writes no log line. Every access to the game's memory is under SEH.
 #include <algorithm>
@@ -19,6 +21,7 @@
 #include "native_on_foot_hooks.h"
 #include "avatar_hooks_core.h"
 #include "avatar_skeleton_core.h"
+#include "shop_screen_core.h"   // F209: the Pioneer Supplies buy screens' hooks, signal and lines
 #include "native_on_foot.h"   // nativeOnFootActive, nativeOnFootCameraExternal and the pose freeze's hand-off (pfz)
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
 #include "native_on_foot_f180.h"   // F180b: the spine straighten's plan (the spine and the neck as held joints)
@@ -44,7 +47,9 @@ namespace edvr {
 namespace {
 
 // ---- the three hooks ------------------------------------------------------------------------------------------------------------
-enum Hk : int { kHkCtl = 0, kHkFade, kHkFind, kHkCount };
+// F209 adds five optional ones for the Pioneer Supplies buy screens: the base class's Show and Close, the UI state machine's SetState and the armoury kiosk's start and stop.
+enum Hk : int { kHkCtl = 0, kHkFade, kHkFind, kHkShow, kHkClose, kHkSetState, kHkKioskStart, kHkKioskStop, kHkCount };
+constexpr bool isShopHook(int id) { return id >= kHkShow && id <= kHkKioskStop; }
 struct HookSpec {
     const char* label;      // the log's name for it
     const char* what;       // what the prologue belongs to
@@ -60,6 +65,14 @@ const HookSpec kSpec[kHkCount] = {
      avh::kAvatarFadePrologueBytes},
     {"find-joint", "skeleton interface FindJoint(name)", "avatar-hooks-find-joint", avh::kFindJointRva, avh::kFindJointPrologue,
      avh::kFindJointPrologueBytes},
+    {"shop-show", "UI interaction base Show (sets the open byte +0x79)", "avatar-hooks-shop-show", shop::kShowRva, shop::kShowPrologue, shop::kShowPrologueBytes},
+    {"shop-close", "UI interaction base Close (clears the open byte +0x79)", "avatar-hooks-shop-close", shop::kCloseRva, shop::kClosePrologue,
+     shop::kClosePrologueBytes},
+    {"shop-state", "UI state machine SetState(handle, name)", "avatar-hooks-shop-state", shop::kSetStateRva, shop::kSetStatePrologue, shop::kSetStatePrologueBytes},
+    {"shop-kiosk-start", "ArmouryVendorActivity OnStart (sets +0x1F8)", "avatar-hooks-shop-kiosk-start", shop::kKioskStartRva, shop::kKioskStartPrologue,
+     shop::kKioskStartPrologueBytes},
+    {"shop-kiosk-stop", "ArmouryVendorActivity OnStop (clears +0x1F8)", "avatar-hooks-shop-kiosk-stop", shop::kKioskStopRva, shop::kKioskStopPrologue,
+     shop::kKioskStopPrologueBytes},
 };
 
 // ---- state shared between the threads --------------------------------------------------------------------------------------
@@ -184,6 +197,9 @@ avh::FadeGuard g_nativeFade;
 uintptr_t g_testTargets[kHkCount] = {};   // the rig's synthetic functions, installed in place of the game's
 int32_t* g_testFadeMode = nullptr;        // ...and its synthetic fade global
 float* g_testFadeAmount = nullptr;
+uintptr_t g_testShopBase = 0;             // F209: the rig's image base for the buy screens' vtable compares (0: the armed hook's target minus its RVA)
+bool g_testShopReal = false;              // F209: try the shop hooks against the real module too (the rig's identity-refusal case); otherwise only those with a test target
+uint64_t g_testShopNow = 0;               // F209: the rig's clock (ms) for the shop lines (0: the system clock)
 #endif
 
 // ---- guarded access to the game's memory (nothing with a destructor lives in a function that has a __try) ------------------
@@ -420,6 +436,133 @@ __declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void*
     }
     return result;
 }
+
+// ---- F209: the Pioneer Supplies buy screens (shop_screen_core.h says what and why) -----------------------------------------------------------
+// Five optional hooks, none of which writes to the game: the base Show and Close (shared by 40+ UI classes: the callback reads *(this), tests it against the suit and weapon buy screens'
+// vtables and forwards at once for every other class), SetState (the new state is recorded when the handle's name is "SuitUIStateMachine"), and the armoury kiosk's OnStart and OnStop.
+// Hook threads do the work below under SEH, with atomics, one try-flag and a single-producer ring: no lock they can wait on, no allocation, no log line. The frame thread
+// (shopFrameTick) logs, and once a frame it re-reads every remembered object (vtable, then the byte) so a missed Close or a freed object cannot leave the signal stuck.
+std::atomic<uintptr_t> g_shopBase{0};                      // the game image's base: the armed shop hooks' target minus its RVA (the vtables are compared as base + RVA)
+std::atomic<uintptr_t> g_shopObj[shop::kClassCount];       // the object each class's Show / start last remembered (0: none); hook threads store, the frame thread clears
+std::atomic<uint8_t> g_shopOpen[shop::kClassCount];        // 1 while that class's object reads open: the callbacks set it at once, the frame thread re-derives it every frame
+std::atomic<int8_t> g_shopByte[shop::kClassCount] = {{-1}, {-1}, {-1}};   // the frame thread's last read of each remembered byte (-1 none, 0, 1), for the once-a-second line
+std::atomic<bool> g_shopBusy{false};                       // the ring's try-flag: a second concurrent producer drops its event (counted) rather than wait
+std::atomic<uint64_t> g_shopBusyDrops{0};
+avh::Ring<shop::Event, 32> g_shopRing;
+
+__declspec(noinline) bool sehReadByteAt(uintptr_t at, uint8_t* out) noexcept {
+    __try {
+        *out = *reinterpret_cast<const volatile uint8_t*>(at);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// A bounded copy of a C string: stops at the NUL or at cap-1 bytes and always terminates. False (and an empty string) when a read faults.
+__declspec(noinline) bool sehCopyCString(uintptr_t at, char* out, size_t cap) noexcept {
+    __try {
+        size_t i = 0;
+        for (; i + 1 < cap; ++i) {
+            const char ch = reinterpret_cast<const volatile char*>(at)[i];
+            out[i] = ch;
+            if (ch == 0) return true;
+        }
+        out[i] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = 0;
+        return false;
+    }
+}
+// The buy screen the object at `self` is, by its vtable (the first qword), for the base's Show and Close: kNotOurs for any other class or an unreadable object.
+inline int shopClassOf(uintptr_t self, uintptr_t base) noexcept {
+    uint64_t vtable = 0;
+    if (!base || !plausibleUserPointer(self) || !sehReadU64At(self, &vtable)) return shop::kNotOurs;
+    return shop::buyScreenOfVtable(vtable, base);
+}
+inline int shopByteAt(uintptr_t self, uint32_t off) noexcept {
+    uint8_t b = 0;
+    return sehReadByteAt(self + off, &b) ? (b != 0 ? 1 : 0) : -1;
+}
+void shopPush(const shop::Event& e) noexcept {
+    if (g_shopBusy.exchange(true, std::memory_order_acquire)) {
+        g_shopBusyDrops.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_shopRing.push(e);
+    g_shopBusy.store(false, std::memory_order_release);
+}
+// Show and Close share this: the original runs untouched (its result returned unchanged); for a buy screen the byte is read before and after.
+__declspec(noinline) uint64_t shopOpenClose(bool show, void* a, void* b, void* c, void* d) noexcept {
+    const auto forward = reinterpret_cast<ForwardFn>(g_forward[show ? kHkShow : kHkClose].load(std::memory_order_acquire));
+    if (!forward) return 0;
+    const uintptr_t self = reinterpret_cast<uintptr_t>(a);
+    const int cls = shopClassOf(self, g_shopBase.load(std::memory_order_relaxed));
+    if (cls == shop::kNotOurs) return forward(a, b, c, d);
+    const int before = shopByteAt(self, shop::kOffOpen);
+    const uint64_t result = forward(a, b, c, d);
+    const int after = shopByteAt(self, shop::kOffOpen);
+    if (show) g_shopObj[cls].store(self, std::memory_order_release);
+    if (after >= 0) g_shopOpen[cls].store(after != 0 ? 1u : 0u, std::memory_order_release);
+    shop::Event e;
+    e.kind = show ? shop::kShow : shop::kClose;
+    e.cls = static_cast<int8_t>(cls);
+    e.before = static_cast<int8_t>(before);
+    e.after = static_cast<int8_t>(after);
+    e.tid = GetCurrentThreadId();
+    e.thisLow = static_cast<uint32_t>(self);
+    shopPush(e);
+    return result;
+}
+__declspec(noinline) uint64_t __fastcall shopShowHooked(void* a, void* b, void* c, void* d) noexcept { return shopOpenClose(true, a, b, c, d); }
+__declspec(noinline) uint64_t __fastcall shopCloseHooked(void* a, void* b, void* c, void* d) noexcept { return shopOpenClose(false, a, b, c, d); }
+
+// SetState(handle, name): rcx is the state machine's handle, rdx the new state's C string. Only the handle named "SuitUIStateMachine" is recorded; the call is forwarded either way.
+__declspec(noinline) bool shopIsSuitUiHandle(uintptr_t handle) noexcept {
+    uint64_t str = 0;
+    char name[shop::kNameCopy];
+    if (!plausibleUserPointer(handle) || !sehReadU64At(handle + shop::kOffHandleName, &str) || !plausibleUserPointer(str)) return false;
+    if (!sehCopyCString(static_cast<uintptr_t>(str) + shop::kOffStringChars, name, sizeof(name))) return false;
+    return shop::isSuitUiStateMachine(name);
+}
+__declspec(noinline) uint64_t __fastcall shopSetStateHooked(void* a, void* b, void* c, void* d) noexcept {
+    const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkSetState].load(std::memory_order_acquire));
+    if (!forward) return 0;
+    if (shopIsSuitUiHandle(reinterpret_cast<uintptr_t>(a))) {
+        shop::Event e;
+        e.kind = shop::kState;
+        e.tid = GetCurrentThreadId();
+        if (!plausibleUserPointer(reinterpret_cast<uintptr_t>(b)) || !sehCopyCString(reinterpret_cast<uintptr_t>(b), e.to, sizeof(e.to))) std::snprintf(e.to, sizeof(e.to), "?");
+        shopPush(e);   // before the call: the order of the lines is the order of the calls, and what the call opens follows its state
+    }
+    return forward(a, b, c, d);
+}
+
+// ArmouryVendorActivity OnStart / OnStop: the kiosk session's byte (+0x1F8), read before and after.
+__declspec(noinline) uint64_t shopKiosk(bool start, void* a, void* b, void* c, void* d) noexcept {
+    const auto forward = reinterpret_cast<ForwardFn>(g_forward[start ? kHkKioskStart : kHkKioskStop].load(std::memory_order_acquire));
+    if (!forward) return 0;
+    const uintptr_t self = reinterpret_cast<uintptr_t>(a);
+    uint64_t vtable = 0;
+    const uintptr_t base = g_shopBase.load(std::memory_order_relaxed);
+    if (!base || !plausibleUserPointer(self) || !sehReadU64At(self, &vtable) || vtable != base + shop::kKioskVtableRva) return forward(a, b, c, d);
+    const int before = shopByteAt(self, shop::kOffKiosk);
+    const uint64_t result = forward(a, b, c, d);
+    const int after = shopByteAt(self, shop::kOffKiosk);
+    if (start) g_shopObj[shop::kKiosk].store(self, std::memory_order_release);
+    if (after >= 0) g_shopOpen[shop::kKiosk].store(after != 0 ? 1u : 0u, std::memory_order_release);
+    shop::Event e;
+    e.kind = start ? shop::kKioskStart : shop::kKioskStop;
+    e.cls = static_cast<int8_t>(shop::kKiosk);
+    e.before = static_cast<int8_t>(before);
+    e.after = static_cast<int8_t>(after);
+    e.tid = GetCurrentThreadId();
+    e.thisLow = static_cast<uint32_t>(self);
+    shopPush(e);
+    return result;
+}
+__declspec(noinline) uint64_t __fastcall shopKioskStartHooked(void* a, void* b, void* c, void* d) noexcept { return shopKiosk(true, a, b, c, d); }
+__declspec(noinline) uint64_t __fastcall shopKioskStopHooked(void* a, void* b, void* c, void* d) noexcept { return shopKiosk(false, a, b, c, d); }
 
 // ---- hiding the head parts (the avatar-fade hook's post-call) -------------------------------------------------------------------
 // Runs inside the game's submit job, right after the dither fade and before the loop that reads the view masks, on the same thread: a zero written here is
@@ -2468,6 +2611,11 @@ const void* callbackFor(int id) {
         case kHkCtl: return reinterpret_cast<const void*>(&controllerHooked);
         case kHkFade: return reinterpret_cast<const void*>(&avatarFadeHooked);
         case kHkFind: return reinterpret_cast<const void*>(&findJointHooked);
+        case kHkShow: return reinterpret_cast<const void*>(&shopShowHooked);
+        case kHkClose: return reinterpret_cast<const void*>(&shopCloseHooked);
+        case kHkSetState: return reinterpret_cast<const void*>(&shopSetStateHooked);
+        case kHkKioskStart: return reinterpret_cast<const void*>(&shopKioskStartHooked);
+        case kHkKioskStop: return reinterpret_cast<const void*>(&shopKioskStopHooked);
         default: return nullptr;
     }
 }
@@ -2514,24 +2662,50 @@ const char* armedRole(int id) {
         case kHkFind:
             return "CAPTURE only: the original runs first and its result is returned unchanged; a call from one of the two avatar-attach sites with the "
                    "povCamera literal stores the skeleton interface (rcx) and the index, for head hiding and the census";
+        case kHkShow:
+        case kHkClose:
+            return "the Pioneer Supplies buy screens' flag (F209): the original runs and its result is returned unchanged; for the suit and weapon buy screens (the vtable at *(rcx) "
+                   "tested) the open byte +0x79 is read before and after and the object remembered, for F107; every other class returns at once; nothing is written";
+        case kHkSetState:
+            return "shop screens instrument (F209): the original runs and its result is returned unchanged; the new state is recorded when the handle's name is SuitUIStateMachine; "
+                   "nothing is written";
+        case kHkKioskStart:
+        case kHkKioskStop:
+            return "shop screens instrument (F209): the original runs and its result is returned unchanged; the kiosk session's byte +0x1F8 is read before and after; nothing is "
+                   "written";
         default:
             return "the original runs untouched and the mode byte is read after it, for native on foot's camera signal; nothing is written";
     }
 }
 const char* downConsequence(int id) {
+    if (isShopHook(id) && g_identity == 2)
+        return "none of the five shop screen hooks (F209) is placed (they need build 334925): the shop screens' own open flag is not read, and F107 holds a showroom camera "
+               "away by its distance test alone.";
     switch (id) {
         case kHkFade: return "head hiding and the census do not run.";
         case kHkFind: return "head hiding and the census do not run (no local skeleton can be latched).";
+        case kHkShow:
+        case kHkClose: return "the shop screens' own open flag (F209) is not read; F107 holds a showroom camera away by its distance test alone.";
+        case kHkSetState: return "the shop state changes (F209) are not logged.";
+        case kHkKioskStart:
+        case kHkKioskStop: return "the armoury kiosk's start and stop (F209) are not logged.";
         default: return "native on foot's body changes stay on in every camera (the game's third-person camera is not told apart).";
     }
 }
 
-void tryHook(int id, const avh::Sink& sink) {
+void tryHook(int id, const avh::Sink& sink, bool quiet = false) {
     const HookSpec& spec = kSpec[id];
     HookEntry& entry = g_hooks[id];
     char why[400] = {};
     if (installHook(id, why, sizeof(why))) {
         entry.state = kHookStateArmed;
+        if (isShopHook(id)) {   // F209: the image base is the target minus its RVA (the rigs may name one of their own)
+            uintptr_t base = entry.target - spec.rva;
+#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
+            if (g_testShopBase) base = g_testShopBase;
+#endif
+            g_shopBase.store(base, std::memory_order_release);
+        }
         if (id == kHkFind) {
             // The image base is the target minus its RVA (production: target = base + RVA; the rigs place their synthetic functions the same way).
             const uintptr_t base = entry.target - avh::kFindJointRva;
@@ -2547,7 +2721,7 @@ void tryHook(int id, const avh::Sink& sink) {
     } else {
         entry.state = kHookStateStoodDown;
         std::snprintf(entry.why, sizeof(entry.why), "%s", why);
-        say(sink, "%s %s hook stood down: %s. %s", avh::prefix(), spec.label, why, downConsequence(id));
+        if (!quiet) say(sink, "%s %s hook stood down: %s. %s", avh::prefix(), spec.label, why, downConsequence(id));
     }
 }
 
@@ -2565,6 +2739,110 @@ void updateGates() {
     g_hideOn.store(hideOn, std::memory_order_release);
     g_gate[kHkFade].store(armed(kHkFade) && hideOn ? 1u : 0u, std::memory_order_release);
     g_gate[kHkFind].store(armed(kHkFind) && capture ? 1u : 0u, std::memory_order_release);
+    // F209: the five shop hooks are open while the native key is on (they are rare calls: a UI screen opening or closing, a state machine changing state). A closed gate loses no signal:
+    // the frame thread re-reads every remembered object each frame whatever the gates say.
+    for (int id = kHkShow; id <= kHkKioskStop; ++id) g_gate[id].store(armed(id) && capture ? 1u : 0u, std::memory_order_release);
+}
+
+// ---- F209: the frame thread's half of the buy screens --------------------------------------------------------------------------------------------
+struct ShopFrame {
+    char state[shop::kStateCopy] = {};   // the newest SuitUIStateMachine state an event carried ("" until one)
+    bool signalLogged = false;           // the signal as last written
+    uint32_t seq = 0;                    // its changes
+    uint64_t lostSeen = 0;               // events the ring or the try-flag dropped, already said
+    shop::LineCap cap;                   // the event lines' rate cap
+    bool identityLine = false;           // the one "build differs" line for the five hooks was said
+};
+ShopFrame g_shopFrame;   // frame thread only (nativeOnFootShopRead is the frame thread's too)
+
+uint64_t shopNowMs() {
+#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
+    if (g_testShopNow) return g_testShopNow;
+#endif
+    return GetTickCount64();
+}
+// The rigs install only the shop hooks they gave a target; production tries all five.
+bool shopWanted(int id) {
+#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
+    return g_testShopReal || g_testTargets[id] != 0;
+#else
+    (void)id;
+    return true;
+#endif
+}
+bool shopAnyArmed() {
+    for (int id = kHkShow; id <= kHkKioskStop; ++id)
+        if (armed(id)) return true;
+    return false;
+}
+// One event line, under the cap: a window that dropped lines says how many, once, before its first line.
+void shopWrite(ShopFrame& f, const avh::Sink& sink, uint64_t now, const char* line) {
+    uint32_t summary = 0;
+    const bool ok = f.cap.allow(now, &summary);
+    if (summary) say(sink, "%s %u event lines in the last 10 s were not written (at most %u in any ten seconds)", shop::tag(), summary, shop::kLinesPer10s);
+    if (ok) say(sink, "%s", line);
+}
+// The five hooks, each optional. A build that differs (the PE identity) gets ONE line for all five.
+void tryShopHooks(const avh::Sink& sink) {
+    static const int kIds[] = {kHkShow, kHkClose, kHkSetState, kHkKioskStart, kHkKioskStop};
+    ShopFrame& f = g_shopFrame;
+    for (const int id : kIds) {
+        if (g_hooks[id].state != kHookStateNotTried || !shopWanted(id)) continue;
+        tryHook(id, sink, g_identity == 2 && f.identityLine);
+        if (g_identity == 2) f.identityLine = true;
+    }
+}
+// Once a frame: the events the hook threads queued (as lines), then every remembered object read again (its vtable, then the byte) so the signal can never be stuck on a missed Close or a
+// freed object, then the signal's edge.
+void shopFrameTick(const avh::Sink& sink) {
+    if (!shopAnyArmed()) return;
+    ShopFrame& f = g_shopFrame;
+    const uint64_t now = shopNowMs();
+    char line[avh::kLineBytes];
+    shop::Event e;
+    while (g_shopRing.take(&e)) {
+        if (e.kind == shop::kState) {
+            std::snprintf(e.from, sizeof(e.from), "%s", f.state[0] ? f.state : "unknown");
+            std::snprintf(f.state, sizeof(f.state), "%s", e.to);
+        }
+        shop::formatEvent(line, sizeof(line), e);
+        shopWrite(f, sink, now, line);
+    }
+    const uint64_t lost = g_shopRing.lost() + g_shopBusyDrops.load(std::memory_order_relaxed);
+    if (lost != f.lostSeen) {
+        std::snprintf(line, sizeof(line), "%s %llu shop event(s) were not recorded (the ring was full or a second hook thread was in it)", shop::tag(),
+                      static_cast<unsigned long long>(lost - f.lostSeen));
+        f.lostSeen = lost;
+        shopWrite(f, sink, now, line);
+    }
+    const uintptr_t base = g_shopBase.load(std::memory_order_acquire);
+    shop::Verdict verdict[shop::kClassCount];
+    for (int c = 0; c < shop::kClassCount; ++c) {
+        const uintptr_t obj = g_shopObj[c].load(std::memory_order_acquire);
+        uint64_t vtable = 0;
+        uint8_t byte = 0;
+        const bool have = obj != 0;
+        const bool vtableRead = have && base != 0 && plausibleUserPointer(obj) && sehReadU64At(obj, &vtable);
+        const bool byteRead = vtableRead && sehReadByteAt(obj + (c == shop::kKiosk ? shop::kOffKiosk : shop::kOffOpen), &byte);
+        const uint64_t expected = base + shop::vtableRva(c);
+        verdict[c] = shop::judgeObject(have, vtableRead, vtable, expected, byteRead, byte);
+        if (shop::forgets(verdict[c])) {
+            uintptr_t was = obj;
+            g_shopObj[c].compare_exchange_strong(was, 0, std::memory_order_acq_rel);   // a Show that remembered a new object meanwhile is kept
+            shop::formatForgotten(line, sizeof(line), c, verdict[c], vtable, expected, static_cast<uint32_t>(obj));
+            shopWrite(f, sink, now, line);
+        }
+        g_shopOpen[c].store(verdict[c] == shop::Verdict::kOpen ? 1u : 0u, std::memory_order_release);
+        g_shopByte[c].store(static_cast<int8_t>(verdict[c] == shop::Verdict::kOpen ? 1 : verdict[c] == shop::Verdict::kClosed ? 0 : -1), std::memory_order_relaxed);
+    }
+    const shop::Signal s = shop::signalOf(verdict[shop::kSuit], verdict[shop::kWeapons], verdict[shop::kKiosk]);
+    const bool on = s.buyScreenOpen();
+    if (on != f.signalLogged) {
+        ++f.seq;
+        f.signalLogged = on;
+        shop::formatSignal(line, sizeof(line), s, on, f.seq);
+        shopWrite(f, sink, now, line);
+    }
 }
 
 // ---- the frame thread ----------------------------------------------------------------------------------------------------------
@@ -2769,6 +3047,7 @@ void boundaryAt(const avh::Sink& sink) {
         // F93d: the camera controller's update, for the game's camera (the suite's mode byte): native on foot's body changes are first-person only.
         // Optional: a stand-down leaves the body changes on in every camera (native_on_foot.cpp says so once).
         if (g_hooks[kHkCtl].state == kHookStateNotTried) tryHook(kHkCtl, sink);
+        tryShopHooks(sink);   // F209: optional; a stand-down leaves F107 on its distance test alone
         checkPartNames(sink);
         skeletonArm(fs, sink);
     }
@@ -2777,12 +3056,32 @@ void boundaryAt(const avh::Sink& sink) {
         const bool nativeBody = g_nativeBody.load(std::memory_order_acquire), external = nativeBody && nativeOnFootCameraExternal();
         nativeFadeTick(nativeBody && !external, external ? "the game's third-person camera (F93d)" : g_nativeReason, sink);
     }
+    shopFrameTick(sink);   // F209
     updateGates();
 }
 avh::Sink g_frameSink{&logSink, nullptr};   // the production wrapper's lines (the rig points it at a capture)
 }  // namespace
 
 void nativeOnFootHooksFrameBoundary() { boundaryAt(g_frameSink); }
+
+// F209: the Pioneer Supplies buy screens' signal. Any thread (two atomics); true while the suit or the weapon buy screen reads open (shop_screen_core.h).
+bool nativeOnFootShopOpen() noexcept {
+    return g_shopOpen[shop::kSuit].load(std::memory_order_acquire) != 0 || g_shopOpen[shop::kWeapons].load(std::memory_order_acquire) != 0;
+}
+// The frame thread's reading for the once-a-second line (the frame thread owns the state text). False when no shop hook is armed.
+bool nativeOnFootShopRead(NativeOnFootShopRead* out) noexcept {
+    if (!out) return false;
+    *out = NativeOnFootShopRead();
+    out->armed = shopAnyArmed();
+    out->buyScreenOpen = nativeOnFootShopOpen();
+    out->suitByte = g_shopByte[shop::kSuit].load(std::memory_order_relaxed);
+    out->weaponsByte = g_shopByte[shop::kWeapons].load(std::memory_order_relaxed);
+    out->kioskByte = g_shopByte[shop::kKiosk].load(std::memory_order_relaxed);
+    out->kiosk = g_shopOpen[shop::kKiosk].load(std::memory_order_acquire) != 0;
+    std::snprintf(out->state, sizeof(out->state), "%s", g_shopFrame.state);
+    out->signalChanges = g_shopFrame.seq;
+    return out->armed;
+}
 
 void nativeOnFootHooksShutdown() {
     // An unload (FreeLibrary): the dither-fade global goes back to -1 if EDVR still holds it at 0. A process exit does not come here, and
@@ -3429,6 +3728,11 @@ void setTargets(const NativeOnFootHooksTestTargets& t) {
     g_testTargets[kHkCtl] = t.controller;
     g_testTargets[kHkFade] = t.avatarFade;
     g_testTargets[kHkFind] = t.findJoint;
+    g_testTargets[kHkShow] = t.shopShow;   // F209
+    g_testTargets[kHkClose] = t.shopClose;
+    g_testTargets[kHkSetState] = t.shopSetState;
+    g_testTargets[kHkKioskStart] = t.kioskStart;
+    g_testTargets[kHkKioskStop] = t.kioskStop;
 }
 void setFadeGlobal(int32_t* mode, float* amount) {
     g_testFadeMode = mode;
@@ -3461,6 +3765,9 @@ uint64_t hideZeroed() { return g_hideZeroed.load(); }
 uint64_t amcCalls() { return g_amcCalls.load(); }
 uint64_t amcLocalMatches() { return g_amcLocalMatches.load(); }
 uint64_t amcLocal() { return g_amcLocal.load(); }
+void shopImageBase(uintptr_t base) { g_testShopBase = base; }
+void shopTryReal(bool on) { g_testShopReal = on; }
+void shopClock(uint64_t nowMs) { g_testShopNow = nowMs; }
 void reset() {
     for (HookEntry& entry : g_hooks) {
         entry.hook.uninstall();
@@ -3538,6 +3845,22 @@ void reset() {
         g_f143Armed.store(0);
         static nofoot::f143::ClipSnap droppedClip;
         while (g_f143Ring.take(&droppedClip)) {}
+    }
+    {   // F209: the buy screens' objects, flags, ring and frame state start from nothing
+        g_shopBase.store(0);
+        for (int c = 0; c < shop::kClassCount; ++c) {
+            g_shopObj[c].store(0);
+            g_shopOpen[c].store(0);
+            g_shopByte[c].store(-1);
+        }
+        g_shopBusy.store(false);
+        g_shopBusyDrops.store(0);
+        shop::Event drop;
+        while (g_shopRing.take(&drop)) {}
+        g_shopFrame = ShopFrame();
+        g_testShopBase = 0;
+        g_testShopReal = false;
+        g_testShopNow = 0;
     }
     g_ctlCalls.store(0);
     g_skelTargets = avh::HeadTargets();

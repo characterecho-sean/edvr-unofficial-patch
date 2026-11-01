@@ -32,6 +32,7 @@
 #include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the paced F68d window, the throttled lines
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1)
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
+#include "f209_checks.h"    // F209: the Pioneer Supplies buy screens found by the game's own open flag; F107 holds the camera away while one is open
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
 #include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
@@ -7527,6 +7528,8 @@ int wmain(int argc, wchar_t** argv) {
     f101test::run101(check);
     // F107: the carrier management screen's camera away from the commander: the gate, the episode, the neck reference held out, the calibration's consequence.
     f107test::run107(check);
+    // F209: the buy screens' flag: the signal from Show and Close, the once-a-frame re-check, F107's rule at any distance, normal play unchanged, the lines and their cap, the wiring.
+    f209test::run209(check);
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
     // snap's fade, the smoothing, the follower against the real map, the per-second check.
     f109test::run109(check);

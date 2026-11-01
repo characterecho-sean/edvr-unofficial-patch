@@ -34,6 +34,7 @@
 #include "engine_velocity.h"   // F45: engineVelocityShadowSceneRows, the CB shadow's rows 270..275 (the world view's row 275)
 #include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
 #include "native_on_foot_hooks.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
+#include "shop_screen_core.h"   // F209: the once-a-second shop line (shop::formatSecond), the Pioneer Supplies buy screens' signal
 #include "journal_watch.h"
 #include "mode_watch.h"   // F190: modeWatchStereoValue, the mode a late install takes (the setter call for the switch has passed)
 #include "native_on_foot_core.h"
@@ -14748,9 +14749,24 @@ std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0}, g_f
 std::atomic<float> g_f107HoldS{nofoot::f107::kReturnHoldS};   // F208b: the hold in force for the open episode (doubled by rejoins)
 std::atomic<float> g_f107NearestM{0.0f}, g_f107FarthestM{0.0f};
 std::atomic<uint64_t> g_f107LastMs{0};
+std::atomic<uint32_t> g_f107ShopCalls{0}, g_f107DistanceCalls{0};   // F209: this episode's calls refused with a buy screen open / with the camera over kOnCommanderM (one call can be both)
+std::atomic<uint8_t> g_f107Began{0};   // F209: what made the episode's first call away: bit 0 the shop screen, bit 1 the distance test
 uint32_t g_f107EpisodesLogged = 0;
 bool g_f107AwayLogged = false;
 uint64_t g_f107LeftMs = 0;
+shop::Pacer g_shopSecondPacer;   // F209: the once-a-second line (frame thread)
+// F209: while a buy screen is open, the kiosk session runs or the UI state machine is in a vendor state: one line a second with the game's flag bytes and F107's state (the frame thread's;
+// the hooks' own event lines are written by native_on_foot_hooks.cpp's frame boundary). Silent when none of them is set, or when the shop hooks are not armed.
+void shopSecondLine(uint64_t now, bool away, uint32_t episodes) noexcept {
+    NativeOnFootShopRead r;
+    if (!nativeOnFootShopRead(&r) || !shop::anySet(r.buyScreenOpen, r.kiosk, r.state) || !g_shopSecondPacer.due(now)) return;
+    char f107[200];
+    std::snprintf(f107, sizeof(f107), "%s (episode %u, %u calls refused, %u with a buy screen open)", away ? "away" : "not away", episodes,
+                  g_f107Calls.load(std::memory_order_relaxed), g_f107ShopCalls.load(std::memory_order_relaxed));
+    char line[512];
+    shop::formatSecond(line, sizeof(line), r.suitByte, r.weaponsByte, r.kioskByte, r.state, r.buyScreenOpen, f107);
+    Log::get().note("%s", line);
+}
 bool f107Tick(uint64_t now) noexcept {
     const uint64_t last = g_f107LastMs.load(std::memory_order_relaxed);
     // F208: an open episode is over only when the hook says so (the camera stayed on the commander for the hold) or has not reported for kAwayStaleMs; the hook reports on every call of an open
@@ -14761,21 +14777,26 @@ bool f107Tick(uint64_t now) noexcept {
         g_f107AwayLogged = true;
         g_f107EpisodesLogged = episodes;
         g_f107LeftMs = now;
-        // F208b: the test that made the camera away is named: the distance from the neck (the only test there is; a showroom camera within kOnCommanderM is not recognised, see the arc doc)
-        Log::get().note("native on foot camera away (F107): the game's camera left the commander (episode %u): %.1f m from the neck, over the %.1f m a commander's "
-                        "eye can be (away by: the distance test); the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
+        // F208b / F209: the test that made the camera away is named: the Pioneer Supplies buy screen's own open flag ("the shop screen", at any distance), the distance from the neck, or both
+        const uint8_t began = g_f107Began.load(std::memory_order_relaxed);
+        const bool byShop = (began & 1u) != 0, byDistance = (began & 2u) != 0 || !byShop;
+        Log::get().note("native on foot camera away (F107): the game's camera left the commander (episode %u): %.1f m from the neck, %s the %.1f m a commander's "
+                        "eye can be%s (away by: the %s); the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
                         "(the view is the game's own camera); the episode ends after the camera has stayed on the commander for %.1f s%s",
-                        episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM, static_cast<double>(g_f107HoldS.load(std::memory_order_relaxed)),
+                        episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), byDistance ? "over" : "within", nofoot::f107::kOnCommanderM,
+                        byShop ? (byDistance ? ", and a buy screen is open" : ", but a buy screen is open") : "",
+                        byShop ? (byDistance ? "shop screen and the distance test" : "shop screen") : "distance test", static_cast<double>(g_f107HoldS.load(std::memory_order_relaxed)),
                         g_f107Rejoins.load(std::memory_order_relaxed) ? " (doubled: it began again within 3 s of an end)" : "");
     } else if (!away && g_f107AwayLogged) {
         g_f107AwayLogged = false;
         Log::get().note("native on foot camera away (F107): the episode ended after %.1f s (episode %u): %u pinned calls refused, the camera "
-                        "%.1f to %.1f m from the neck, not a number in %u, back near and gone again within the %.1f s hold %u times (rejoins in a row %u); the neck reference takes its target from the next settled stance",
+                        "%.1f to %.1f m from the neck, not a number in %u, back near and gone again within the %.1f s hold %u times (rejoins in a row %u); the neck reference takes its target from the next settled stance (calls held by the shop screen %u, by the distance test %u)",
                         static_cast<double>(now - g_f107LeftMs) * 1e-3, episodes, g_f107Calls.load(std::memory_order_relaxed),
                         static_cast<double>(g_f107NearestM.load(std::memory_order_relaxed)), static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)),
                         g_f107NotNumber.load(std::memory_order_relaxed), static_cast<double>(g_f107HoldS.load(std::memory_order_relaxed)), g_f107Alternations.load(std::memory_order_relaxed),
-                        g_f107Rejoins.load(std::memory_order_relaxed));
+                        g_f107Rejoins.load(std::memory_order_relaxed), g_f107ShopCalls.load(std::memory_order_relaxed), g_f107DistanceCalls.load(std::memory_order_relaxed));
     }
+    shopSecondLine(now, away, episodes);   // F209
     return away;
 }
 struct F94Tick {
@@ -17539,9 +17560,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         {   // F107: the game's camera away from the commander (a terminal's or a screen's own camera): the pin, the neck reference and the standing calibration
             // take nothing from this call (native_on_foot_f107.h); the edges and the episode go to the frame thread, which logs them
             const double eyeNeckM = nofoot::f107::eyeNeckDistance(E, N0);
-            g_f107Away.step(eyeNeckM, static_cast<double>(f30QpcUs(in.qpc)) * 1e-6);
+            g_f107Away.step(eyeNeckM, static_cast<double>(f30QpcUs(in.qpc)) * 1e-6, nativeOnFootShopOpen());   // F209: a Pioneer Supplies buy screen open holds the camera away at any distance
             if (g_f107Away.away) {
                 refusal = kPinRefCameraAway;
+                g_f107ShopCalls.store(g_f107Away.shopCalls, std::memory_order_relaxed);
+                g_f107DistanceCalls.store(g_f107Away.distanceCalls, std::memory_order_relaxed);
+                g_f107Began.store(static_cast<uint8_t>((g_f107Away.beganByShop ? 1u : 0u) | (g_f107Away.beganByDistance ? 2u : 0u)), std::memory_order_relaxed);
                 g_f107Calls.store(g_f107Away.calls, std::memory_order_relaxed);
                 g_f107Alternations.store(g_f107Away.alternations, std::memory_order_relaxed);
                 g_f107Rejoins.store(g_f107Away.rejoins, std::memory_order_relaxed);

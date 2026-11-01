@@ -41,6 +41,11 @@ inline bool onCommander(double eyeNeckM) noexcept { return eyeNeckM == eyeNeckM 
 // 4.2 s once, at the end). The hold is now 2.0 s, and it adapts: an episode that begins again within kRejoinS of an end is the same trouble, and the hold doubles (to kMaxHoldS) for it; one that
 // begins after a quiet kRejoinS starts from the base again. The suit change's pattern then runs as 3 episodes in 32 s, not 20, and the first shop's flaps (near runs of 0.5 s) never end one.
 //
+// F209 (the game's own flag): the suit and the weapon buy screens at Pioneer Supplies are found by the open byte their interaction objects keep (shop_screen_core.h). While one is open the
+// camera is held away at ANY distance (the weapon showroom's camera is the commander's own, 0.9 cm under the neck: no distance test could see it): `shopOpen` joins the distance test as a
+// reason for a call to be refused, the episode's left line names the reason ("the shop screen", "the distance test" or both), and the episode ends through the same hold once the screen has closed
+// and the camera is near the commander. The distance test is unchanged for everything else, and the adaptive hold stays: a fleet carrier's or a terminal's camera is not a buy screen.
+//
 // The hold. The first shop's near runs were at most 0.5 s and its real return 2.1 s; the suit change's near stretches 1.0 to 2.8 s. 2.0 s covers every flap of the first and most of the second, and
 // the doubling covers the rest after one rejoin; a real return costs two seconds of the view being the game's own camera at the commander (the neck reference ramps back in over kRampS after it).
 // Silence is another matter: with no call at all for kSilenceS the episode is over (the commander is not animated: a load, a different mode), and the next call starts clean.
@@ -58,12 +63,14 @@ inline bool awayNow(bool published, uint64_t lastMs, uint64_t nowMs) noexcept { 
 struct Away {
     bool away = false;
     uint32_t calls = 0, farCalls = 0, notNumber = 0, episodes = 0, alternations = 0, rejoins = 0;
+    uint32_t shopCalls = 0, distanceCalls = 0;      // F209: this episode's calls refused with a buy screen open / with the camera over kOnCommanderM (one call can be both)
+    bool beganByShop = false, beganByDistance = false;   // F209: what made the episode's first call away
     double startS = 0.0, lastS = 0.0, nearestM = 0.0, farthestM = 0.0, nearSinceS = -1.0, lastCallS = -1.0;
     double holdS = kReturnHoldS, endS = -1.0;   // the hold now in force (doubled by a rejoin) and when the last episode ended by it
     enum Edge : uint8_t { kNone = 0, kLeft = 1, kBack = 2 };
     // One pinned call: its eye - neck distance and its time (s, monotonic). Returns the edge this call made. While an episode is open every call is refused (the pin takes nothing from a camera
     // that was away a moment ago), near ones too; the episode ends on the first near call after the camera has been near for holdS without a far one between.
-    Edge step(double eyeNeckM, double tS) noexcept {
+    Edge step(double eyeNeckM, double tS, bool shopOpen = false) noexcept {
         Edge e = kNone;
         if (away && lastCallS >= 0.0 && tS - lastCallS > kSilenceS) {   // no call for kSilenceS: nothing was pinned, the episode is over
             away = false;
@@ -72,7 +79,8 @@ struct Away {
             e = kBack;
         }
         lastCallS = tS;
-        const bool farNow = !onCommander(eyeNeckM);
+        const bool byDistance = !onCommander(eyeNeckM);
+        const bool farNow = shopOpen || byDistance;   // F209: a buy screen open holds the camera away at any distance
         if (farNow) {
             if (!away) {
                 const bool rejoin = endS >= 0.0 && tS - endS <= kRejoinS;   // the camera went far again right after an end: the same trouble, the hold doubles
@@ -80,7 +88,9 @@ struct Away {
                 rejoins = rejoin ? rejoins + 1 : 0;
                 away = true;
                 ++episodes;
-                calls = farCalls = notNumber = alternations = 0;
+                calls = farCalls = notNumber = alternations = shopCalls = distanceCalls = 0;
+                beganByShop = shopOpen;
+                beganByDistance = byDistance;
                 startS = tS;
                 nearestM = farthestM = 0.0;
                 nearSinceS = -1.0;
@@ -101,6 +111,8 @@ struct Away {
         if (away) {
             ++calls;
             lastS = tS;
+            if (shopOpen) ++shopCalls;
+            if (byDistance) ++distanceCalls;
             if (farNow) {
                 ++farCalls;
                 if (eyeNeckM == eyeNeckM) {

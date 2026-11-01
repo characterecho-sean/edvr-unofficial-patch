@@ -12219,14 +12219,16 @@ def _hj_f107_away(rows, ctx):
     if not left and not ended and not remote:
         return None
     text = "%d episodes" % len(left)
-    tests = collections.Counter(r.get("test") or "distance" for r in left)   # F208b: the test that made each away (the distance test is the only one an earlier build had)
-    if tests.get("showroom"):
-        text += " (by the distance test %d, by the showroom test %d)" % (tests.get("distance", 0), tests["showroom"])
+    tests = collections.Counter(r.get("test") or "distance" for r in left)   # F208b: the test that made each away (the distance test is the only one an earlier build had); F209: the shop screen
+    names = (("distance", "the distance test"), ("showroom", "the showroom test"), ("shop screen", "the shop screen"))
+    if len(tests) > 1 or (tests and "distance" not in tests):
+        text += " (%s)" % ", ".join("by %s %d" % (label, tests[k]) for k, label in names if tests.get(k))
     elif left and any(r.get("test") for r in left):
         text += " (all by the distance test)"
     if ended:
-        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck%s" % (
-            float(r["s"]), r["calls"], r["near"], r["far"], ", %s flaps inside the %s s hold" % (r["alt"], r["hold"]) if r.get("alt") not in (None, "0") else "") for r in ended)
+        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck%s%s" % (
+            float(r["s"]), r["calls"], r["near"], r["far"], ", %s calls with a buy screen open" % r["shopcalls"] if r.get("shopcalls") not in (None, "0") else "",
+            ", %s flaps inside the %s s hold" % (r["alt"], r["hold"]) if r.get("alt") not in (None, "0") else "") for r in ended)
     # F208: an episode a second long or more is a real one; a log with hundreds of them in a few seconds is the camera flapping through an older build's end rule (the suit shop: 632 in 18 s)
     flaps = [r for r in ended if float(r["s"]) < 0.2]
     rej = [int(r["rej"]) for r in ended if r.get("rej") not in (None, "0")]
@@ -12235,11 +12237,97 @@ def _hj_f107_away(rows, ctx):
     if len(ended) >= 20 and len(flaps) * 2 > len(ended):
         return ("PARTIAL", text + "; %d of %d episodes lasted under 0.2 s: the camera alternated between two views and the episode ended on every return (a build before F208), so the view pumped" % (
             len(flaps), len(ended)))
+    shopnote = _hj_f107_unflagged(left, ended, ctx)   # F209
     if remote:
         far = max(float(r["remote_max"]) if r.get("remote_max") is not None else abs(float(r["game"])) for r in remote) / 100.0
         note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, sum(int(r["remote"]) if r.get("remote") is not None else 1 for r in remote))
-        return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note)
+        return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note + shopnote)
+    if shopnote:
+        return ("PARTIAL", text + shopnote)
     return ("OK", text + "; the neck reference and the standing calibration held")
+
+
+H_SHOP = "shop screens (F209)"
+F107_SHOWROOM_MAX_M = 50.0   # F209: a distance-test episode whose first camera stood over F107's 3 m and no farther than this from the neck is the size of a showroom's camera (the suit shop's: 3.6 to 3.7 m)
+
+
+def _hj_f107_unflagged(left, ended, ctx):
+    """F209: the text to append when an F107 episode by the distance test, at a showroom's distance (over 3 m and at most F107_SHOWROOM_MAX_M), has no shop signal in the log beside it
+    (the signal's ON line from 10 s before the episode's left line to a second after its ended line; any ON line when the log has no stamps): the game's own flag did not see that
+    camera, because the shop hooks stood down, or the screen is not one of the two buy screens. Empty when there is none. A carrier management screen (3367 m) is not one."""
+    ons = _hrows(ctx, H_SHOP, "on")
+    ends = {r["ep"]: r for r in ended}
+    miss = []
+    for r in left:
+        if (r.get("test") or "distance") != "distance":
+            continue
+        m = float(r["m"])
+        if not (3.0 < m <= F107_SHOWROOM_MAX_M):
+            continue
+        t0, e = r.get("_t"), ends.get(r["ep"])
+        t1 = e.get("_t") if e else None
+        if t0 is None or any(o.get("_t") is None for o in ons):
+            covered = bool(ons)
+        else:
+            covered = any(t0 - 10.0 <= o["_t"] <= (t1 if t1 is not None else t0 + 120.0) + 1.0 for o in ons)
+        if not covered:
+            miss.append(m)
+    if not miss:
+        return ""
+    stood = sorted({r["hook"] for r in _hrows(ctx, H_SHOP, "hook") if r["st"] == "stood down"})
+    return ("; %d episode(s) by the distance test with the camera %.1f-%.1f m from the neck, a showroom's distance, and no shop signal in the log beside %s: the game's own flag did not see "
+            "that camera (%s)" % (len(miss), min(miss), max(miss), "it" if len(miss) == 1 else "them",
+                                  "the shop hooks stood down: " + ", ".join(stood) if stood else "the screen is not the suit or the weapon buy screen, or the hooks never ran"))
+
+
+def _hj_shop(rows, ctx):
+    """F209: the Pioneer Supplies buy screens found by the game's own open flag (shop_screen_core.h): the five hooks (armed or stood down), each buy screen's Show and Close (the byte
+    +0x79 before and after), the shop signal's edges, the SuitUIStateMachine's states, the armoury kiosk's start and stop, and the objects the frame thread forgot. A shop signal that went on
+    with no F107 episode by the shop screen is NEVER APPLIED (the view did not change); a signal that did not hold on its object, events the hooks lost or the cap dropped, a Show that left
+    the byte unset, a signal that went on more often than it went off, hooks that all stood down, or a Show with no signal are PARTIAL."""
+    kinds = ("hook", "show", "close", "on", "off", "state", "kstart", "kstop", "forgot", "sec", "capped", "lost")
+    if not any(rows.get(k) for k in kinds):
+        return None
+    hooks, shows, closes = rows.get("hook", []), rows.get("show", []), rows.get("close", [])
+    ons, offs, states = rows.get("on", []), rows.get("off", []), rows.get("state", [])
+    armed = sorted({r["hook"] for r in hooks if r["st"] == "armed"})
+    stood = sorted({r["hook"] for r in hooks if r["st"] == "stood down"})
+    parts = []
+    if hooks:
+        parts.append("hooks: %d armed%s" % (len(armed), (", stood down: " + ", ".join(stood)) if stood else ""))
+    byclass = collections.Counter(r["cls"] for r in shows)
+    if shows or closes:
+        parts.append("%d Show / %d Close (%s)" % (len(shows), len(closes), ", ".join("%s %d" % (k, byclass[k]) for k in sorted(byclass)) or "no buy screen"))
+    parts.append("the signal on %d, off %d" % (len(ons), len(offs)))
+    if states:
+        parts.append("%d state change(s), last %s" % (len(states), states[-1]["to"]))
+    if rows.get("kstart") or rows.get("kstop"):
+        parts.append("kiosk %d start / %d stop" % (len(rows.get("kstart", [])), len(rows.get("kstop", []))))
+    if rows.get("sec"):
+        parts.append("%d one-second line(s)" % len(rows["sec"]))
+    text = "; ".join(parts)
+    shop_eps = [r for r in _hrows(ctx, "camera away (F107)", "left") if r.get("test") == "shop screen"]
+    if ons and not shop_eps:
+        return ("NEVER APPLIED", text + "; the shop signal went on %d time(s) but F107 logged no episode by the shop screen: the view did not change" % len(ons))
+    problems = []
+    if rows.get("forgot"):
+        problems.append("%d remembered object(s) forgotten (their vtable changed or they could not be read): the flag did not hold on them" % len(rows["forgot"]))
+    if rows.get("lost"):
+        problems.append("%d shop event(s) were not recorded (the ring was full or a second hook thread was in it)" % _hsum(rows["lost"], "n"))
+    if rows.get("capped"):
+        problems.append("%d event line(s) were not written (the cap of 40 in ten seconds): a flapping screen" % _hsum(rows["capped"], "n"))
+    unset = [r for r in shows if r["a"] != "1"]
+    if unset:
+        problems.append("%d Show(s) left the byte +0x79 not set (read %s)" % (len(unset), ", ".join(sorted({r["a"] for r in unset}))))
+    if any(r["a"] == "1" for r in shows) and not ons:
+        problems.append("a buy screen was shown but the signal never went on")
+    if len(ons) > len(offs) + 1:
+        problems.append("the signal went on %d times and off %d: it may have stuck" % (len(ons), len(offs)))
+    if hooks and stood and not armed and not ons:
+        problems.append("every shop hook stood down: F107 holds a showroom camera by its distance test alone")
+    if problems:
+        return ("PARTIAL", text + "; " + "; ".join(problems))
+    return ("OK", text)
 
 
 def _hj_f115_pair(edges, secs):
@@ -16999,11 +17087,28 @@ HEALTH_RULES = (
     ), _hj_f94a_neck),
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
         ("left", r"native on foot camera away \(F107\): the game's camera left the commander \(episode (?P<ep>\d+)\): (?P<m>[\d.]+) m from the neck"
-                 r"(?:, over the [\d.]+ m a commander's eye can be \(away by: the (?P<test>distance|showroom) test\))?"),   # F208b: which test made it away (an earlier build's line names none)
+                 r"(?:, (?:over|within) the [\d.]+ m a commander's eye can be(?:, (?:and|but) a buy screen is open)? "
+                 r"\(away by: the (?P<test>distance|showroom|shop screen)(?P<both> and the distance)?(?: test)?\))?"),   # F208b: which test made it away (an earlier build's line names none); F209: the shop screen
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
                   r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"
-                  r"(?:, back near and gone again within the (?P<hold>[\d.]+) s hold (?P<alt>\d+) times(?: \(rejoins in a row (?P<rej>\d+)\))?)?"),   # F208/F208b: the flaps the hold absorbed, the rejoins
+                  r"(?:, back near and gone again within the (?P<hold>[\d.]+) s hold (?P<alt>\d+) times(?: \(rejoins in a row (?P<rej>\d+)\))?)?"   # F208/F208b: the flaps the hold absorbed, the rejoins
+                  r"(?:.*\(calls held by the shop screen (?P<shopcalls>\d+), by the distance test (?P<distcalls>\d+)\))?"),   # F209: the calls each test held
     ), _hj_f107_away),
+    _hrule(H_SHOP, ("F209",), ("(F209)",), (
+        ("hook", r"avatar hooks: (?P<hook>shop-[a-z-]+) hook (?P<st>armed|stood down)"),
+        ("on", r"shop screens \(F209\): the shop signal is ON: F107 holds the camera away \(suit (?P<suit>\w+), weapons (?P<weap>\w+), kiosk (?P<kiosk>[\w ]+?); change (?P<n>\d+)\)"),
+        ("off", r"shop screens \(F209\): the shop signal is OFF \(suit (?P<suit>\w+), weapons (?P<weap>\w+), kiosk (?P<kiosk>[\w ]+?); change (?P<n>\d+)\)"),
+        ("show", r"shop screens \(F209\): (?P<cls>\w+) Show: \+0x79 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("close", r"shop screens \(F209\): (?P<cls>\w+) Close: \+0x79 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("state", r"shop screens \(F209\): SuitUIStateMachine: \"(?P<from>[^\"]*)\" -> \"(?P<to>[^\"]*)\" \(thread (?P<tid>\d+)\)"),
+        ("kstart", r"shop screens \(F209\): ArmouryVendorActivity started: \+0x1F8 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("kstop", r"shop screens \(F209\): ArmouryVendorActivity stopped: \+0x1F8 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("forgot", r"shop screens \(F209\): the remembered (?P<cls>\w+) \(this 0x(?P<this>[0-9A-F]+)\) is (?P<why>forgotten: .*?) \(vtable 0x(?P<vt>[0-9A-F]+), the class's 0x(?P<want>[0-9A-F]+)\)"),
+        ("sec", r"shop screens \(F209\): 1 s: suit \+0x79 (?P<suit>\w+), weapons \+0x79 (?P<weap>\w+), kiosk \+0x1F8 (?P<kiosk>\w+), SuitUIStateMachine \"(?P<state>[^\"]*)\", "
+                "signal (?P<sig>on|off); F107: (?P<f107>.*)$"),
+        ("capped", r"shop screens \(F209\): (?P<n>\d+) event lines in the last 10 s were not written"),
+        ("lost", r"shop screens \(F209\): (?P<n>\d+) shop event\(s\) were not recorded"),
+    ), _hj_shop),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
         ("_", r"native on foot \(F115\): native stereo on foot began at frame \d+"),
@@ -18584,6 +18689,7 @@ def self_test_health():
         b3src = read_text(b3_path)
         f205src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f205.h"))   # F205: the ADS view circle's press, runtime and override lines
         c1src = read_text(c1_path)
+        shopsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "shop_screen_core.h"))   # F209: the buy screens' event, signal and one-second lines
         probesrc = read_text(probe_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -18994,6 +19100,31 @@ def self_test_health():
         if fmts[key] is None:
             raise AssertionError("crisp_reticle.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
+
+    def RS(needle, *vals):
+        """F209's lines (formatEvent, formatSignal, formatForgotten, formatSecond and the cap's notes in shop_screen_core.h), from their own format literals."""
+        key = "shop:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(shopsrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("shop_screen_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RH(needle, *vals):
+        """F209's hook lines (native_on_foot_hooks.cpp tryHook: armed, stood down), from their own format literals."""
+        key = "hooks:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(hooks_src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_hooks.cpp has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RHT(needle):
+        """The text of a plain literal in native_on_foot_hooks.cpp (the shop hooks' role and consequence sentences)."""
+        text = health_c_format(hooks_src, needle)
+        if text is None:
+            raise AssertionError("native_on_foot_hooks.cpp has no text holding %r: the --health rule that reads it is out of date" % needle)
+        return text
 
     def RPROBE(needle, *vals):
         """The pixel probe's closing line (pixel_probe.cpp closeProbedFrame), which the S0 census rule reads (it carries no tag)."""
@@ -21208,7 +21339,7 @@ def self_test_health():
 
         # ---- camera away (F107): the game's camera away from the commander ----
         F107 = "camera away (F107)"
-        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, 3.0, 2.0, "")
+        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, "over", 3.0, "", "distance test", 2.0, "")
         AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0, 2.0, 0, 0)
         AWAY_END_FLAPS = R("native on foot camera away (F107): the episode ended", 18.4, 2, 1620, 710.5, 710.6, 0, 2.0, 640, 0)
         AWAY_END_REJOIN = R("native on foot camera away (F107): the episode ended", 11.2, 3, 980, 3.6, 3.7, 0, 4.0, 3, 2)
@@ -21227,6 +21358,56 @@ def self_test_health():
         SHOP_FLAP_END = R("native on foot camera away (F107): the episode ended", 0.0, 4, 1, 710.5, 710.5, 0, 1.0, 0, 0)
         check("F208 away: a build before F208 ended an episode on every return: hundreds of 0.0 s episodes are PARTIAL", [neck()] + [AWAY_LEFT, SHOP_FLAP_END] * 30 + [neck()], 0, [("PARTIAL", F107)],
               has=["30 of 30 episodes lasted under 0.2 s", "the view pumped"], lacks=["UNPARSED"])
+
+        # ---- the Pioneer Supplies buy screens (F209): the game's own open flag, and F107's reason ----
+        S209 = "shop screens (F209)"
+        TAG209 = "shop screens (F209):"
+        AWAY_LEFT_SHOP = R("native on foot camera away (F107): the game's camera left", 1, 1.2, "within", 3.0, ", but a buy screen is open", "shop screen", 2.0, "")
+        AWAY_LEFT_BOTH = R("native on foot camera away (F107): the game's camera left", 2, 3.7, "over", 3.0, ", and a buy screen is open", "shop screen and the distance test", 2.0, "")
+        AWAY_END_SHOP = R("native on foot camera away (F107): the episode ended", 12.0, 1, 540, 1.2, 1.3, 0, 2.0, 0, 0, 540, 0)
+        AWAY_LEFT_3M7 = R("native on foot camera away (F107): the game's camera left", 1, 3.7, "over", 3.0, "", "distance test", 2.0, "")
+        AWAY_END_3M7 = R("native on foot camera away (F107): the episode ended", 14.0, 1, 600, 3.6, 3.7, 0, 2.0, 4, 0, 0, 600)
+        SHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Show", 0, 1, 0x1A2B3C4D, 7)
+        CLOSE209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Close", 1, 0, 0x1A2B3C4D, 7)
+        WSHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "WeaponsVendorInteraction", "Show", 0, 1, 0x2B3C4D5E, 7)
+        BADSHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Show", 0, 0, 0x1A2B3C4D, 7)
+        ON209 = RS("the shop signal is %s (suit", TAG209, "ON: F107 holds the camera away", "open", "closed", "not running", 1)
+        OFF209 = RS("the shop signal is %s (suit", TAG209, "OFF", "closed", "closed", "not running", 2)
+        STATE209 = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "OnFoot", "Suit Vendor", 7)
+        KSTART209 = RS(": +0x1F8 %d -> %d (this", TAG209, "ArmouryVendorActivity", "started", 0, 1, 0x3C4D5E6F, 7)
+        KSTOP209 = RS(": +0x1F8 %d -> %d (this", TAG209, "ArmouryVendorActivity", "stopped", 1, 0, 0x3C4D5E6F, 7)
+        SEC209 = RS("1 s: suit +0x79 %s", TAG209, "1", "none", "none", "Suit Vendor", "on", "away (episode 1, 90 calls refused, 90 with a buy screen open)")
+        FORGOT209 = RS("is %s (vtable 0x%llX", TAG209, "SuitVendorInteraction", 0x1A2B3C4D, "forgotten: its vtable is no longer the class's", 0x7FF600001234, 0x7FF600005D20)
+        LOST209 = RH("shop event(s) were not recorded", TAG209, 3)
+        CAPPED209 = RH("event lines in the last 10 s were not written", TAG209, 12, 40)
+        HOOK_DOWN209 = RH("hook stood down: %s. %s", "avatar hooks:", "shop-show", "the game build differs (the PE timestamp or image size is not build 334925's); EliteDangerous64.exe+0x9C3960 was not touched",
+                          RHT("none of the five shop screen hooks (F209) is placed"))
+        HOOK_UP209 = RH("hook armed: EliteDangerous64.exe+0x%llX", "avatar hooks:", "shop-show", 0x9C3960, "UI interaction base Show (sets the open byte +0x79)", 0x7FF600001000, 6, 14, 14, 0x7FF700000000,
+                        RHT("the Pioneer Supplies buy screens' flag (F209)"))
+        check("F209: a suit buy screen opened and closed, F107 held the camera away by the shop screen, and both say so", [neck(), HOOK_UP209, STATE209, SHOW209, ON209, AWAY_LEFT_SHOP, SEC209, SEC209,
+              CLOSE209, OFF209, AWAY_END_SHOP, neck()], 0, [("OK", S209), ("OK", F107)],
+              has=["hooks: 1 armed", "1 Show / 1 Close (SuitVendorInteraction 1)", "the signal on 1, off 1", "1 state change(s), last Suit Vendor", "2 one-second line(s)",
+                   "1 episodes (by the shop screen 1) (12.0 s, 540 calls refused, the camera 1.2-1.3 m from the neck, 540 calls with a buy screen open)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F209: the weapon buy screen and the armoury kiosk are counted by class", [neck(), KSTART209, WSHOW209, ON209, AWAY_LEFT_SHOP, OFF209, AWAY_END_SHOP, KSTOP209, neck()], 0,
+              [("OK", S209)], has=["1 Show / 0 Close (WeaponsVendorInteraction 1)", "kiosk 1 start / 1 stop"], lacks=["UNPARSED"])
+        check("F209: the shop signal went on and F107 logged no episode by the shop screen: the view did not change", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 3,
+              [("NEVER APPLIED", S209)], has=["went on 1 time(s) but F107 logged no episode by the shop screen: the view did not change"], lacks=["UNPARSED"])
+        check("F209: a shop-sized distance episode with the shop signal beside it is not flagged", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_LEFT_BOTH, AWAY_END_3M7, CLOSE209, OFF209, neck()], 0,
+              [("OK", S209), ("OK", F107)], has=["(by the distance test 1, by the shop screen 1)"], lacks=["no shop signal in the log"])
+        check("F209: a distance episode at a showroom's distance with no shop signal is PARTIAL (the flag did not see that camera)", [neck(), AWAY_LEFT_3M7, AWAY_END_3M7, neck()], 0,
+              [("PARTIAL", F107)], has=["1 episode(s) by the distance test with the camera 3.7-3.7 m from the neck, a showroom's distance, and no shop signal in the log beside it",
+                                          "the screen is not the suit or the weapon buy screen, or the hooks never ran"], lacks=["UNPARSED"])
+        check("F209: the same episode with the hooks stood down names them", [neck(), HOOK_DOWN209, AWAY_LEFT_3M7, AWAY_END_3M7, neck()], 0, [("PARTIAL", F107), ("PARTIAL", S209)],
+              has=["the shop hooks stood down: shop-show", "every shop hook stood down: F107 holds a showroom camera by its distance test alone"], lacks=["UNPARSED"])
+        check("F209: the carrier management screen (3367 m) is not a showroom's distance", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)], lacks=["no shop signal", "UNPARSED"])
+        check("F209: a signal that did not hold on its object, events the hooks lost and lines the cap dropped are PARTIAL", [neck(), SHOW209, ON209, AWAY_LEFT_SHOP, FORGOT209, LOST209, CAPPED209,
+              OFF209, AWAY_END_SHOP, neck()], 0, [("PARTIAL", S209)],
+              has=["1 remembered object(s) forgotten", "3 shop event(s) were not recorded", "12 event line(s) were not written"], lacks=["UNPARSED"])
+        check("F209: a Show that left the byte not set, and a signal that never went on, are PARTIAL", [neck(), BADSHOW209, neck()], 0, [("PARTIAL", S209)],
+              has=["1 Show(s) left the byte +0x79 not set (read 0)"], lacks=["UNPARSED"])
+        check("F209: a signal that went on more often than it went off may have stuck", [neck(), SHOW209, ON209, AWAY_LEFT_SHOP, OFF209, ON209, ON209, AWAY_END_SHOP, neck()], 0, [("PARTIAL", S209)],
+              has=["the signal went on 3 times and off 1: it may have stuck"], lacks=["UNPARSED"])
+        check("F209: a line that drifted from its pattern is unparsed", [neck(), "shop screens (F209): the buy screen is somewhere else"], 4, [("UNPARSED", S209)])
 
         # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
         B115 = "boarding reset (F115)"
