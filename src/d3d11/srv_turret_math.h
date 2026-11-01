@@ -428,7 +428,10 @@ inline bool radarCorrectionWorld(const float uTrue[3], const float A[16], float 
 inline void radarDeltaInEye(const float rows[12], const float deltaW[3], float out[3]) {
     for (int k = 0; k < 3; ++k) out[k] = rows[4 * k] * deltaW[0] + rows[4 * k + 1] * deltaW[1] + rows[4 * k + 2] * deltaW[2];
 }
-inline constexpr double kCorrectionMaxM = 0.10;   // a correction larger than this (a view-off frame, a fallback add) leaves the draw to the game
+// A correction larger than kCorrectionMaxM leaves the draw to the game: a sanity bound only, since every draw left to the game pops (flight da716942: a 10 cm cap left 4 to 12 draws a
+// window). One larger than kCorrectionLargeM is applied and counted as large.
+inline constexpr double kCorrectionMaxM = 0.50;
+inline constexpr double kCorrectionLargeM = 0.10;
 // THE RESIDUAL (the instrument): at each camera write, the true aim (that camera with its own pose, in the anchor's axes of its frame) minus the aim the setter call it shows used. Lagging
 // when it has the sign of the turret's rate, leading when the opposite; with the rate above kResidualMinRateDegPerFrame its quotient by the rate a frame is the latency left, in frames.
 inline constexpr double kResidualMinRateDegPerFrame = 0.5;

@@ -452,10 +452,10 @@ static bool wiredAnchorCpuRows(const std::string& vscreen, const std::string& mo
 }
 // The draw-time correction (srv_turret.cpp radarCorrectionBegin): reached from srvTurretHudBegin for the yielded families only; family 7 alone is moved, and only on a t4 a radar writer
 // drew into; family 8 never (counted when on a radar target); the translation alone with the game's own depth; delta is paired with the call the frame's camera write shows, capped at
-// 10 cm, and put in each eye's space with that draw's own camera rows before the bind; the writers are recorded from vscreen.cpp's draw path.
+// 0.5 m, and put in each eye's space with that draw's own camera rows before the bind; the writers are recorded from vscreen.cpp's draw path.
 static bool wiredCorrection(const std::string& vscreen, const std::string& module) {
     const size_t npos = std::string::npos;
-    const size_t watch = vscreen.find("if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));");
+    const size_t watch = vscreen.find("if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs), count, instances);");
     const size_t fn = module.find("bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
     const size_t fam = found(fn) ? module.find("if (family != 7) {", fn) : npos;
     const size_t fam8 = found(fam) ? module.find("if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n        return false;\n    }", fam) : npos;
@@ -473,9 +473,32 @@ static bool wiredCorrection(const std::string& vscreen, const std::string& modul
     // this frame's writers only move a billboard; the previous frame's are counted, never matched
     const size_t strict = found(t4) ? module.find("const int kind = res ? kindOf(g_writers, res) : 0;", t4) : npos;
     if (!found(strict) || found(module.find("&g_writersPrev}")) || found(module.find("kindOf(g_writersPrev, res) == 1"))) return false;
-    const size_t writerFn = module.find("void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs) {");
+    const size_t writerFn = module.find("void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances) {");
     const size_t icon256 = found(writerFn) ? module.find("td.Width == 256 && td.Height == 256", writerFn) : npos;
     return found(watch) && found(bound) && found(capped) && found(t4) && found(icon256) && found(module.find("constexpr uint64_t kRadarIconVs = 0x5B0068AF5630F96Bull;"));
+}
+// The ghost fix (flight da716942) and the counters: in radarCorrectionBegin the hologram source instrument runs first (it records the game's t1), a disc and an icon are moved at most
+// once an eye a frame, and t1 is swapped for the far depth only after the bind, on the moved path (the function is called nowhere else); srvTurretHudEnd puts the game's t1 back; the far
+// texture is made at the game's t1 size, read from its view; the 0.5 m bound leaves garbage to the game and over 10 cm is counted as large.
+static bool wiredGhost(const std::string& module) {
+    const size_t npos = std::string::npos;
+    const size_t fn = module.find("bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
+    const size_t holo = found(fn) ? module.find("if (family == kHoloFamilyA || family == kHoloFamilyB) holoCollect(ctx, family, eye, g_probe[eye][family].ordinal++);", fn) : npos;
+    const size_t kind = found(holo) ? module.find("const int kind = billboardKind(ctx, lastFrameOnly);", holo) : npos;
+    const size_t once = found(kind) ? module.find("if (g_movedAt[eye][kind - 1] == g_frame + 1u) return leave(kCorrExtra);", kind) : npos;
+    const size_t bound = found(once) ? module.find("g_binding.begin(ctx, g_gs[st::kSceneSignature], cbuf, st::directSetGs, &camera)", once) : npos;
+    const size_t swap = found(bound) ? module.find("    farDepthSwap(ctx);", bound) : npos;
+    const size_t marked = found(swap) ? module.find("g_movedAt[eye][kind - 1] = g_frame + 1u;", swap) : npos;
+    size_t calls = 0;
+    for (size_t at = module.find("farDepthSwap("); found(at); at = module.find("farDepthSwap(", at + 1)) ++calls;   // the definition and the one call
+    const size_t endFn = module.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
+    const size_t endClose = found(endFn) ? module.find("\n}\n", endFn) : npos;
+    const size_t restored = found(endFn) ? module.find("farDepthRestore(ctx);", endFn) : npos;
+    const size_t sized = module.find("ID3D11ShaderResourceView* farView = game && st::depthViewSize(game, w, h) ? g_farDepth.get(ctx, w, h, farDepthClear) : nullptr;");
+    const size_t raw = module.find("vScreenPSSetShaderResourcesRaw(ctx, 1, 1, &farView);");
+    const bool caps = found(module.find("if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;")) && found(module.find("if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);"));
+    return found(holo) && found(kind) && found(once) && found(bound) && found(swap) && found(marked) && calls == 2 && found(restored) && found(endClose) && restored < endClose && found(sized) &&
+           found(raw) && caps;
 }
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
@@ -682,7 +705,7 @@ static void wiringCases() {
     check(!wiredAnchorCpuRows(vscreen, replaced(module, "int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes, &writtenAt);", "int miss = 1;")), "control: the CPU path never tried (the GPU readback's lag) trips the pin");
     check(!wiredAnchorCpuRows(vscreen, replaced(module, "w->hostSeq = nativeTemporalFrameSequence();", "w->hostSeq = 0;")), "control: writes never stamped with their frame trip the pin");
     check(wiredCorrection(vscreen, module), "the draw-time correction: family 7 only and on a radar writer's target, family 8 never, the game's depth, delta from the call the frame's write shows, capped, per eye");
-    check(!wiredCorrection(replaced(vscreen, "if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));", ""), module),
+    check(!wiredCorrection(replaced(vscreen, "if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs), count, instances);", ""), module),
           "control: no writer watch (no billboard can match) trips the pin");
     check(!wiredCorrection(vscreen, replaced(module, "if (family != 7) {", "if (family == 9) {")), "control: a correction not kept to family 7 trips the pin");
     check(!wiredCorrection(vscreen, replaced(module, "        if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n        return false;\n", "        if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n")),
@@ -691,7 +714,19 @@ static void wiringCases() {
     check(!wiredCorrection(vscreen, replaced(module, "st::DepthMode::kGame)", "st::DepthMode::kFront)")), "control: a corrected draw that does not keep the game's depth trips the pin");
     check(!wiredCorrection(vscreen, replaced(module, "srvRadarAnchorShownCall(writtenAt, call)", "srvRadarAnchorShownCall(INT64_MAX, call)")),
           "control: delta paired with the newest call, not the one the frame's camera write shows, trips the pin");
-    check(!wiredCorrection(vscreen, replaced(module, "if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;", "(void)norm;")), "control: an uncapped correction trips the pin");    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;", "(void)norm;")), "control: an uncapped correction trips the pin");
+    check(wiredGhost(module), "the ghost fix: the holo source first, one disc and one icon an eye a frame, t1 swapped for the far depth only after the bind and put back in End, the far texture at the game's t1 size, the 0.5 m bound");
+    check(!wiredGhost(replaced(module, "    farDepthSwap(ctx);   // THE GHOST", "    // THE GHOST")), "control: a moved billboard that keeps the game's t1 (the ghost) trips the pin");
+    check(!wiredGhost(replaced(module, "    farDepthRestore(ctx);   // the game's t1", "    // the game's t1")), "control: the game's t1 never put back trips the pin");
+    check(!wiredGhost(replaced(module, "    if (family == kHoloFamilyA || family == kHoloFamilyB) holoCollect(ctx, family, eye, g_probe[eye][family].ordinal++);\n", "")),
+          "control: the holo source rounds stopped while the correction is on trip the pin");
+    check(!wiredGhost(replaced(replaced(module, "    farDepthSwap(ctx);   // THE GHOST", "    // THE GHOST"), "    if (lastFrameOnly) g_cc.lastFrameOnly", "    farDepthSwap(ctx);\n    if (lastFrameOnly) g_cc.lastFrameOnly")),
+          "control: t1 swapped before the bind (on a draw that may stay the game's own) trips the pin");
+    check(!wiredGhost(replaced(module, "if (g_movedAt[eye][kind - 1] == g_frame + 1u) return leave(kCorrExtra);", "(void)0;")), "control: more than one disc or icon an eye a frame moved trips the pin");
+    check(!wiredGhost(replaced(module, "st::depthViewSize(game, w, h) ? g_farDepth.get(ctx, w, h, farDepthClear)", "st::depthViewSize(game, w, h) ? g_farDepth.get(ctx, 2016, 2017, farDepthClear)")),
+          "control: a far texture not at the game's t1 size trips the pin");
+    check(!wiredGhost(replaced(module, "if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);", "(void)0;")), "control: large corrections never counted trip the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, ini, replaced(build, "\"src\\d3d11\\srv_radar_anchor.cpp\"", ""), audit), "control: the hook outside the compile list trips the pin");

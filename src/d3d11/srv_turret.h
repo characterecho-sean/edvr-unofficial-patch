@@ -78,7 +78,7 @@
 //   "srv turret hud holo quad: family=F eye=0 draw=K tangents=(l,r,dn,up) T=(x,y,z) | vI pre=(x,y,z,w) post=(x,y,w) uv=(u,v) ..."   eye 0's sampled near billboard (game clip w under 1 m): its
 //     vertices before and after the move and their UVs.
 //   "srv turret holo source: round R frame N F eye=E draw=K reads tI=ID WxH fmt N bind 0x.. [WATCHED] ..."   each 5559BD94 draw of the collecting frame: its pixel-shader inputs t0..t7; render and
-//     depth targets among t2..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
+//     depth targets among t1..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
 //   "srv turret holo writer: round R frame N vs=.. ps=.. draw K count N instances N topology T viewport (..) targets: rtvI=ID WxH fmt N [WATCHED] .. dsv=.."   each draw of the next frame with a
 //     watched texture bound as a render or depth target (the first 24 a round); "srv turret holo watch: round R frame N: W of D owner-context draws ..." sums it (W = 0: the picture is made
 //     some other way) and "srv turret holo watch: round R writer pairs vs/ps xN (#K ID) ..." counts every writer's shader pair.
@@ -101,7 +101,8 @@
 //     with the 10 s line while armed; "srv turret radar anchor: 10 s residual: ...; shown call before the write: mean .. min .. max .. ms; ..." beside it;
 //   "srv turret radar anchor: 10 s correction: N billboard draws moved (...) over F frames, |delta| ..., yaw ..., pitch ...; left to the game: ...; family 8 on a radar target k; writers:
 //     ..."   whenever the anchor yield was on in the window; "... correction first applied at frame F, eye E, disc|icon: delta ... cm ..." once; "... the setter runs on thread T, the
-//     camera writes on thread U" once;
+//     camera writes on thread U" once; "... a third 256x256 5B0068AF writer at frame F: draw count .., instances .., target .. WxH, viewport ..; a billboard's t4 matched|did not match that
+//     target that frame" once (the 10 s line also says t1 far/kept: the moved billboards' scene depth swapped for the far depth, srv_turret_hud_binding.h THE FAR DEPTH);
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once
@@ -135,7 +136,8 @@ extern std::atomic<bool> g_srvTurretRadarWritersOn;
 // yield is on (one relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the
 // frame, which a radar billboard's t4 is matched against (srv_turret.cpp radarCorrectionBegin).
 inline bool srvTurretRadarWritersOn() { return detail::g_srvTurretRadarWritersOn.load(std::memory_order_relaxed); }
-void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs);
+// count and instances: the draw's (the first 256x256 icon writer beyond two in a frame is said with them).
+void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances);
 
 // TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
 // vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in

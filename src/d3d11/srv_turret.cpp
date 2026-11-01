@@ -964,13 +964,13 @@ void noteState(ID3D11DeviceContext* ctx) {
 // pixel shader draws a PICTURE it reads at the billboard's own UV (the fill where t4 is under 1000, the outline from an edge filter over t4, the colours from an ID in t5, more from t6). That
 // picture is made earlier in the frame by another pass, from the game's own camera, so the moved billboard shows the disc as it looked from where it was (under the chin, cut by that
 // pass's near plane) at the moved place. This finds that pass. Every kHoloEveryMs, one frame's 5559BD94 draws (both pixel shaders, both eyes) say what they read at t0..t7, and the
-// render or depth targets among t2..t7 are watched (t0 is the exposure and t1 the scene's linear depth: the scene's own); in the next frame every owner-context draw with one of them bound
+// render or depth targets among t1..t7 are watched (t0 is the exposure; t1, the scene's linear depth, since the ghost of flight da716942); in the next frame every owner-context draw with one of them bound
 // as a render target or the depth target is a WRITER, and says its shaders, its draw, its targets and its first viewport. The vertex constants of the first billboards and writers (b0 rows
 // 0..15, b1 rows 270..279 -- the camera block the billboard reads: the view-projection columns 270..273, the camera 275, its right, up and forward 277..279 -- and b2 rows 0..15) are copied
 // to a staging buffer at the draw and logged when the GPU has them. A draw the game makes through an indirect or auto draw, a compute pass or a copy is not seen; zero writers says so.
 // Nothing here changes a draw.
 constexpr uint64_t kHoloEveryMs = 15000;
-constexpr uint32_t kHoloFirstWatchedSlot = 2, kHoloSlots = 8;
+constexpr uint32_t kHoloFirstWatchedSlot = 1, kHoloSlots = 8;   // t1 included since flight da716942: its writers are where the Scorpion's near footprint comes from
 constexpr uint32_t kHoloTexMax = 12, kHoloBillboardsMax = 6, kHoloWritersMax = 10, kHoloEntries = kHoloBillboardsMax + kHoloWritersMax;
 constexpr uint32_t kHoloBuffers = 3;
 constexpr uint32_t kHoloSlot[kHoloBuffers] = {0, 1, 2}, kHoloFirstRow[kHoloBuffers] = {0, 270, 0}, kHoloRows[kHoloBuffers] = {16, 10, 16};
@@ -1105,7 +1105,8 @@ void holoCopyConstants(ID3D11DeviceContext* ctx, HoloEntry& e, uint32_t index) {
     }
 }
 
-// srvTurretHudBegin, at each draw of a hologram billboard family while a round collects: what it reads at t0..t7; the render and depth targets among t2..t7 are watched in the next frame.
+// srvTurretHudBegin (and radarCorrectionBegin, before its t1 swap), at each draw of a hologram billboard family while a round collects: what it reads at t0..t7; the render and depth
+// targets among t1..t7 are watched in the next frame.
 void holoCollect(ID3D11DeviceContext* ctx, int family, int eye, uint32_t ordinal) {
     if (g_holo.phase != HoloWatch::Phase::kCollect || !ctx) return;
     ID3D11ShaderResourceView* srvs[kHoloSlots] = {};
@@ -1185,7 +1186,7 @@ void holoBoundary(ID3D11DeviceContext* ctx) {
             g_holo.lastMs = now;
             if (!g_holo.texN) {
                 Log::get().note("srv turret holo source: round %u: %s", g_holo.round,
-                                g_holo.billboards ? "no 5559BD94 draw of the frame read a render or depth target at t2..t7; nothing to watch" : "no 5559BD94 draw in the frame");
+                                g_holo.billboards ? "no 5559BD94 draw of the frame read a render or depth target at t1..t7; nothing to watch" : "no 5559BD94 draw in the frame");
                 g_holo.phase = g_holo.entryN ? HoloWatch::Phase::kRead : HoloWatch::Phase::kIdle;
                 g_holo.waited = 0;
             } else {
@@ -1793,17 +1794,21 @@ struct Writers {
 // This frame's writers move a billboard. The previous frame's only say, in the 10 s line, how often a billboard read a target a radar writer drew into last frame and none drew into
 // this frame: the game's hologram targets can change hands between frames (the holo rounds of flight 707c0ab5), so such a target may now hold a panel's picture and is never moved.
 Writers g_writers, g_writersPrev;
-std::atomic<uint64_t> g_cwDisc{0}, g_cwIcon{0}, g_cwAmbiguous{0};   // writer draws seen, and frames with two or more 256x256 icon writers
-enum CorrMiss : int { kCorrOk = 0, kCorrNoMatch, kCorrNoRows, kCorrNoCall, kCorrNoAnchor, kCorrOver, kCorrOther, kCorrMissCount };
+std::atomic<uint64_t> g_cwDisc{0}, g_cwIcon{0}, g_cwExtraFrames{0};   // writer draws seen, and frames with more than two 256x256 icon writers (two is normal: one an eye)
+// Why a radar billboard draw was left to the game (each is a pop, but for kCorrZero): kCorrOther's causes are split, so the 10 s line says which.
+enum CorrMiss : int {
+    kCorrOk = 0, kCorrNoMatch, kCorrNoRows, kCorrNoCall, kCorrNoAnchor, kCorrOver, kCorrExtra, kCorrZero, kCorrNotReady, kCorrNoEyeFrame, kCorrParams, kCorrTopology, kCorrNoGameCb,
+    kCorrBeginFailed, kCorrMissCount
+};
 struct CorrCounters {
-    std::atomic<uint64_t> moved[2]{}, disc{0}, icon{0}, frames{0}, deltaSumUm{0}, deltaMaxUm{0}, yawMaxMilli{0}, pitchMaxMilli{0}, family8{0}, lastFrameOnly{0};
+    std::atomic<uint64_t> moved[2]{}, disc{0}, icon{0}, frames{0}, deltaSumUm{0}, deltaMaxUm{0}, yawMaxMilli{0}, pitchMaxMilli{0}, family8{0}, lastFrameOnly{0}, large{0}, t1Far{0}, t1Kept{0};
     std::atomic<int64_t> yawSumMicro{0}, pitchSumMicro{0};
     std::atomic<uint64_t> left[kCorrMissCount]{};
 };
 CorrCounters g_cc;
 struct FrameCorrection {
     uint32_t frame = 0xFFFFFFFFu;
-    int reason = kCorrOther;
+    int reason = kCorrNoRows;
     float deltaW[3] = {};
     double yawDeg = 0.0, pitchDeg = 0.0, gapMs = 0.0;
     bool counted = false;
@@ -1811,9 +1816,35 @@ struct FrameCorrection {
 FrameCorrection g_corr;
 bool g_corrFirstSaid = false;
 int64_t g_qpcFreq = 0;
+uint32_t g_movedAt[2][2] = {};   // [eye][disc, icon]: g_frame + 1 of the frame a billboard of that kind was moved in that eye (one of each per eye per frame)
+// The first 256x256 icon writer beyond two in a frame, said once at the next frame (with whether a billboard's t4 matched its target that frame).
+struct ExtraWriter {
+    bool pending = false, said = false, matched = false, haveVp = false;
+    const void* target = nullptr;
+    uint32_t frame = 0;
+    UINT count = 0, instances = 0, w = 0, h = 0;
+    D3D11_VIEWPORT vp{};
+};
+ExtraWriter g_extraWriter;
+// The far depth a moved radar billboard reads at PS t1 (srv_turret_hud_binding.h THE FAR DEPTH), and the game's t1 held for srvTurretHudEnd.
+st::FarDepth g_farDepth;
+ID3D11ShaderResourceView* g_t1Game = nullptr;
+bool g_t1Swapped = false;
 
 void writersFrame() {
     if (g_writers.frame == g_frame) return;
+    if (g_extraWriter.pending && g_extraWriter.frame != g_frame) {
+        g_extraWriter.pending = false;
+        g_extraWriter.said = true;
+        char vp[96] = "none";
+        if (g_extraWriter.haveVp)
+            std::snprintf(vp, sizeof(vp), "(%.0f,%.0f %.0fx%.0f)", static_cast<double>(g_extraWriter.vp.TopLeftX), static_cast<double>(g_extraWriter.vp.TopLeftY),
+                          static_cast<double>(g_extraWriter.vp.Width), static_cast<double>(g_extraWriter.vp.Height));
+        Log::get().note("srv turret radar anchor: a third 256x256 5B0068AF writer at frame %u: draw count %u, instances %u, target %06X %ux%u, viewport %s; a billboard's t4 %s that target "
+                        "that frame",
+                        g_extraWriter.frame, g_extraWriter.count, g_extraWriter.instances, holoShortId(g_extraWriter.target), g_extraWriter.w, g_extraWriter.h, vp,
+                        g_extraWriter.matched ? "matched" : "did not match");
+    }
     g_writersPrev = g_writers.frame + 1 == g_frame ? g_writers : Writers{};
     g_writers = Writers{};
     g_writers.frame = g_frame;
@@ -1842,6 +1873,7 @@ int billboardKind(ID3D11DeviceContext* ctx, bool& lastFrameOnly) {
     ID3D11Resource* res = nullptr;
     guarded("srv.turret.corr.srvres", [&] { srv->GetResource(&res); });
     const int kind = res ? kindOf(g_writers, res) : 0;
+    if (res && g_extraWriter.pending && g_extraWriter.frame == g_frame && res == g_extraWriter.target) g_extraWriter.matched = true;
     lastFrameOnly = res && !kind && kindOf(g_writersPrev, res) != 0;
     st::release(res);
     st::release(srv);
@@ -1865,7 +1897,7 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
     float dStar[3];
     if (!st::radarCorrectionWorld(uTrue, call.A, call.sF, call.d, c.deltaW, dStar)) return kCorrNoAnchor;
     const double norm = std::sqrt(double(c.deltaW[0]) * c.deltaW[0] + double(c.deltaW[1]) * c.deltaW[1] + double(c.deltaW[2]) * c.deltaW[2]);
-    if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;
+    if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;   // a sanity bound (0.5 m): only garbage is left to the game, since every draw left to it pops
     const float want[3] = {dStar[0] / call.sF, dStar[1] / call.sF, dStar[2] / call.sF}, used[3] = {call.d[0] / call.sF, call.d[1] / call.sF, call.d[2] / call.sF};
     const st::Aim aw = st::aimOf(want), au = st::aimOf(used);
     c.yawDeg = st::wrapDeg(aw.yaw - au.yaw);
@@ -1879,9 +1911,40 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
     return kCorrOk;
 }
 
-// srvTurretHudBegin, at a draw of family 7 or 8 while the anchor yield is on (anchorLeaves): true when the draw is moved and bound (srvTurretHudEnd puts the game's stage back).
+// THE GHOST (flight da716942): a moved radar billboard reads the far depth at PS t1 instead of the game's scene depth, so its scene-depth discard does not cut the Scorpion-shaped near
+// footprint the game left in t1 at the unmoved place (srv_turret_hud_binding.h THE FAR DEPTH, which says the trade-off). Called only on the moved path, after the bind; srvTurretHudEnd
+// puts the game's t1 back (farDepthRestore). A game t1 that is not a 2D R32 view, or a far texture that cannot be made, is kept: the draw still moves, counted as "t1 kept". The swap goes
+// past the binding shadow's hook (vScreenPSSetShaderResourcesRaw), as the UI layer's own swaps do, so every issue of the scope (the layer's, the colourless re-issue) reads it.
+void farDepthClear(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const float colour[4]) { vScreenClearRenderTargetViewRaw(c, v, colour); }
+void farDepthSwap(ID3D11DeviceContext* ctx) {
+    ID3D11ShaderResourceView* game = nullptr;
+    guarded("srv.turret.far.get", [&] { ctx->PSGetShaderResources(1, 1, &game); });
+    UINT w = 0, h = 0;
+    ID3D11ShaderResourceView* farView = game && st::depthViewSize(game, w, h) ? g_farDepth.get(ctx, w, h, farDepthClear) : nullptr;
+    if (!farView) {
+        st::release(game);
+        g_cc.t1Kept.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    vScreenPSSetShaderResourcesRaw(ctx, 1, 1, &farView);
+    g_t1Game = game;   // the reference PSGetShaderResources took, held until the restore
+    g_t1Swapped = true;
+    g_cc.t1Far.fetch_add(1, std::memory_order_relaxed);
+}
+void farDepthRestore(ID3D11DeviceContext* ctx) {
+    if (!g_t1Swapped) return;
+    g_t1Swapped = false;
+    ID3D11ShaderResourceView* game = g_t1Game;
+    g_t1Game = nullptr;
+    if (ctx) vScreenPSSetShaderResourcesRaw(ctx, 1, 1, &game);
+    st::release(game);
+}
+
+// srvTurretHudBegin, at a draw of family 7 or 8 while the anchor yield is on (anchorLeaves): true when the draw is moved and bound (srvTurretHudEnd puts the game's stage and t1 back).
 bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (eye != 0 && eye != 1) return false;
+    // the hologram's source instrument keeps its rounds while the correction is on, and records the game's own t1 (before any substitution)
+    if (family == kHoloFamilyA || family == kHoloFamilyB) holoCollect(ctx, family, eye, g_probe[eye][family].ordinal++);
     bool lastFrameOnly = false;
     const int kind = billboardKind(ctx, lastFrameOnly);
     if (family != 7) {   // family 8 is never moved; one on a radar writer's target would contradict the model
@@ -1894,6 +1957,7 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     };
     if (lastFrameOnly) g_cc.lastFrameOnly.fetch_add(1, std::memory_order_relaxed);
     if (!kind) return leave(kCorrNoMatch);
+    if (g_movedAt[eye][kind - 1] == g_frame + 1u) return leave(kCorrExtra);   // one disc and one icon in each eye each frame
     if (g_corr.frame != g_frame) {
         g_corr = FrameCorrection{};
         g_corr.frame = g_frame;
@@ -1904,31 +1968,34 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (anchorDirCpuRows(ctx, nativeTemporalFrameSequence(), rows, nullptr, nullptr) != 0) return leave(kCorrNoRows);   // this draw's own camera rows, this host frame
     float dEye[3];
     st::radarDeltaInEye(rows, g_corr.deltaW, dEye);
-    if (dEye[0] == 0.0f && dEye[1] == 0.0f && dEye[2] == 0.0f) return leave(kCorrOther);
+    if (dEye[0] == 0.0f && dEye[1] == 0.0f && dEye[2] == 0.0f) return leave(kCorrZero);   // nothing to move: the game's own place is right (no pop)
     st::EyeFrame ef;
-    if (!drawEyeFrame(eye, ef)) return leave(kCorrOther);
+    if (!drawEyeFrame(eye, ef)) return leave(kCorrNoEyeFrame);
     for (int i = 0; i < 3; ++i) ef.tRadar[i] = dEye[i];
     // the translation alone (gap 0: every vertex moves by delta), and the game's own NDC depth (the hologram's scene-depth discard reads it), whatever fix.srv_turret_hud_depth says
     const st::TurretParams cparams = st::withDepth(st::translateParamsFor(ef, st::Group::kRadar), st::DepthMode::kGame);
-    if (!st::paramsUsable(cparams)) return leave(kCorrOther);
+    if (!st::paramsUsable(cparams)) return leave(kCorrParams);
     D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    if (!guarded("srv.turret.corr.topology", [&] { ctx->IAGetPrimitiveTopology(&topo); }) || !st::topologyCarried(static_cast<int>(topo))) return leave(kCorrOther);
-    if (g_binding.needsRestore() || g_scissor.owed() || !ensureGs(ctx, st::kSceneSignature)) return leave(kCorrOther);
+    if (!guarded("srv.turret.corr.topology", [&] { ctx->IAGetPrimitiveTopology(&topo); }) || !st::topologyCarried(static_cast<int>(topo))) return leave(kCorrTopology);
+    if (g_binding.needsRestore() || g_scissor.owed() || !ensureGs(ctx, st::kSceneSignature)) return leave(kCorrNotReady);
     ID3D11Buffer* const cbuf = g_constants[eye].get(ctx, cparams);
-    if (!cbuf) return leave(kCorrOther);
+    if (!cbuf) return leave(kCorrNotReady);
     st::ExtraCb camera;
-    if (!st::readGameCb(ctx, st::kGameCbSlot, camera)) return leave(kCorrOther);   // signature H's lighting position needs the draw's own camera rows at GS slot 1
-    if (g_binding.begin(ctx, g_gs[st::kSceneSignature], cbuf, st::directSetGs, &camera) != st::Binding::Begin::kBound) return leave(kCorrOther);
+    if (!st::readGameCb(ctx, st::kGameCbSlot, camera)) return leave(kCorrNoGameCb);   // signature H's lighting position needs the draw's own camera rows at GS slot 1
+    if (g_binding.begin(ctx, g_gs[st::kSceneSignature], cbuf, st::directSetGs, &camera) != st::Binding::Begin::kBound) return leave(kCorrBeginFailed);
     if (g_scissorOpen.load(std::memory_order_relaxed)) {   // the game's scissor rectangle is from the unmoved place, as for the other moved draws
         st::Scissor::Seen seen;
         if (g_scissor.open(ctx, seen, true) == st::Scissor::Open::kOpened) g_scissorOpened.fetch_add(1, std::memory_order_relaxed);
     }
+    farDepthSwap(ctx);   // THE GHOST: the moved billboard's scene-depth test reads the far depth
+    g_movedAt[eye][kind - 1] = g_frame + 1u;
     g_cc.moved[eye].fetch_add(1, std::memory_order_relaxed);
     (kind == 1 ? g_cc.disc : g_cc.icon).fetch_add(1, std::memory_order_relaxed);
     const double norm = std::sqrt(double(g_corr.deltaW[0]) * g_corr.deltaW[0] + double(g_corr.deltaW[1]) * g_corr.deltaW[1] + double(g_corr.deltaW[2]) * g_corr.deltaW[2]);
     if (!g_corr.counted) {   // the per-frame figures, once a frame
         g_corr.counted = true;
         g_cc.frames.fetch_add(1, std::memory_order_relaxed);
+        if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);
         const uint64_t um = static_cast<uint64_t>(norm * 1.0e6 + 0.5);
         g_cc.deltaSumUm.fetch_add(um, std::memory_order_relaxed);
         uint64_t cur = g_cc.deltaMaxUm.load(std::memory_order_relaxed);
@@ -1947,10 +2014,10 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!g_corrFirstSaid) {
         g_corrFirstSaid = true;
         Log::get().note("srv turret radar anchor: correction first applied at frame %u, eye %d, %s: delta (%.2f,%.2f,%.2f) cm in the world, (%.2f,%.2f,%.2f) cm in the eye; the shown call was "
-                        "%.2f ms before the camera write",
+                        "%.2f ms before the camera write; t1 %s",
                         g_frame, eye, kind == 1 ? "disc" : "icon", static_cast<double>(g_corr.deltaW[0]) * 100.0, static_cast<double>(g_corr.deltaW[1]) * 100.0,
                         static_cast<double>(g_corr.deltaW[2]) * 100.0, static_cast<double>(dEye[0]) * 100.0, static_cast<double>(dEye[1]) * 100.0, static_cast<double>(dEye[2]) * 100.0,
-                        g_corr.gapMs);
+                        g_corr.gapMs, g_t1Swapped ? "is the far depth" : "kept (the game's is not a 2D R32 view, or the far depth could not be made)");
     }
     return true;
 }
@@ -1959,7 +2026,8 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
 // either way. No line at all means this code never ran.
 void correctionWindow(bool yieldSeen) {
     struct Base {
-        uint64_t moved0 = 0, moved1 = 0, disc = 0, icon = 0, frames = 0, deltaSumUm = 0, family8 = 0, lastFrameOnly = 0, cwDisc = 0, cwIcon = 0, cwAmbiguous = 0, left[kCorrMissCount] = {};
+        uint64_t moved0 = 0, moved1 = 0, disc = 0, icon = 0, frames = 0, deltaSumUm = 0, family8 = 0, lastFrameOnly = 0, large = 0, t1Far = 0, t1Kept = 0, cwDisc = 0, cwIcon = 0,
+                 cwExtraFrames = 0, left[kCorrMissCount] = {};
         int64_t yawSumMicro = 0, pitchSumMicro = 0;
     };
     static Base b;
@@ -1972,9 +2040,12 @@ void correctionWindow(bool yieldSeen) {
     n.deltaSumUm = g_cc.deltaSumUm.load(std::memory_order_relaxed);
     n.family8 = g_cc.family8.load(std::memory_order_relaxed);
     n.lastFrameOnly = g_cc.lastFrameOnly.load(std::memory_order_relaxed);
+    n.large = g_cc.large.load(std::memory_order_relaxed);
+    n.t1Far = g_cc.t1Far.load(std::memory_order_relaxed);
+    n.t1Kept = g_cc.t1Kept.load(std::memory_order_relaxed);
     n.cwDisc = g_cwDisc.load(std::memory_order_relaxed);
     n.cwIcon = g_cwIcon.load(std::memory_order_relaxed);
-    n.cwAmbiguous = g_cwAmbiguous.load(std::memory_order_relaxed);
+    n.cwExtraFrames = g_cwExtraFrames.load(std::memory_order_relaxed);
     for (int i = 0; i < kCorrMissCount; ++i) n.left[i] = g_cc.left[i].load(std::memory_order_relaxed);
     n.yawSumMicro = g_cc.yawSumMicro.load(std::memory_order_relaxed);
     n.pitchSumMicro = g_cc.pitchSumMicro.load(std::memory_order_relaxed);
@@ -1983,19 +2054,22 @@ void correctionWindow(bool yieldSeen) {
     if (yieldSeen) {
         const uint64_t frames = n.frames - b.frames;
         const double perFrame = frames ? 1.0 / double(frames) : 0.0;
-        Log::get().note("srv turret radar anchor: 10 s correction: %llu billboard draws moved (eye 0 %llu, eye 1 %llu; disc %llu, icon %llu) over %llu frames, |delta| mean %.2f max %.2f cm, "
-                        "yaw mean %.3f max |%.3f| deg, pitch mean %.3f max |%.3f| deg; left to the game: no writer match %llu (of them on last frame's radar target %llu), no camera rows %llu, no shown call %llu, no anchor %llu, "
-                        "over 10 cm %llu, other %llu; family 8 on a radar target %llu; writers: 4EDE4BC9 %llu, 256x256 5B0068AF %llu (frames with two or more: %llu)",
+        const auto left = [&](int why) { return static_cast<unsigned long long>(n.left[why] - b.left[why]); };
+        Log::get().note("srv turret radar anchor: 10 s correction: %llu billboard draws moved (eye 0 %llu, eye 1 %llu; disc %llu, icon %llu) over %llu frames, |delta| mean %.2f max %.2f cm "
+                        "(large, over 10 cm: %llu frames), yaw mean %.3f max |%.3f| deg, pitch mean %.3f max |%.3f| deg; t1 far %llu, t1 kept %llu; left to the game: no writer match %llu "
+                        "(of them on last frame's radar target %llu), extra radar-target billboard %llu, no camera rows %llu, no shown call %llu, no anchor %llu, over 50 cm %llu, "
+                        "delta 0 %llu (no pop), not ready %llu, no eye frame %llu, params unusable %llu, topology %llu, no game cb %llu, binding begin failed %llu; family 8 on a radar "
+                        "target %llu; writers: 4EDE4BC9 %llu, 256x256 5B0068AF %llu (frames with more than two: %llu)",
                         static_cast<unsigned long long>((n.moved0 - b.moved0) + (n.moved1 - b.moved1)), static_cast<unsigned long long>(n.moved0 - b.moved0),
                         static_cast<unsigned long long>(n.moved1 - b.moved1), static_cast<unsigned long long>(n.disc - b.disc), static_cast<unsigned long long>(n.icon - b.icon),
                         static_cast<unsigned long long>(frames), double(n.deltaSumUm - b.deltaSumUm) * 1.0e-4 * perFrame, double(deltaMaxUm) * 1.0e-4,
-                        double(n.yawSumMicro - b.yawSumMicro) * 1.0e-6 * perFrame, double(yawMax) / 1000.0, double(n.pitchSumMicro - b.pitchSumMicro) * 1.0e-6 * perFrame,
-                        double(pitchMax) / 1000.0, static_cast<unsigned long long>(n.left[kCorrNoMatch] - b.left[kCorrNoMatch]),
-                        static_cast<unsigned long long>(n.lastFrameOnly - b.lastFrameOnly), static_cast<unsigned long long>(n.left[kCorrNoRows] - b.left[kCorrNoRows]), static_cast<unsigned long long>(n.left[kCorrNoCall] - b.left[kCorrNoCall]),
-                        static_cast<unsigned long long>(n.left[kCorrNoAnchor] - b.left[kCorrNoAnchor]), static_cast<unsigned long long>(n.left[kCorrOver] - b.left[kCorrOver]),
-                        static_cast<unsigned long long>(n.left[kCorrOther] - b.left[kCorrOther]), static_cast<unsigned long long>(n.family8 - b.family8),
+                        static_cast<unsigned long long>(n.large - b.large), double(n.yawSumMicro - b.yawSumMicro) * 1.0e-6 * perFrame, double(yawMax) / 1000.0,
+                        double(n.pitchSumMicro - b.pitchSumMicro) * 1.0e-6 * perFrame, double(pitchMax) / 1000.0, static_cast<unsigned long long>(n.t1Far - b.t1Far),
+                        static_cast<unsigned long long>(n.t1Kept - b.t1Kept), left(kCorrNoMatch), static_cast<unsigned long long>(n.lastFrameOnly - b.lastFrameOnly), left(kCorrExtra),
+                        left(kCorrNoRows), left(kCorrNoCall), left(kCorrNoAnchor), left(kCorrOver), left(kCorrZero), left(kCorrNotReady), left(kCorrNoEyeFrame), left(kCorrParams),
+                        left(kCorrTopology), left(kCorrNoGameCb), left(kCorrBeginFailed), static_cast<unsigned long long>(n.family8 - b.family8),
                         static_cast<unsigned long long>(n.cwDisc - b.cwDisc), static_cast<unsigned long long>(n.cwIcon - b.cwIcon),
-                        static_cast<unsigned long long>(n.cwAmbiguous - b.cwAmbiguous));
+                        static_cast<unsigned long long>(n.cwExtraFrames - b.cwExtraFrames));
     }
     b = n;
 }
@@ -2025,7 +2099,7 @@ void srvTurretNoteCameraWrite(const void* res, const void* data, uint32_t bytes)
 
 // The radar's picture writers (vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor yield is on): the terrain schematic (vs 4EDE4BC9) and the Scorpion icon (vs
 // 5B0068AF into a 256x256 target) record their render targets for this frame, which the draw-time correction matches against a billboard's t4. Every reference taken is released.
-void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs) {
+void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances) {
     const bool disc = vs == kSchematicTerrainVs, icon = vs == kRadarIconVs;
     if (!ctx || (!disc && !icon)) return;
     writersFrame();
@@ -2047,7 +2121,21 @@ void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs) {
                 if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
             });
             if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D && td.Width == 256 && td.Height == 256) {
-                if (addWriter(g_writers.icon, g_writers.nIcon, res) && g_writers.nIcon == 2) g_cwAmbiguous.fetch_add(1, std::memory_order_relaxed);
+                if (addWriter(g_writers.icon, g_writers.nIcon, res) && g_writers.nIcon == 3) {   // two is normal (one an eye); a third is counted, and the first ever is said
+                    g_cwExtraFrames.fetch_add(1, std::memory_order_relaxed);
+                    if (!g_extraWriter.said && !g_extraWriter.pending) {
+                        g_extraWriter.pending = true;
+                        g_extraWriter.matched = false;
+                        g_extraWriter.target = res;
+                        g_extraWriter.frame = g_frame;
+                        g_extraWriter.count = count;
+                        g_extraWriter.instances = instances;
+                        g_extraWriter.w = td.Width;
+                        g_extraWriter.h = td.Height;
+                        UINT nvp = 1;
+                        g_extraWriter.haveVp = guarded("srv.turret.writers.vp", [&] { ctx->RSGetViewports(&nvp, &g_extraWriter.vp); }) && nvp >= 1;
+                    }
+                }
                 counted = true;
             }
         }
@@ -2376,6 +2464,7 @@ void srvTurretHudEnd(ID3D11DeviceContext* ctx) {
         g_restoreNoted = true;
         Log::get().note("srv turret hud: the game's geometry stage could not be put back after an issue; the frame boundary settles it and draws are refused (not-ready) until then.");
     }
+    farDepthRestore(ctx);   // the game's t1, when a moved radar billboard read the far depth (radarCorrectionBegin)
 }
 
 void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
@@ -2418,6 +2507,8 @@ void srvTurretShutdown() {
     g_writers = Writers{};
     g_writersPrev = Writers{};
     g_corr = FrameCorrection{};
+    farDepthRestore(nullptr);
+    g_farDepth.reset();
     g_anchorDirWanted.store(false, std::memory_order_relaxed);
     detail::g_srvTurretCameraRowsWanted.store(false, std::memory_order_relaxed);
     for (auto& w : g_camWrites) w = CamWrite{};

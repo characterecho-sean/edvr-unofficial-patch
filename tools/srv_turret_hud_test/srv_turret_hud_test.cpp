@@ -63,6 +63,7 @@
 #include "../../src/d3d11/srv_turret_hud_binding.h"
 #include "../../src/d3d11/srv_turret_hud_shader.h"
 #include "../../src/d3d11/srv_turret_math.h"
+#include "../../src/d3d11/ui_holo_remap.h"   // depthSource: the far depth must pass the crisp layer's rule
 #include "temporal_shader_bytecode.h"
 
 using Microsoft::WRL::ComPtr;
@@ -1773,6 +1774,7 @@ static void radarAnchorCases() {
         check(!st::radarCorrectionWorld(uTrueZ, skew16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, uneven16, sFc, dUsedC, dW, dS) &&
                   !st::radarCorrectionWorld(halfU, ident16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, ident16, 0.0f, dUsedC, dW, dS),
               "an anchor whose rows are not orthogonal or not of one length, a u that is not unit, or no offset: no correction (the draw is the game's own)");
+        check(st::kCorrectionMaxM == 0.50 && st::kCorrectionLargeM == 0.10, "the correction's bound is 0.5 m, a sanity bound (every draw left to the game pops); over 10 cm is applied and counted as large");
         // The eye conversion on a canted eye (10 deg about up, 3 deg about right): delta in the eye's axes, then signature H's mapping (l += R x + U y + F z) gives delta back.
         const double a10 = 10.0 / 57.29577951308232, a3 = 3.0 / 57.29577951308232;
         const double Rv[3] = {std::cos(a10), 0.0, -std::sin(a10)}, Fv0[3] = {std::sin(a10), 0.0, std::cos(a10)};
@@ -2243,6 +2245,64 @@ static void sceneBindingCases(ID3D11GeometryShader* gs, Fails& f) {
         g_ctx->GSSetConstantBuffers(st::kGsGameSlot, 1, theirs.GetAddressOf());
         f.expect(c.settle(g_ctx.Get()) && slotIs(st::kGsGameSlot, theirs.Get()), "settle with GS slot 1 rebound by the game leaves the game's own newer state");
     }
+    g_ctx->ClearState();
+}
+
+// The far depth (srv_turret_hud_binding.h THE FAR DEPTH, the Scorpion's ghost of flight da716942), on WARP: the game's t1 size read from its view, the texture made at exactly that size,
+// R32_FLOAT, one mip, one slice, one sample, SRV and RTV, cleared to 1e9 everywhere, accepted by the crisp layer's depth-source rule (ui_holo_remap.h depthSource), made once, and made
+// again for another size; a view that is not 2D R32 is not stood in for.
+static void farDepthCases() {
+    const UINT w = 2016, h = 2017;
+    D3D11_TEXTURE2D_DESC gd = st::farDepthTextureDesc(w, h);   // a stand-in for the game's t1: the same shape
+    ComPtr<ID3D11Texture2D> gameTex;
+    ck(g_dev->CreateTexture2D(&gd, nullptr, &gameTex), "the game's t1 stand-in");
+    ComPtr<ID3D11ShaderResourceView> gameSrv;
+    const D3D11_SHADER_RESOURCE_VIEW_DESC sd = st::farDepthSrvDesc();
+    ck(g_dev->CreateShaderResourceView(gameTex.Get(), &sd, &gameSrv), "the game's t1 view");
+    UINT gw = 0, gh = 0;
+    check(st::depthViewSize(gameSrv.Get(), gw, gh) && gw == w && gh == h, "the game's t1 size is read from its view's texture");
+    D3D11_TEXTURE2D_DESC hd = gd;
+    hd.Format = DXGI_FORMAT_R16_FLOAT;
+    ComPtr<ID3D11Texture2D> halfTex;
+    ck(g_dev->CreateTexture2D(&hd, nullptr, &halfTex), "an R16 texture");
+    ComPtr<ID3D11ShaderResourceView> halfSrv;
+    D3D11_SHADER_RESOURCE_VIEW_DESC hsd = sd;
+    hsd.Format = DXGI_FORMAT_R16_FLOAT;
+    ck(g_dev->CreateShaderResourceView(halfTex.Get(), &hsd, &halfSrv), "an R16 view");
+    check(!st::depthViewSize(halfSrv.Get(), gw, gh) && !st::depthViewSize(nullptr, gw, gh), "a view that is not 2D R32 (or none) is not stood in for: the game's t1 is kept");
+    st::FarDepth farDepth;
+    ID3D11ShaderResourceView* const v = farDepth.get(g_ctx.Get(), w, h);
+    check(v != nullptr && !farDepth.failed(), "the far depth is made");
+    if (!v) return;
+    ComPtr<ID3D11Resource> res;
+    v->GetResource(&res);
+    ComPtr<ID3D11Texture2D> tex;
+    res.As(&tex);
+    D3D11_TEXTURE2D_DESC td{};
+    if (tex) tex->GetDesc(&td);
+    check(tex && td.Width == w && td.Height == h && td.Format == DXGI_FORMAT_R32_FLOAT && td.MipLevels == 1 && td.ArraySize == 1 && td.SampleDesc.Count == 1 &&
+              td.BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET),
+          "the far depth is R32_FLOAT at exactly the game's t1 size, one mip, one slice, one sample, SRV and RTV");
+    check(edvr::ui_holo_remap::depthSource(v, w, h) && !edvr::ui_holo_remap::depthSource(v, w + 1, h), "the crisp layer's depth-source rule takes it (so the layer still takes the moved draw), at that size only");
+    D3D11_TEXTURE2D_DESC rd = td;
+    rd.Usage = D3D11_USAGE_STAGING;
+    rd.BindFlags = 0;
+    rd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;
+    ck(g_dev->CreateTexture2D(&rd, nullptr, &readback), "the far depth's readback");
+    g_ctx->CopyResource(readback.Get(), tex.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    ck(g_ctx->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &m), "map the far depth");
+    bool all = true;
+    for (UINT y = 0; y < h && all; y += 97)
+        for (UINT x = 0; x < w && all; x += 89) all = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + y * m.RowPitch)[x] == st::kFarDepth;
+    const float corner = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + (h - 1) * m.RowPitch)[w - 1];
+    g_ctx->Unmap(readback.Get(), 0);
+    check(all && corner == st::kFarDepth && st::kFarDepth >= 1.0e9f, "it is cleared to 1e9 everywhere: the billboard's discard (t1 more than 0.5 m nearer than the hologram) never fires");
+    check(farDepth.get(g_ctx.Get(), w, h) == v, "made once: the same view the next time");
+    ID3D11ShaderResourceView* const other = farDepth.get(g_ctx.Get(), 1008, 1009);
+    check(other != nullptr && edvr::ui_holo_remap::depthSource(other, 1008, 1009), "another size makes it again, at that size");
+    farDepth.reset();
     g_ctx->ClearState();
 }
 
@@ -2745,6 +2805,7 @@ int main(int argc, char** argv) {
         sceneBindingCases(gsOf[st::kSceneSignature].Get(), production);
         scissorCases(gsOf[0].Get(), production);
         copyRegisterCases();
+        farDepthCases();
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);

@@ -315,6 +315,119 @@ public:
     }
 };
 
+// THE FAR DEPTH (the Scorpion's ghost, flight da716942). The radar's picture billboard (ps EA02FAC2) loads the game's scene depth at PS t1 at its own screen position and discards a pixel
+// when t1 is more than 0.5 m nearer than the hologram. t1 holds a Scorpion-shaped near footprint where the game drew the icon, so a billboard the draw-time correction moved by delta was
+// cut where the footprint stayed behind: a hole in the disc's fill, one frame of turret motion away. A moved radar billboard reads this texture at t1 instead: R32_FLOAT, exactly the
+// game's t1 size, one mip, one slice, one sample, SRV and RTV (so the crisp layer's depth-source rule, ui_holo_remap.h depthSource, still takes the draw), cleared once to kFarDepth, so
+// the discard never fires. The trade-off: under the icon the disc's fill now draws too, where the stock footprint cut it (slightly darker inside the Scorpion). In the turret view no real
+// scene geometry can be 0.5 m nearer than the radar (about 0.45 m from the eye), so no scene occlusion is lost.
+inline constexpr float kFarDepth = 1.0e9f;
+inline D3D11_TEXTURE2D_DESC farDepthTextureDesc(UINT w, UINT h) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    return td;
+}
+inline D3D11_SHADER_RESOURCE_VIEW_DESC farDepthSrvDesc() {
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = DXGI_FORMAT_R32_FLOAT;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MostDetailedMip = 0;
+    sd.Texture2D.MipLevels = 1;
+    return sd;
+}
+// The game's t1 as something the far depth can stand in for: a 2D R32_FLOAT view of mip 0 of a texture; w and h receive that texture's size. False otherwise (the game's t1 is kept).
+inline bool depthViewSize(ID3D11ShaderResourceView* srv, UINT& w, UINT& h) {
+    w = h = 0;
+    if (!srv) return false;
+    bool ok = false;
+    guarded("srv.turret.far.view", [&] {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        srv->GetDesc(&sd);
+        if (sd.Format != DXGI_FORMAT_R32_FLOAT || sd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || sd.Texture2D.MostDetailedMip != 0) return;
+        ID3D11Resource* r = nullptr;
+        srv->GetResource(&r);
+        ID3D11Texture2D* t = nullptr;
+        if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+            D3D11_TEXTURE2D_DESC td{};
+            t->GetDesc(&td);
+            w = td.Width;
+            h = td.Height;
+            ok = w > 0 && h > 0;
+            t->Release();
+        }
+        if (r) r->Release();
+    });
+    return ok;
+}
+using ClearRtv = void (*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const float[4]);
+inline void directClearRtv(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const float colour[4]) { c->ClearRenderTargetView(v, colour); }
+// One far texture for (the context's device, w x h), made and cleared the first time it is asked for; a different device or size makes it again. A failed make is not retried for the
+// same device and size: get() answers null and the caller keeps the game's t1.
+class FarDepth {
+    ID3D11Device* device_ = nullptr;   // identity only: the texture holds its device alive
+    UINT w_ = 0, h_ = 0;
+    ID3D11Texture2D* tex_ = nullptr;
+    ID3D11ShaderResourceView* srv_ = nullptr;
+    bool failed_ = false;
+
+public:
+    FarDepth() = default;
+    FarDepth(const FarDepth&) = delete;
+    FarDepth& operator=(const FarDepth&) = delete;
+    ~FarDepth() { reset(); }
+
+    ID3D11ShaderResourceView* get(ID3D11DeviceContext* ctx, UINT w, UINT h, ClearRtv clear = directClearRtv) {
+        if (!ctx || !w || !h) return nullptr;
+        ID3D11Device* d = nullptr;
+        if (!guarded("srv.turret.far.device", [&] { ctx->GetDevice(&d); }) || !d) {
+            release(d);
+            return nullptr;
+        }
+        if (d != device_ || w != w_ || h != h_) {
+            reset();
+            device_ = d;
+            w_ = w;
+            h_ = h;
+        }
+        if (!srv_ && !failed_) {
+            const D3D11_TEXTURE2D_DESC td = farDepthTextureDesc(w, h);
+            const D3D11_SHADER_RESOURCE_VIEW_DESC sd = farDepthSrvDesc();
+            ID3D11RenderTargetView* rtv = nullptr;
+            const bool ran = guarded("srv.turret.far.make", [&] {
+                if (FAILED(d->CreateTexture2D(&td, nullptr, &tex_)) || !tex_) return;
+                if (FAILED(d->CreateShaderResourceView(tex_, &sd, &srv_)) || !srv_) return;
+                if (FAILED(d->CreateRenderTargetView(tex_, nullptr, &rtv)) || !rtv) return;
+                const float farValue[4] = {kFarDepth, kFarDepth, kFarDepth, kFarDepth};   // not "far": windows.h defines far (and near) as empty macros
+                clear(ctx, rtv, farValue);
+            });
+            const bool made = ran && tex_ && srv_ && rtv;
+            release(rtv);
+            if (!made) {
+                release(srv_);
+                release(tex_);
+                failed_ = true;
+            }
+        }
+        release(d);
+        return srv_;
+    }
+    bool failed() const { return failed_; }
+    void reset() {
+        release(srv_);
+        release(tex_);
+        device_ = nullptr;
+        w_ = h_ = 0;
+        failed_ = false;
+    }
+};
+
 using SetGs = void (*)(ID3D11DeviceContext*, ID3D11GeometryShader*, ID3D11ClassInstance* const*, uint32_t);
 inline void directSetGs(ID3D11DeviceContext* c, ID3D11GeometryShader* gs, ID3D11ClassInstance* const* classes, uint32_t n) {
     c->GSSetShader(gs, classes, n);

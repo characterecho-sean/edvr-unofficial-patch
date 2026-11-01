@@ -17,12 +17,12 @@
   (`--target steam --scope both --xess`).
 - **The radar fix:** a hook on the schematic's placement setter
   (0x38563A0, build 334925 only) adds radar forward along the turret's
-  seated forward, in the anchor's axes, to the translation the game sets
-  (about 1.96 m up), with the camera rows read on the CPU and paired by
-  frame. FLOWN (c8d79c6a): the timing is right but +-1 to 2 deg of jitter is
-  left. BUILT, NOT FLOWN: no lead; the radar's picture billboards corrected
-  at draw time from the frame's own camera (journal, "a correction at draw
-  time").
+  seated forward, in the anchor's axes, to the translation the game sets;
+  the radar's picture billboards are corrected at draw time from the
+  frame's own camera. FLOWN (da716942): it runs, but a Scorpion ghost trails
+  the icon: the billboard's scene-depth test cuts a near footprint the game
+  left in t1. BUILT, NOT FLOWN: a moved billboard reads a far depth at t1
+  (journal, "the Scorpion's ghost").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -53,9 +53,9 @@
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
   radar forward = 65 minus camera back. Fast and slow turret sweeps, then
-  drive forward and turn the vehicle; watch for jitter and lag. Read `--grep
-  "srv turret radar anchor: 10 s correction"`: draws moved in both eyes, few
-  left to the game, and |delta| about a turret frame's motion.
+  drive forward and turn the vehicle; watch for the ghost, jitter and pops.
+  Read `--grep "srv turret radar anchor: 10 s correction"`: t1 far equal to
+  the draws moved, few left to the game; and the holo rounds' t1 writers.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1270,6 +1270,112 @@ The log lines:
 - The 10 s residual line drops `lead now` and gains `shown call before the
   write: mean G min g max h ms`. The direction line drops `led by` and keeps
   the age, the frames, the source and the aim.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back,
+`fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive
+forward and turn the vehicle.
+
+### 2026-11-01: the correction flown (flight da716942); the Scorpion's ghost is the disc's depth test
+
+Steam, `edvr_gfx_20261101_044947.log`, build matches, dump
+`eye_045244947001` (mid-rotation). Sean: the rotation is still not
+perfectly smooth, and a shadow or ghost of the Scorpion trails the real
+one while the turret turns.
+- **The correction runs.** 4 billboard draws moved a frame (disc and icon,
+  both eyes), |delta| mean 0.6 to 1.1 cm, max 2.7 to 5.7 cm. The residual
+  now lags a steady 1.00 frame (no lead), and the shown call comes about
+  6.5 ms before the camera write. "No writer match" is 2 a frame: the
+  512x512 single-target billboard, the SYSTEMS panel's Scorpion (writer
+  #6). "Over 10 cm" 4 to 12 and "other" 4 to 12 per 10 s were left to the
+  game.
+- **Every issue of a moved draw is moved.** The unmoved-draw counts are the
+  group-off draws and their one re-issue each (1806 and 1806 in a window,
+  equal to "no writer match"); no issue of a moved billboard went out
+  unmoved. The hologram depth pass captured nothing at the radar
+  (`HoloContribution` and `HoloCoverage` are 0 there in the dump).
+- **What the ghost is.** Cropped from both eyes' finals: the orange
+  Scorpion sits where it should, and 70 to 85 px to the right is a
+  Scorpion-shaped region where the disc's dark fill is missing. There the
+  final equals the pre-UI image to the bit (patches 166.8/162.4/162.6 and
+  53.3/50.7/50.7 in both), so the disc's draw left nothing at all: no fill
+  and no rim. Its edge steps are 2 native px, the game's 2016 pixels, not
+  the layer's 4032 and not either picture's texels.
+- **Reading.** The only per-game-pixel decision in the billboard's pixel
+  shader (EA02FAC2) is its scene-depth test: it loads t1 (the game's
+  2016x2017 R32 depth) at its own screen position and discards when t1 is
+  more than 0.5 m nearer than the hologram. A hole in the picture (t4) would
+  move with the billboard and carry the rim, and this one has neither. So
+  t1 holds a Scorpion-shaped near footprint at the place the game drew the
+  icon, in screen space. Before the correction the icon covered it; moving
+  both billboards by delta leaves it behind, one frame of turret motion
+  away. What writes the footprint into t1 is not yet known (the scene
+  depth in the dump has no Scorpion). Unconfirmed until it flies.
+
+**The build.**
+- **The ghost fix: a far depth at t1.** A moved radar billboard (family 7
+  with a t4 match, the draw `radarCorrectionBegin` binds) reads EDVR's own
+  far depth at PS t1 for its scope instead of the game's scene depth.
+  - The texture is R32_FLOAT at exactly the game's t1 size (read from its
+    view), one mip, one slice, one sample, SRV and RTV. It is cleared once
+    to 1e9, so the discard (t1 more than 0.5 m nearer than the hologram)
+    never fires. One is made per device and size, the first time it is
+    needed (`srv_turret_hud_binding.h` `FarDepth`).
+  - It passes the crisp layer's depth-source rule (`ui_holo_remap.h`
+    `depthSource`, which the rig runs on it on WARP), so the layer still
+    takes the draw.
+  - The game's t1 is read and held at the bind, ours goes in past the
+    binding shadow's hook (as the UI layer's own swaps do), and
+    `srvTurretHudEnd` puts the game's back. Every issue in the scope sees
+    ours. A game t1 that is not a 2D R32 view, or a far texture that cannot
+    be made: the draw still moves, with the game's t1, counted as "t1 kept".
+  - Never for family 8, the unmatched 512x512 billboard, or a draw that is
+    not moved.
+  - The trade-off: under the icon the disc's fill now draws too, where the
+    stock footprint cut it, so it is slightly darker inside the Scorpion. In
+    the turret view no real scene geometry can be 0.5 m nearer than the
+    radar (about 0.45 m from the eye), so no scene occlusion is lost.
+- **The pops.**
+  - The correction is applied up to 0.5 m, a sanity bound: every draw left
+    to the game pops. Frames over 10 cm are applied and counted as "large";
+    over 50 cm is left to the game.
+  - "other" is split into its causes: delta 0 (no pop), not ready (a
+    binding or scissor restore owed, the shader, or the constants), no eye
+    frame, params unusable, topology, no game cb, binding begin failed.
+  - At most one disc and one icon are moved in each eye each frame; a
+    further match is left to the game as "extra radar-target billboard".
+- **The writer counter.** Two 256x256 5B0068AF writers a frame are normal
+  (one an eye). The line now counts frames with more than two, and the
+  first such extra writer is said once at the next frame: draw count,
+  instances, target and size, viewport, and whether a billboard's t4
+  matched that target that frame.
+- **The holo source rounds** keep running while the correction is on
+  (`holoCollect` is called from `radarCorrectionBegin`, before the t1 swap,
+  so it records the game's t1). The watched range is t1..t7 (was t2..t7),
+  so the next round's writer lines name t1's writers, which is where the
+  footprint comes from.
+
+Unconfirmed until it flies: that the ghost goes with the far depth; how much
+darker the fill under the Scorpion looks; which draws write the footprint
+into t1 (the holo rounds' t1 writer lines).
+
+The log lines:
+- the 10 s correction line now reads `srv turret radar anchor: 10 s
+  correction: N billboard draws moved (eye 0 a, eye 1 b; disc c, icon d)
+  over F frames, |delta| mean X max Y cm (large, over 10 cm: L frames), yaw
+  mean P max |Q| deg, pitch mean R max |S| deg; t1 far T, t1 kept K; left to
+  the game: no writer match m (of them on last frame's radar target l),
+  extra radar-target billboard x, no camera rows r, no shown call s, no
+  anchor n, over 50 cm o, delta 0 z (no pop), not ready a, no eye frame b,
+  params unusable c, topology t, no game cb g, binding begin failed f;
+  family 8 on a radar target k; writers: 4EDE4BC9 w, 256x256 5B0068AF v
+  (frames with more than two: e)`;
+- `srv turret radar anchor: a third 256x256 5B0068AF writer at frame F: draw
+  count N, instances I, target ID WxH, viewport (x,y WxH); a billboard's t4
+  matched|did not match that target that frame`, once;
+- the first-application line ends `; t1 is the far depth` or `; t1 kept
+  (...)`;
+- `srv turret holo source: round R: no 5559BD94 draw of the frame read a
+  render or depth target at t1..t7; nothing to watch` (was t2..t7).
 
 To fly: camera back 0 to 35, radar forward = 65 minus camera back,
 `fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive
