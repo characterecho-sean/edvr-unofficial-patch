@@ -19,10 +19,11 @@
   (0x38563A0, build 334925 only) adds radar forward along the turret's
   seated forward, in the anchor's axes, to the translation the game sets;
   the radar's picture billboards are corrected at draw time from the
-  frame's own camera. FLOWN (da716942): it runs, but a Scorpion ghost trails
-  the icon: the billboard's scene-depth test cuts a near footprint the game
-  left in t1. BUILT, NOT FLOWN: a moved billboard reads a far depth at t1
-  (journal, "the Scorpion's ghost").
+  frame's own camera. FLOWN (e64866f9): a Scorpion-shaped hole in the disc's
+  picture trails the icon; a far depth at t1 changed nothing (ruled out).
+  BUILT, NOT FLOWN: each billboard vertex moves by delta * w / z_c, so both
+  quads shift on screen as their content at z_c (V0's schematic origin)
+  would (journal, "the hole is in the disc's own picture").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -53,9 +54,10 @@
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
   radar forward = 65 minus camera back. Fast and slow turret sweeps, then
-  drive forward and turn the vehicle; watch for the ghost, jitter and pops.
-  Read `--grep "srv turret radar anchor: 10 s correction"`: t1 far equal to
-  the draws moved, few left to the game; and the holo rounds' t1 writers.
+  drive forward and turn the vehicle; watch for the hole, jitter and pops.
+  Read `--grep "srv turret radar anchor: quad probe"` (each quad's w; moved
+  by against expected) and the 10 s line's content depth (no content depth
+  near 0).
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -199,6 +201,9 @@ same amount. Matching them needs a change to one layer's stereo depth.
   0.00 frames, lead at the 11.1 ms horizon) the residual still spreads
   +-1 to 2 deg while sweeping, lagging and leading about evenly (flight
   c8d79c6a, `edvr_gfx_20261101_040003.log`).
+- ruled out: the billboard's t1 scene-depth discard as the Scorpion ghost,
+  because with a far t1 on every moved draw (t1 far 2932, kept 0) the ghost
+  stayed (flight e64866f9, `edvr_gfx_20261101_055340.log`).
 
 ## Journal
 
@@ -1381,5 +1386,97 @@ To fly: camera back 0 to 35, radar forward = 65 minus camera back,
 `fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive
 forward and turn the vehicle.
 
+### 2026-11-01: the far depth flown (flight e64866f9); the hole is in the disc's own picture
 
+Steam, `edvr_gfx_20261101_055340.log`, build matches, dump
+`eye_055600519001`. Sean: "No change", the ghost is still there.
+- **The far depth ran on every moved draw.** The 10 s line read 2932 moved
+  (disc 1466, icon 1466), t1 far 2932, t1 kept 0, |delta| mean 0.37 and max
+  2.4 cm, and delta 0 28, with nothing else left to the game. So the t1
+  scene-depth test is not the hole (ruled out below).
+- **t1's writer** (holo rounds 1 and 2) is vs DEF19B035D5EDEDC with ps
+  CB95394B50D737D6: a full-screen triangle into the 2016x2017 R32 target,
+  which copies the scene depth. The third 256x256 5B0068AF writer (count
+  1383, 2 instances, target B4A4E0) was read by no billboard.
+- **The stencil names the hole.** In the dump's scene depth-stencil
+  (`SceneZ`, the stencil byte), bit 0x04 is set over the whole disc except
+  in a Scorpion-shaped patch at the ghost's place. 0x04 is what the radar
+  billboards' colourless re-issue writes wherever their pixel shader keeps
+  a pixel. So the disc's own draw dropped those pixels in both its issues,
+  and with t1 far, the shader's only remaining discard is alpha below
+  1e-5: no content in the disc's picture (the centre tap of t4 at 1000 or
+  more) and no rim. **The hole is in the disc's picture**, the vehicle
+  missing from the terrain. Its 2 px steps are that 512x512 picture's
+  texels across the disc, about 1.7 native px each.
+- **Why it trails (hypothesis).** The hole moves with the disc's quad, the
+  orange Scorpion with the icon's quad. Both quads move by the same delta
+  in 3D, but a quad moved in 3D shifts on screen by delta over its OWN
+  depth, while its picture shows content at about 0.45 m. The pictures'
+  quads need not be at the content's depth: the panel holograms' quads,
+  the only 5559BD94 quads the probe has caught, sit 2.4 to 2.6 m out (w).
+  If the disc's quad is far and the icon's is near, the disc and its hole
+  move about a fifth as far as the icon on screen. That is also a disc that
+  is still not smooth. The disc's and the icon's quad depths have not been
+  measured.
+
+**The build.**
+- **The far depth is reverted.** FarDepth, the t1 swap and its restore, the
+  t1 far and kept counters, their rig cases and their pins are gone. The
+  holo watch is back to t2..t7 (t1's writer is known: the DEF19B03 depth
+  copy). Kept: `holoCollect` on the corrected path, the 0.5 m bound and the
+  large count, the split reasons, one disc and one icon an eye a frame.
+- **Each billboard moves as its content would.** The shared shader function
+  `turretMove` now reads tr.w (padding before, 0 for every draw). When tr.w
+  is above 0 a vertex's translation is tr.xyz * (w * tr.w), w its clip w;
+  otherwise tr.xyz as before, so every other draw is bit for bit what it was.
+  With tr.w = 1 / z_c the moved vertex projects to (x / z + dx / z_c) / (1 +
+  dz / z_c), where the content point on the same ray at depth z_c, moved by
+  delta, lands, whatever the quad's own depth. The disc, the hole in its
+  picture and the icon then shift alike on screen. Signature H's lighting
+  line moves l by the vertex's own move, so it stays consistent. The CPU copy
+  (`anchoredMove`) does the same, and the constants' test takes tr.w in [0,
+  20] (z_c of 5 cm or more).
+- **z_c** is the radar picture camera instrument's schematic origin depth
+  (V0's `centre[2]`, about 0.34 m). It is used while the instrument has a
+  read whose last good read is at most 90 frames old (a new stamp at every
+  read, moved or not) and 0.1 m <= z_c <= 2 m. Otherwise tr.w is 0, the plain
+  delta, counted as "no content depth". Both eyes and both kinds take the
+  same z_c (the icon sits at the schematic's origin). It is set in
+  `radarCorrectionBegin` after the translation's constants are made and
+  before their test.
+- **The rig**, on WARP in every signature's stream-output twin: a quad 2.5 m
+  out, a vertex at 0.6 m and one at 0.34 m, with 1 / z_c = 1 / 0.34, land
+  where content at 0.34 m on their rays, moved by delta, projects (by the
+  camera's own projection). With tr.w = 0 they move by delta at their own
+  depth, and a vertex on the eye plane is left alone. On the CPU: the
+  freshness and range of z_c, the constants' 0..20, and `anchoredMove`
+  against `st::contentShiftNdc` at 0.2, 0.34, 2.5 and 7 m. Three new shader
+  mutants (the content depth ignored, scaled without w, scaled at tr.w 0)
+  are caught, twenty-five in all. Wiring pins with controls: tr.w set on the
+  corrected path only, from the instrument with its freshness and range;
+  the shader's and the CPU's tr.w > 0 rule; the quad probe; the far depth
+  gone.
+- **The instrument.** The corrected path now runs the stream-output twin
+  probe, once a second per eye, the disc and the icon in turn. Each sample
+  says the quad probe line, beside the probe's usual stats and capture lines
+  for family 7.
+
+The log lines:
+- new: `srv turret radar anchor: quad probe: eye E disc|icon w=[a,b] pre ndc
+  centre (x,y) moved by (dx,dy) ndc; content depth z_c Z m; expected
+  (ex,ey) ndc for content at z_c; delta in the eye (x,y,z) cm`. "expected" is
+  where content at z_c on the centre's ray goes: moved by equal to expected
+  says the quad shifts as its content does, and w says the quad's depth.
+  Without a content depth it reads "content depth z_c none (the plain
+  delta); expected none".
+- the 10 s correction line: "t1 far T, t1 kept K" is now "content depth z_c
+  mean X min Y max Z m (no content depth n draws)".
+- the first-application line ends "; content depth z_c Z m" or "; content
+  depth none (the plain delta)".
+- the holo round line says t2..t7 again.
+
+Unconfirmed until it flies: the two quads' depths (the quad probe's w will
+show them); z_c as the depth of the picture's content (the schematic's
+origin). If the content sits at another depth, moved by will match expected
+and the hole will still trail.
 

@@ -63,7 +63,6 @@
 #include "../../src/d3d11/srv_turret_hud_binding.h"
 #include "../../src/d3d11/srv_turret_hud_shader.h"
 #include "../../src/d3d11/srv_turret_math.h"
-#include "../../src/d3d11/ui_holo_remap.h"   // depthSource: the far depth must pass the crisp layer's rule
 #include "temporal_shader_bytecode.h"
 
 using Microsoft::WRL::ComPtr;
@@ -1272,6 +1271,64 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         }
         resetScene();
     }
+    {   // (p) THE CONTENT DEPTH (the radar billboards' correction): with tr.w = 1 / z_c every vertex moves by T w / z_c, so a quad 2.5 m out lands on screen exactly where content at
+        // z_c = 0.34 m on the same rays, moved by T, projects (by the camera's own projection); with tr.w = 0 the same vertices move by T at their own depth (as before); a vertex on the
+        // eye plane is left alone
+        const float t[3] = {0.012f, -0.008f, 0.03f};
+        const double zc = 0.34;
+        st::TurretParams p = st::translateParamsFor(frameOfCam(cam, nullptr, t));
+        p.invZc = static_cast<float>(1.0 / zc);
+        Pt c[4];
+        boxAt(c, 0.10f, -0.05f, 2.5f, 0.3f, 0.3f);
+        std::vector<Pt> pts(c, c + 4);
+        pts.push_back(Pt{-0.02f, 0.03f, 0.6f});
+        pts.push_back(Pt{0.0f, 0.0f, 0.34f});
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(p) the content depth: every vertex is the CPU reference's", p, m, int(pts.size()));
+        bool content = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3];
+            eyePos(m.pre[i], cam, pin);
+            const double k = zc / pin[2];
+            const double C[3] = {pin[0] * k + t[0], pin[1] * k + t[1], zc + t[2]};
+            const double ex = cam.p00 * C[0] / C[2] + cam.offX, ey = cam.p11 * C[1] / C[2] + cam.offY;
+            content = content && closeTo(m.post[i][0] / m.post[i][3], ex, 2e-5) && closeTo(m.post[i][1] / m.post[i][3], ey, 2e-5);
+        }
+        f.expect(content, "(p) with 1 / z_c = 1 / 0.34 a vertex 2.5 m out (and 0.6 m, and 0.34 m) lands on screen where content at 0.34 m on its ray, moved by T, projects");
+        double zIn[3], zOut[3];
+        eyePos(m.pre[5], cam, zIn);
+        eyePos(m.post[5], cam, zOut);
+        f.expect(closeTo(zOut[0] - zIn[0], t[0], 3e-5) && closeTo(zOut[1] - zIn[1], t[1], 3e-5) && closeTo(zOut[2] - zIn[2], t[2], 3e-5), "(p) ...and a vertex at z_c itself moves by exactly T");
+        double box[8] = {1e30, -1e30, 1e30, -1e30, 1e30, -1e30, 1e30, -1e30};   // the quad's NDC box before (x, y) and after
+        for (size_t i = 0; i < 4; ++i) {
+            const double v[4] = {m.pre[i][0] / m.pre[i][3], m.pre[i][1] / m.pre[i][3], m.post[i][0] / m.post[i][3], m.post[i][1] / m.post[i][3]};
+            for (int j = 0; j < 4; ++j) {
+                box[2 * j] = std::min(box[2 * j], v[j]);
+                box[2 * j + 1] = std::max(box[2 * j + 1], v[j]);
+            }
+        }
+        const double cx = (box[0] + box[1]) * 0.5, cy = (box[2] + box[3]) * 0.5;
+        double e[2] = {};
+        f.expect(st::contentShiftNdc(p, cx, cy, t, zc, e) && closeTo((box[4] + box[5]) * 0.5 - cx, e[0], 5e-5) && closeTo((box[6] + box[7]) * 0.5 - cy, e[1], 5e-5),
+                 "(p) the quad probe's expectation (st::contentShiftNdc at the NDC box's centre) is the shift of the quad's NDC box centre");
+        st::TurretParams plain = p;
+        plain.invZc = 0.0f;
+        const Captured mp = captureMove(fam, twin, pts, cam, plain);
+        expectReference(f, "(p) tr.w = 0: every vertex is the CPU reference's", plain, mp, int(pts.size()));
+        bool own = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3], pout[3];
+            eyePos(mp.pre[i], cam, pin);
+            eyePos(mp.post[i], cam, pout);
+            own = own && closeTo(pout[0] - pin[0], t[0], 3e-5) && closeTo(pout[1] - pin[1], t[1], 3e-5) && closeTo(pout[2] - pin[2], t[2], 3e-5);
+        }
+        f.expect(own, "(p) with tr.w = 0 the same vertices move by T at their own depth, as before");
+        const std::vector<Pt> plane = {Pt{0.1f, 0.05f, 0.0f}, Pt{-0.1f, 0.02f, 0.0f}, Pt{0.0f, -0.1f, 0.0f}};
+        const Captured mz = captureMove(fam, twin, plane, cam, p);
+        bool alone = true;
+        for (size_t i = 0; i < plane.size(); ++i) alone = alone && std::memcmp(mz.pre[i].data(), mz.post[i].data(), 16) == 0;
+        f.expect(alone, "(p) with the content depth a vertex on the eye plane (clip w 0) is still left as the game made it");
+    }
 }
 
 // The pictures: the move seen through the rasterizer. With the anchor at the eye the picture is the plain one; with the anchor off the eye the picture is that of the quad truly moved.
@@ -1807,6 +1864,53 @@ static void radarAnchorCases() {
 }
 
 // ---------------------------------------------------------------- the depth modes and the displacement, on the CPU
+// THE CONTENT DEPTH on the CPU (srv_turret_math.h): z_c from the V0 instrument only when it has one, read in the last 90 frames, 0.1 to 2 m; paramsUsable takes 1 / z_c in [0, 20] and
+// nothing else; the CPU move puts a vertex where content at z_c on its ray, moved by T, projects (st::contentShiftNdc, the quad probe's expectation).
+static void contentDepthCases() {
+    check(st::kContentInvZMax == 20.0f && st::kContentDepthMinM == 0.10 && st::kContentDepthMaxM == 2.0 && st::kContentDepthFreshFrames == 90u, "the content depth's bounds: 1 / z_c up to 20, z_c 0.1 to 2 m, 90 frames");
+    check(st::contentInvDepth(true, 0, 0.34) == static_cast<float>(1.0 / 0.34) && st::contentInvDepth(true, st::kContentDepthFreshFrames, 0.10) == static_cast<float>(1.0 / 0.10) &&
+              st::contentInvDepth(true, 5, 2.0) == 0.5f,
+          "a fresh V0 read 0.1 to 2 m deep is the content depth (1 / z_c)");
+    check(st::contentInvDepth(false, 0, 0.34) == 0.0f && st::contentInvDepth(true, st::kContentDepthFreshFrames + 1, 0.34) == 0.0f && st::contentInvDepth(true, 0, 0.099) == 0.0f &&
+              st::contentInvDepth(true, 0, 2.01) == 0.0f && st::contentInvDepth(true, 0, -0.34) == 0.0f && st::contentInvDepth(true, 0, std::nan("")) == 0.0f,
+          "no V0 read, a stale one, or a depth out of 0.1..2 m (or not a number): no content depth (0, the plain delta)");
+    st::EyeFrame ef;
+    ef.l = -1.1f;
+    ef.r = 1.0f;
+    ef.dn = -1.05f;
+    ef.up = 0.95f;
+    ef.tRadar[0] = 0.012f;
+    ef.tRadar[1] = -0.008f;
+    ef.tRadar[2] = 0.03f;
+    st::TurretParams cp = st::translateParamsFor(ef, st::Group::kRadar);
+    bool usable = st::paramsUsable(cp);
+    for (const float k : {static_cast<float>(1.0 / 0.34), 0.5f, 20.0f}) {
+        cp.invZc = k;
+        usable = usable && st::paramsUsable(cp);
+    }
+    for (const float k : {20.5f, -0.1f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        cp.invZc = k;
+        usable = usable && !st::paramsUsable(cp);
+    }
+    check(usable, "the constants take 1 / z_c from 0 to 20 (z_c of 5 cm or more) and refuse more, less, NaN and infinity");
+    cp.invZc = static_cast<float>(1.0 / 0.34);
+    const float t[3] = {0.012f, -0.008f, 0.03f};
+    bool same = true;
+    for (const double w : {0.2, 0.34, 2.5, 7.0}) {
+        const double x = 0.2, y = -0.1, in[4] = {x * w, y * w, 0.025, w};
+        double out[4], e[2] = {};
+        same = same && st::anchoredMove<double>(cp, in, out) && st::contentShiftNdc(cp, x, y, t, 1.0 / double(cp.invZc), e) && closeTo(out[0] / out[3] - x, e[0], 1e-9) &&
+               closeTo(out[1] / out[3] - y, e[1], 1e-9);
+    }
+    check(same, "the CPU move with 1 / z_c shifts a vertex at any depth (0.2, 0.34, 2.5, 7 m) on screen by exactly the content's shift at z_c (st::contentShiftNdc)");
+    double e[2] = {};
+    check(!st::contentShiftNdc(cp, 0.0, 0.0, t, 0.0, e) && !st::contentShiftNdc(cp, 0.0, 0.0, t, -0.3, e), "no content shift without a content depth");
+    cp.invZc = 0.0f;
+    const double in[4] = {0.5, -0.25, 0.025, 2.5};
+    double out[4];
+    check(st::anchoredMove<double>(cp, in, out) && closeTo(out[3], 2.5 + double(cp.tz), 1e-12), "with 1 / z_c at 0 the CPU move is the plain translation (the quad's own depth moves by T.z)");
+}
+
 static void depthMathCases() {
     using M = st::DepthMode;
     check(st::depthModeOf("game") == M::kGame && st::depthModeOf("real") == M::kReal && st::depthModeOf("front") == M::kFront && st::depthModeOf("") == M::kGame &&
@@ -2245,64 +2349,6 @@ static void sceneBindingCases(ID3D11GeometryShader* gs, Fails& f) {
         g_ctx->GSSetConstantBuffers(st::kGsGameSlot, 1, theirs.GetAddressOf());
         f.expect(c.settle(g_ctx.Get()) && slotIs(st::kGsGameSlot, theirs.Get()), "settle with GS slot 1 rebound by the game leaves the game's own newer state");
     }
-    g_ctx->ClearState();
-}
-
-// The far depth (srv_turret_hud_binding.h THE FAR DEPTH, the Scorpion's ghost of flight da716942), on WARP: the game's t1 size read from its view, the texture made at exactly that size,
-// R32_FLOAT, one mip, one slice, one sample, SRV and RTV, cleared to 1e9 everywhere, accepted by the crisp layer's depth-source rule (ui_holo_remap.h depthSource), made once, and made
-// again for another size; a view that is not 2D R32 is not stood in for.
-static void farDepthCases() {
-    const UINT w = 2016, h = 2017;
-    D3D11_TEXTURE2D_DESC gd = st::farDepthTextureDesc(w, h);   // a stand-in for the game's t1: the same shape
-    ComPtr<ID3D11Texture2D> gameTex;
-    ck(g_dev->CreateTexture2D(&gd, nullptr, &gameTex), "the game's t1 stand-in");
-    ComPtr<ID3D11ShaderResourceView> gameSrv;
-    const D3D11_SHADER_RESOURCE_VIEW_DESC sd = st::farDepthSrvDesc();
-    ck(g_dev->CreateShaderResourceView(gameTex.Get(), &sd, &gameSrv), "the game's t1 view");
-    UINT gw = 0, gh = 0;
-    check(st::depthViewSize(gameSrv.Get(), gw, gh) && gw == w && gh == h, "the game's t1 size is read from its view's texture");
-    D3D11_TEXTURE2D_DESC hd = gd;
-    hd.Format = DXGI_FORMAT_R16_FLOAT;
-    ComPtr<ID3D11Texture2D> halfTex;
-    ck(g_dev->CreateTexture2D(&hd, nullptr, &halfTex), "an R16 texture");
-    ComPtr<ID3D11ShaderResourceView> halfSrv;
-    D3D11_SHADER_RESOURCE_VIEW_DESC hsd = sd;
-    hsd.Format = DXGI_FORMAT_R16_FLOAT;
-    ck(g_dev->CreateShaderResourceView(halfTex.Get(), &hsd, &halfSrv), "an R16 view");
-    check(!st::depthViewSize(halfSrv.Get(), gw, gh) && !st::depthViewSize(nullptr, gw, gh), "a view that is not 2D R32 (or none) is not stood in for: the game's t1 is kept");
-    st::FarDepth farDepth;
-    ID3D11ShaderResourceView* const v = farDepth.get(g_ctx.Get(), w, h);
-    check(v != nullptr && !farDepth.failed(), "the far depth is made");
-    if (!v) return;
-    ComPtr<ID3D11Resource> res;
-    v->GetResource(&res);
-    ComPtr<ID3D11Texture2D> tex;
-    res.As(&tex);
-    D3D11_TEXTURE2D_DESC td{};
-    if (tex) tex->GetDesc(&td);
-    check(tex && td.Width == w && td.Height == h && td.Format == DXGI_FORMAT_R32_FLOAT && td.MipLevels == 1 && td.ArraySize == 1 && td.SampleDesc.Count == 1 &&
-              td.BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET),
-          "the far depth is R32_FLOAT at exactly the game's t1 size, one mip, one slice, one sample, SRV and RTV");
-    check(edvr::ui_holo_remap::depthSource(v, w, h) && !edvr::ui_holo_remap::depthSource(v, w + 1, h), "the crisp layer's depth-source rule takes it (so the layer still takes the moved draw), at that size only");
-    D3D11_TEXTURE2D_DESC rd = td;
-    rd.Usage = D3D11_USAGE_STAGING;
-    rd.BindFlags = 0;
-    rd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> readback;
-    ck(g_dev->CreateTexture2D(&rd, nullptr, &readback), "the far depth's readback");
-    g_ctx->CopyResource(readback.Get(), tex.Get());
-    D3D11_MAPPED_SUBRESOURCE m{};
-    ck(g_ctx->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &m), "map the far depth");
-    bool all = true;
-    for (UINT y = 0; y < h && all; y += 97)
-        for (UINT x = 0; x < w && all; x += 89) all = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + y * m.RowPitch)[x] == st::kFarDepth;
-    const float corner = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + (h - 1) * m.RowPitch)[w - 1];
-    g_ctx->Unmap(readback.Get(), 0);
-    check(all && corner == st::kFarDepth && st::kFarDepth >= 1.0e9f, "it is cleared to 1e9 everywhere: the billboard's discard (t1 more than 0.5 m nearer than the hologram) never fires");
-    check(farDepth.get(g_ctx.Get(), w, h) == v, "made once: the same view the next time");
-    ID3D11ShaderResourceView* const other = farDepth.get(g_ctx.Get(), 1008, 1009);
-    check(other != nullptr && edvr::ui_holo_remap::depthSource(other, 1008, 1009), "another size makes it again, at that size");
-    farDepth.reset();
     g_ctx->ClearState();
 }
 
@@ -2771,6 +2817,7 @@ int main(int argc, char** argv) {
         mathCases();
         depthMathCases();
         radarAnchorCases();
+        contentDepthCases();
         planeAndUnmovedCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
@@ -2805,7 +2852,6 @@ int main(int argc, char** argv) {
         sceneBindingCases(gsOf[st::kSceneSignature].Get(), production);
         scissorCases(gsOf[0].Get(), production);
         copyRegisterCases();
-        farDepthCases();
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
@@ -2828,8 +2874,11 @@ int main(int argc, char** argv) {
             {"the sign of the gap", "((d - mv.x) / d)", "((d + mv.x) / d)"},
             {"y read down", "c.y * (tn.w - tn.z) * 0.5 +", "-c.y * (tn.w - tn.z) * 0.5 +"},
             {"the left and right tangents mixed", "w * (tn.y + tn.x) * 0.5, c.y", "w * (tn.y - tn.x) * 0.5, c.y"},
-            {"the translation dropped", "const float3 p1 = p + tr.xyz;", "const float3 p1 = p;"},
-            {"the translation's sign", "const float3 p1 = p + tr.xyz;", "const float3 p1 = p - tr.xyz;"},
+            {"the translation dropped", "const float3 p1 = p + tv;", "const float3 p1 = p;"},
+            {"the translation's sign", "const float3 p1 = p + tv;", "const float3 p1 = p - tv;"},
+            {"the content depth ignored", "tr.w > 0.0 ?", "tr.w > 1000.0 ?"},
+            {"the content depth's scale without the vertex's depth", "tr.xyz * (w * tr.w)", "tr.xyz * tr.w"},
+            {"the content depth's scale taken at tr.w 0 (every other draw)", "tr.w > 0.0 ?", "tr.w >= 0.0 ?"},
             {"the move about the origin, not the anchor", "q = an.xyz + v * ((d - mv.x) / d);", "q = v * ((d - mv.x) / d);"},
             {"w kept, not the moved depth", "ndcZ * q.z, q.z);", "ndcZ * q.z, w);"},
             {"the NDC z not kept", "ndcZ * q.z", "c.z"},
@@ -2911,7 +2960,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-two shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

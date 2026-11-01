@@ -78,7 +78,7 @@
 //   "srv turret hud holo quad: family=F eye=0 draw=K tangents=(l,r,dn,up) T=(x,y,z) | vI pre=(x,y,z,w) post=(x,y,w) uv=(u,v) ..."   eye 0's sampled near billboard (game clip w under 1 m): its
 //     vertices before and after the move and their UVs.
 //   "srv turret holo source: round R frame N F eye=E draw=K reads tI=ID WxH fmt N bind 0x.. [WATCHED] ..."   each 5559BD94 draw of the collecting frame: its pixel-shader inputs t0..t7; render and
-//     depth targets among t1..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
+//     depth targets among t2..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
 //   "srv turret holo writer: round R frame N vs=.. ps=.. draw K count N instances N topology T viewport (..) targets: rtvI=ID WxH fmt N [WATCHED] .. dsv=.."   each draw of the next frame with a
 //     watched texture bound as a render or depth target (the first 24 a round); "srv turret holo watch: round R frame N: W of D owner-context draws ..." sums it (W = 0: the picture is made
 //     some other way) and "srv turret holo watch: round R writer pairs vs/ps xN (#K ID) ..." counts every writer's shader pair.
@@ -102,7 +102,9 @@
 //   "srv turret radar anchor: 10 s correction: N billboard draws moved (...) over F frames, |delta| ..., yaw ..., pitch ...; left to the game: ...; family 8 on a radar target k; writers:
 //     ..."   whenever the anchor yield was on in the window; "... correction first applied at frame F, eye E, disc|icon: delta ... cm ..." once; "... the setter runs on thread T, the
 //     camera writes on thread U" once; "... a third 256x256 5B0068AF writer at frame F: draw count .., instances .., target .. WxH, viewport ..; a billboard's t4 matched|did not match that
-//     target that frame" once (the 10 s line also says t1 far/kept: the moved billboards' scene depth swapped for the far depth, srv_turret_hud_binding.h THE FAR DEPTH);
+//     target that frame" once (the 10 s line also says the content depth z_c the moved billboards ran with, and the draws without one);
+//   "srv turret radar anchor: quad probe: eye E disc|icon w=[a,b] pre ndc centre (x,y) moved by (dx,dy) ndc; content depth z_c Z m; expected (ex,ey) ndc for content at z_c; delta in the
+//     eye (x,y,z) cm"   a corrected billboard's GPU sample, once a second per eye, the disc and the icon in turn (srv_turret.cpp logQuadProbe);
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once

@@ -511,17 +511,25 @@ inline constexpr float kPushSplitM = 1.0f;
 inline constexpr float kFallbackNdcZ = 0.999f; // the depth of a moved vertex whose own NDC z is not valid (behind the eye, or inside the near plane): the nearest valid reversed-Z depth
 inline constexpr float kPlaneEpsM = 1.0e-6f;  // a vertex on the eye plane (clip w about 0) has no ray to follow: left alone
 inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor, a translation and a gap up to this far (the keys' 200 cm, 150 cm)
+// THE CONTENT DEPTH (the radar billboards' draw-time correction, flight e64866f9). A billboard quad shows a picture of content at depth z_c (the radar schematic's origin, about 0.34 m),
+// whatever the quad's own depth. Moving the quad's vertices by one 3D delta shifts it on screen by delta over the QUAD's depth; moving each vertex by delta * w / z_c instead (w its clip w,
+// the eye-space depth) puts it where the content point on the same ray at depth z_c, moved by delta, projects: q = p + delta p.z / z_c projects to (p.x / p.z + delta.x / z_c) / (1 +
+// delta.z / z_c), the content's own. The constants carry 1 / z_c (TurretParams::invZc; 0 for every other draw, which moves by the translation as it is).
+inline constexpr float kContentInvZMax = 20.0f;                              // z_c of 5 cm or more
+inline constexpr double kContentDepthMinM = 0.10, kContentDepthMaxM = 2.0;   // a V0 schematic origin outside this is not taken as the content's depth
+inline constexpr uint32_t kContentDepthFreshFrames = 90;                     // ... nor one whose last good read is older than this
 
 // The geometry shader's constant buffer (GS slot 0, which the game never binds): four registers.
 //   [0] gap, dMin, dMax, depth       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
 //   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
 //   [2] ax, ay, az, (pad)            the anchor in the eye's space: X right, Y up, Z forward (= clip w)
-//   [3] tx, ty, tz, (pad)            the translation (HUD forward) in the same axes
+//   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes; invZc 1 / the content depth z_c (THE CONTENT DEPTH below), 0 for every draw but the
+//                                    radar billboards' draw-time correction
 struct TurretParams {
     float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float ax = 0.0f, ay = 0.0f, az = 0.0f, pad1 = 0.0f;
-    float tx = 0.0f, ty = 0.0f, tz = 0.0f, pad2 = 0.0f;
+    float tx = 0.0f, ty = 0.0f, tz = 0.0f, invZc = 0.0f;
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
 static_assert(sizeof(TurretParams) == 64, "the turret shader's cbuffer is four 16-byte registers");
@@ -585,11 +593,13 @@ inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g
 inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPanels ? panelsCm : radarCm; }
 
 // The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
-// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; the depth mode one of 0, 1 and 2; and a move that does something (a gap or a translation).
+// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; the depth mode one of 0, 1 and 2; 1 / the content depth in [0, 20] (z_c of 5 cm or more,
+// or none); and a move that does something (a gap or a translation).
 inline bool paramsUsable(const TurretParams& p) {
-    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz};
+    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz, p.invZc};
     for (float f : all)
         if (!std::isfinite(f)) return false;
+    if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;
     if (p.depth != 0.0f && p.depth != 1.0f && p.depth != 2.0f) return false;
     if (!(std::fabs(p.gap) <= kAnchorLimitM)) return false;
     if (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin)) return false;
@@ -620,7 +630,10 @@ inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* befo
     const T l = p.l, r = p.r, dn = p.dn, up = p.up;
     const T tx = l + (in[0] / w + T(1)) * (r - l) / T(2), ty = dn + (in[1] / w + T(1)) * (up - dn) / T(2);
     const T P[3] = {w * tx, w * ty, w};
-    const T P1[3] = {P[0] + T(p.tx), P[1] + T(p.ty), P[2] + T(p.tz)};
+    // the translation, scaled by w / z_c when the content depth is given (THE CONTENT DEPTH), else as it is
+    const T s = w * T(p.invZc);
+    const T tv[3] = {p.invZc > 0.0f ? T(p.tx) * s : T(p.tx), p.invZc > 0.0f ? T(p.ty) * s : T(p.ty), p.invZc > 0.0f ? T(p.tz) * s : T(p.tz)};
+    const T P1[3] = {P[0] + tv[0], P[1] + tv[1], P[2] + tv[2]};
     const T V[3] = {P1[0] - T(p.ax), P1[1] - T(p.ay), P1[2] - T(p.az)};
     const T d = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
     const bool inWindow = d > T(p.dMin) && d < T(p.dMax);
@@ -670,6 +683,25 @@ inline double anchorDistanceOfClip(const TurretParams& p, const float c[4]) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// The content depth the radar correction runs with, as 1 / z_c: the V0 instrument's schematic origin depth `z` when it has one (`have`), read `age` frames ago at most
+// kContentDepthFreshFrames, and z in [kContentDepthMinM, kContentDepthMaxM]; else 0 (the plain delta).
+inline float contentInvDepth(bool have, uint32_t age, double z) {
+    if (!have || age > kContentDepthFreshFrames || !(z >= kContentDepthMinM && z <= kContentDepthMaxM)) return 0.0f;
+    return static_cast<float>(1.0 / z);
+}
+
+// Where content at depth zc on the ray through NDC (x, y) goes on screen when moved by delta (the eye's axes: X right, Y up, Z forward), as an NDC shift, with the constants' tangents: the
+// quad probe line's expectation (the move with invZc = 1 / zc puts every vertex on the ray there). False when zc, the tangents or the moved depth are unusable.
+inline bool contentShiftNdc(const TurretParams& p, double x, double y, const float delta[3], double zc, double out[2]) {
+    if (!(zc > 0.0) || !(p.r > p.l) || !(p.up > p.dn)) return false;
+    const double z2 = zc + double(delta[2]);
+    if (!(z2 > 1.0e-6)) return false;
+    const double tx = p.l + (x + 1.0) * (double(p.r) - p.l) * 0.5, ty = p.dn + (y + 1.0) * (double(p.up) - p.dn) * 0.5;
+    const double tx2 = (tx * zc + delta[0]) / z2, ty2 = (ty * zc + delta[1]) / z2;
+    out[0] = 2.0 * (tx2 - p.l) / (double(p.r) - p.l) - 1.0 - x;
+    out[1] = 2.0 * (ty2 - p.dn) / (double(p.up) - p.dn) - 1.0 - y;
+    return true;
+}
 // ---- the anchor ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // The fixed point in the seated frame the move is made about: the head's position when the turret view came on. It is taken again (and the module says so in the log, once each) when
 // the turret view comes on, when fix.srv_turret_camera_back, fix.srv_turret_hud_forward or fix.srv_turret_radar_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when

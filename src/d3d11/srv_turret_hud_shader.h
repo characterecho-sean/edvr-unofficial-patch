@@ -11,6 +11,7 @@
 // (dMin, dMax), and projects the result back with the same tangents:
 //
 //     P1 = P + T;   V = P1 - A;   d = |V|;   Q = (dMin < d < dMax) ? A + V (d - gap) / d : P1;   pos = project(Q), z' = ndcZ * Q.z
+//     T = tr.xyz, or tr.xyz * w / z_c when tr.w = 1 / z_c > 0 (THE CONTENT DEPTH, srv_turret_math.h: the radar billboards move on screen as their picture's content at z_c would)
 //     ndcZ = z / w when w > 0 and 0 <= z / w <= 1 (the game's own depth), else 0.999        (depth mode game, the default)
 //     ndcZ = clamp(z / Q.z, 0, 0.999), with the vertex's own clip z                           (depth mode real: the moved position's own depth)
 //     ndcZ = 0.999 for every moved vertex                                                    (depth mode front)
@@ -33,7 +34,7 @@
 // interpolant, so it needs nothing here.
 //
 // THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): four registers, srv_turret_math.h's TurretParams -- {gap, dMin, dMax, depth mode}, {left, right, down, up},
-// {the anchor in the eye's space: X right, Y up, Z forward}, {the translation in the same axes}.
+// {the anchor in the eye's space: X right, Y up, Z forward}, {the translation in the same axes, and 1 / the content depth or 0}.
 //
 // THE SCORPION HOLOGRAM (signature H) also reads the draw's own vertex constants at GS slot 1 (the module binds the draw's VS slot 1 there and gives it back): the move's eye-space
 // displacement d = Q - P is added to the interpolant __USER_VERTEX_M_LIGHTINGPOSITION (the camera-relative world position, which the pixel shader divides by its view depth) as
@@ -58,14 +59,15 @@ namespace edvr {
     "    float4 mv;   // x: gap, metres nearer (negative: deeper); y: dMin and z: dMax, the window of distances from the anchor that move; w: the depth mode (0 game, 1 real, 2 front)\n" \
     "    float4 tn;   // the eye's tangents as the game projects: x left, y right, z down, w up\n" \
     "    float4 an;   // the anchor in the eye's space: X right, Y up, Z forward (= clip w)\n" \
-    "    float4 tr;   // the translation (HUD forward) in the same axes\n" \
+    "    float4 tr;   // the translation (HUD forward) in the same axes; w: 1 / the content depth (the radar billboards' correction: the translation scaled by w / z_c), else 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
     "    const float w = c.w;\n" \
     "    if (abs(w) < 1.0e-6) return c;\n" \
     "    const float3 p = float3(c.x * (tn.y - tn.x) * 0.5 + w * (tn.y + tn.x) * 0.5, c.y * (tn.w - tn.z) * 0.5 + w * (tn.w + tn.z) * 0.5, w);\n" \
-    "    const float3 p1 = p + tr.xyz;\n" \
+    "    const float3 tv = tr.w > 0.0 ? tr.xyz * (w * tr.w) : tr.xyz;\n" \
+    "    const float3 p1 = p + tv;\n" \
     "    const float3 v = p1 - an.xyz;\n" \
     "    const float d = length(v);\n" \
     "    const bool win = d > mv.y && d < mv.z;\n" \
