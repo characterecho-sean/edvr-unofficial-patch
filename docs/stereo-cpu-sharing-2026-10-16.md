@@ -54,9 +54,11 @@
   render thread in the concourse; EDHM is 2.4-3.2 ms. The draw gate never
   closes in VR because default-on features hold it. See "2026-11-01: the CPU
   profile" for the ranked candidates.
-- **Next flight:** a test build carrying candidates 1-5 from that section,
-  flown as the 10-31 concourse legs (DLAA / F7 off, 2 minutes each). "The
-  A/B flight" below is stale: Explorer Cam and `perf baseline F5` are gone.
+- **Continued in `docs\vr-draw-path-cpu-2026-11-01.md`** (2026-11-01). The
+  work is EDVR's VR draw-path CPU cost in general, not the concourse or the
+  stereo question; that doc holds the design of test build 1 and the next
+  flight. Candidate 5 became #153. "The A/B flight" below is stale: Explorer
+  Cam and `perf baseline F5` are gone.
 - **Environment:** SteamVR (aapvr), RTX 5090, 2016x2016 per eye rendered and
   DLSS'd to 4032x4032, 90 Hz; Elite build 332841. On foot, the native runtime
   paces `deferred` in both modes (the weapon-stability pacing), so the second

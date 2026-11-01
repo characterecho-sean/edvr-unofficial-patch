@@ -106,3 +106,20 @@ The type of projection a game camera uses: 1 orthographic, 3 trigonometric,
 4 and 5 a custom matrix. The headset eye cameras are kind 5, and the on-foot
 world camera is kind 3.
 _Avoid_: camera kind, projType, camera type
+
+### Draws
+
+**Draw path**:
+Everything EDVR does on each of the game's draw calls, from the moment the call
+reaches EDVR until it is forwarded to the driver.
+_Avoid_: draw hooks (one part of it), hook path
+
+**Draw gate**:
+The single decision of whether any EDVR feature wants to see the game's draws
+at all; while it is closed, the draw path forwards every draw untouched.
+_Avoid_: subscriber gate, draw filter
+
+**Re-issue**:
+EDVR submitting one of the game's draws again, a second time, with its own
+state or target, in addition to the game's own submission.
+_Avoid_: replay, redraw, second issue
