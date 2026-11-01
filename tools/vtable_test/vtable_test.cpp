@@ -1258,6 +1258,42 @@ int main() {
               "...and the skeleton FindJoint: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "the FindJoint hook would be refused or stolen at the wrong length");
 
+        // The SRV radar's placement setter (0x38563A0 in build 334925; srv_radar_anchor.cpp): `sub rsp,48h` (4), `movups xmm0,[rdx]` (3),
+        // `movups [rcx+1528h],xmm0` (7), `movups xmm1,[rdx+10h]` (4). CodeHook steals the first two, seven bytes, none rip-relative.
+        const uint8_t radarSetter[] = {0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0x28, 0x15, 0x00, 0x00, 0x0F, 0x10, 0x4A, 0x10};
+        size_t dispB = 9, dispC = 9, dispD = 9;
+        check(codeInstructionLength(radarSetter, sizeof(radarSetter), &disp) == 4 && disp == 0 &&
+                  codeInstructionLength(radarSetter + 4, sizeof(radarSetter) - 4, &dispB) == 3 && dispB == 0 &&
+                  codeInstructionLength(radarSetter + 7, sizeof(radarSetter) - 7, &dispC) == 7 && dispC == 0 &&
+                  codeInstructionLength(radarSetter + 14, sizeof(radarSetter) - 14, &dispD) == 4 && dispD == 0,
+              "...and the radar placement setter: `sub rsp,48h` 4, `movups xmm0,[rdx]` 3, `movups [rcx+1528h],xmm0` 7, `movups xmm1,[rdx+10h]` 4, no displacement",
+              "the radar setter hook would be refused or stolen at the wrong length");
+
+        // The SRV radar's schematic slot update (0x36BF3C0 in build 334925; srv_radar_anchor.cpp, camera mode): `push rbp` with a REX prefix (2), `push r14` (2), `push r15` (2),
+        // `lea rbp,[rsp-6F0h]` (8: SIB, disp32), `sub rsp,7F0h` (7), then `mov rax,[rip+disp32]` (7, the security cookie). CodeHook steals the three pushes, six bytes, none rip-relative.
+        const uint8_t radarSlot[] = {0x40, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x10, 0xF9, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xF0, 0x07, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xDC, 0xA5, 0x7E, 0x02};
+        size_t slotDisp[6] = {9, 9, 9, 9, 9, 9};
+        check(codeInstructionLength(radarSlot, sizeof(radarSlot), &slotDisp[0]) == 2 && slotDisp[0] == 0 &&
+                  codeInstructionLength(radarSlot + 2, sizeof(radarSlot) - 2, &slotDisp[1]) == 2 && slotDisp[1] == 0 &&
+                  codeInstructionLength(radarSlot + 4, sizeof(radarSlot) - 4, &slotDisp[2]) == 2 && slotDisp[2] == 0 &&
+                  codeInstructionLength(radarSlot + 6, sizeof(radarSlot) - 6, &slotDisp[3]) == 8 && slotDisp[3] == 0 &&
+                  codeInstructionLength(radarSlot + 14, sizeof(radarSlot) - 14, &slotDisp[4]) == 7 && slotDisp[4] == 0 &&
+                  codeInstructionLength(radarSlot + 21, sizeof(radarSlot) - 21, &slotDisp[5]) == 7 && slotDisp[5] == 3,
+              "...and the radar slot update: `push rbp`, `push r14`, `push r15` 2 each, `lea rbp,[rsp-6F0h]` 8, `sub rsp,7F0h` 7, no displacement; the cookie load 7, rip-relative at 3",
+              "the radar slot hook would be refused or stolen at the wrong length");
+
+        // movups xmm0,[rip+disp32] -- seven bytes, displacement at offset 3: measured, so CodeHook can rewrite it.
+        const uint8_t ripMovups[] = {0x0F, 0x10, 0x05, 0x10, 0x20, 0x30, 0x40};
+        check(codeInstructionLength(ripMovups, sizeof(ripMovups), &disp) == 7 && disp == 3,
+              "...and a rip-relative `movups xmm0,[rip+disp32]`, its displacement at offset 3",
+              "a rip-relative movups moved without its displacement rewritten addresses other memory");
+
+        // Every other SSE form stays refused: movss (F3 0F 10) and movaps (0F 28).
+        const uint8_t movss[] = {0xF3, 0x0F, 0x10, 0x02}, movaps[] = {0x0F, 0x28, 0x02};
+        check(codeInstructionLength(movss, sizeof(movss), &disp) == 0 && codeInstructionLength(movaps, sizeof(movaps), &disp) == 0,
+              "...and still refuses `movss` and `movaps`",
+              "the decoder took an SSE form beyond movups");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

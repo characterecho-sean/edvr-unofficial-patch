@@ -118,6 +118,8 @@ struct LegacyContract {
 #include "fixed_visor_axis_variants.h"
 #include "fixed_desktop_window_variants.h"
 #include "fixed_scope_zoom_variants.h"
+#include "fixed_srv_turret_variants.h"
+#include "../../src/d3d11/srv_turret_math.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -345,6 +347,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), desktopWindow.begin(), desktopWindow.end());
     const auto scopeZoom = scopeZoomVariants();
     variants.insert(variants.end(), scopeZoom.begin(), scopeZoom.end());
+    const auto srvTurret = srvTurretHudVariants();
+    variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());
     return variants;
 }
 
@@ -630,8 +634,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 79 && coreLegacy.size() + 32 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders and the scope lens's three compute passes are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 87 && coreLegacy.size() + 40 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's eight geometry shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1157,6 +1161,80 @@ static void selfTest() {
                 ID3D11ShaderReflectionConstantBuffer* cbuffer = ok ? reflection->GetConstantBufferByName("P") : nullptr;
                 check(ok && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == passes[i].cbSize,
                       "the scope lens passes keep their group sizes, their inputs and outputs at the slots scope_zoom.cpp sets them at, and their parameter blocks at b0");
+            }
+        }
+    }
+
+    // The SRV turret HUD's eight pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to their own contract -- the symbol, source name, entry,
+    // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
+    // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
+    // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
+    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 64-byte constant buffer, Turret at b0 (srv_turret_math.h's
+    // TurretParams: four registers; signature H also GameVS at b1). A change to any of them fails here, in the build.
+    {
+        namespace stm = edvr::srv_turret;
+        struct TurretContract { const char* symbol; const char* name; const char* source; };
+        const TurretContract contracts[stm::kSignatureCount] = {
+            {"kSrvTurretHudGsABytecode", "srv turret hud pass-through A", edvr::kSrvTurretHudGsA},
+            {"kSrvTurretHudGsBBytecode", "srv turret hud pass-through B", edvr::kSrvTurretHudGsB},
+            {"kSrvTurretHudGsCBytecode", "srv turret hud pass-through C", edvr::kSrvTurretHudGsC},
+            {"kSrvTurretHudGsDBytecode", "srv turret hud pass-through D", edvr::kSrvTurretHudGsD},
+            {"kSrvTurretHudGsEBytecode", "srv turret hud pass-through E", edvr::kSrvTurretHudGsE},
+            {"kSrvTurretHudGsFBytecode", "srv turret hud pass-through F", edvr::kSrvTurretHudGsF},
+            {"kSrvTurretHudGsGBytecode", "srv turret hud pass-through G", edvr::kSrvTurretHudGsG},
+            {"kSrvTurretHudGsHBytecode", "srv turret hud pass-through H", edvr::kSrvTurretHudGsH},
+        };
+        for (size_t i = 0; i < stm::kSignatureCount; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 32 + i];
+            check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == contracts[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each SRV turret HUD geometry shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each SRV turret HUD geometry shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                const stm::Signature& sig = stm::kSignatures[i];
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
+                      "the turret HUD shaders reflect as Shader Model 5 geometry shaders");
+                check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
+                      desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 &&
+                      desc.InputParameters == sig.count && desc.OutputParameters == sig.count + 1,
+                      "...taking triangles and emitting at most three vertices as a triangle strip, over as many input elements as the family's signature has and one output element more");
+                bool elements = reflection != nullptr;
+                for (UINT e = 0; elements && e < sig.count; ++e) {
+                    D3D11_SIGNATURE_PARAMETER_DESC in{}, out{};
+                    const BYTE mask = static_cast<BYTE>((1u << sig.el[e].comps) - 1u);
+                    elements = SUCCEEDED(reflection->GetInputParameterDesc(e, &in)) && SUCCEEDED(reflection->GetOutputParameterDesc(e, &out)) &&
+                               !std::strcmp(in.SemanticName, sig.el[e].name) && in.SemanticIndex == sig.el[e].index && in.Register == e && in.Mask == mask &&
+                               !std::strcmp(out.SemanticName, sig.el[e].name) && out.SemanticIndex == sig.el[e].index && out.Register == e && out.Mask == mask;
+                }
+                check(elements, "...its input and output are the family's vertex shader's output signature, element for element and register for register");
+                D3D11_SIGNATURE_PARAMETER_DESC pre{};
+                check(reflection && SUCCEEDED(reflection->GetOutputParameterDesc(sig.count, &pre)) && !std::strcmp(pre.SemanticName, stm::kPreSemantic) && pre.SemanticIndex == 0 &&
+                          pre.Register == sig.count && pre.Mask == 0xF,
+                      "...and its output ends with the TURRETPRE element, four components, in the register after the signature's");
+                D3D11_SHADER_INPUT_BIND_DESC bind{};
+                ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
+                D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                // Signature H (the Scorpion's hologram) also reads the draw's own vertex constants at b1, GameVS: 280 registers, of which rows 277 to 279 are the camera's right, up and forward.
+                const bool scene = i == stm::kSceneSignature;
+                check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 64 &&
+                      desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
+                      "...reading one 64-byte constant buffer, Turret at b0, and nothing else (signature H also the draw's vertex constants, GameVS at b1)");
+                if (scene) {
+                    D3D11_SHADER_INPUT_BIND_DESC sceneBind{};
+                    D3D11_SHADER_BUFFER_DESC sceneDesc{};
+                    ID3D11ShaderReflectionConstantBuffer* sceneBuffer = reflection ? reflection->GetConstantBufferByName("GameVS") : nullptr;
+                    check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("GameVS", &sceneBind)) && sceneBind.Type == D3D_SIT_CBUFFER && sceneBind.BindPoint == stm::kGameCbSlot &&
+                          sceneBind.BindCount == 1 && sceneBuffer && SUCCEEDED(sceneBuffer->GetDesc(&sceneDesc)) && sceneDesc.Size == 16u * stm::kSceneRows,
+                          "...signature H's GameVS is the draw's vertex constants at b1, 280 registers, so rows 277 to 279 are in range");
+                }
             }
         }
     }

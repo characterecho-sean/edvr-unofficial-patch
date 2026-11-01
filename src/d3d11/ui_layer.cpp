@@ -584,6 +584,29 @@ bool g_holoPrepareNoted[kRemapPrograms]{}, g_holoTakeNoted[kRemapPrograms]{},
 std::atomic<uint64_t> g_holoCaptureCalls{0}, g_holoCaptured{0};
 std::atomic<bool> g_holoCaptureNoted[kRemapPrograms]{}, g_holoCaptureRefusalNoted[kRemapPrograms]{};
 static_assert(ui_holo_remap::kVs == kHoloTargetSphere, "hologram classifier identity");
+// THE RELIEF (ui_holo_remap.h): the scene block's cb1[120].z by buffer (uiLayerNoteSceneWrite), the first application said
+// once per program, and each fallback source said the first time it is used.
+ui_holo_remap::SceneRelief g_sceneRelief;
+bool g_holoReliefNoted[kRemapPrograms]{}, g_holoReliefSourceNoted[ui_holo_remap::SceneRelief::kSources]{};
+
+// The pixel stage's b1 at a hologram draw (the scene block its programs read cb1[120].z from), identity only, and
+// whether it is bound from its first constant (a context without the 11.1 interface: the whole buffer).
+const void* holoPsSceneBlock(ID3D11DeviceContext* ctx, bool& fromFirst) {
+    fromFirst = true;
+    ID3D11Buffer* b = nullptr;
+    ID3D11DeviceContext1* c1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {
+        UINT first = 0, count = 0;
+        c1->PSGetConstantBuffers1(1, 1, &b, &first, &count);
+        fromFirst = first == 0;
+        c1->Release();
+    } else {
+        ctx->PSGetConstantBuffers(1, 1, &b);
+    }
+    const void* id = b;
+    if (b) b->Release();
+    return id;
+}
 uint64_t g_lastRedirectSeq = 0;
 bool g_familyEngaged[static_cast<size_t>(UiLayerFamily::kCount)] = {};
 uint32_t g_watchBudget = kWatchPerFrame;
@@ -2230,6 +2253,27 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             }
             releaseSaved(); return false;
         }
+        if (depthLoad) {   // THE RELIEF (ui_holo_remap.h): the Sobel taps at the game's own radius, k * max(cb1[120].z, 1)
+            bool fromFirst = true;
+            const void* b1 = holoPsSceneBlock(ctx, fromFirst);
+            float sceneZ = 1.0f;
+            const auto source = g_sceneRelief.find(b1, fromFirst, sceneZ);
+            holoParams.relief = ui_holo_remap::reliefRadius(holoParams, sceneZ);
+            if (!g_holoReliefNoted[slot]) {
+                g_holoReliefNoted[slot] = true;
+                g_holoReliefSourceNoted[source] = true;
+                Log::get().note("crisp holo remap: relief radius applied to PS %016llX (VS %016llX): k %.4f (layer %ux%u over the game's %ux%u), cb1[120].z %.4f from %s, "
+                                "radius factor %.4f = k x max(z, 1); said once per program (fix.ui_quality off draws the game's own shader).",
+                                static_cast<unsigned long long>(g_draw.holoPsHash), static_cast<unsigned long long>(ui_holo_remap::kVs),
+                                1.0 / std::sqrt(double(holoParams.x) * double(holoParams.y)), layerW, layerH, g_draw.targetW, g_draw.targetH,
+                                static_cast<double>(sceneZ), ui_holo_remap::reliefSourceName(source), static_cast<double>(holoParams.relief));
+            } else if (!g_holoReliefSourceNoted[source]) {
+                g_holoReliefSourceNoted[source] = true;
+                Log::get().note("crisp holo remap: relief radius for PS %016llX now from %s: cb1[120].z %.4f, radius factor %.4f (said once per source).",
+                                static_cast<unsigned long long>(g_draw.holoPsHash), ui_holo_remap::reliefSourceName(source), static_cast<double>(sceneZ),
+                                static_cast<double>(holoParams.relief));
+            }
+        }
     }
     // The layer's depth-stencil target: for a draw that tests, seeded from
     // the game's own first (or again, when stale or short of the bits this
@@ -3673,6 +3717,8 @@ void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
             static_cast<unsigned long long>(hash));
     }
 }
+
+void uiLayerNoteSceneWrite(const void* resource, const void* data, uint32_t bytes) { g_sceneRelief.note(resource, data, bytes); }
 
 // The crisp take's whole dependency set, established no later than the first
 // HUD take (review R2) -- defined beside the coverage machinery, below.
@@ -6981,6 +7027,7 @@ void releaseDeviceObjects() {
     if (g_draw.active) releaseSaved();
     g_holoBinding.clear();
     g_holoCache.reset();
+    g_sceneRelief.reset();   // the buffers it names belong to the old device
     g_hdrSeedGpu.reset();  // release-only; the old device may already be gone
     g_hdrSeedActive = 0;
     releaseLayers();

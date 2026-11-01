@@ -96,6 +96,9 @@ template<class Check> void runWorldScaleCases(Check&& check) {
   const std::vector<std::string> want={
     "src\\common\\native_temporal.h",          // (a) the temporal frame struct: the eye transforms as given to Elite
     "src\\d3d11\\native_temporal.cpp",         // (a) the temporal pass's eyes: motion, the ADS eye offsets, the history reset on a moved separation
+    "src\\d3d11\\srv_turret.cpp",              // (a) the SRV turret HUD's anchored move: the eyes as Elite is given them (the head and the eye matrices of the frame)
+    "src\\d3d11\\srv_turret_math.h",           // (a) ... its eye frame from them (eyeFrameFrom)
+    "src\\d3d11\\vr_camera_census.h",          // (a) the declaration of nativeTemporalHeadPose, which hands them over
     "src\\openxr\\canted_display.h",           // (a) gameHandedness: Elite's S*E*S of the snapshot's pair
     "src\\openxr\\geometry_snapshot.h",        // the one place the scale is applied
     "src\\openxr\\native_runtime_host.h",      // the change line's two separations

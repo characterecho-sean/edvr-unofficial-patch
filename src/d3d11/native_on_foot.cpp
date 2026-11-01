@@ -134,6 +134,7 @@
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
+#include "srv_turret.h"   // issue 140: the SRV turret view's camera, a term of the eye alignment alignTick publishes
 #include "temporal_shader_bytecode.h"   // F85c: kReticleDepthBytecode (tools/temporal_shader_build)
 #include "temporal_pass.h"   // F52: temporalPassEyeRows, the temporal pass's camera rows for an eye (the marker correction's reference)
 #include "ui_depth.h"  // F46: uiDepthEyeOfTargetReadOnly, ui depth's frame table (the marker probe's eyes; read only)
@@ -15958,6 +15959,10 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         const double aimRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
         const nofoot::f172::Raise neckRaise = nofoot::f172::publish(neckRef.out.seatedY, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
         if (onFoot && !camExternal && neckRef.out.seatedY != 0.0) g_f172Turned.add(neckRaise);
+        // Issue 140 (TEMPORARY, experimental.srv_turret_camera_back): the SRV's turret view moves the camera back, over the turret's axis. Seated +z is backward and the view moves by
+        // MINUS the published alignment, so D metres back is z = -D. Added AFTER the on-foot gate and the external-camera zero below (every on-foot term above is an exact zero off
+        // foot), as exactly 0.0 outside the turret view; this is the one publisher of the alignment, so the serials stay coherent.
+        const double turretBackZ = srvTurretBackSeatedZ();
         // F186/F187: the same turn for the ADS terms. Under mouse look the game applies the whole seated alignment in the aim-pitched frame, not the neck
         // raise alone; the position lock, the sight lock and the weapon eye offset (which carries the ADS eye depth) went out unturned, so at a steep aim the sight lock's correction landed rotated by the pitch
         // and its loop (the controller adds the error each frame) grew from 60 deg. They go out turned by -a in the (forward, up) plane (y += y cos a + z sin a - y, z += z cos a - y sin a - z), F172's
@@ -15979,6 +15984,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             eye[i] += virtualNeck.seated[i];   // F137: the virtual neck (the view only: the P1 hook takes it back out by serial, the physical head offset cancels it)
             if (camExternal) eye[i] = 0.0;
             eye[i] = nofoot::f115::gate(onFoot, eye[i]);
+            if (i == 2) eye[i] += turretBackZ;   // issue 140: the turret view's camera, after the gate
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F119 (measure only): the head's offset from the rest point against EDVR's own eye offsets, which are the alignment just made and the terms it holds
@@ -16002,6 +16008,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             g_f94NeckSeatedPub = camExternal || !onFoot ? 0.0 : neckRef.out.seatedY;   // F94a: the neck reference's part of this alignment, kept under its serial
             for (size_t i = 0; i < 3; ++i) g_f137Pub[i] = camExternal || !onFoot ? 0.0 : virtualNeck.seated[i];   // F137: the virtual neck's part, kept under the same serial
             f89AlignPublish(f);   // F89: the serial and the y under it are kept for the hold's input
+            srvTurretNotePublished(turretBackZ, g_align.serial);   // issue 140: said in the log when the turret term changed (the serial f89AlignPublish just used)
         }
     }
 
@@ -37448,6 +37455,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
+    srvTurretFrameTick(frameNo);   // issue 140: the SRV turret view (the journal's bit, the five TEMPORARY keys, the geometry the HUD move is made from), just before alignTick adds its camera term
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain

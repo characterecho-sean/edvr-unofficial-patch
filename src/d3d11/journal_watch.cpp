@@ -19,6 +19,8 @@
 #include "../common/log.h"
 #include "../common/periodic_work.h"
 #include "journal_loadout_reader.h"   // F140: the suit loadout's weapon slots (their own reader of the current journal; journal_loadout.h parses)
+#include "journal_vehicle_latch.h"   // issue 140: the Scorpion latch, fed every byte the tail reads
+#include "srv_turret_math.h"          // issue 140: the turret view's Flags bit (journalSrvTurretView)
 
 namespace edvr {
 namespace {
@@ -147,6 +149,8 @@ struct Published {
     bool     supercruise = false;
     uint32_t statusSamples = 0;       // successful Status.json parses
     uint64_t statusContentRevision = 0, statusContentMs = 0;
+    // Built issue 140: the journal says the player's SRV is the Scorpion (journal_vehicle_latch.h). False until a LoadGame or LaunchSRV says so.
+    bool     srvScorpion = false;
 };
 
 struct Visible {
@@ -185,6 +189,7 @@ struct Visible {
     std::atomic<bool>     supercruise{false};
     std::atomic<uint32_t> statusSamples{0};
     std::atomic<uint64_t> statusContentRevision{0}, statusContentMs{0};
+    std::atomic<bool>     srvScorpion{false};
 };
 Visible g_v;
 
@@ -230,6 +235,7 @@ void applyPublished(const Published& p) {
     g_v.statusSamples.store(p.statusSamples, kRelaxed);
     g_v.statusContentRevision.store(p.statusContentRevision, kRelaxed);
     g_v.statusContentMs.store(p.statusContentMs, kRelaxed);
+    g_v.srvScorpion.store(p.srvScorpion, kRelaxed);
     g_v.active.store(p.active, std::memory_order_release);
 }
 
@@ -293,6 +299,8 @@ struct Session {
     uint32_t     statusMisses = 0;
     JournalStatusContentRevision statusContent;
     loadout::Reader loadoutReader;   // F140: the worker's own
+    // Issue 140: which SRV the player is in, read from the bytes the tail reads (journal_vehicle_latch.h). The worker's own, reset with the file.
+    journal_vehicle::Latch vehicle;
     // The flat profile's GuiFocus note (pollStatus): the last value noted, and how many notes were written (capped).
     bool         guiNoted = false;
     bool         guiNotedPresent = false;
@@ -342,6 +350,13 @@ std::atomic<Session*> g_session{nullptr};
 // Set by shutdown. A frame that arrives after it starts nothing.
 std::atomic<bool> g_stopped{false};
 
+// Issue 140: the latch moved (a journal event, or the file changed). Said once per change, in the VR profile only (the flat profile never reads it).
+void noteVehicle(Session& s, bool scorpion, journal_vehicle::Event cause) {
+    s.pub.srvScorpion = scorpion;
+    if (runtimeFlatProfile()) return;
+    Log::get().note("srv turret: the vehicle is %s (event %s)", scorpion ? "the Scorpion" : "not the Scorpion", journal_vehicle::eventName(cause));
+}
+
 void closeFile(Session& s) {
     if (s.handle != INVALID_HANDLE_VALUE) {
         CloseHandle(s.handle);
@@ -350,6 +365,8 @@ void closeFile(Session& s) {
     s.offset = 0;
     s.carryLen = 0;
     s.loadoutReader.close();   // F140
+    // Issue 140: another file is another stream, and what the last one said of the vehicle does not carry over (unknown is "not the Scorpion").
+    if (s.vehicle.reset()) noteVehicle(s, false, journal_vehicle::Event::kNewJournal);
 }
 
 // FILETIME is a 64-bit count in two halves; the decision below wants one
@@ -598,6 +615,8 @@ void scanEvents(Session& s, const char* data, uint32_t len) {
     }
     if (stitchedLen) scanRange(s, stitched, stitchedLen);
     scanRange(s, data, len);
+    // Issue 140: the Scorpion latch reads the new bytes themselves, once (a stream: the carry and the stitched head above would feed some bytes twice).
+    s.vehicle.feed(data, len, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });
 
     // Keep the tail as the next carry. Anything already scanned in `stitched`
     // that also sits in `data`'s head double-scans harmlessly: LoadGame and
@@ -1210,6 +1229,8 @@ JournalAdsStatus journalAdsStatus() {
     return r;
 }
 uint32_t journalFlags2() { return peek(g_v.flags2); }
+bool journalSrvTurretView() { return !runtimeFlatProfile() && srv_turret::turretViewFromFlags(peek(g_v.flags)); }
+bool journalSrvScorpion() { return !runtimeFlatProfile() && peek(g_v.srvScorpion); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
 bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
 bool journalStatusDocked() { return peek(g_v.docked); }

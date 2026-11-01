@@ -147,13 +147,28 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
                 i += extra;
                 return i <= available ? i : 0;
             }
+            // movups xmm, xmm/m128 (0F 10) and its store (0F 11), with no F2/F3 prefix: a plain unaligned move with a ModRM operand and
+            // no immediate, which is how MSVC opens a leaf that copies a matrix (the SRV radar's placement setter, 0x38563A0 in build
+            // 334925, begins `sub rsp,48h; movups xmm0,[rdx]`). Moved as is unless rip-relative, which is measured like every other
+            // ModRM form. Every other SSE form is still refused.
+            if (i < available && (code[i] == 0x10 || code[i] == 0x11)) {
+                ++i;
+                if (i >= available) return 0;
+                bool rip = false;
+                size_t extra = 0;
+                if (!modrmSize(code[i], &rip, &extra)) return 0;
+                if (rip && ripDispOffset) *ripDispOffset = i + 1;
+                i += extra;
+                return i <= available ? i : 0;
+            }
             return 0;   // every other two-byte opcode, including jcc rel32
         }
 
         default:
             // Everything unlisted, which includes E8 (call), E9/EB (jmp),
-            // 7x (jcc rel8), C3 (ret) and every SSE form. A prologue that
-            // begins with any of them is one this class will not touch.
+            // 7x (jcc rel8), C3 (ret) and every SSE form but movups (0F 10 /
+            // 0F 11 above). A prologue that begins with any of them is one
+            // this class will not touch.
             return 0;
     }
 }

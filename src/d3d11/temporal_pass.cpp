@@ -40,6 +40,7 @@
 #include "xess_engine.h"   // XeSS-SR: the VR eye pass's Intel engine (xessAvailable, xessEvaluate, xessSlotTotals)
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
+#include "srv_turret.h"     // srvTurretNoteEyeDump: issue 140's radar pair capture rides the eye dump (TEMPORARY)
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
 #include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
 #include "ui_resolve.h"
@@ -6814,6 +6815,7 @@ static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot*
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
     mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
+    srvTurretNoteEyeDump(g_eyeRunStamp);   // issue 140 (TEMPORARY): the SRV radar's pair capture and pictures take the dump's next frames
     if(!companion) {
         g_airborneCompanion=AirborneCompanionRequest{};
         if(edvr::nativeOnFootActive()) {
