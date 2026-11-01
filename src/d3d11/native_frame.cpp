@@ -3,6 +3,7 @@
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
 #include "../common/scope_zoom_window.h"
+#include "../common/view_circle.h"
 #include "../common/config.h"
 #include "../common/world_scale.h"
 #include "../common/frame_flag.h"
@@ -419,6 +420,12 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         // B3 (the scope zoom's window): the left eye drawn as the zoomed view, in a version 11 answer only, in five of the retired guard's words. None once the frame thread's request is
         // stale; a shape that cannot carry it leaves the words zero (no zoom, no strip).
         if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);
+        // F205: the ADS view circle (view_circle.h), in seven more of the retired guard's words (5..11), in a version 11 answer only: none once the frame thread's request is stale.
+        if (carried) {
+            uint32_t circleWords[edvr::viewcircle::kWords];
+            edvr::viewcircle::toWords(edvr::viewcircle::read(GetTickCount64()), circleWords);
+            std::memcpy(result.reservedTerrainGuard + edvr::viewcircle::kWordsAt, circleWords, sizeof(circleWords));
+        }
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a

@@ -464,6 +464,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrPluginDispatchFilterInput ^
     --extra-export edvrPluginHasActivePlugins ^
     --extra-export edvrNoteNativeEyeShare ^
+    --extra-export edvrNoteNativeViewCircle ^
     --extra-export edvrNoteNativeScopeZoom
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
@@ -2349,6 +2350,21 @@ if not exist "%OBJ%\depthscenepick" mkdir "%OBJ%\depthscenepick"
 if errorlevel 1 ( echo [edvr] ERROR: scene depth selection test build failed & exit /b 1 )
 "%OBJ%\depthscenepick\depth_scene_pick_test.exe" --dry-run || exit /b 1
 "%OBJ%\depthscenepick\depth_scene_pick_test.exe" --self-test || exit /b 1
+exit /b 0
+
+REM F198: the eye source S (src\d3d11\submitted_eye.h) and targetEye's order: the stability rule over the submitted textures, the previous-frame timing, a recreate, an edge and a size
+REM change, and that S is never asked while the temporal path runs. The header alone; no D3D11.
+:rig_submitted_eye_test
+echo [edvr] === submitted eye source (F198) ===
+if not exist "%OBJ%\submittedeye" mkdir "%OBJ%\submittedeye"
+%CC% /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\submittedeye\\" /Fe"%OBJ%\submittedeye\submitted_eye_test.exe" ^
+    "tools\submitted_eye_test\submitted_eye_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: submitted eye test build failed & exit /b 1 )
+"%OBJ%\submittedeye\submitted_eye_test.exe" --dry-run || exit /b 1
+"%OBJ%\submittedeye\submitted_eye_test.exe" --self-test || exit /b 1
 exit /b 0
 
 REM F85c: the reticle depth pass (src\d3d11\reticle_depth_shader.h). The production bytecode (kReticleDepthBytecode, from tools\temporal_shader_build) on a WARP device

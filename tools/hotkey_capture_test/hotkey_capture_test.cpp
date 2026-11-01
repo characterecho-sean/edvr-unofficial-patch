@@ -1848,7 +1848,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 18, "the Native on foot page has 18 rows (F177: Aiming choice at start, the [menu] key menu.aim_choice_prompt, which the page shows under Look to aim; "
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F205 added ADS: view circle and F205b removed it again, the circle following ADS: scope zoom; F177: Aiming choice at start, the [menu] key menu.aim_choice_prompt, which the page shows under Look to aim; "
                                 "A1: ADS: scope zoom joined Aiming down sights; F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
                                 "F128: Visor axis (test) was retired with the correction always on; the panel cursor's F155 retired its F154's Panel cursor (test) row with the "
                                 "drawn placement shipped; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch were retired, and the four Weapon UI trims "
@@ -2133,6 +2133,17 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                             strcmp(kMenuRows[swingRow].group, kMenuRows[squareRow].group) == 0;
         check(found == 1 && shaped && beside,
               "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS torso square, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.5 (F173; 0.0 before)");
+    }
+    // F194b / F195b: look to aim's test rows are gone with their keys. The picture-centre aim (F194 part 1) was removed on 2026-10-31; the eye height row (F194 part 2) and the keep-the-aim's-pitch row (F195) were
+    // retired the same day on the pilot's word, and their behaviour is unconditional. No row of the experimental section is a "Look to aim: ... (test)" row, and none names those keys.
+    {
+        int found = 0;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strstr(d.key, "look_to_aim_aims_at") != nullptr || strstr(d.key, "look_to_aim_eye_height") != nullptr || strstr(d.key, "look_to_aim_keeps") != nullptr) ++found;
+            if (strcmp(d.section, "experimental") == 0 && strncmp(d.label, "Look to aim:", 12) == 0) ++found;
+        }
+        check(found == 0, "Look to aim's three test rows (aim at the middle of the picture, eye height as mouse look, keep the aim's pitch; F194, F195) are gone with their keys: no experimental \"Look to aim: ...\" row, no row of those keys");
     }
     // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
     // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.

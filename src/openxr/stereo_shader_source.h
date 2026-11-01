@@ -71,6 +71,9 @@ float4 ps(O o):SV_TARGET {
 // B3 (the scope zoom's window): the left eye's own picture is the zoomed view, which must not be seen. dim is how much of it goes toward black: the strip weight band.z over the part the right
 // eye does not cover (1 - cover, the geometry alone: the edge band and the hidden-area mask, not the share weight), and all of it (band.w = 1) in a frame drawn with eye 0 narrowed. With
 // the weight falling at the end of a press and no narrowed frame, the covered interior is left as it was; with band.z and band.w 0 the share is exactly as it was.
+// F205: with misc.w = 2 the same shader draws the ADS view circle over an eye's finished image: black with alpha k, outside a circle of angular radius about the direction in rightAng.xyz (a unit
+// vector of THIS eye's view), nothing sampled. leftTan and leftSize are this eye's own (the pixel's direction is d as below), band is {margin, 1 / band, the weight, 0}, and rightAng.w is the
+// angle at which the black has all but come in (radius + margin + band / 2): k = weight (1 - saturate((rightAng.w - theta - margin) / band)). Same soft edge as the bars (src\openxr\scope_circle.h).
 // B3-3: with misc.w = 1 the same shader draws the RIGHT eye's mirror of that strip: the constants are the right eye's as "this" and the left eye's as the "other" (rot turns a right view
 // direction into the left view, rightAng is the left eye's drawn rectangle), and the output is black with the alpha s (1 - cover): the directions of the right view that the left view does
 // not see, with the same edge band, taken toward black by the strip's weight (band.z). It samples nothing.
@@ -91,6 +94,12 @@ float3 srgb(float3 c) { return lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-0.055,st
 float4 ps(O v):SV_TARGET {
   float2 lp=v.position.xy/leftSize.xy;
   float3 d=float3(lerp(leftTan.x,leftTan.y,lp.x),lerp(leftTan.z,leftTan.w,lp.y),-1);
+  if(misc.w>1.5) {
+    float th=acos(clamp(dot(normalize(d),rightAng.xyz),-1.0,1.0));
+    float k=band.z*(1-saturate((rightAng.w-th-band.x)*band.y));
+    if(!(k>0)) discard;
+    return float4(0,0,0,k);
+  }
   float3 r=mul(rot,float4(d,0));
   if(misc.w>0.5) {
     if(!(r.z<-1e-6)) return float4(0,0,0,band.z);

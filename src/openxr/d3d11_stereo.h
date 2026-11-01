@@ -40,6 +40,16 @@ struct StereoHiddenArea {
   uint32_t indexCount = 0;
   uint64_t revision = 0;
 };
+// F205: the ADS view circle (src\common\view_circle.h; src\openxr\scope_circle.h): black outside a circle about the sight in each eye, drawn over that eye's finished image. radiusRad is the
+// angular radius the d3d11 half asked for, weight 0..1 (the sight lock's ramp), tc[e] the sight's far point as tangents of eye e's own view (0 the left). Absent, off or a weight of 0: no pass,
+// and both eyes are the images the renderer has always drawn. While the full-detail scope's window stands (the right eye's mirror strip is drawn) the radius is cut to the circle that keeps its
+// side bars inside the black.
+struct StereoViewCircle {
+  bool on = false;
+  float radiusRad = 0.0f;
+  float weight = 0.0f;
+  float tc[2][2] = {};
+};
 // F106: what the renderer did with the left eye's share in its last renderCaptured call, for the host's per-press line. coverage and coverageWhole (eye_share.h,
 // coverageOf) are computed again only when the relative rotation, a fov, a placement or the mask changes, not every frame.
 struct StereoShareFacts {
@@ -53,6 +63,10 @@ struct StereoShareFacts {
   // and mirrorWidth the share of the right eye's width it covered on its middle row (the columns at least half black), 0..1.
   bool leftBlacked = false, mirrorDrawn = false;
   float mirrorWidth = 0.0f;
+  // F205: the view circle was drawn in both eyes / asked and refused (the centre or the views unusable, or the cut radius too small to be a view) / its radius was cut to hide B3's side bars. The
+  // radius it drew (degrees), the radius that hides the bars when that was worked out (0 when not), and its centre in each eye's image: left u, v then right u, v (fractions, v down).
+  bool circleDrawn = false, circleRefused = false, circleCapped = false;
+  float circleRadiusDeg = 0.0f, circleCoverageDeg = 0.0f, circleCentreUv[4]{};
 };
 
 struct StereoDispatch {
@@ -118,7 +132,9 @@ class D3D11Stereo final {
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
                           const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false,
-                          const XrPosef* seatOrigin = nullptr);
+                          const XrPosef* seatOrigin = nullptr, const StereoViewCircle* circle = nullptr);
+  // circle (F205, StereoViewCircle above): with it on and a weight above 0 each eye gets one more draw of the share shader in its circle mode, over its finished image, before the fade; the share
+  // and the mirror are drawn as they were and the circle goes over them. Nothing else changes, so with no circle (or a weight of 0) both eyes are bit for bit what they were.
   // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
   // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
   // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.

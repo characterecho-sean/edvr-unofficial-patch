@@ -144,7 +144,7 @@ struct State {
 };
 State g_s;
 TimerSlot g_timers[kTimers];   // apart from State: a GpuTimer is never moved
-bool g_firstNoted = false, g_failNoted = false, g_b3Noted = false;
+bool g_firstNoted = false, g_failNoted = false, g_b3Noted = false, g_firstOwnNoted = false;
 
 void releaseAll(ID3D11DeviceContext* ctx) {
     for (TimerSlot& t : g_timers) {
@@ -156,6 +156,7 @@ void releaseAll(ID3D11DeviceContext* ctx) {
     g_inflight.store(0, std::memory_order_relaxed);
     g_s = State{};
     g_firstNoted = false;
+    g_firstOwnNoted = false;
     g_b3Noted = false;
 }
 
@@ -578,7 +579,7 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
     });
     // c's frame against the picture's (the jitter's sequence is the frame the rows were drawn in): the gap is counted by bucket, and the lens still applies.
     if (f.jitterSeq != 0) count([&](sz::LensDoorStats& s) { ++s.seqGap[sz::lensGapBucket(a.sequence, f.jitterSeq)]; });
-    if (!a.resolved) {   // the game's own picture, not the upscaler's: the frame route refuses it
+    if (!a.resolved) {   // not the picture the eye shows unjittered: a temporal mode ran and the pass did not make this one (F202: with Anti-aliasing off the game's own picture is resolved, the caller says so)
         count([](sz::LensDoorStats& s) { ++s.formatRefused; });
         return;
     }
@@ -823,7 +824,11 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         s.depthNear = depth.nearDepth;
     });
     countB3([&](sz::B3Press& b) { ++b.source[static_cast<uint32_t>(b3src)]; });
-    if (!g_firstNoted) {
+    if (a.gameOwn && !g_firstOwnNoted) {   // F202: the first time the lens applies to the game's own picture (Anti-aliasing off): its own line, whatever an earlier DLSS press said
+        g_firstOwnNoted = true;
+        Log::get().note("scope lens: the right eye's picture (%ux%u, the game's own, Anti-aliasing off, DXGI format %d) is magnified %s, M %.2f about c (%.1f, %.1f) px, the depth from the depth probe (%ux%u) read for the hole.",
+                        fd.Width, fd.Height, static_cast<int>(fd.Format), inPlace ? "in place" : "in EDVR's copy of it", static_cast<double>(f.m), cx, cy, depth.w, depth.h);
+    } else if (!a.gameOwn && !g_firstNoted) {
         g_firstNoted = true;
         Log::get().note("scope lens: the right eye's picture (%ux%u, DXGI format %d) is magnified %s, M %.2f about c (%.1f, %.1f) px, the depth the upscaler used (%ux%u) read for the hole.",
                         fd.Width, fd.Height, static_cast<int>(fd.Format), inPlace ? "in place" : "in EDVR's copy of it", static_cast<double>(f.m), cx, cy, depth.w, depth.h);

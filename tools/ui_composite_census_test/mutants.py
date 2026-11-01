@@ -73,10 +73,11 @@ def drop(old):
 
 # ---- the anchors: text of the production headers, verbatim (the self-test finds each exactly once) -------------------------
 # ui_layer_math.h
-PRED = "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }\n"
+PRED = "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloNoShadow; }\n"
 HDR_USE = "        out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo\n"
 LDR_USE = "              : uiVsIsHoloPanel(f.vs)  ? UiLayerFamily::kHolo\n"
 KUI = "constexpr uint64_t kUiVsHoloGuiFxOff = kHoloGuiFxOffVs;\n"
+KUI_NS = "constexpr uint64_t kUiVsHoloNoShadow = kHoloNoShadowVs;\n"
 FAMILY_NAME = '        case UiLayerFamily::kHolo: return "cockpit holo panels";\n'
 HDR_SPRITE = "              : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud\n              : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite\n"
 LDR_LOADER = "              : f.vs == kUiVsLoader    ? UiLayerFamily::kLoader\n"
@@ -85,6 +86,9 @@ SPHERE_PS = "                  (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE9563
 # holo_material.h
 MAT_VS = "constexpr uint64_t kHoloGuiFxOffVs = 0x1989E6D3B405FDE0ull;\n"
 MAT_PS = "constexpr uint64_t kHoloGuiFxOffPs = 0xEAB8A1C95A13FFBEull;\n"
+MAT_NS_VS = "constexpr uint64_t kHoloNoShadowVs = 0x925ACEDA0153AA5Bull;\n"
+MAT_NS_PS = "constexpr uint64_t kHoloNoShadowPs = 0x738A98ED038E58B7ull;\n"
+MAT_SLOT = "    return ps == kHoloUnlitPs || ps == kHoloNoShadowPs ? 1u : 2u;\n"
 # ui_scene_composites.h
 PAIRS = "constexpr size_t kUiSceneCompositePairs = 8;\n"
 USED = "    uint32_t used = 0;\n"
@@ -154,6 +158,16 @@ MUTANTS = [
       "the vertex shader hash in holo_material.h is one bit off: the disassembled shader is not named", MAT),
     M("material-ps-typo", "R1f", [(MAT_PS, "constexpr uint64_t kHoloGuiFxOffPs = 0xEAB8A1C95A13FFBFull;\n")],
       "the pixel shader hash is one bit off: the pair is not the one the dump named", MAT),
+    M("holo-vs-noshadow-dropped", "R1j", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }\n")],
+      "the predicate names the stock and Disable-GUI-effects vertex shaders but not the planet-surface one: those panels stay in the scene (the 2026-10-31 field defect)", MATH),
+    M("layer-noshadow-constant-off-by-one", "R1j", [(KUI_NS, "constexpr uint64_t kUiVsHoloNoShadow = 0x925ACEDA0153AA5Cull;\n")],
+      "the layer's constant for the planet-surface panels is not the disassembled hash", MATH),
+    M("material-noshadow-vs-typo", "R1j", [(MAT_NS_VS, "constexpr uint64_t kHoloNoShadowVs = 0x925ACEDA0153AA5Cull;\n")],
+      "the planet-surface vertex shader hash in holo_material.h is one bit off: the disassembled shader is not named", MAT),
+    M("material-noshadow-ps-typo", "R1k", [(MAT_NS_PS, "constexpr uint64_t kHoloNoShadowPs = 0x738A98ED038E58B8ull;\n")],
+      "the planet-surface pixel shader hash is one bit off: the pair is not the one the dump named", MAT),
+    M("noshadow-surface-slot-lit", "R1l", [(MAT_SLOT, "    return ps == kHoloUnlitPs ? 1u : 2u;\n")],
+      "the planet-surface pixel shader's interface surface is looked for in t2: it sits in t1, so a capture would read the mask", MAT),
     # ---- R8: the setting off changes nothing (the frozen rule) --------------------------------------------------------------------
     M("ldr-loader-becomes-surface", "R8a", [(LDR_LOADER, "              : f.vs == kUiVsLoader    ? UiLayerFamily::kSurface\n")],
       "the loading screen's composite over a learned surface is named a generic surface: a draw that has nothing to do with the new shader changes", MATH),

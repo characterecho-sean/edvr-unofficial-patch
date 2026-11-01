@@ -28,6 +28,27 @@ namespace visoraxis {
 
 constexpr unsigned kTrustRun = 12;   // consecutive draws in a new state before it is logged (about six frames)
 
+// F200: where a visor draw's eye comes from. The eye filing (ui depth's frame table, read only: 'T') names it only while the temporal path runs: ui depth classifies draws
+// under uiDepthWantsDraws, which is the temporal mode, so with Anti-aliasing off it answers -1 and the per-eye visor work (F121's axis shift, outer mode's per-eye pixel shader,
+// this guard) was refused as kNoEye. With the temporal path OFF only, the depth probe's scene pair names it ('D'): the visor draw binds a depth-stencil view (the pilot's log:
+// "DSV bound", RTV 2016x2017 R11G11B10, the scene's size), and the pair is the eyes' scene depth. The table's answer always wins; the depth is not asked with the temporal
+// path on (the lambda is not called), so that path is what it was. -1 when both fail. NOT the submitted textures (F198's 'S'): the visor draws into the HDR scene target, which
+// is not a submitted texture.
+enum class EyeSource : char { kNone = 0, kTable = 'T', kDepth = 'D' };
+struct EyeChoice {
+    int eye;
+    EyeSource src;
+};
+template <class Depth>
+inline EyeChoice chooseVisorEye(int tableEye, bool temporalPathRuns, Depth depthEye) {
+    if (tableEye == 0 || tableEye == 1) return {tableEye, EyeSource::kTable};
+    if (!temporalPathRuns) {
+        const int eye = depthEye();
+        if (eye == 0 || eye == 1) return {eye, EyeSource::kDepth};
+    }
+    return {-1, EyeSource::kNone};
+}
+
 // Why a draw was or was not trusted.
 enum class Why : unsigned { kOk = 0, kFirst, kOneEye, kMoved, kSubmitted, kCount };
 // The filing's state, as logged.

@@ -119,6 +119,36 @@ inline bool lensOpticalSight(const char* itemName, int scope, double refDeg) noe
     return lensAdsDeg(itemName, scope, &ads) && lensZoom(refDeg, ads) >= kLensMinM;
 }
 
+// F205: the ADS FOV of every owned weapon, for the ADS view circle (view_circle.h), not only the optical sights the lens magnifies. The same measured values (section 7: 52.000 the shotgun,
+// the pistols and the launcher, 50.000 the sub-machine guns, 48.000 the assault rifles), keyed by the same stems; the table above answers first (the Executioner's two, the optical copies).
+// What no row names is unmeasured: no value, and so no circle (never a guess).
+struct AdsOnlyEntry {
+    const char* stem;
+    double deg;
+};
+constexpr AdsOnlyEntry kAdsOnlyTable[] = {
+    {"m_shotgun_plasma_doublebarrel", 52.0}, {"s_pistol_plasma_charged", 52.0}, {"s_pistol_kinetic_sauto", 52.0}, {"m_launcher_rocket_sauto", 52.0}, {"s_pistol_laser_sauto", 52.0},
+    {"m_submachinegun_kinetic_fauto", 50.0}, {"m_submachinegun_laser_fauto", 50.0},   // the Eclipse unscoped: its own sight is not optical (no lens), its ADS FOV is measured
+    {"m_assaultrifle_kinetic_fauto", 48.0},
+};
+// The game's ADS FOV (degrees) for the held item and its scope state, for the view circle: the lens table's answer, else the other measured weapons'. An unknown scope state has no value (the
+// FOV of a scoped copy that no row measures is the item's own, as the lens table's stand-ins take it: *fromBare says so). False, with *deg NaN, for an item no row names.
+inline bool adsFovDeg(const char* itemName, int scope, double* deg, bool* fromBare = nullptr) noexcept {
+    if (lensAdsDeg(itemName, scope, deg, fromBare)) return true;
+    if (deg) *deg = kNaN;
+    if (fromBare) *fromBare = false;
+    if (scope != kLensScopeNo && scope != kLensScopeYes) return false;
+    char stem[64];
+    if (!lensStem(itemName, stem, sizeof(stem))) return false;
+    for (const AdsOnlyEntry& e : kAdsOnlyTable) {
+        if (std::strcmp(stem, e.stem) != 0) continue;
+        if (deg) *deg = e.deg;
+        if (fromBare) *fromBare = scope == kLensScopeYes;
+        return true;
+    }
+    return false;
+}
+
 // ---- 2. the gate and the ease ------------------------------------------------------------------------------------------------------------------------------------------------
 // What a frame of the frame thread's tick came to. kIdle is every frame that asks nothing of the lens (the key off, not on foot, not in the sights, w under 1.0): nothing is counted.
 // The others are counted by the door under their reason; kQualifies frames are the ones the lens runs on (and the ones the scope's gunsight mark is taken out of the scene for).
@@ -168,6 +198,21 @@ constexpr uint32_t kLensOffRadiusPx = 64;     // 128 floats: r(k) in render px, 
 constexpr uint32_t kLensOffRadiusDeg = kLensOffRadiusPx + 4 * kLensRays;   // 128 floats: r(k) in degrees, as the ray ended (12 for an escaped one)
 constexpr uint32_t kLensBufferBytes = kLensOffRadiusDeg + 4 * kLensRays;
 static_assert(kLensOffRadiusDeg == 576 && kLensBufferBytes == 1088, "the lens buffer is 272 uints");
+
+// F202: may the right eye's door treat the picture it was handed as the one it can read as resolved (unjittered, the picture the eye shows)? Two cases say yes. The picture is the temporal
+// pass's own output (doorFromPass): the upscaler's, as before. Or no temporal mode runs (Anti-aliasing off): the game's own picture IS what the eye shows, there is no jitter in it
+// (native_temporal.cpp begin() leaves the eye shift zeroed and the lens's jitterUv reads zero), and the sight point c the frame thread worked out from the game's rows is where the game
+// drew it. With a temporal mode running, a picture the pass did not make (the pass declined, stood down, or the frame was withheld) is still refused, exactly as before F202.
+inline bool lensPictureResolved(bool doorFromPass, bool temporalPathRuns) noexcept { return doorFromPass || !temporalPathRuns; }
+
+// F202: the reverse-Z depth of kLensNearM for the scene depth the lens's rays march, with Anti-aliasing off, from the near plane the runtime's projection query gave. Elite's scene depth is
+// reversed Z with an infinite far plane: d = A + B / z with A = 0 and B = the near plane, so d(z) = near / z. That is what temporal_math.h temporalSceneProjection falls back to when no
+// scene row is measured (a = 0, b = nearZ), and what the 2026-11-01 DLSS flight's presses read ("no usable scene projection row; using Elite's infinite-far reversed-Z depth = 0.025 /
+// metres", near 0.041667 = 0.025 / 0.6 in the press line). The lens's hole test is `depth > nearDepth`, larger is nearer, so it asks z < kLensNearM. The same float arithmetic as
+// temporal_pass.cpp's `lensA + lensB / static_cast<float>(kLensNearM)` with lensA = 0. 0 for a near plane that is not a positive number: the door counts that as no depth.
+inline float lensNearDepthInfiniteFar(float nearZ) noexcept {
+    return (std::isfinite(nearZ) && nearZ > 0.0f) ? nearZ / static_cast<float>(kLensNearM) : 0.0f;
+}
 
 // The tangents {L, R, D, U} an eye's image spans (tangentsOf's order). A uv of the image (0..1, y down) is a point of the tangent plane.
 inline void lensTangentAtUv(const float tan4[4], double u, double v, double out[2]) noexcept {
@@ -377,7 +422,7 @@ struct LensDoorStats {
     uint32_t notOptical = 0;          // declined by the gate: the (item, scope) is not an optical sight, or its M is under 1.05
     uint32_t leftAim = 0;             // declined by the gate: the aiming eye is the left one (fix.native_on_foot_ads_sight_eye = left); the lens is the right eye's
     uint32_t depthUnavailable = 0;    // no depth for the eye at the door, or not at the size c was worked out for
-    uint32_t formatRefused = 0;       // the frame route: a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
+    uint32_t formatRefused = 0;       // the frame route: a picture that is not resolved (lensPictureResolved: a temporal mode ran and the pass did not make it), a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
     uint32_t dispatched = 0;          // frames the passes were issued on
     uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease) that the door would otherwise have run on: nothing to do, nothing issued, not applied
     uint32_t seqGap[kLensGapBuckets] = {};   // frames (applied or not) with a c reading, by the picture's temporal sequence less the sequence c's draws were made in: -1, 0, +1, +2, other

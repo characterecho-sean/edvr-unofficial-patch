@@ -19,6 +19,7 @@ namespace {
 unsigned checks = 0;
 std::string temporalMode = "dlss";
 bool eyeDepthCaptureOn = false;
+std::string nativeOnFootKey = "off";   // fix.native_on_foot: off here, so the arming tests below see only the two reasons they always did
 
 void check(bool value, const char* message) {
     ++checks;
@@ -75,6 +76,7 @@ void Log::note(const char*, ...) {}
 Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char* key, const char* def) const {
     if (!std::strcmp(key, "fix.temporal_aa")) return temporalMode;
+    if (!std::strcmp(key, "fix.native_on_foot")) return nativeOnFootKey;
     return def;
 }
 bool Config::getBool(const char* key, bool def) const {
@@ -351,6 +353,189 @@ void runEquivalenceTests() {
     check(oldWork.refresh == 3 && fusedWork.refresh == 2 &&
           oldWork.order == 3 && fusedWork.order == 2,
           "fused lookup performs one refresh and order operation per resource");
+}
+
+// F196: the probe watches for native on-foot VR alone (depth_probe_wanted.h). A user's log (Quest 2 on WiVRn, fix.temporal_aa = off, the shipped
+// default) had F113's row sources decline 157185 draws for want of a scene depth eye and the ADS sight lock on F110's model in every frame: with the
+// temporal pass off nothing asked for the scene pair, so it never formed, and the probe was not even watching. The decision, then the arm's work.
+void configureRig(edvr::RuntimeProfile profile, const char* mode, bool capture, const char* nativeOnFoot) {
+    edvr::runtimeProfileSet(profile);
+    temporalMode = mode;
+    eyeDepthCaptureOn = capture;
+    nativeOnFootKey = nativeOnFoot;
+    edvr::depthProbeConfigure(edvr::Config::get());
+}
+
+void runNativeOnFootTests(ID3D11DeviceContext* context) {
+    using edvr::DepthProbeWhy;
+    using edvr::RuntimeProfile;
+    TargetTableGuard restore;
+
+    // The pure decision: (fix.temporal_aa, the eye depth capture, native on-foot VR) -> why the probe watches.
+    const struct { const char* mode; bool capture; bool nofVr; DepthProbeWhy why; } decide[] = {
+        {"off", false, true, DepthProbeWhy::kNativeOnFoot},   // the shipped default in a headset
+        {"off", false, false, DepthProbeWhy::kOff},           // flat, or native on foot off in the VR profile
+        {"dlss", false, false, DepthProbeWhy::kTemporal},
+        {"dlss", false, true, DepthProbeWhy::kTemporal},      // the pilot's rig: the temporal pass asks, the diagnostics stay
+        {"on", false, true, DepthProbeWhy::kTemporal},
+        {"banana", false, false, DepthProbeWhy::kTemporal},   // today's rule: any value but off
+        {"off", true, false, DepthProbeWhy::kCapture},
+        {"off", true, true, DepthProbeWhy::kCapture},         // the capture keeps its diagnostics
+        {"", false, true, DepthProbeWhy::kNativeOnFoot},
+        {"", false, false, DepthProbeWhy::kOff},
+        {"OFF", false, true, DepthProbeWhy::kNativeOnFoot},
+    };
+    for (const auto& row : decide) {
+        const DepthProbeWhy why = edvr::depthProbeWhyFor(row.mode, row.capture, row.nofVr);
+        check(why == row.why, "F196: the probe's reason follows (fix.temporal_aa, capture, native on-foot VR)");
+        check(edvr::depthProbeWantedFor(row.mode, row.capture, row.nofVr) == (row.why != DepthProbeWhy::kOff),
+              "F196: wanted exactly when there is a reason");
+        check(edvr::depthProbeDiagnosticsFor(why) == (row.why == DepthProbeWhy::kTemporal || row.why == DepthProbeWhy::kCapture),
+              "F196: the diagnostics run for the temporal and capture reasons, never for native on foot alone");
+    }
+    check(edvr::depthProbeNativeOnFootVr(true, "on") && !edvr::depthProbeNativeOnFootVr(true, "off") &&
+          !edvr::depthProbeNativeOnFootVr(false, "on") && !edvr::depthProbeNativeOnFootVr(true, "") &&
+          !edvr::depthProbeNativeOnFootVr(true, "ON"),
+          "F196: native on-foot VR is the VR profile and fix.native_on_foot exactly 'on' (native_on_foot.cpp readKey's own test)");
+
+    // The decision through depthProbeConfigure: the profile and the key as the config reload reads them.
+    const struct { RuntimeProfile profile; const char* mode; bool capture; const char* key; bool wanted; bool pickOnly; } config[] = {
+        {RuntimeProfile::Vr, "off", false, "on", true, true},
+        {RuntimeProfile::LegacyVr, "off", false, "on", true, true},
+        {RuntimeProfile::Vr, "off", false, "off", false, false},      // native on foot disabled in VR, AA off
+        {RuntimeProfile::Flat, "off", false, "on", false, false},     // flat: nothing changes
+        {RuntimeProfile::Passthrough, "off", false, "on", false, false},
+        {RuntimeProfile::Invalid, "off", false, "on", false, false},
+        {RuntimeProfile::Vr, "dlss", false, "on", true, false},
+        {RuntimeProfile::Vr, "off", true, "on", true, false},
+        {RuntimeProfile::Flat, "dlss", false, "on", true, false},     // flat's own arming is as it was
+        {RuntimeProfile::Flat, "off", true, "on", true, false},
+    };
+    for (const auto& row : config) {
+        configureRig(row.profile, row.mode, row.capture, row.key);
+        check(edvr::g_wanted == row.wanted && edvr::depthProbeWanted() == row.wanted,
+              "F196: depthProbeConfigure watches exactly when the decision says");
+        check(edvr::g_pickOnly == row.pickOnly, "F196: the scene-pick-only arm is native on-foot VR alone");
+    }
+
+    // The arm's work. A synthetic frame: two eye-sized depth targets bound beside eye-sized colour, a third of the eye's size (the HUD's), and a
+    // shadow atlas that is the busiest of all and is never beside an eye-sized colour target.
+    auto frame = [&]() {
+        std::memset(edvr::g_targets, 0, sizeof(edvr::g_targets));
+        edvr::g_targetCount = 4;
+        const struct { unsigned id; uint32_t w, h, draws, eyeDraws, firstBind; } t[] = {
+            {10, 200, 100, 900, 900, 3}, {11, 200, 100, 800, 800, 9}, {12, 100, 100, 2000, 0, 1}, {13, 200, 100, 5, 5, 20},
+        };
+        for (int i = 0; i < 4; ++i) {
+            setSyntheticTarget(i, t[i].id, t[i].w, t[i].h, 0, 0);
+            edvr::Target& target = edvr::g_targets[i];
+            target.drawsThisFrame = t[i].draws;
+            target.eyeRtvDrawsThisFrame = t[i].eyeDraws;
+            target.firstBindThisFrame = t[i].firstBind;
+            target.lastSeenFrame = edvr::g_frameNo;
+        }
+        edvr::g_scenePick[0] = edvr::g_scenePick[1] = -1;
+        edvr::g_scenePickCache.valid = false;
+    };
+    auto view = [](int i) { return static_cast<ID3D11DepthStencilView*>(edvr::g_targets[i].dsv); };
+    int eye = 77, target = 77;
+
+    configureRig(RuntimeProfile::Vr, "off", false, "on");
+    frame();
+    check(!edvr::depthProbeCurrentSceneEyeOf(view(0), &eye, &target) && eye == -1,
+          "F196: before the first frame boundary there is no scene pair and no eye");
+    check(!edvr::depthProbeWantsSample(view(3), view(0)),
+          "F196: native on-foot VR alone never unbinds the output merger for a depth sample");
+    const uint64_t boundaryReadAt = edvr::g_boundaryLastMs;
+    edvr::depthProbeFrameBoundary(context);   // a real context beside targets with no real texture: a frame-boundary read would be begun here and would touch them
+    check(edvr::g_boundaryLastMs == boundaryReadAt && !edvr::g_stagingInFlight,
+          "F196: native on-foot VR alone begins no frame-boundary read of a depth texture");
+    check(edvr::g_layoutTarget == -1, "F196: native on-foot VR alone runs no layout census, though the atlas qualifies for one");
+    check(edvr::g_scenePick[0] == 0 && edvr::g_scenePick[1] == 1,
+          "F196: the pair forms at the frame boundary by the eye-sized colour target's size, with nobody asking: the two busiest of 200x100, not the 100x100 atlas");
+    check(edvr::depthProbeCurrentSceneEyeOf(view(0), &eye, &target) && eye == 0 && target == 0 &&
+          edvr::depthProbeCurrentSceneEyeOf(view(1), &eye, &target) && eye == 1 && target == 1,
+          "F196: the pair answers each eye by first bind, the way the temporal pass's does");
+    check(!edvr::depthProbeCurrentSceneEyeOf(view(2), &eye, &target) && eye == -1 &&
+          !edvr::depthProbeCurrentSceneEyeOf(view(3), &eye, &target) && eye == -1,
+          "F196: the atlas and the HUD's third target are not scene eyes");
+    // F199: the pick-only arm now hands out the scene depth (F85c's reticle march, F119's grid and F123's wall contact never had it with Anti-aliasing off), from the pair the frame
+    // boundary formed, for the size that pair is, and never by re-picking.
+    {
+        ID3D11Texture2D* texture = reinterpret_cast<ID3D11Texture2D*>(uintptr_t{1});
+        const uint32_t scansBefore = edvr::g_scenePickScans;
+        const int pairBefore[2] = {edvr::g_scenePick[0], edvr::g_scenePick[1]};
+        check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == fakeTexture(10),
+              "F199: the pick-only arm hands out the first eye's scene depth for the pair's size (by first bind: target 0)");
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11),
+              "F199: ...and the second eye's");
+        ID3D11Texture2D* formatted = nullptr;
+        uint32_t dsvFormat = 0;
+        check(edvr::depthProbeSceneDepthFormat(200, 100, 1, &formatted, &dsvFormat) && formatted == fakeTexture(11) && dsvFormat == static_cast<uint32_t>(DXGI_FORMAT_D32_FLOAT),
+              "F199: depthProbeSceneDepthFormat rides on it: the eye's texture and the view format the game binds it with");
+        // a wrong size is refused: the 100x100 atlas's size (a target is there, busy) and a size nothing has; the pair stays and no scan is made
+        check(!edvr::depthProbeSceneDepth(100, 100, 0, &texture) && texture == nullptr && !edvr::depthProbeSceneDepth(201, 100, 1, &texture) && texture == nullptr &&
+              !edvr::depthProbeSceneDepth(200, 101, 0, &texture) && texture == nullptr,
+              "F199: a wrong size is refused, with no texture");
+        check(edvr::g_scenePick[0] == pairBefore[0] && edvr::g_scenePick[1] == pairBefore[1] && edvr::g_scenePickScans == scansBefore,
+              "F199: the refusals did not re-pick: the boundary's pair stands and no scan of the targets was made (an asker of another size cannot displace it within the frame)");
+        check(!edvr::depthProbeSceneDepth(200, 100, 2, &texture) && texture == nullptr && !edvr::depthProbeSceneDepth(200, 100, -1, &texture) && texture == nullptr &&
+              !edvr::depthProbeSceneDepth(200, 100, 0, nullptr),
+              "F199: an eye other than 0 or 1, and no output, are refused");
+        // the pair's size asked repeatedly agrees with the boundary's pick at every call (it is what refreshScenePick would have returned) and does not move it
+        for (int i = 0; i < 4; ++i)
+            check(edvr::depthProbeSceneDepth(200, 100, i & 1, &texture) && texture == fakeTexture(i & 1 ? 11 : 10) && edvr::g_scenePick[0] == pairBefore[0] && edvr::g_scenePick[1] == pairBefore[1],
+                  "F199: asked again, the same pair");
+        // the depth is not handed out from a pair whose targets were not drawn into last frame (refreshScenePick's own rule), nor when a target has left the table
+        const edvr::Target saved0 = edvr::g_targets[0], saved1 = edvr::g_targets[1];
+        edvr::g_targets[0].drawsLastFrame = 0;
+        check(!edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr, "F199: a pair whose target was not drawn into last frame is refused");
+        edvr::g_targets[0] = saved0;
+        edvr::g_targets[1].dsv = nullptr;
+        check(!edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == nullptr, "F199: a pair whose target has left the table is refused");
+        edvr::g_targets[1] = saved1;
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11), "F199: and handed out again once it is back");
+    }
+    // The pair is held while the game keeps drawing it (hysteresis): the same frame again, the same pair.
+    frame();
+    edvr::g_scenePick[0] = 1;
+    edvr::g_scenePick[1] = 0;
+    edvr::depthProbeFrameBoundary(context);
+    check(edvr::g_scenePick[0] == 1 && edvr::g_scenePick[1] == 0 &&
+          edvr::depthProbeCurrentSceneEyeOf(view(0), &eye, &target) && eye == 0,
+          "F196: a settled pair is kept across frames (the temporal pass's hysteresis), the eye still by first bind");
+
+    // The control: the same frame under the temporal reason keeps the diagnostics -- the unbind-and-sample is asked for and the layout census arms --
+    // and does not form the pair itself (the temporal pass is the asker there).
+    configureRig(RuntimeProfile::Vr, "dlss", false, "on");
+    frame();
+    check(!edvr::g_stagingInFlight && edvr::depthProbeWantsSample(view(3), view(0)),
+          "F196 control: with a temporal mode on, the unbind-and-sample is still asked for");
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(edvr::g_layoutTarget == 2, "F196 control: with a temporal mode on, the layout census still arms on the atlas");
+    check(edvr::g_scenePick[0] == -1 && edvr::g_scenePick[1] == -1,
+          "F196 control: with a temporal mode on, the probe forms no pair of its own at the boundary (depthProbeSceneDepth does)");
+    {   // F199 control: with a temporal mode on depthProbeSceneDepth is what it was: it re-picks by the size asked (the pair forms here), and a size with no pair is refused
+        ID3D11Texture2D* texture = reinterpret_cast<ID3D11Texture2D*>(uintptr_t{1});
+        const uint32_t scansBefore = edvr::g_scenePickScans;
+        check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == fakeTexture(10) && edvr::g_scenePick[0] == 0 && edvr::g_scenePick[1] == 1 &&
+                  edvr::g_scenePickScans == scansBefore + 1,
+              "F199 control: with a temporal mode on the asker forms the pair itself, by a scan of the targets (the temporal pass's way)");
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11) && edvr::g_scenePickScans == scansBefore + 1,
+              "F199 control: ...and the second eye's from the cache");
+    }
+    edvr::g_layoutTarget = edvr::g_layoutRecord = -1;
+    edvr::layoutReset();
+
+    // The probe off in the profile the key does not apply to: no pair, nothing counted.
+    configureRig(RuntimeProfile::Flat, "off", false, "on");
+    frame();
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(edvr::g_scenePick[0] == -1 && !edvr::depthProbeCurrentSceneEyeOf(view(0), &eye, &target),
+          "F196: in the flat profile with Anti-aliasing off the probe is off and forms nothing");
+
+    configureRig(RuntimeProfile::LegacyVr, "dlss", false, "off");   // the state the rest of this rig runs with
+    check(edvr::g_wanted && !edvr::g_pickOnly, "F196: back under the DLSS arming the rest of this rig runs with");
 }
 
 bool oldSceneTextureEyeUninstrumented(uint32_t w, uint32_t h, const void* resource,
@@ -731,6 +916,10 @@ int main(int argc, char** argv) {
             edvr::detail::g_depthProbeEyeDrawThisFrame = gateSavedThisFrame;
             edvr::detail::g_depthProbeLastDsv = gateSavedLast;
         }
+
+        // F196: native on-foot VR alone is a reason to watch, and the scene pair it forms at the frame boundary answers the eyes.
+        runNativeOnFootTests(context.Get());
+        check(edvr::depthProbeWanted(), "F196: the DLSS arming is back for the rest of this rig");
 
         // The layout census (flight 6, 153446: "now #0 2048x1024" beside a
         // 5088x2862 viewport). A screen-sized target and a shadow atlas that

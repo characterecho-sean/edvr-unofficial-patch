@@ -26,8 +26,12 @@ static_assert(edvr::kFrameSpanSlots * 2u <= edvr::DisjointClock::kLeases,
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 namespace edvr {
 
@@ -84,6 +88,70 @@ void testFastPathTable() {
     check(!edvr::drawFastPathTaken(c), "fast path: the VR world route keeps the full path");
     c = base; c.aaOff = false;
     check(!edvr::drawFastPathTaken(c), "fast path: AA on never takes it (behaviour with AA on is unchanged)");
+}
+
+// F201: the marker fix's bind. forwardWithVerdict binds the patched b0 for a draw the UI layer took (the layer's bracket) and, with the temporal path off, for the game's own single issue:
+// markerFixBindWanted over all four (layered, temporal path) combinations, and the fast path's claim for a decided draw.
+void testMarkerFixBind() {
+    check(edvr::markerFixBindWanted(true, true), "marker bind: layered with a temporal mode on: bound (as before)");
+    check(!edvr::markerFixBindWanted(false, true), "marker bind: not layered with a temporal mode on (the layer stood down, or no family): not bound, as before (the DLSS path is unchanged)");
+    check(edvr::markerFixBindWanted(true, false), "marker bind: layered with the temporal mode off cannot happen, and would be bound");
+    check(edvr::markerFixBindWanted(false, false), "marker bind: not layered with the temporal mode off (Anti-aliasing off, no layer): bound, on the game's own issue (F201)");
+    // with a temporal mode on the answer is `layered`, bit for bit
+    bool same = true;
+    for (int l = 0; l < 2; ++l) same = same && edvr::markerFixBindWanted(l != 0, true) == (l != 0);
+    check(same, "marker bind: with a temporal mode on the predicate is `layered` exactly");
+    // the fast path: a decided draw is claimed while the AA is off; a draw nothing decided still is not; with the AA on nothing changes (the path is never taken there)
+    check(!edvr::drawClaimed(false, false) && edvr::drawClaimed(true, false) && edvr::drawClaimed(false, true) && edvr::drawClaimed(true, true), "claim: a verdict or a pending marker decision claims the draw");
+    const auto fast = [](bool aaOff, bool verdictClaims, bool pending) {
+        // drawPathFast: the pending flag is asked only while the AA is off
+        return edvr::drawFastPathTaken(edvr::DrawPathInputs{aaOff, false, false, false, edvr::drawClaimed(verdictClaims, aaOff && pending)});
+    };
+    check(fast(true, false, false), "claim: AA off, nothing decided: the fast path is taken, as before");
+    check(!fast(true, false, true), "claim: AA off, a marker decision pending: the full path, where the bind is (F201)");
+    check(!fast(true, true, false) && !fast(true, true, true), "claim: AA off, a verdict claims it: the full path, as before");
+    check(!fast(false, false, false) && !fast(false, false, true) && !fast(false, true, true), "claim: AA on never takes the fast path, pending or not (unchanged)");
+}
+
+// F201: the wiring, by a scan of the sources (this rig runs from the repository root, as build.bat does): vscreen.cpp's bind uses the predicate and keeps the Begin and End calls, nothing
+// returns between them, drawPathFast claims a decided draw, and every write of native on foot's pending decision mirrors the flag the fast path reads.
+static std::string slurpFile(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+static size_t countOf(const std::string& text, const std::string& needle) {
+    size_t n = 0;
+    for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++n;
+    return n;
+}
+void testMarkerFixWiring() {
+    const std::string v = slurpFile("src/d3d11/vscreen.cpp"), n = slurpFile("src/d3d11/native_on_foot.cpp");
+    check(!v.empty() && !n.empty(), "marker bind wiring: vscreen.cpp and native_on_foot.cpp open (run from the repository root)");
+    const std::string line = "const bool markerFixed = markerFixBindWanted(layered, temporalPassWantsFssChrome()) && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);";
+    check(countOf(v, line) == 1 && countOf(v, "nativeOnFootMarkerFixBegin(self)") == 1 && countOf(v, "layered && owner && nativeOnFootMarkerFixLive()") == 0,
+          "marker bind wiring: the bind asks markerFixBindWanted(layered, the temporal path), once, and the old layered-only expression is gone");
+    check(countOf(v, "if (markerFixed) nativeOnFootMarkerFixEnd(self);") == 1, "marker bind wiring: End is called once, on markerFixed");
+    const size_t begin = v.find(line), end = v.find("if (markerFixed) nativeOnFootMarkerFixEnd(self);");
+    bool noReturn = begin != std::string::npos && end != std::string::npos && begin < end;
+    for (size_t at = begin; noReturn && at < end;) {
+        const size_t eol = v.find('\n', at);
+        std::string code = v.substr(at, (eol == std::string::npos ? end : eol) - at);
+        const size_t comment = code.find("//");
+        if (comment != std::string::npos) code.erase(comment);
+        for (size_t r = code.find("return"); r != std::string::npos; r = code.find("return", r + 1)) {
+            const bool wordStart = r == 0 || !(std::isalnum(static_cast<unsigned char>(code[r - 1])) || code[r - 1] == '_');
+            const bool wordEnd = r + 6 >= code.size() || !(std::isalnum(static_cast<unsigned char>(code[r + 6])) || code[r + 6] == '_');
+            if (wordStart && wordEnd) noReturn = false;
+        }
+        if (eol == std::string::npos) break;
+        at = eol + 1;
+    }
+    check(noReturn, "marker bind wiring: no return between the bind and its End, so End is reached on every path where Begin bound");
+    check(countOf(v, "drawClaimed(v != DrawVerdict::kNone, aaOff && nativeOnFootMarkerFixPending())") == 1,
+          "marker bind wiring: drawPathFast claims a decided draw, asking the flag only while the AA is off");
+    check(countOf(n, "g_fix.pending = true;") == 2 && countOf(n, "g_nativeOnFootMarkerFixPending.store(true, std::memory_order_relaxed);") == 2 &&
+              countOf(n, "g_fix.pending = false;") == 2 && countOf(n, "g_nativeOnFootMarkerFixPending.store(false, std::memory_order_relaxed);") == 3,
+          "marker bind wiring: every write of the pending decision mirrors the flag the fast path reads (two sets, two clears, and the shutdown's)");
 }
 
 // Cut B: the bind records. Only AA off with engine velocity closed skips VsSrv33 and Blend.
@@ -389,6 +457,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     testFastPathTable();
+    testMarkerFixBind();
+    testMarkerFixWiring();
     testBindShadows();
     testThunkModel();
     testBindToggle();

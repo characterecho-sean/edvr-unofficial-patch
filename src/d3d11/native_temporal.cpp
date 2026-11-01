@@ -88,6 +88,7 @@ struct State {
   uint32_t verdictSeen[2]{}, verdictWaits[2]{};
   uint64_t skipped=0, spared=0, returned=0, unjudged=0;
   float nearZ[2]{}, farZ[2]{};
+  float nearLast[2]{};   // F202: the near plane the last matrix query gave for the eye, kept across frames (nearZ is per frame): the scope lens's depth with the temporal mode off
   uint64_t projectionSequence[2]{};
   bool projectionKnown[2]{};
   Settings currentSettings{}, pendingSettings{};
@@ -464,6 +465,7 @@ HRESULT WINAPI noteProjection(void* p,uint64_t seq,uint32_t eye,float nearZ,floa
   if(!s||!s->active||s!=current||!s->begun||eye>1||seq!=s->sequence||
      !std::isfinite(nearZ)||!std::isfinite(farZ)||!(nearZ>0&&farZ>nearZ)) return E_INVALIDARG;
   if(!s->projectionKnown[eye]||nearZ<s->nearZ[eye]){s->nearZ[eye]=nearZ;s->farZ[eye]=farZ;}
+  s->nearLast[eye]=s->nearZ[eye];
   s->projectionSequence[eye]=seq;s->projectionKnown[eye]=true;++s->projectionReads;return S_OK;
 }
 
@@ -486,6 +488,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
   // this eye, the one authority on which eye is which.
   edvr::uiLayerNoteSubmitted(seq,eye,source);
+  edvr::uiLayerNoteSubmittedSized(eye,source,d.Width,d.Height);   // F198: the submitted textures with their sizes, the marker fix's eye source 'S' with Anti-aliasing off
   if (eye==0) {
     edvr::announceEyeTextureSize(w,h);
     const float outer=-s->announced[0][0], inner=s->announced[0][1];   // B3: the frustum without the scope zoom's window
@@ -498,6 +501,16 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(flipU||flipV) {
     if(!s->flippedNoted){s->flippedNoted=true;edvr::Log::get().note("native temporal: flipped eye bounds pass through; temporal reprojection for flipped inputs remains pending.");}
     s->history[eye]={};
+  }
+  // F198: with the temporal mode OFF the pass never runs, so the two per-eye facts the native on-foot features read from it are published here from the very arrays it is handed:
+  // the frustum (edvrTemporalAa's tanNow is s->frusta[eye], for the marker's axis term: temporalPassEyeTan) and the eye offset's x (the ADS model's IPD: temporalPassEyeOffsetX).
+  // Neither consumer reads "set" as "the pass ran". Only the mode off: with it on, edvrTemporalAa and the note after it publish exactly as before.
+  if(!s->currentSettings.on){
+    edvr::temporalPassNoteEyeTan(int(eye),s->frusta[eye]);
+    const float offAaEyeOffset[3]={s->eyes[eye][3],s->eyes[eye][7],s->eyes[eye][11]};
+    edvrTemporalAaNoteHead(int(eye),nullptr,nullptr,offAaEyeOffset);
+    // F202: and the eye's scene depth for the scope lens (the right eye's, while a press of the sights is open): the near plane is this frame's matrix query's when the game made one, else the last one's.
+    edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]);
   }
   if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){

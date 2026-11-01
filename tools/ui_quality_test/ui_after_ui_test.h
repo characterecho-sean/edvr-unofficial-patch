@@ -696,9 +696,18 @@ void testGuiFxOffCockpit() {
     // HDR target), so a variant pixel shader of it -- the unlit material, say -- is the family too.
     check(takenCount(guiFxOffFrame(kUiVsHoloGuiFxOff, kHoloUnlitPs), nullptr) == 24,
           "the new vertex shader names the family by itself on the HDR target, whichever pixel shader it draws with");
-    // The controls: a vertex shader one bit away from either names nothing, so nothing is taken and every draw stays in the game's frame --
+    // The panels close to a planet's surface (2026-10-31: vs 925ACEDA0153AA5B ps 738A98ED038E58B7, 22.00 draws a frame, no family) through the
+    // same recorded structure. No census of that pair was taken: the structure and the draw state are the Disable-GUI-effects pair's, which
+    // the disassembly makes the pair's own too (the same layout, clip arithmetic and surface coordinate). This holds that the RULE takes it
+    // as it takes the others; a flight must show the draws really have this shape.
+    {
+        Router r;
+        check(takenCount(guiFxOffFrame(kUiVsHoloNoShadow, kHoloNoShadowPs), &r) == 24 && r.eye[0].hdrTaken && r.eye[1].hdrTaken,
+              "the panels close to a planet's surface, through the recorded structure: all 24 draws are named, decided a redirect and taken into the HDR layer, both eyes");
+    }
+    // The controls: a vertex shader one bit away from any of them names nothing, so nothing is taken and every draw stays in the game's frame --
     // the field's picture, "cockpit holo panels" absent and 22-24 draws a frame left in the scene.
-    for (uint64_t vs : {kUiVsHoloGuiFxOff ^ 1ull, kUiVsHolo ^ 1ull, kHoloGuiFxOffPs}) {
+    for (uint64_t vs : {kUiVsHoloGuiFxOff ^ 1ull, kUiVsHolo ^ 1ull, kUiVsHoloNoShadow ^ 1ull, kHoloGuiFxOffPs, kHoloNoShadowPs}) {
         Router r;
         const std::vector<GDraw> frame = guiFxOffFrame(vs, kHoloGuiFxOffPs);
         const std::vector<Verdict> v = route(frame, true, &r);
@@ -707,7 +716,7 @@ void testGuiFxOffCockpit() {
         check(left == 24 && !r.eye[0].hdrTaken && !r.eye[1].hdrTaken,
               "control: a vertex shader the rule does not name leaves all 24 draws in the game's frame (the teeth)");
     }
-    check(counted == 72, "(the three taken frames counted 24 each)");
+    check(counted == 96, "(the four taken frames counted 24 each)");
 }
 
 // --------------------------------------------------------- 5. the wiring
