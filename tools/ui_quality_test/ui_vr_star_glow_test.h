@@ -561,7 +561,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.vscreen, "__declspec(noinline) void starGlowAfterDraw(", &body);
         body = afterui::squeeze(body);
         pins.push_back({"after-reissue",
-                        found && inOrder(body, {"if(vrStarGlowAfterDraw(self,v==DrawVerdict::kNone&&!uiLayerIssueBlocked())){", "pureDrawReissue(self,kind,count,instances,args);",
+                        found && inOrder(body, {"if(vrStarGlowAfterDraw(self,v==DrawVerdict::kNone&&!uiLayerIssueBlocked())){", "pureDrawReissue(ReissueCaller::StarGlow,self,kind,count,instances,args);",
                                                 "vrStarGlowReplayEnd(self);"}),
                         "starGlowAfterDraw issues the star pass once more between the module's Begin and End, with the game's arguments, and only for a draw no verdict altered "
                         "and the layer has not blocked"});
@@ -712,7 +712,7 @@ void testWiring() {
         {"thunks-ask-once", 0, "    if (starGlow) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);\n", ""},
         {"thunk-order", 0, "    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);\n    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);",
          "    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);\n    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);"},
-        {"after-reissue", 0, "        pureDrawReissue(self, kind, count, instances, args);\n        vrStarGlowReplayEnd(self);\n", "        vrStarGlowReplayEnd(self);\n"},
+        {"after-reissue", 0, "        pureDrawReissue(ReissueCaller::StarGlow, self, kind, count, instances, args);\n        vrStarGlowReplayEnd(self);\n", "        vrStarGlowReplayEnd(self);\n"},
         {"after-reissue", 0, "if (vrStarGlowAfterDraw(self, v == DrawVerdict::kNone && !uiLayerIssueBlocked())) {", "if (vrStarGlowAfterDraw(self, true)) {"},
         {"boundary", 0, "tkVrStarGlow.run([&] { vrStarGlowFrameBoundary(); });", ""},
         {"boundary", 1, "tkMenu.run([] { menuTick(g_state->device); });", ""},

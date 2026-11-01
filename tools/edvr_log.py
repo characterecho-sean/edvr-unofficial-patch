@@ -861,6 +861,53 @@ def print_cover_tally(parsed):
     return 0
 
 
+# --tally reissue: the re-issue counter (src/d3d11/draw_reissue_line.h writes the line, perf_monitor.cpp every 1800 frames beside `draw hook CPU:`). Always on, no key.
+#
+#   draw reissue CPU: 1800-frame window ending N; M ms/sampled frame mean, X ms max, S sampled frames (one in E); T re-issues in the window, P of them on sampled frames; ...
+#       Callers (ms a sampled frame, calls on sampled frames): name 0.600 ms 150, name2 ... | none.
+#
+# A window with no re-issue prints 0 and `none`; no line at all means the build has no counter (or the monitor never reached the window edge).
+
+REISSUE_RE = re.compile(r"draw reissue CPU: 1800-frame window ending (?P<frame>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, "
+                        r"(?P<samples>\d+) sampled frames \(one in (?P<every>\d+)\); (?P<total>\d+) re-issues in the window, (?P<sampled>\d+) of them on sampled frames; .*?"
+                        r"Callers \(ms a sampled frame, calls on sampled frames\): (?P<callers>none|.*?)\.\s*$")
+REISSUE_CALLER_RE = re.compile(r"(?P<name>[a-z_]+) (?P<ms>[\d.]+) ms (?P<calls>\d+)")
+
+
+def parse_reissue(text):
+    """Every `draw reissue CPU:` window, in order: dicts of frame, mean (ms a sampled frame), max, samples, every, total (re-issues in the window), sampled (of them on sampled
+    frames), callers ([(name, ms a sampled frame, calls on sampled frames)], empty for `none`) and hook (the `draw hook CPU:` mean of the same window, or None)."""
+    hooks = {w["end"]: w for w in perf_windows(text)}   # the sibling line's parse (--perf-windows)
+    out = []
+    for line in text.splitlines():
+        m = REISSUE_RE.search(line)
+        if not m:
+            continue
+        callers = [] if m.group("callers") == "none" else [(c.group("name"), float(c.group("ms")), int(c.group("calls")))
+                                                              for c in REISSUE_CALLER_RE.finditer(m.group("callers"))]
+        out.append({"frame": int(m.group("frame")), "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
+                    "every": int(m.group("every")), "total": int(m.group("total")), "sampled": int(m.group("sampled")), "callers": callers})
+    for w in out:
+        h = hooks.get(w["frame"])
+        w["hook"] = h["mean"] if h else None
+        w["flipped"] = bool(h and h["dropped"])   # a temporary key changed inside the window: it mixes two settings
+    return out
+
+
+def print_reissue_tally(windows):
+    """The --tally reissue report. Returns the process exit code: 1 when the log has no `draw reissue CPU:` line."""
+    if not windows:
+        print("[edvr] no `draw reissue CPU:` lines in this log: a build without the re-issue counter, or a session shorter than one 1800-frame window -- this tally reads --tag gfx.")
+        return 1
+    for w in windows:
+        hook = "n/a" if w["hook"] is None else "%.3f ms" % w["hook"]
+        who = ", ".join("%s %.3f ms (%d)" % c for c in w["callers"]) if w["callers"] else "no caller"
+        print("[edvr] draw reissue CPU, window ending %d: %.3f ms/sampled frame (draw hook CPU %s); %d re-issues; %s" % (w["frame"], w["mean"], hook, w["total"], who))
+    print("[edvr] %d window(s). How to read it: the ms are EDVR's re-issues timed whole (state changes and the driver call), the same sampled frames as `draw hook CPU:`, so a caller's "
+          "share of that line is its ms over the hook's. 0 re-issues with `no caller` is a window where the game was never drawn twice; no line at all is a build without the counter." % len(windows))
+    return 0
+
+
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
 # 82): which signal tells an eye view's camera from the world's at the game's
@@ -17202,7 +17249,7 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "cover"], default=None,
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "cover", "reissue"], default=None,
                     help="aggregate instead of dumping: pose tables the `pose gap:` "
                          "lines of the runtime log by caller; "
                          "cover tables the `terrain cull cover:` lines of the graphics log "
@@ -17487,6 +17534,8 @@ def main(argv=None):
         return print_pose_tally(text)
     if args.tally == "cover":
         return print_cover_tally(parse_cover(text))
+    if args.tally == "reissue":
+        return print_reissue_tally(parse_reissue(text))
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -23499,6 +23548,8 @@ def self_test():
         ok = False
     if not self_test_cover():
         ok = False
+    if not self_test_reissue():
+        ok = False
     if not self_test_perf_keys():
         ok = False
     if not self_test_switches():
@@ -23889,6 +23940,89 @@ def self_test_cover():
         rc, out = run(["--dir", logs, "--tally", "cover"])
         if rc != 1 or "no `terrain cull cover:` lines in this log" not in out:
             fail("a log with no cover line -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+REISSUE_HEADER = "draw_reissue_line.h"
+
+
+def self_test_reissue():
+    """--tally reissue on `draw reissue CPU:` lines: a window with callers, a window with none (prints 0, never an absent line), the sibling `draw hook CPU:` line laid
+    beside them, a log with no such line (a build without the counter, exit 1), and the header's own text (src\\d3d11\\draw_reissue_line.h writes the line; the fragments the
+    parser reads are held to it, so a formatter that drifts fails here). Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_reissue: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    hook1 = ("[10:10:03.000] draw hook CPU: 1800-frame window ending 1800; 5.900 ms/sampled frame mean, 7.000 ms max, 112 sampled frames (one in 16); excludes forwarded game draw "
+             "time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every 64th draw, scaled by 64. Temporal AA on; eye draws counted "
+             "this frame 0 (counted only while a draw subscriber is on).")
+    rei1 = ("[10:10:03.001] draw reissue CPU: 1800-frame window ending 1800; 1.250 ms/sampled frame mean, 2.000 ms max, 112 sampled frames (one in 16); 5400 re-issues in the window, "
+            "380 of them on sampled frames; every re-issue of a sampled frame is timed, so nothing is scaled; excludes the forwarded game draw, inside the draw hook CPU figure. "
+            "Callers (ms a sampled frame, calls on sampled frames): screen_motion 0.600 ms 150, panel_curve 0.400 ms 100, crisp_hud 0.250 ms 130.")
+    hook2 = hook1.replace("ending 1800", "ending 3600").replace("5.900", "3.000")
+    rei2 = ("[10:20:03.001] draw reissue CPU: 1800-frame window ending 3600; 0.000 ms/sampled frame mean, 0.000 ms max, 112 sampled frames (one in 16); 0 re-issues in the window, "
+            "0 of them on sampled frames; every re-issue of a sampled frame is timed, so nothing is scaled; excludes the forwarded game draw, inside the draw hook CPU figure. "
+            "Callers (ms a sampled frame, calls on sampled frames): none.")
+    text = "\n".join([hook1, rei1, hook2, rei2]) + "\n"
+    w = parse_reissue(text)
+    if len(w) != 2:
+        fail("two windows expected, parsed %r" % (w,))
+        return False
+    a, b = w
+    if (a["frame"], a["mean"], a["max"], a["samples"], a["total"], a["sampled"], a["hook"]) != (1800, 1.25, 2.0, 112, 5400, 380, 5.9) or \
+            a["callers"] != [("screen_motion", 0.6, 150), ("panel_curve", 0.4, 100), ("crisp_hud", 0.25, 130)]:
+        fail("the window with callers parsed to %r" % (a,))
+    if (b["frame"], b["mean"], b["total"], b["sampled"], b["hook"]) != (3600, 0.0, 0, 0, 3.0) or b["callers"] != []:
+        fail("the window with no re-issue parsed to %r" % (b,))
+    if parse_reissue("[00:00:00.001] draw hook CPU: 1800-frame window ending 1800; 5.900 ms/sampled frame mean\n") != []:
+        fail("a draw hook line alone parsed as a re-issue window")
+    # The header: the fragments the parser reads.
+    header = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11", REISSUE_HEADER)
+    if not os.path.isfile(header):
+        fail("the formatter %s is missing" % REISSUE_HEADER)
+    else:
+        src = read_text(header)
+        for frag in ("draw reissue CPU: 1800-frame window ending %u; ", " ms/sampled frame mean, ", " ms max, ", " sampled frames (one in ", " re-issues in the window, ",
+                     " of them on sampled frames; ", "Callers (ms a sampled frame, calls on sampled frames): ", "none"):
+            if frag not in src:
+                fail("%s lacks the text %r the parser reads" % (REISSUE_HEADER, frag))
+    head = "[00:00:00.001] version 0.19.0-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-10 12:00:00 UTC\n"
+    tmp = tempfile.mkdtemp(prefix="edvr_reissue_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        name = os.path.join(logs, "edvr_gfx_20261010_100000.log")
+        with open(name, "wb") as f:
+            f.write((head + text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "reissue"])
+        for want in ("[edvr] draw reissue CPU, window ending 1800: 1.250 ms/sampled frame (draw hook CPU 5.900 ms); 5400 re-issues; screen_motion 0.600 ms (150), panel_curve 0.400 ms (100), crisp_hud 0.250 ms (130)",
+                     "[edvr] draw reissue CPU, window ending 3600: 0.000 ms/sampled frame (draw hook CPU 3.000 ms); 0 re-issues; no caller",
+                     "[edvr] 2 window(s)"):
+            if want not in out:
+                fail("--tally reissue output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally reissue exited %d" % rc)
+        with open(name, "wb") as f:
+            f.write((head + hook1 + "\n").encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "reissue"])
+        if rc != 1 or "no `draw reissue CPU:` lines in this log" not in out:
+            fail("a log with no re-issue line -> rc %d:\n%s" % (rc, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
