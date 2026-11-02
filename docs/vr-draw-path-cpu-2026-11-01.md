@@ -415,3 +415,33 @@ Next, cheapest first: re-export the existing ETLs for concourse windows
 only and replace the function prices; a config-bisect flight with DLAA,
 one subscriber family at a time from F8, judged on the time before the
 first submit; then design the subscriber mask (#152) from the measured list.
+
+## Concourse-only profile (2026-11-02)
+
+The 2026-11-01 captures re-exported for concourse windows only (DLAA 7-11
+and 15-18, 1003 frames; AA off 9-18, 1270 frames) with the build-identity
+guarded analyzer. ms a frame, profiled (profiled R1 runs 24-33% over
+unprofiled, so deltas read about 0.5 ms low; the DLAA capture lost 1.29M
+events). "Innermost" includes the runtime, driver and EDHM below an EDVR
+frame; the export cannot separate them.
+
+| | DLAA | AA off | delta |
+|---|---|---|---|
+| R1 (before the first submit) | 32.26 | 28.79 | +3.48 |
+| EDVR leaf | 7.43 | 4.46 | +2.96 |
+| EDVR innermost | 12.90 | 8.92 | +3.98 |
+| game exe | 13.0 | 13.3 | |
+| EDHM | 2.8 | 3.1 | |
+
+- DLAA delta by owner (innermost): UI layer +1.1 (`uiLayerFamilyOf` +0.41,
+  crisp +0.17), UI depth +0.7, engine velocity +0.5, screen motion +0.4,
+  star glow +0.2, GPU census +0.1. No function above 0.41.
+- Always-on ladder (both modes): `beginPanelOverride`,
+  `forwardWithVerdict` and `hookedDrawIndexedInstanced` 2.0 / 1.9, plus
+  the draw lambda 0.83 / 0.81.
+- Outside the draw clock: `drawtag::streamLoad16` 0.83 / 0.80;
+  `clearEntries` through `NativeBenchmarkCollector::observe` 0.08 / 0.16.
+- Unexplained: `f44::draw` 0.79 off against 0.13 DLAA;
+  `hookedCreateTexture2D` 0.64 in DLAA R5 against 0.05 off.
+- This replaces the per-function prices in the item sections above, which
+  came from a mixed-window `self_split.json`.
