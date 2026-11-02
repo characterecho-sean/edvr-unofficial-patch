@@ -69,6 +69,10 @@ namespace edvr {
     "    float4 an;   // the anchor in the eye's space: X right, Y up, Z forward (= clip w)\n" \
     "    float4 tr;   // the translation (HUD forward) in the same axes; w: 1 / the content depth (the radar billboards' correction: the translation scaled by w / z_c), else 0\n" \
     "    float4 fr;   // the curved game panel: x gap2, metres nearer; y dMin2 and z dMax2, the window past 1 m. The near window (mv) wins when both match. w stays 0\n" \
+    "    float4 s0;   // row 0 of seat-from-math-eye. Identity except on the gunner sheet, where it keeps the border test still as the head turns\n" \
+    "    float4 s1;\n" \
+    "    float4 s2;\n" \
+    "    float4 s3;   // fourth row of the sheet's mesh-space map. Zero: the sheet is not cropped\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -194,11 +198,91 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "        o.v.l += g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z;\n"
     EDVR_SRV_TURRET_GS_TAIL_C;
 
-// The gunner camera's curved sheet (vs 5DAD41AA66757CE3, 2016 indices). The cards on that sheet use signature B.
+// The gunner camera's curved sheet (vs 5DAD41AA66757CE3, 2016 indices). One mesh holds the faint frame and the
+// bright card brackets; nothing in the vertex marks them apart (dump 113734647001: packed colour is constant, the
+// UV follows the position). The split is the mesh's own local metres. The game's vertex shader writes
+// clip = (dot(cb0[4], w), dot(cb0[5], w), dot(cb0[6], w), dot(cb0[7], w)) with w = local - cb1[275] (identity
+// instance, scale 1). Those two buffers are bound here as SheetClip and SheetCam. Inverting them puts the vertex
+// back in local metres, which does not move when the headset does. The choice is those metres, never the colour, so a
+// HUD recolour keeps the same triangles. Dumps 113734647001 and 122624067001: the bright rows are y -0.478, -0.402,
+// -0.325 and -0.246; the faint row under the cards is y -0.553 and the faint row above them is y -0.166. The bright
+// top is the quad between y -0.246 and y -0.166, and the bottom hook is the quad between y -0.478 and y -0.553.
+// The text, icons and the card body are the same mesh as the border. Dump 131322664001: 28 of the 672 triangles
+// sit inside the two fills (y -0.478..-0.325, x about -0.75..-0.50 and 0.50..0.75). Those are drawn. A triangle
+// that reaches the border rows (y -0.246 and above, or y -0.553) is sent off screen. No view bound: the sheet is
+// drawn whole, so a missed constant buffer does not blank the cards.
 constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    float4 t0 : TEXCOORD0;\n"
-    "    float4 pos : SV_Position;"
-    EDVR_SRV_TURRET_GS_TAIL;
+    "    float4 pos : SV_Position;\n"
+    "};\n"
+    "cbuffer SheetClip : register(b1) { float4 clipRows[8]; };\n"
+    "cbuffer SheetCam : register(b2) { float4 camBlock[276]; };\n"
+    "struct Moved { Vertex v; float4 pre : TURRETPRE; };\n"
+    "float4x4 sheetInv(float4x4 m, out float det) {\n"
+    "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n"
+    "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n"
+    "    const float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2], a23 = m[2][3];\n"
+    "    const float a30 = m[3][0], a31 = m[3][1], a32 = m[3][2], a33 = m[3][3];\n"
+    "    const float b00 = a00 * a11 - a01 * a10;\n"
+    "    const float b01 = a00 * a12 - a02 * a10;\n"
+    "    const float b02 = a00 * a13 - a03 * a10;\n"
+    "    const float b03 = a01 * a12 - a02 * a11;\n"
+    "    const float b04 = a01 * a13 - a03 * a11;\n"
+    "    const float b05 = a02 * a13 - a03 * a12;\n"
+    "    const float b06 = a20 * a31 - a21 * a30;\n"
+    "    const float b07 = a20 * a32 - a22 * a30;\n"
+    "    const float b08 = a20 * a33 - a23 * a30;\n"
+    "    const float b09 = a21 * a32 - a22 * a31;\n"
+    "    const float b10 = a21 * a33 - a23 * a31;\n"
+    "    const float b11 = a22 * a33 - a23 * a32;\n"
+    "    det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;\n"
+    "    const float invDet = 1.0 / det;\n"
+    "    float4x4 r;\n"
+    "    r[0] = float4( a11 * b11 - a12 * b10 + a13 * b09, -a01 * b11 + a02 * b10 - a03 * b09,  a31 * b05 - a32 * b04 + a33 * b03, -a21 * b05 + a22 * b04 - a23 * b03) * invDet;\n"
+    "    r[1] = float4(-a10 * b11 + a12 * b08 - a13 * b07,  a00 * b11 - a02 * b08 + a03 * b07, -a30 * b05 + a32 * b02 - a33 * b01,  a20 * b05 - a22 * b02 + a23 * b01) * invDet;\n"
+    "    r[2] = float4( a10 * b10 - a11 * b08 + a13 * b06, -a00 * b10 + a01 * b08 - a03 * b06,  a30 * b04 - a31 * b02 + a33 * b00, -a20 * b04 + a21 * b02 - a23 * b00) * invDet;\n"
+    "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n"
+    "    return r;\n"
+    "}\n"
+    "bool inFill(float3 p) {\n"
+    "    const bool left = p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n"
+    "    const bool right = p.x > 0.50 && p.x < 0.78 && p.y > -0.51 && p.y < -0.245;\n"
+    "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n"
+    "    return left || right || label;\n"
+    "}\n"
+    "bool liveLocal(float4 c, out float3 local) {\n"
+    "    float det;\n"
+    "    const float4x4 G = sheetInv(float4x4(clipRows[4], clipRows[5], clipRows[6], clipRows[7]), det);\n"
+    "    const float4 h = mul(G, c);\n"
+    "    if (abs(det) < 1e-8 || abs(h.w) < 1e-6) { local = 0; return false; }\n"
+    "    local = h.xyz / h.w + camBlock[275].xyz;\n"
+    "    return true;\n"
+    "}\n"
+    "[maxvertexcount(3)]\n"
+    "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n"
+    "    float4 c0 = v[0].pos, c1 = v[1].pos, c2 = v[2].pos;\n"
+    "    bool draw = true;\n"
+    "    if (dot(clipRows[4], clipRows[4]) + dot(clipRows[7], clipRows[7]) > 1e-8) {\n"
+    "        float3 p0, p1, p2;\n"
+    "        if (liveLocal(c0, p0) && liveLocal(c1, p1) && liveLocal(c2, p2)) {\n"
+    "            draw = inFill(p0) && inFill(p1) && inFill(p2);\n"
+    "        }\n"
+    "    }\n"
+    "    const bool locked = an.w > 0.5;\n"
+    "    const float3 lk = locked ? tr.xyz - turretLockCentre(c0, c1, c2) : float3(0.0, 0.0, 0.0);\n"
+    "    [unroll] for (int i = 0; i < 3; ++i) {\n"
+    "        const float4 corner = i == 0 ? c0 : (i == 1 ? c1 : c2);\n"
+    "        Moved o;\n"
+    "        o.v = v[i];\n"
+    "        o.pre = v[i].pos;\n"
+    "        float3 d;\n"
+    "        const float4 moved = turretMove(corner, d);\n"
+    "        o.v.pos = draw ? (locked ? turretLock(corner, lk, d) : moved) : float4(2.0, 2.0, 0.0, 1.0);\n"
+    "        stream.Append(o);\n"
+    "    }\n"
+    "    stream.RestartStrip();\n"
+    "}\n";
+
 
 #undef EDVR_SRV_TURRET_GS_HEAD
 #undef EDVR_SRV_TURRET_GS_TAIL

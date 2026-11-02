@@ -1169,8 +1169,8 @@ static void selfTest() {
     // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
     // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
-    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 80-byte constant buffer, Turret at b0 (srv_turret_math.h's
-    // TurretParams: five registers; signature H also GameVS at b1). A change to any of them fails here, in the build.
+    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 144-byte constant buffer, Turret at b0 (srv_turret_math.h's
+    // TurretParams: nine registers; signature H also GameVS at b1; signature I also SheetClip at b1 and SheetCam at b2). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
         struct TurretContract { const char* symbol; const char* name; const char* source; };
@@ -1223,11 +1223,25 @@ static void selfTest() {
                 ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
                 D3D11_SHADER_BUFFER_DESC bufferDesc{};
                 // Signature H (the Scorpion's hologram) also reads the draw's own vertex constants at b1, GameVS: 280 registers, of which rows 277 to 279 are the camera's right, up and forward.
+                // Signature I reads the draw's VS b0 at GS b1 (SheetClip) and VS b1 at GS b2 (SheetCam) and keeps only the card interior.
                 const bool scene = i == stm::kSceneSignature;
-                check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
-                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 80 &&
-                      desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
-                      "...reading one 80-byte constant buffer, Turret at b0, and nothing else (signature H also the draw's vertex constants, GameVS at b1)");
+                const bool sheet = i == stm::kGunnerSheetSignature;
+                const bool turret = SUCCEEDED(reflection ? reflection->GetResourceBindingDescByName("Turret", &bind) : E_FAIL) && bind.Type == D3D_SIT_CBUFFER &&
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 144;
+                if (sheet) {
+                    D3D11_SHADER_INPUT_BIND_DESC clipBind{};
+                    D3D11_SHADER_BUFFER_DESC clipDesc{};
+                    ID3D11ShaderReflectionConstantBuffer* clipBuffer = reflection ? reflection->GetConstantBufferByName("SheetClip") : nullptr;
+                    ID3D11ShaderReflectionConstantBuffer* camBuffer = reflection ? reflection->GetConstantBufferByName("SheetCam") : nullptr;
+                    check(reflection && turret && desc.ConstantBuffers == 3 && desc.BoundResources == 3 &&
+                          SUCCEEDED(reflection->GetResourceBindingDescByName("SheetClip", &clipBind)) && clipBind.BindPoint == 1 &&
+                          clipBuffer && SUCCEEDED(clipBuffer->GetDesc(&clipDesc)) && clipDesc.Size == 16u * 8u &&
+                          camBuffer && SUCCEEDED(reflection->GetResourceBindingDescByName("SheetCam", &clipBind)) && clipBind.BindPoint == 2,
+                          "...the gunner sheet reads Turret, SheetClip at b1 and SheetCam at b2");
+                } else {
+                    check(reflection && turret && desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
+                          "...reading one 144-byte constant buffer, Turret at b0, and nothing else (signature H also GameVS at b1)");
+                }
                 if (scene) {
                     D3D11_SHADER_INPUT_BIND_DESC sceneBind{};
                     D3D11_SHADER_BUFFER_DESC sceneDesc{};

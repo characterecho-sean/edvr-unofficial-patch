@@ -352,6 +352,8 @@ struct DrawOpts {
     bool scissored = false;      // the game's draw has ScissorEnable and the one rectangle scissorRect
     D3D11_RECT scissorRect{0, 0, 0, 0};
     bool openScissor = false;    // the production Scissor opens it around the issue (experimental.srv_turret_hud_scissor at open) and gives the game's back
+    ID3D11Buffer* clipCb = nullptr;   // gunner sheet: the draw's VS b0, bound at GS b1 for the local-space test
+    ID3D11Buffer* camCb = nullptr;    // gunner sheet: the draw's VS b1, bound at GS b2 (row 275 is the rebase origin)
 };
 // One frame of `verts` through the stand-in pair and, when gs is given, the production binding with `params` (null gs: the plain shader alone).
 static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11GeometryShader* gs, const st::TurretParams& params, UINT w = 256, UINT h = 256, const DrawOpts& o = DrawOpts{}) {
@@ -385,6 +387,8 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
         if (needScene) check(st::readGameCb(g_ctx.Get(), st::kGameCbSlot, extra), "the draw's vertex constants are read");
         bound = binding.begin(g_ctx.Get(), gs, cb, st::directSetGs, needScene ? &extra : nullptr) == st::Binding::Begin::kBound;
         check(bound, "the production binding binds the shader");
+        if (o.clipCb) g_ctx->GSSetConstantBuffers(st::kGsGameSlot, 1, &o.clipCb);
+        if (o.camCb) g_ctx->GSSetConstantBuffers(st::kGsCamSlot, 1, &o.camCb);
     }
     st::Scissor scissor;
     if (bound && o.openScissor) {
@@ -505,8 +509,8 @@ static void mathCases() {
     check(std::fabs(st::p00OfTangents(asym) - 2.0f / 1.9f) < 1e-5f, "...for an off-centre frustum too");
     const float flat[4] = {0.5f, 0.5f, -1, 1}, nan[4] = {NAN, 1, -1, 1};
     check(st::p00OfTangents(flat) == 0.0f && st::p00OfTangents(nan) == 0.0f && st::p00OfTangents(nullptr) == 0.0f, "tangents that are no frustum give no P00");
-    check(sizeof(st::TurretParams) == 80 && st::kPreFloats == 4 && !std::strcmp(st::kPreSemantic, "TURRETPRE"),
-          "the constants are five registers (80 bytes); the shader's own `pre` output is four floats named TURRETPRE");
+    check(sizeof(st::TurretParams) == 144 && st::kPreFloats == 4 && !std::strcmp(st::kPreSemantic, "TURRETPRE"),
+          "the constants are nine registers (144 bytes); the shader's own `pre` output is four floats named TURRETPRE");
     {   // the eye's frame from the host's pose: the anchor and the HUD-forward translation in the shader's axes (X right, Y up, Z forward)
         const float tn[4] = {-1.0f, 1.2f, -0.9f, 1.1f};
         const float level[12] = {1, 0, 0, 0.1f, 0, 1, 0, 0.2f, 0, 0, 1, 0.3f}, leftEye[12] = {1, 0, 0, -0.03f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
@@ -771,11 +775,15 @@ static void mathCases() {
             closer.tNear[1] = 0.0f;
             closer.tNear[2] = -0.40f;
             st::TurretParams gunner{};
-            check(st::gunnerParamsFor(closer, gunner) && gunner.gap == 0.0f && gunner.gap2 == 0.0f && gunner.depth == 0.0f && std::fabs(gunner.tz + 0.40f) < 1e-6f && st::paramsUsable(gunner),
+            check(st::gunnerParamsFor(closer, gunner) && gunner.gap == 0.0f && gunner.gap2 == 0.0f && gunner.depth == 0.0f && gunner.pad2 == 0.0f && std::fabs(gunner.tz + 0.40f) < 1e-6f && st::paramsUsable(gunner),
                   "the gunner panel moves 40 cm toward the camera, at the game's own depth");
             closer.tNear[1] = 0.30f;
             check(st::gunnerParamsFor(closer, gunner) && gunner.depth == 0.0f && std::fabs(gunner.ty - 0.30f) < 1e-6f && std::fabs(gunner.tz + 0.40f) < 1e-6f,
                   "the gunner panel's height is the same translation, 30 cm up, and the depth stays the game's own");
+            closer.tCards[1] = 0.20f;
+            check(st::gunnerParamsFor(closer, gunner, true) && gunner.depth == 0.0f && std::fabs(gunner.ty - 0.50f) < 1e-6f && std::fabs(gunner.tz + 0.40f) < 1e-6f,
+                  "the cards-up key adds 20 cm of seat-up on the two cards only");
+            check(st::gunnerParamsFor(closer, gunner, false) && std::fabs(gunner.ty - 0.30f) < 1e-6f, "the curved sheet does not take the cards-up translation");
             check(!st::gunnerParamsFor(e, gunner), "a gunner move of 0 leaves the panel as the game placed it");
             check(st::gunnerSignature(st::kGunnerCardsVs, 'X', 288) == st::kGunnerCardsSignature && st::gunnerSignature(st::kGunnerSheetVs, 'I', 2016) == st::kGunnerSheetSignature &&
                       st::gunnerSignature(st::kGunnerCardsVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 6) < 0 &&
@@ -1109,8 +1117,9 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
     {   // (d2) the gunner panel: every vertex moves 40 cm toward the camera, and the game's depth is kept
         st::EyeFrame frame = frameOfCam(cam);
         frame.tNear[2] = -0.40f;
+        frame.tCards[1] = 0.20f;
         st::TurretParams p;
-        f.expect(st::gunnerParamsFor(frame, p) && p.depth == 0.0f && std::fabs(p.tz + 0.40f) < 1e-6f && p.gap == 0.0f && p.gap2 == 0.0f,
+        f.expect(st::gunnerParamsFor(frame, p) && p.depth == 0.0f && p.pad2 == 0.0f && std::fabs(p.tz + 0.40f) < 1e-6f && p.gap == 0.0f && p.gap2 == 0.0f,
                  "(d2) the gunner move is a translation toward the camera at the game's depth");
         const std::vector<Pt> pts = {dirPt(0, 0, 1, 1.4f), dirPt(0.2f, 0.1f, 1, 2.2f), dirPt(0, 0, 1, 0.5f), dirPt(0.15f, -0.05f, 1, 0.8f)};
         const Captured m = captureMove(fam, twin, pts, cam, p);
@@ -1123,6 +1132,8 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
             nearer = nearer && closeTo(pout[0], pin[0], 3e-4) && closeTo(pout[1], pin[1], 3e-4) && closeTo(pout[2], pin[2] - 0.40, 3e-4);
         }
         f.expect(nearer, "(d2) every vertex of the panel moves 40 cm toward the camera and keeps its sideways place");
+        st::TurretParams cards;
+        f.expect(st::gunnerParamsFor(frame, cards, true) && std::fabs(cards.ty - 0.20f) < 1e-6f && std::fabs(cards.tz + 0.40f) < 1e-6f, "(d2) the cards add their own seat-up");
     }
     {   // (e) a pull: the first build's gap, window gap + 0.10 to 4.0 m from the anchor
         const float a[3] = {0.10f, 0.05f, 0.0f};
@@ -2346,7 +2357,7 @@ static void constantsCases() {
     const auto readBack = [&](ID3D11Buffer* source) {
         D3D11_BUFFER_DESC bd{};
         source->GetDesc(&bd);
-        check(bd.ByteWidth == 80, "the buffer is five 16-byte registers");
+        check(bd.ByteWidth == 144, "the buffer is nine 16-byte registers");
         bd.BindFlags = bd.MiscFlags = bd.StructureByteStride = 0;
         bd.Usage = D3D11_USAGE_STAGING;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -2673,6 +2684,57 @@ int main(int argc, char** argv) {
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
             linkageCases(int(fam), gsOf[fam].Get());
+            if (fam == uint32_t(st::kGunnerSheetSignature)) {
+                const Cam cam;
+                auto countWith = [&](Pt p) {
+                    std::vector<Vtx> v(3, vtxOf(p, 0, 0));
+                    Sample s;
+                    DrawOpts o;
+                    o.sample = &s;
+                    o.soTarget = true;
+                    (void)render(v, cam, twinOf[fam].Get(), defaultParams(), 64, 64, o);
+                    return s.so.NumPrimitivesWritten;
+                };
+                auto at = [](float x, float y, float z) { return dirPt(x, y, z, std::sqrt(x * x + y * y + z * z)); };
+                check(countWith(at(-0.62f, -0.36f, 1.0f)) == 1, "with no view bound the gunner sheet still draws the card contents");
+                std::vector<float> clipRows(8 * 4, 0.0f);
+                clipRows[4 * 4 + 0] = cam.p00;
+                clipRows[4 * 4 + 2] = -cam.offX;
+                clipRows[5 * 4 + 1] = cam.p11;
+                clipRows[5 * 4 + 2] = -cam.offY;
+                clipRows[6 * 4 + 2] = -0.5f;
+                clipRows[6 * 4 + 3] = 0.2f;
+                clipRows[7 * 4 + 2] = -1.0f;
+                auto clipBuf = makeBuffer(UINT(clipRows.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, clipRows.data());
+                std::vector<float> camRows(276 * 4, 0.0f);
+                auto camBuf = makeBuffer(UINT(camRows.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, camRows.data());
+                auto offScreen = [&](float x, float y) {
+                    Pt p = at(x, y, 1.0f);
+                    p.zc = 0.5f * p.d + 0.2f;
+                    std::vector<Vtx> v(3, vtxOf(p, 0, 0));
+                    Sample s;
+                    DrawOpts o;
+                    o.sample = &s;
+                    o.soTarget = true;
+                    o.clipCb = clipBuf.Get();
+                    o.camCb = camBuf.Get();
+                    (void)render(v, cam, twinOf[fam].Get(), defaultParams(), 64, 64, o);
+                    return s.records.size() > 5 && std::fabs(s.records[4] - 2.0f) < 0.01f && std::fabs(s.records[5] - 2.0f) < 0.01f;
+                };
+                check(!offScreen(-0.62f, -0.36f), "the gunner sheet draws a triangle inside a card");
+                check(!offScreen(-0.80f, -0.40f), "the gunner sheet draws the planet icon on the info card");
+                check(!offScreen(-0.70f, -0.25f), "the gunner sheet draws the top of the info card");
+                check(!offScreen(0.30f, -0.55f), "the gunner sheet draws the gunner camera label");
+                check(!offScreen(0.75f, -0.55f), "the gunner sheet draws the camera icon beside the label");
+                check(offScreen(-0.15f, -0.55f), "the gunner sheet sends the dash left of the label off screen");
+                check(!offScreen(-0.81f, -0.36f), "the gunner sheet draws the notched corner of the planet icon");
+                check(offScreen(-0.84f, -0.36f), "the gunner sheet sends the info card's left border off screen");
+                check(!offScreen(0.62f, -0.25f), "the gunner sheet draws the top of the systems card");
+                check(offScreen(0.48f, -0.25f), "the gunner sheet sends the systems upper-left corner off screen");
+                check(offScreen(-0.62f, -0.16f), "the gunner sheet sends the faint line above a card off screen");
+                check(offScreen(-0.85f, -0.36f), "the gunner sheet sends the border beside a card off screen");
+                continue;
+            }
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
             stripCases(twinOf[fam].Get(), production);
@@ -2686,7 +2748,7 @@ int main(int argc, char** argv) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
             for (const std::string& k : production.kinds) std::printf("  failed: %s\n", k.c_str());
         }
-        check(production.n == 0, "the production shaders and binding pass every move, picture, strip, binding and issue-end case, for all nine signatures");
+        check(production.n == 0, "the production shaders and binding pass every move, picture, strip, binding and issue-end case; the gunner sheet border is not drawn");
 
         // THE MUTANTS: each through the same cases (the move's numbers and pictures), each must fail at least one, in each signature's text. They are edits of the shared function turretMove
         // and of the pass-through that calls it.
@@ -2731,6 +2793,7 @@ int main(int argc, char** argv) {
             {"the lighting position moved by the translation alone", "g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z", "g[277].xyz * tr.x + g[278].xyz * tr.y + g[279].xyz * tr.z"},
         };
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
+            if (fam == uint32_t(st::kGunnerSheetSignature)) continue;   // the border shader returns before the move, so a mutant of the move still draws nothing
             g_fam = int(fam);
             const std::string text = kBytes[fam].text;
             for (const Mutant& m : mutants) {

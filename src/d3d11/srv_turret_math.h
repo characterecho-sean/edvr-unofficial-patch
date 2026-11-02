@@ -94,6 +94,7 @@ inline constexpr int kPanelsDefaultCm = 0, kRadarDefaultCm = 0, kPushMaxCm = 200
 inline constexpr int kSystemsNearDefaultCm = 70, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 70 is the distance kept on 2026-11-02.
 inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
 inline constexpr int kGunnerUpDefaultCm = 0, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards
+inline constexpr int kCardsUpDefaultCm = 0, kCardsUpMaxCm = 100;   // experimental.srv_turret_cards_up: centimetres up, along the seat, for the target card and SYSTEMS only
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
@@ -564,21 +565,26 @@ inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor,
 // triangle's centre onto the target in tx, ty, tz, and anchoredMove has no copy of it.
 inline constexpr float kContentInvZMax = 20.0f;   // z_c of 5 cm or more
 
-// The geometry shader's constant buffer (GS slot 0, which the game never binds): five registers.
+// The geometry shader's constant buffer (GS slot 0, which the game never binds): eight registers.
 //   [0] gap, dMin, dMax, depth       the near move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
 //   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
 //   [2] ax, ay, az, lock             the anchor in the eye's space: X right, Y up, Z forward (= clip w); lock: THE LOCK above, 0 as the module writes it
 //   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes; invZc: 1 / the content depth z_c (THE CONTENT DEPTH above), 0 as the module writes it
-//   [4] gap2, dMin2, dMax2, 0        a second radial window. experimental.srv_turret_systems_near writes it for the panels group. It is not the Escape menu.
+//   [4] gap2, dMin2, dMax2, 0        a second radial window. w stays 0.
+//   [5..7] rows of seat-from-math-eye. Identity except the gunner sheet's border test.
 struct TurretParams {
     float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float ax = 0.0f, ay = 0.0f, az = 0.0f, lock = 0.0f;
     float tx = 0.0f, ty = 0.0f, tz = 0.0f, invZc = 0.0f;
-    float gap2 = 0.0f, dMin2 = 0.0f, dMax2 = 0.0f, pad2 = 0.0f;   // the systems panel's pull; pad2 stays 0
+    float gap2 = 0.0f, dMin2 = 0.0f, dMax2 = 0.0f, pad2 = 0.0f;   // the old systems pull; pad2 stays 0
+    float s0x = 1.0f, s0y = 0.0f, s0z = 0.0f, s0w = 0.0f;   // row 0 of seat-from-math-eye. The gunner sheet uses it to tell the outer border from the card brackets.
+    float s1x = 0.0f, s1y = 1.0f, s1z = 0.0f, s1w = 0.0f;
+    float s2x = 0.0f, s2y = 0.0f, s2z = 1.0f, s2w = 0.0f;
+    float s3x = 0.0f, s3y = 0.0f, s3z = 0.0f, s3w = 0.0f;   // fourth row of the mesh-space map. Zero means the sheet is not cropped.
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
-static_assert(sizeof(TurretParams) == 80, "the turret shader's cbuffer is five 16-byte registers");
+static_assert(sizeof(TurretParams) == 144, "the turret shader's cbuffer is nine 16-byte registers");
 
 // One eye's side of the constants for a frame: its tangents (jitter included), the anchor and the HUD-forward translation, both in the eye's space (X right, Y up, Z forward).
 struct EyeFrame {
@@ -587,6 +593,9 @@ struct EyeFrame {
     float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation: HUD forward, plus the weapon panel's seat-up (experimental.srv_turret_hud_up)
     float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (experimental.srv_turret_radar_forward)
     float tNear[3] = {0.0f, 0.0f, 0.0f};    // the gunner panel: toward the camera (experimental.srv_turret_systems_near) plus its seat-up (experimental.srv_turret_gunner_up)
+    float tCards[3] = {0.0f, 0.0f, 0.0f};   // extra seat-up for the two cards only (experimental.srv_turret_cards_up). The curved sheet does not get this.
+    float seatR[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // row-major seat-from-math-eye, so the sheet's border test does not follow the head
+    float eyeSeat[3] = {0, 0, 0};                   // the eye's origin in the seat. Added so leaning does not slide the card test.
 };
 
 // The constants with the depth mode written (the module applies the key to whatever paramsForGroup made).
@@ -652,7 +661,8 @@ inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm
 
 // The gunner camera's curved panel (dump 050105383001). The sheet is vs 5DAD41AA at 2016 indices. The two cards on it, CASPIAN EXPLORER and SYSTEMS, are vs C4B4B334 at 288 indices.
 // The Escape menu is the 360-index draws of those shaders and is not this. The centre reticle is vs E5086486 and is not this. Positive centimetres move the whole panel toward the camera
-// along the turret, the same axis as the HUD-forward key, and the depth written stays the game's own.
+// along the turret, the same axis as the HUD-forward key. The sheet is then unwrapped off its left-right curve onto one plane just in front of the launcher, so a
+// horizontal line on that curve stays the game's. The curved sheet is not reshaped. experimental.srv_turret_cards_up raises only the two cards.
 inline constexpr uint64_t kGunnerSheetVs = 0x5DAD41AA66757CE3ull;
 inline constexpr uint64_t kGunnerCardsVs = 0xC4B4B334B26E81A9ull;
 inline constexpr uint32_t kGunnerSheetIndices = 2016;
@@ -675,7 +685,8 @@ inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPa
 // translation within 2 m; the depth mode one of 0, 1 and 2; 1 / the content depth in [0, 20] (z_c of 5 cm or more, or none); the lock 0 or 1; the systems register's pad 0; and a move that
 // does something (a gap, a translation, or the systems pull).
 inline bool paramsUsable(const TurretParams& p) {
-    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc, p.gap2, p.dMin2, p.dMax2, p.pad2};
+    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc, p.gap2, p.dMin2, p.dMax2, p.pad2,
+                         p.s0x, p.s0y, p.s0z, p.s0w, p.s1x, p.s1y, p.s1z, p.s1w, p.s2x, p.s2y, p.s2z, p.s2w, p.s3x, p.s3y, p.s3z, p.s3w};
     for (float f : all)
         if (!std::isfinite(f)) return false;
     if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;
@@ -693,16 +704,22 @@ inline bool paramsUsable(const TurretParams& p) {
     return p.gap != 0.0f || t2 > 0.0 || farMoves;
 }
 
-// After paramsUsable: the gunner panel's constants are a pure translation toward the camera, depth mode game.
-inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out) {
-    const double t2 = double(e.tNear[0]) * e.tNear[0] + double(e.tNear[1]) * e.tNear[1] + double(e.tNear[2]) * e.tNear[2];
+// After paramsUsable: a translation toward the camera, at the game's own depth. The curved sheet is not reshaped. cards adds the cards-only seat-up.
+inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out, bool cards = false) {
+    const float tx = e.tNear[0] + (cards ? e.tCards[0] : 0.0f);
+    const float ty = e.tNear[1] + (cards ? e.tCards[1] : 0.0f);
+    const float tz = e.tNear[2] + (cards ? e.tCards[2] : 0.0f);
+    const double t2 = double(tx) * tx + double(ty) * ty + double(tz) * tz;
     if (!(t2 > 0.0)) return false;
     out = makeParams(e, 0.0f, 0.0f, 0.0f);
-    out.tx = e.tNear[0];
-    out.ty = e.tNear[1];
-    out.tz = e.tNear[2];
+    out.tx = tx;
+    out.ty = ty;
+    out.tz = tz;
     out.depth = 0.0f;
     out.gap2 = out.dMin2 = out.dMax2 = out.pad2 = 0.0f;
+    out.s0x = e.seatR[0]; out.s0y = e.seatR[1]; out.s0z = e.seatR[2]; out.s0w = e.eyeSeat[0];
+    out.s1x = e.seatR[3]; out.s1y = e.seatR[4]; out.s1z = e.seatR[5]; out.s1w = e.eyeSeat[1];
+    out.s2x = e.seatR[6]; out.s2y = e.seatR[7]; out.s2z = e.seatR[8]; out.s2w = e.eyeSeat[2];
     return paramsUsable(out);
 }
 
@@ -893,22 +910,24 @@ inline void limitTranslation(float t[3]) {
     t[2] *= s;
 }
 
-inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, double radarForwardM, const float tangents[4], EyeFrame& out, double nearM = 0.0, double hudUpM = 0.0, double gunnerUpM = 0.0) {
+inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, double radarForwardM, const float tangents[4], EyeFrame& out, double nearM = 0.0, double hudUpM = 0.0, double gunnerUpM = 0.0, double cardsUpM = 0.0) {
     for (int i = 0; i < 12; ++i)
         if (!std::isfinite(head[i]) || !std::isfinite(eyeToHead[i])) return false;
     for (int i = 0; i < 4; ++i)
         if (!std::isfinite(tangents[i])) return false;
-    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM) || !std::isfinite(radarForwardM) || !std::isfinite(nearM) || !std::isfinite(hudUpM) || !std::isfinite(gunnerUpM)) return false;
+    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM) || !std::isfinite(radarForwardM) || !std::isfinite(nearM) || !std::isfinite(hudUpM) || !std::isfinite(gunnerUpM) || !std::isfinite(cardsUpM)) return false;
     double R[3][3], E[3];
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
             R[i][j] = 0.0;
             for (int k = 0; k < 3; ++k) R[i][j] += double(head[i * 4 + k]) * eyeToHead[k * 4 + j];
+            out.seatR[i * 3 + j] = static_cast<float>(R[i][j]);
         }
         E[i] = head[i * 4 + 3];
         for (int k = 0; k < 3; ++k) E[i] += double(head[i * 4 + k]) * eyeToHead[k * 4 + 3];
+        out.eyeSeat[i] = static_cast<float>(E[i]);
     }
-    double v[3], tv[3], tr[3], tn[3], hu[3], gu[3];
+    double v[3], tv[3], tr[3], tn[3], hu[3], gu[3], cu[3];
     for (int j = 0; j < 3; ++j) {
         v[j] = 0.0;
         for (int i = 0; i < 3; ++i) v[j] += R[i][j] * (anchor[i] - E[i]);
@@ -916,7 +935,8 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
         tr[j] = R[2][j] * (-radarForwardM);   // ... for the radar
         tn[j] = R[2][j] * nearM;              // the opposite way: toward the camera, for the gunner panel
         hu[j] = R[1][j] * hudUpM;             // R^T (0, U, 0): seat up, for the weapon panel
-        gu[j] = R[1][j] * gunnerUpM;          // the same axis, for the gunner panel
+        gu[j] = R[1][j] * gunnerUpM;          // the same axis, for the whole gunner frame
+        cu[j] = R[1][j] * cardsUpM;           // the same axis, for the two cards only
     }
     out.l = tangents[0];
     out.r = tangents[1];
@@ -940,11 +960,15 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
     out.tNear[0] += static_cast<float>(gu[0]);
     out.tNear[1] += static_cast<float>(gu[1]);
     out.tNear[2] += static_cast<float>(-gu[2]);
+    out.tCards[0] = static_cast<float>(cu[0]);
+    out.tCards[1] = static_cast<float>(cu[1]);
+    out.tCards[2] = static_cast<float>(-cu[2]);
     limitTranslation(out.t);
     limitTranslation(out.tNear);
+    limitTranslation(out.tCards);
     return std::isfinite(out.a[0]) && std::isfinite(out.a[1]) && std::isfinite(out.a[2]) && std::isfinite(out.t[0]) && std::isfinite(out.t[1]) && std::isfinite(out.t[2]) &&
            std::isfinite(out.tRadar[0]) && std::isfinite(out.tRadar[1]) && std::isfinite(out.tRadar[2]) && std::isfinite(out.tNear[0]) && std::isfinite(out.tNear[1]) &&
-           std::isfinite(out.tNear[2]);
+           std::isfinite(out.tNear[2]) && std::isfinite(out.tCards[0]) && std::isfinite(out.tCards[1]) && std::isfinite(out.tCards[2]);
 }
 
 // P00 of an eye's projection as Elite renders it, from the tangents {left, right, down, up}: the NDC span 2 over the tangent span. 0 when the tangents are not a frustum (the log prints it).

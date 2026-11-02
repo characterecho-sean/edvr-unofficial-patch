@@ -27,7 +27,8 @@ namespace edvr {
 namespace srv_turret {
 
 inline constexpr uint32_t kGsSlot = 0;   // the geometry stage's constant buffer slot the shader reads (the game binds none)
-inline constexpr uint32_t kGsGameSlot = 1;   // ... and the one signature H reads the draw's vertex constants at (kGameCbSlot of the vertex stage)
+inline constexpr uint32_t kGsGameSlot = 1;   // signature H reads the draw's vertex constants here; the gunner sheet reads the draw's VS b0 (clip rows) here
+inline constexpr uint32_t kGsCamSlot = 2;    // the gunner sheet reads the draw's VS b1 here (cb1[275], the world-rebase origin)
 
 // A constant buffer of the draw's own: for signature H the vertex stage's slot kGameCbSlot, for the disc probe a pixel-stage register's buffer; the buffer and the range the game bound it with (first constant and count, in 16-byte constants;
 // ranged is false when the context cannot say, and the whole buffer is meant). A reference is held until drop() or the destructor.
@@ -73,6 +74,23 @@ inline bool readGameCb(ID3D11DeviceContext* c, uint32_t slot, ExtraCb& out, bool
         }
     });
     return out.buffer != nullptr;
+}
+
+// True when shader register `reg` of this binding is inside the buffer and inside the range the game bound.
+// A reported count past the buffer is clipped to the buffer. The gunner sheet needs VS b0 register 7 and VS b1 register 275.
+inline bool cbShowsRegister(const ExtraCb& e, UINT reg) {
+    if (!e.buffer) return false;
+    D3D11_BUFFER_DESC bd{};
+    e.buffer->GetDesc(&bd);
+    const UINT regs = bd.ByteWidth / 16u;
+    UINT first = 0, count = regs;
+    if (e.ranged) {
+        first = e.first;
+        if (e.count) count = e.count;
+    }
+    if (first >= regs) return false;
+    if (first + count > regs) count = regs - first;
+    return reg < count;
 }
 
 // THE SCISSOR. The game sets a scissor rectangle for the radar's draws from the radar's screen bounds at its OLD place, and the moved geometry is cropped to it (a straight edge across the disc and
@@ -292,22 +310,25 @@ inline void directSetGs(ID3D11DeviceContext* c, ID3D11GeometryShader* gs, ID3D11
 class Binding {
     ID3D11GeometryShader* gs_ = nullptr;
     ID3D11Buffer* cb_ = nullptr;
-    ID3D11Buffer* cb1_ = nullptr;   // the game's GS slot 1 (it binds none; held only when signature H's extra constants went in)
+    ID3D11Buffer* cb1_ = nullptr;   // the game's GS slot 1 (it binds none; held only when an extra buffer went in)
+    ID3D11Buffer* cb2_ = nullptr;   // the game's GS slot 2 (held only when the gunner sheet's camera block went in)
     const void* ourGs_ = nullptr;
     const void* ourCb_ = nullptr;
     const void* ourCb1_ = nullptr;
+    const void* ourCb2_ = nullptr;
     ID3D11ClassInstance* classes_[D3D11_SHADER_MAX_INTERFACES] = {};
     UINT count_ = D3D11_SHADER_MAX_INTERFACES;
-    bool gsSaved_ = false, cbSaved_ = false, cb1Saved_ = false, modified_ = false;
+    bool gsSaved_ = false, cbSaved_ = false, cb1Saved_ = false, cb2Saved_ = false, modified_ = false;
 
     void drop() {
         release(gs_);
         release(cb_);
         release(cb1_);
+        release(cb2_);
         for (auto& p : classes_) release(p);
         count_ = D3D11_SHADER_MAX_INTERFACES;
-        gsSaved_ = cbSaved_ = cb1Saved_ = modified_ = false;
-        ourGs_ = ourCb_ = ourCb1_ = nullptr;
+        gsSaved_ = cbSaved_ = cb1Saved_ = cb2Saved_ = modified_ = false;
+        ourGs_ = ourCb_ = ourCb1_ = ourCb2_ = nullptr;
     }
     bool settleGs(ID3D11DeviceContext* c, SetGs setGs) {
         ID3D11GeometryShader* bound = nullptr;
@@ -344,6 +365,28 @@ class Binding {
         cb1Saved_ = false;
         return true;
     }
+    bool settleBuffer2(ID3D11DeviceContext* c) {
+        ID3D11Buffer* bound = nullptr;
+        const bool read = guarded("srv.turret.settle.get.cb2", [&] { c->GSGetConstantBuffers(kGsCamSlot, 1, &bound); });
+        const bool ours = bound && static_cast<const void*>(bound) == ourCb2_;
+        release(bound);
+        if (!read) return false;
+        if (ours && !guarded("srv.turret.settle.cb2", [&] { c->GSSetConstantBuffers(kGsCamSlot, 1, &cb2_); })) return false;
+        release(cb2_);
+        cb2Saved_ = false;
+        return true;
+    }
+    static void setGameRange(ID3D11DeviceContext* c, UINT slot, const ExtraCb* extra) {
+        ID3D11DeviceContext1* c1 = nullptr;
+        if (extra->ranged && extra->first != 0 && SUCCEEDED(c->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {
+            ID3D11Buffer* b = extra->buffer;
+            c1->GSSetConstantBuffers1(slot, 1, &b, &extra->first, &extra->count);
+            c1->Release();
+        } else {
+            ID3D11Buffer* b = extra->buffer;
+            c->GSSetConstantBuffers(slot, 1, &b);
+        }
+    }
 
 public:
     Binding() = default;
@@ -358,10 +401,11 @@ public:
 
     // Bind the shader and its constants for the issue that follows. kGameHasGs: the game has a geometry shader bound, or class instances: nothing was touched.
     // kRefused: a call faulted, or a private object was missing: nothing of ours stays bound.
-    // `extra` (signature H) is the draw's vertex constants, set at GS slot 1 with the range the game bound them with.
-    Begin begin(ID3D11DeviceContext* c, ID3D11GeometryShader* shader, ID3D11Buffer* constants, SetGs setGs = directSetGs, const ExtraCb* extra = nullptr) {
-        if (!c || !shader || !constants || modified_ || gsSaved_ || cbSaved_ || cb1Saved_) return Begin::kRefused;
-        if (extra && !extra->buffer) return Begin::kRefused;
+    // `extra` is set at GS slot 1 with the range the game bound it with: signature H's vertex constants, or the gunner sheet's VS b0.
+    // `cam` (the gunner sheet only) is the draw's VS b1, set at GS slot 2 the same way. It is refused without `extra`.
+    Begin begin(ID3D11DeviceContext* c, ID3D11GeometryShader* shader, ID3D11Buffer* constants, SetGs setGs = directSetGs, const ExtraCb* extra = nullptr, const ExtraCb* cam = nullptr) {
+        if (!c || !shader || !constants || modified_ || gsSaved_ || cbSaved_ || cb1Saved_ || cb2Saved_) return Begin::kRefused;
+        if ((extra && !extra->buffer) || (cam && (!extra || !cam->buffer))) return Begin::kRefused;
         Begin result = Begin::kRefused;
         const bool ran = guarded("srv.turret.bind", [&] {
             c->GSGetShader(&gs_, classes_, &count_);
@@ -379,19 +423,15 @@ public:
                 cb1Saved_ = true;
                 ourCb1_ = extra->buffer;
             }
+            if (cam) {
+                c->GSGetConstantBuffers(kGsCamSlot, 1, &cb2_);
+                cb2Saved_ = true;
+                ourCb2_ = cam->buffer;
+            }
             modified_ = true;  // any setter can partially publish before a fault
             c->GSSetConstantBuffers(kGsSlot, 1, &constants);
-            if (extra) {
-                ID3D11DeviceContext1* c1 = nullptr;
-                if (extra->ranged && extra->first != 0 && SUCCEEDED(c->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {   // a range that starts at 0 is the whole buffer to the shader
-                    ID3D11Buffer* b = extra->buffer;
-                    c1->GSSetConstantBuffers1(kGsGameSlot, 1, &b, &extra->first, &extra->count);
-                    c1->Release();
-                } else {
-                    ID3D11Buffer* b = extra->buffer;
-                    c->GSSetConstantBuffers(kGsGameSlot, 1, &b);
-                }
-            }
+            if (extra) setGameRange(c, kGsGameSlot, extra);
+            if (cam) setGameRange(c, kGsCamSlot, cam);
             setGs(c, shader, nullptr, 0);
             result = Begin::kBound;
         });
@@ -406,6 +446,7 @@ public:
         if (gsSaved_) ok = guarded("srv.turret.restore.gs", [&] { setGs(c, gs_, count_ ? classes_ : nullptr, count_); }) && ok;
         if (cbSaved_) ok = guarded("srv.turret.restore.cb", [&] { c->GSSetConstantBuffers(kGsSlot, 1, &cb_); }) && ok;
         if (cb1Saved_) ok = guarded("srv.turret.restore.cb1", [&] { c->GSSetConstantBuffers(kGsGameSlot, 1, &cb1_); }) && ok;
+        if (cb2Saved_) ok = guarded("srv.turret.restore.cb2", [&] { c->GSSetConstantBuffers(kGsCamSlot, 1, &cb2_); }) && ok;
         if (ok) drop();
         return ok;
     }
@@ -423,6 +464,7 @@ public:
         if (gsSaved_) ok = settleGs(c, setGs) && ok;
         if (cbSaved_) ok = settleBuffer(c) && ok;
         if (cb1Saved_) ok = settleBuffer1(c) && ok;
+        if (cb2Saved_) ok = settleBuffer2(c) && ok;
         if (ok) modified_ = false;
         return ok;
     }

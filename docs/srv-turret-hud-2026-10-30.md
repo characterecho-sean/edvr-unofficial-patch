@@ -20,12 +20,13 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): twelve. Baked from the 2026-11-02 Frontier flight:
+- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight:
   camera back 80, HUD forward 0, radar forward 0, panels back 0, systems near 70,
-  weapon panel up 10, gunner up 0. Screen limit is game, radar anchor is off,
-  depth is game. `srv_turret_hud_up` raises the weapon panel and
-  `srv_turret_gunner_up` raises the gunner frame, along the seat, at the game's
-  own depth. The centre reticle and the Escape menu's 360-index draws stay.
+  weapon panel up 10, gunner up 0, cards up 0. Screen limit is game, radar anchor
+  is off, depth is game. `srv_turret_hud_up` raises the weapon panel.
+  `srv_turret_gunner_up` raises the whole gunner frame. `srv_turret_cards_up`
+  raises only the target card and SYSTEMS. The sheet draws the card contents
+  and not the border. The dark cards and the centre reticle stay.
 - **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
   anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
   `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
@@ -38,7 +39,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The twelve `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The thirteen `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
