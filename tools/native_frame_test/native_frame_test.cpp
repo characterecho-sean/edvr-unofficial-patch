@@ -1253,6 +1253,11 @@ int wmain(int argc, wchar_t** argv) {
             bl.step(false, 0.3);
             check(std::fabs(half - 0.5f) < 1e-6f && std::fabs(full - 1.0f) < 1e-6f && clamped == 1.0f && bl.w == 0.0f,
                   "F49: the blend weight reaches 1 in 0.3 s, clamps, and returns to 0 in 0.3 s");
+            check(!nf::pfzFreezeBuildsChain(0) && !nf::pfzFreezeBuildsChain(1) && nf::pfzFreezeBuildsChain(2),
+                  "F49: off and probe do not build the rest chain; on does");
+            check(!nf::pfzFreezeWrites(1, 1.0f, false) && !nf::pfzFreezeWrites(2, 0.0f, false) && !nf::pfzFreezeWrites(2, 1.0f, true) &&
+                      nf::pfzFreezeWrites(2, 0.25f, false),
+                  "F49: the span is written only when the freeze is on, the weight is live, and a write has not stood down");
             // The rest gate: steady for 1 s rests; a 3 cm move or ADS ends it.
             nf::PfzHeadRest hr;
             bool rest = false;

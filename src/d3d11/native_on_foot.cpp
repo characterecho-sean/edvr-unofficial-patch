@@ -16706,11 +16706,27 @@ bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
     if (!planOk) return pfzFail(kPfzFailPlanTorn), false;
     const pfz::Plan& pl = g_pfzPlanCopy;
     if (pl.x != x || pl.count == 0 || pl.count > nofoot::kPfzMaxF) return pfzFail(kPfzFailPlan), false;
-    const uint8_t f210 = sp.f210, f212 = sp.f212, f12C = sp.f12C;
-    const uint32_t f128 = sp.f128, count = sp.count, which = sp.which;
+    const uint32_t count = sp.count, which = sp.which;
     const uint64_t buf = sp.buf;
     if (count != pl.joints || pl.anchor >= count) return pfzFail(kPfzFailCount), false;
-    // The rest chain (w = 1), anchored at the hips' animated matrix.
+    // The pin reads the animated head and joint 34 from this snapshot whether or not the freeze writes. The written copy
+    // follows below, and only then.
+    const uint64_t nowMs = GetTickCount64();
+    if (count > 44) {
+        g_pfzHeadUp.store(g_pfzAnim[44][13], std::memory_order_relaxed);
+        g_pfzHeadMs.store(nowMs, std::memory_order_relaxed);
+    }
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (count > 34) std::memcpy(pfz::g_span34, g_pfzAnim[34], sizeof(pfz::g_span34));
+    pfz::g_span34WasWritten = false;
+    pfz::g_span34Ms = count > 34 ? nowMs : 0;
+    pfz::g_span34Buffer = which;
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_release);
+    // Probe (the shipped default) stops here. The rest chain exists for the write and for the millimetre stats beside it.
+    const int mode = pfz::g_mode.load(std::memory_order_relaxed);
+    if (!nofoot::pfzFreezeBuildsChain(mode)) return false;
+    const uint8_t f210 = sp.f210, f212 = sp.f212, f12C = sp.f12C;
+    const uint32_t f128 = sp.f128;
     const float* anchorM = g_pfzAnim[pl.anchor];
     for (uint32_t k = 0; k < pl.count; ++k) {
         float local[16];
@@ -16719,19 +16735,7 @@ bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
         nofoot::pfzMul(local, parentM, g_pfzChain[k]);
     }
     const uint32_t tid = GetCurrentThreadId();
-    const uint64_t nowMs = GetTickCount64();
-    if (count > 44) {
-        g_pfzHeadUp.store(g_pfzAnim[44][13], std::memory_order_relaxed);
-        g_pfzHeadMs.store(nowMs, std::memory_order_relaxed);
-    }
-    // The span snapshot of joint 34 (as animated); the written copy follows below when the freeze writes.
-    pfz::g_spanSeq.fetch_add(1, std::memory_order_acq_rel);
-    if (count > 34) std::memcpy(pfz::g_span34, g_pfzAnim[34], sizeof(pfz::g_span34));
-    pfz::g_span34WasWritten = false;
-    pfz::g_span34Ms = count > 34 ? nowMs : 0;
-    pfz::g_span34Buffer = which;
-    pfz::g_spanSeq.fetch_add(1, std::memory_order_release);
-    // The probe: joints 34 and 44, animated minus the rest chain (both relative to the anchor's animated matrix, so the anchor cancels), in mm.
+    // Joints 34 and 44, animated minus the rest chain (both relative to the anchor's animated matrix, so the anchor cancels), in mm.
     g_pfzStatSeq.fetch_add(1, std::memory_order_acq_rel);
     if (g_pfzStatReset.exchange(false, std::memory_order_relaxed)) g_pfzStats = PfzStats{};
     PfzStats& st = g_pfzStats;
@@ -16763,7 +16767,7 @@ bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
     g_pfzStatSeq.fetch_add(1, std::memory_order_release);
     // ON: the frozen set, blended toward the rest chain by the frame thread's weight. Every matrix is computed before the first write.
     const float w = g_pfzWeight.load(std::memory_order_relaxed);
-    if (pfz::g_mode.load(std::memory_order_relaxed) != 2 || !(w > 0.0f) || g_pfzWriteDown.load(std::memory_order_relaxed)) return false;
+    if (!nofoot::pfzFreezeWrites(mode, w, g_pfzWriteDown.load(std::memory_order_relaxed))) return false;
     if (w < 1.0f) {
         for (uint32_t k = 0; k < pl.count; ++k) {
             const float* parentAnim = pl.parentSlot[k] < 0 ? anchorM : g_pfzAnim[pl.member[pl.parentSlot[k]]];
@@ -23569,7 +23573,8 @@ void pfzTick(uint64_t now) {
         Log::get().note("native on foot pose freeze (F49, %s): %llu Animate calls in 5 s, %llu for the local X %016llX (%llu skipped busy); %s",
                         kModeNames[mode], static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dLocal),
                         static_cast<unsigned long long>(pfz::g_localX.load(std::memory_order_relaxed)), static_cast<unsigned long long>(dBusy),
-                        !got ? "the statistics were being written (retried next time)" : "no measured call for the local X");
+                        !got ? "the statistics were being written (retried next time)"
+                             : mode != 2 ? "probe does not build the rest chain" : "no measured call for the local X");
         return;
     }
     char joint[2][200] = {};
