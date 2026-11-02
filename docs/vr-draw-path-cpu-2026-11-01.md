@@ -2,11 +2,13 @@
 
 ## Status
 
-- **State (2026-11-01): built (tickets #158-#163 merged), not flown.**
-  Next: one flight with test build 1. Writing the spec corrected three points
-  here: item 1's rig and item 3's two wrappers (see those sections). The
-  build's code review (findings fixed on `build1/review-fixes`) moved the
-  re-issue counter's edges: see that section.
+- **State (2026-11-02): build 1 flown (`53c965cd`); it fails the total
+  criterion.** `draw hook CPU` keys on is not below keys off in either mode
+  (see "Flight 2026-11-02"). Item 1 works and is a behaviour fix with AA off
+  (eye rows, marker fix, reticle depth now apply), but its tee saving is spent
+  downstream. Items 2 and 4 cut nothing in flight. Next: decide items 2 and 4
+  (removal needs the keys quoted and asked), and whether item 1 ships for
+  its behaviour. Draft PR #166 holds the build.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -19,10 +21,14 @@
 - **Temporary keys (never shipped; removed when this closes):**
   `experimental.vr_eye_rows_without_aa`, `experimental.vr_cpu_benchmark_idle`,
   `experimental.vr_cpu_depth_slot_cache`.
-- **Open hypothesis (item 1):** with AA off the depth probe is off, no draw
-  passes the scene-depth test, `worldOk` never sets, so the tee never goes
-  fast and no world rows publish. Signature: in keys-off AA-off legs the
-  tally names `world` and `sceneRefused[NotSceneDepth]` is large.
+- **Confirmed (item 1):** with AA off and the key off, every world draw is
+  held as not scene depth (about 64M per leg), the tee never goes fast and
+  F113 reports `none` 100%. Key on: fast path 36-46%, F113 scene meshes 94%.
+- **Ruled out:** re-issues as a CPU cost: at most 0.004 ms per sampled frame
+  in any window, and none at all with AA off. Item 4 as a saving: 0 hits in
+  the whole flight, because the binding generation moves between every eye
+  draw. Item 2 as a saving in flight: the collector cleared nothing, done or
+  skipped, in any on-foot or cockpit window.
 - **Ruled out:** idling the whole marker tee without the UI layer, because
   its slow path is the only publisher of the per-eye world rows
   (`eyeRowsPublish`), which on-foot systems read without the layer.
@@ -290,3 +296,44 @@ drawn, or for the weapons work.
 - fps keys on no more than 0.5 below keys off, in every mode.
 - No visual regression: on-foot markers and labels with DLAA and across an
   F7 toggle; HUD and UI depth.
+
+## Flight 2026-11-02
+
+Build `53c965cd` (`--expect-build HEAD` matched), same rig and concourse
+spot, one session, keys from F8. Legs of 4 minutes; windows that contain a
+flip are dropped. `draw hook CPU` is the mean of each leg's kept 1800-frame
+windows; the tee is `--grep 'tee held'` summed over the leg; fps is the
+vScreen totals.
+
+| Leg | Mode, keys | draw hook CPU ms | tee est. ms/frame | fast path | fps |
+|---|---|---|---|---|---|
+| 1a | DLAA, on | 6.12 | 0.68 | 70% | 29.2 |
+| 1b | DLAA, off | 5.93 | 0.63 | 70% | 29.7 |
+| 2a | AA off, on | 2.89 | 1.03 | 36% | 33.8 |
+| 2b | AA off, off | 2.87 | 1.31 | 0% | 32.7 |
+| 1c | DLAA, on | 6.19 | 0.62 | 70% | 28.3 |
+| 1d | DLAA, off | 5.42 | 0.50 | 81% | 30.4 |
+| 2c | AA off, on | 2.61 | 0.87 | 46% | 34.4 |
+| 2d | AA off, off | 2.51 | 1.14 | 0% | 34.9 |
+| 3 | AA off, only item 1 off | 2.46 | 1.12 | 0% | 35.0 |
+| 4 | cockpit, DLAA, on | 1.4-2.9 | none | | 42.0 |
+
+- Total: keys on is above keys off in all four pairs (+0.02 to +0.77 ms).
+  The DLAA pairs differ by more than the spread inside a leg, but the scene
+  moved too: 1d held about 40% as many world-0 draws as 1c. Fails.
+- fps: 1c is 2.1 below 1d, past the 0.5 limit; the other pairs are within
+  it or favour keys on. Read as scene noise at a GPU-bound ~30 fps; fails
+  the criterion as written.
+- Item 1: the tee is about 0.27 ms a frame cheaper with the key on and AA
+  off, but `draw hook CPU` does not fall, because the systems the rows
+  unlock now run: F113 scene meshes 94% (was none 100%), reticle depth F85c
+  patched 100% (was NEVER APPLIED), marker fix F62c 6% (was NEVER APPLIED).
+  Eye 1's world rows hold about 35M draws a leg (`world 1`), so the fast
+  path reaches only 36-46% against DLAA's 70%. DLAA agreement: 0 disagree.
+- Item 2: `entry clears 0 done / 0 skipped` in every window after the main
+  menu (1800 skipped a window there). The collector does not run in flight.
+- Item 4: 16 misses a frame with DLAA, none with AA off, 0 hits ever.
+- Re-issues: about 28 a frame with DLAA (ui_depth, ui_layer_second,
+  crisp_hud), 0 with AA off; their draw calls cost at most 0.004 ms per
+  sampled frame.
+- Visual regression: pending the pilot's report.
