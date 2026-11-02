@@ -6,9 +6,14 @@
   criterion, and the maintainer approved the cleanup the same day** (branch
   `build1/cleanup`, based on `c089b802`). Shipped: item 1 as the standard
   behaviour (it is a behaviour fix with AA off: eye rows, marker fix and
-  reticle depth now apply; its tee saving is spent downstream), item 3, the
-  re-issue counter. Removed: items 2 and 4. No temporary key remains. Draft
-  PR #166 holds the build.
+  reticle depth now apply), item 3, the re-issue counter. Removed: items 2
+  and 4. No temporary key remains. Draft PR #166 holds the build.
+- **Review of the flight (2026-11-02, "Review of build 1's flight"):** the
+  render thread is CPU-bound; build 1's DLAA items were worth 0.2-0.4 ms
+  against a 0.8 ms leg-to-leg noise floor, and the profile prices were
+  diluted about 1.7x by a non-concourse window. Build 2 (/GL flight) is
+  replaced: next is a concourse-only re-export of the existing profile, then
+  a no-build config-bisect flight of the DLAA subscribers.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -343,11 +348,11 @@ vScreen totals.
   The DLAA pairs differ by more than the spread inside a leg, but the scene
   moved too: 1d held about 40% as many world-0 draws as 1c. Fails.
 - fps: 1c is 2.1 below 1d, past the 0.5 limit; the other pairs are within
-  it or favour keys on. Read as scene noise at a GPU-bound ~30 fps; fails
-  the criterion as written.
+  it or favour keys on. Fails the criterion as written. (This line first
+  called the frame GPU-bound; the review below shows it is CPU-bound.)
 - Item 1: the tee is about 0.27 ms a frame cheaper with the key on and AA
-  off, but `draw hook CPU` does not fall, because the systems the rows
-  unlock now run: F113 scene meshes 94% (was none 100%), reticle depth F85c
+  off. `draw hook CPU` cannot show it: the tee runs before `DrawClock`
+  starts (vscreen.cpp near 5417 and 5421). The rows also unlock: F113 scene meshes 94% (was none 100%), reticle depth F85c
   patched 100% (was NEVER APPLIED), marker fix F62c 6% (was NEVER APPLIED).
   Eye 1's world rows hold about 35M draws a leg (`world 1`), so the fast
   path reaches only 36-46% against DLAA's 70%. DLAA agreement: 0 disagree.
@@ -358,3 +363,55 @@ vScreen totals.
   crisp_hud), 0 with AA off; their draw calls cost at most 0.004 ms per
   sampled frame.
 - Visual regression: pending the pilot's report.
+
+## Review of build 1's flight (2026-11-02)
+
+An independent review re-read the flight and the 2026-11-01 profile
+(notes outside the repo: `fable-build2-review.md`).
+
+- **The bound is the render thread's CPU.** The runtime does not hold the
+  game (`next_wait_roundtrip` 0.19 ms); the render thread runs for 98.5% of
+  the time before the first submit (27377 of 27807 us), and that time is
+  25.7 ms with DLAA against 21.7 ms with AA off. After both submits the
+  frame spends another 7-8 ms before the next wait (game 5.1 ms, EDVR
+  1.2 ms in the profile); not looked at before.
+- ruled out: build 1 as a measurable change, because its DLAA items were
+  worth about 0.2-0.4 ms while `draw hook CPU` moved up to 0.77 ms between
+  legs with no code change, and every pair flew keys on first.
+- ruled out: `draw hook CPU` as the judge for items 1 and 2, because the
+  marker tee and the perf tick run outside its clock. The metric for a
+  frame-level change is the render thread's time before the first submit.
+- ruled out: item 2's premise, because the profile's clear is
+  `clearEntries < NativeBenchmarkCollector::observe` (begin or
+  startSampling), not `reset()`.
+- ruled out: item 4's cache key, because the game binds pixel-shader SRVs on
+  every draw, so a generation over the PS SRVs changes between every pair.
+- ruled out: the build-1 function prices as concourse prices, because
+  `self_split.json` averaged a non-concourse window (5) with window 12.
+  Concourse windows alone put EDVR's own code at 6.2-7.8 ms with DLAA and
+  4.0-5.3 ms with AA off; every build-1 price was about 1.7x low.
+- ruled out: build 2 as designed (a /GL A/B flight of two separate
+  launches), because it cannot resolve 0.3 ms against that noise, and the
+  profile already bounds the named cross-TU callees at 0.25-0.35 ms of self
+  time. /GL stays a build-only measurement (link time and a profiled A/B).
+
+Where the review puts the gains, largest first:
+1. The DLAA per-draw subscriber tail, about 3 ms: about 20 subscribers at
+   0.05-0.3 ms each (`uiLayerFamilyOf` 0.27, `hookedEnd` 0.19, crisp 0.12,
+   star glow 0.10, `viewIsSurface`, UI depth, engine velocity, screen
+   motion, GPU census). One per-draw classification cached on the shader
+   pair, skipping subscribers that cannot want the draw (#152), might save
+   1.5-2.5 ms. Medium confidence.
+2. The always-on per-draw ladder, about 1.9 ms in both modes (the AA-off
+   floor): a VR fast path (#151, #152), 0.5-1.5 ms. Medium-low confidence.
+3. `drawtag::streamLoad16`, 0.67-0.81 ms in both captures: the marker fix's
+   instance-stream copy at Unmap, reading write-combined memory after the
+   submits, outside every clock. Its cost line prints only with the detail
+   log. Medium confidence.
+- Outside EDVR: EDHM at 2.4-3.2 ms a frame, larger than builds 1 and 2
+  together.
+
+Next, cheapest first: re-export the existing ETLs for concourse windows
+only and replace the function prices; a config-bisect flight with DLAA,
+one subscriber family at a time from F8, judged on the time before the
+first submit; then design the subscriber mask (#152) from the measured list.
