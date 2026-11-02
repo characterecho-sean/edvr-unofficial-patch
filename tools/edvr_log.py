@@ -10399,11 +10399,11 @@ H_SRV_TURRET = "srv turret view"
 H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud", "srv turret anchor", "srv turret:")
 # Rows of these kinds are state, kept whatever --since says, and are not by themselves a sign the turret view was entered.
 H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
-# ten keys since the systems-near key (optional, so a log from before it still parses), nine since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
+# fourteen with the bracket cut (the last, millimetres), thirteen with the cards-up key, ten keys since the systems-near key (optional, so a log from before it still parses), nine since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
 # the push-back), so the newer keys are optional and the rule reads their absence as the older line
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
-                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)? \(live; ")
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)?(?:, bracket cut (?P<bracketcut>\d+) mm)? \(live; ")
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
@@ -24265,8 +24265,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0, cards_up=0):   # thirteen keys: fixture values, not the shipped defaults
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up)
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0, cards_up=0, bracket_cut=0):   # fourteen keys: fixture values, not the shipped defaults
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up, bracket_cut)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
@@ -24343,6 +24343,8 @@ def self_test_health():
         ST, st_ok = H_SRV_TURRET, [f90_part()]
         check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
         check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret: a settings line from before the bracket cut (it ends at cards up) still parses, and so does one with it", st_ok + [st_set().replace(", bracket cut 0 mm", "")], 0, [("IDLE", ST)],
               has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
               has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera back 0.60 m published 1 time(s)",

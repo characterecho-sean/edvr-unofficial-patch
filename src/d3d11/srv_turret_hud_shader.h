@@ -72,7 +72,7 @@ namespace edvr {
     "    float4 s0;   // row 0 of seat-from-math-eye. Identity except on the gunner sheet, where it keeps the border test still as the head turns\n" \
     "    float4 s1;\n" \
     "    float4 s2;\n" \
-    "    float4 s3;   // fourth row of the sheet's mesh-space map. Zero: the sheet is not cropped\n" \
+    "    float4 s3;   // x: the gunner sheet's bracket cut, metres (experimental.srv_turret_bracket_cut); only the sheet's shader reads it. y, z and w stay 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -216,9 +216,12 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
 // clip plane cuts them, not a cell. The vertices carry SV_ClipDistance0, (x, y) distances to two planes in mesh
 // metres, chosen by the triangle's centroid; the pixel shader does not declare it. Dump 131322664001: the dark
 // fills (vs C4B4B334B26E81A9) span x -0.7708..-0.4867 on the target card and from 0.4934 on the systems card, y
-// -0.481..-0.311 on both; the bar sits just left of -0.7708 and the hook above -0.311; the dash sits in the row
-// y -0.553..-0.478 left of x 0.51, and the GUNNER CAMERA label in that row starts near 0.6. A view that could not
-// be read leaves both distances at 1, so nothing is clipped.
+// -0.481..-0.311 on both; the bar sits just left of the target card's edge and the hook above -0.311; the dash sits
+// in the row y -0.553..-0.478 left of x 0.51, and the GUNNER CAMERA label in that row starts near 0.6. A view that
+// could not be read leaves both distances at 1, so nothing is clipped. The target card's left edge is not a line of
+// constant x: it leans in mesh space (dump 163557956001), so that card's plane is the edge's own plane, moved left
+// by the bracket cut (experimental.srv_turret_bracket_cut, TEMPORARY, in s3.x). A vertical cut at x -0.769 sliced
+// the card's upper-left corner and left the bar's lower part.
 constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    float4 t0 : TEXCOORD0;\n"
     "    float4 pos : SV_Position;\n"
@@ -226,8 +229,11 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "cbuffer SheetClip : register(b1) { float4 clipRows[8]; };\n"
     "cbuffer SheetCam : register(b2) { float4 camBlock[276]; };\n"
     "struct Moved { Vertex v; float4 pre : TURRETPRE; float2 clip : SV_ClipDistance0; };\n"
-    "// Dump 131322664001, mesh metres. The target card's fill starts at x -0.7708 and its top edge is y -0.311; the plane sits 2 mm inside the left edge and 2 mm above the top.\n"
-    "static const float kTargetCardLeftX = -0.769;\n"
+    "// Dump 163557956001, mesh metres. The target card's fill (vs C4B4B334B26E81A9) has its left-edge vertices exactly coplanar (residuals under 0.01 mm), from (-0.7272, -0.4806, 0.5783) at the bottom to (-0.7708, -0.3115, 0.6125) at the top.\n"
+    "// The unit normal into the card is kTargetCardNormal and the edge plane is dot(n, p) = -kTargetCardEdgeOffset, so dot(n, p) + kTargetCardEdgeOffset is the signed distance, metres, right of the fill's left edge.\n"
+    "static const float3 kTargetCardNormal = float3(0.63015, 0.00544, 0.77645);\n"
+    "static const float kTargetCardEdgeOffset = 0.01184;\n"
+    "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; the plane sits 2 mm above it.\n"
     "static const float kTargetCardTopY = -0.309;\n"
     "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n"
     "static const float kCardRowBottomY = -0.481;\n"
@@ -272,8 +278,8 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    local = h.xyz / h.w + camBlock[275].xyz;\n"
     "    return true;\n"
     "}\n"
-    "float2 sheetClip(float3 p, float3 cen) {\n"
-    "    if (cen.x < 0.0) return float2(p.x - kTargetCardLeftX, kTargetCardTopY - p.y);\n"
+    "float2 sheetClip(float3 p, float3 cen, float cutM) {\n"
+    "    if (cen.x < 0.0) return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + cutM, kTargetCardTopY - p.y);\n"
     "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) return float2(p.x - kLabelRowLeftX, 1.0);\n"
     "    return float2(1.0, 1.0);\n"
     "}\n"
@@ -297,7 +303,7 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "        Moved o;\n"
     "        o.v = v[i];\n"
     "        o.pre = v[i].pos;\n"
-    "        o.clip = live ? sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen) : float2(1.0, 1.0);\n"
+    "        o.clip = live ? sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen, s3.x) : float2(1.0, 1.0);\n"
     "        float3 d;\n"
     "        const float4 moved = turretMove(corner, d);\n"
     "        o.v.pos = draw ? (locked ? turretLock(corner, lk, d) : moved) : float4(2.0, 2.0, 0.0, 1.0);\n"

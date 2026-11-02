@@ -20,7 +20,7 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight:
+- **Keys** (`[experimental]`): fourteen. Baked from the 2026-11-02 Frontier flight:
   camera back 80, HUD forward 0, radar forward 0, panels back 0, systems near 70,
   weapon panel up 10, gunner up 0, cards up 0. Screen limit is game, radar anchor
   is off, depth is game. `srv_turret_hud_up` raises the weapon panel.
@@ -39,7 +39,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The thirteen `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The fourteen `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
@@ -55,9 +55,9 @@
   at their defaults, camera mode): the 10 s `srv turret hud: panels:` line
   (`edvr_log.py --grep "srv turret hud"`) and `srv turret radar camera: 10 s:`
   (slot calls and radar slots: radar slots above 0 with moves).
-- **Sheet brackets (2026-11-02, built, NOT FLOWN):** the sheet's geometry shader
-  clips the target card's bar and hook (x -0.769, y -0.309) and the SYSTEMS dash
-  (x 0.53, label row) with SV_ClipDistance0; no key. Journal 2026-11-02, last entry.
+- **Sheet brackets (2026-11-02, built, NOT FLOWN):** the sheet's shader clips the leftover
+  brackets (SV_ClipDistance0). SYSTEMS dash: x 0.53, flown right. Target card: its leaning
+  edge plane moved left by `srv_turret_bracket_cut` (mm, default 18), TEMPORARY: bake and remove when tuned.
 - **Open:** the flight of the stripped build and of the clip; the two height keys; the proposals above.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
@@ -124,6 +124,10 @@ same amount. Matching them needs a change to one layer's stereo depth.
 
 ## Ruled out
 
+- ruled out: a vertical mesh-x cut at -0.769 for the target card's bracket,
+  because the card's edge leans in mesh space (vertices (-0.7272, -0.4806,
+  0.5783) at the bottom to (-0.7708, -0.3115, 0.6125) at the top); it cut the
+  panel's upper-left corner and missed the bar's lower part (dump 163557956001).
 - ruled out: an EDVR path placing the HUD at its depth (UI layer, HDR HUD
   layer, `fix.ui_depth`, the hologram remap), because none of them changes
   a vertex position: the remap edits an SV_Position address in a pixel
@@ -1950,3 +1954,13 @@ The gunner frame still showed two bright orange pieces: the vertical bar with it
 - **Change.** The sheet's geometry shader writes `SV_ClipDistance0` (a `float2`) after `TURRETPRE`. When the view constants gave all three vertices a mesh position, the triangle's centroid picks the planes. Left of x 0 (the target card): x >= -0.769 and y <= -0.309, 2 mm inside the fill's left edge and 2 mm above its top edge. Right of x 0 and under y -0.481 (the label row): x >= 0.53. Every other triangle, a missed constant buffer and a failed inversion get (1, 1), so nothing is clipped. `inFill`, the off-screen drop, the move and the lock are unchanged. The pixel shader does not declare the distance; the rasterizer clips on it.
 - **Gate.** `temporal_shader_build` now expects the sheet's output to end with `SV_ClipDistance0` (two components, in the register after `TURRETPRE`'s). In `tools\srv_turret_hud_test` the sheet's stream-output twin also streams the clip distance, and new WARP cases read it: a left-region triangle across x -0.769 has clip.x of both signs and the distances are exact; a vertex above y -0.309 has clip.y below 0; a label-row triangle across 0.45 to 0.56 straddles 0.53 and the label (from 0.6) is kept; a SYSTEMS card triangle gets (1, 1); with no `SheetClip` every distance is (1, 1). Seven mutants of the rules are caught.
 - **Not flown.** What to look for: the bar and hook left of the CRANFIELD NUTRITION card and the dash under SYSTEMS are gone, and the card text, the planet icon and the label are whole. If a sliver of either bracket remains, the planes are the constants named `kTargetCardLeftX`, `kTargetCardTopY`, `kCardRowBottomY` and `kLabelRowLeftX` at the head of the sheet shader (`srv_turret_hud_shader.h`).
+
+### 2026-11-02: the target card's edge leans; the cut follows it, with a dial (built, not flown)
+
+Sean flew 6b131d5c on Frontier (dump `163557956001`). The SYSTEMS side is right: the label-row plane at x 0.53 stays as it is. The target card side was wrong in two ways: the vertical plane x >= -0.769 cut a diagonal slice off the card's upper-left corner, and the bracket bar's lower part was still there.
+
+- **Cause.** The card's left edge is not a line of constant mesh x. The fill's left-edge vertices (vs `C4B4B334B26E81A9`) run from (-0.7272, -0.4806, 0.5783) at the bottom to (-0.7708, -0.3115, 0.6125) at the top. They are exactly coplanar (fit residuals under 0.01 mm). The unit normal into the card is n = (0.63015, 0.00544, 0.77645) and the edge plane is n.p = -0.01184, so s(p) = dot(n, p) + 0.01184 is the signed distance in metres right of the fill's left edge. The edge leans 44 mm in x over the card's height, so x -0.769 sat 42 mm left of the edge (in x) at the bottom (the bar's lower part survived) and right of the top-left vertex (the corner was cut). The ruled-out line is in the section above.
+- **Change.** In the sheet's geometry shader, clip.x for the left region is now `dot(n, p) + 0.01184 + cutM`, which keeps s(p) >= -cutM. `n`, the offset and the vertex data are named constants with a comment. clip.y stays `-0.309 - p.y` (the card's top edge is y -0.3115 at all its top vertices, so that plane is parallel to it and was right). The region choice and the label-row plane are unchanged.
+- **The dial.** `experimental.srv_turret_bracket_cut` (integer millimetres, 0 to 40, default 18) is cutM: how far left of the target card's dark panel edge the cut sits. TEMPORARY. Sean cannot pin the offset from screenshots to better than about 3 mm and the gap between the bar and the dark border is about 4 mm, so the value is for him to tune in a flight; when it is, bake it and remove the key (Scope control). It is read like the other experimental keys (getter, settings line "bracket cut %d mm", `edvr_log.py` parse), travels in the Turret constant buffer's fourth spare register (`s3.x`, `TurretParams::cutM`, metres, refused outside 0 to 40 mm) and only the sheet's shader reads it.
+- **Gate.** WARP cases on the sheet's shader: with 18 mm a left-region point 10 mm left of the edge keeps clip.x above 0 and one 25 mm left gets clip.x below 0; a triangle across s = -18 mm has its zero crossing there (interpolated along the triangle); 30 mm moves the crossing; 0 puts it at the edge itself; the fill's own left-edge vertices (bottom, middle, top) all have clip.x at the cut, which the old vertical plane failed at the top. The old x = -0.769 cases are gone. Mutants: the dial dropped, its sign, its register component, the normal flipped, the offset dropped, and x alone.
+- **Not flown.** What to look for: the bar and its lower part left of the CRANFIELD NUTRITION card are gone and the card's upper-left corner is whole. If the bar's sliver remains, lower the key; if the card's own border is clipped, raise it. The `srv turret settings:` line names the value in force.

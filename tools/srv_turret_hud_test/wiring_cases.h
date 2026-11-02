@@ -123,7 +123,10 @@ static bool wiredModule(const std::string& t) {
     const size_t hudUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_hud_up\", 10, 0, 100)");
     const size_t gunnerUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_gunner_up\", 0, 0, 100)");
     const size_t cardsUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_cards_up\", 0, 0, 100)");
-    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm (live; \"");
+    const size_t bracketCut = t.find("cfg.getIntInRange(\"experimental.srv_turret_bracket_cut\", 18, 0, 40)");
+    // ...and the gunner draw hands the key's value to the constants it builds (the sheet's shader reads it from the Turret buffer)
+    const size_t bracketPassed = t.find("st::gunnerParamsFor(frame, params, cards, g_bracketCutMm.load(std::memory_order_relaxed))");
+    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm, bracket cut %d mm (live; \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
@@ -198,7 +201,7 @@ static bool wiredModule(const std::string& t) {
     // lists and strips are carried, one signature's shader missing leaves the others' families bound
     const bool strips = found(t.find("!st::topologyCarried(static_cast<int>(topology))")) && found(t.find("bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {")) &&
                         found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
-    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && found(settings) && found(edge) &&
+    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && found(bracketCut) && found(bracketPassed) && found(settings) && found(edge) &&
            found(camera) && found(cleared) && found(line) && found(lineTail) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
 }
 // journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
@@ -275,11 +278,11 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const size_t nextSection = ini.find("\n[", experimental + 1), end = found(nextSection) ? nextSection : ini.size();
     const size_t back = ini.find("\nsrv_turret_camera_back = 80\n"), forward = ini.find("\nsrv_turret_hud_forward = 0\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 0\n"),
                  panels = ini.find("\nsrv_turret_panels_back = 0\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n"),
-                 systems = ini.find("\nsrv_turret_systems_near = 70\n"), hudUp = ini.find("\nsrv_turret_hud_up = 10\n"), gunnerUp = ini.find("\nsrv_turret_gunner_up = 0\n"), cardsUp = ini.find("\nsrv_turret_cards_up = 0\n"),
+                 systems = ini.find("\nsrv_turret_systems_near = 70\n"), hudUp = ini.find("\nsrv_turret_hud_up = 10\n"), gunnerUp = ini.find("\nsrv_turret_gunner_up = 0\n"), cardsUp = ini.find("\nsrv_turret_cards_up = 0\n"), bracketCut = ini.find("\nsrv_turret_bracket_cut = 18\n"),
                  depth = ini.find("\nsrv_turret_hud_depth = game\n"), scissor = ini.find("\nsrv_turret_hud_scissor = game\n");
-    if (!found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(systems) || !found(hudUp) || !found(gunnerUp) || !found(cardsUp) || !found(depth) || !found(scissor)) return false;
+    if (!found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(systems) || !found(hudUp) || !found(gunnerUp) || !found(cardsUp) || !found(bracketCut) || !found(depth) || !found(scissor)) return false;
     const bool inExperimental = back > experimental && back < end && forward > experimental && forward < end && radarForward > experimental && radarForward < end && panels > experimental && panels < end &&
-                                radar > experimental && radar < end && gap > experimental && gap < end && systems > experimental && systems < end && hudUp > experimental && hudUp < end && gunnerUp > experimental && gunnerUp < end && cardsUp > experimental && cardsUp < end && depth > experimental && depth < end && scissor > experimental && scissor < end;
+                                radar > experimental && radar < end && gap > experimental && gap < end && systems > experimental && systems < end && hudUp > experimental && hudUp < end && gunnerUp > experimental && gunnerUp < end && cardsUp > experimental && cardsUp < end && bracketCut > experimental && bracketCut < end && depth > experimental && depth < end && scissor > experimental && scissor < end;
     const size_t backUi = ini.rfind("# ui: SRV turret camera back | range 0..150 | step 5 | unit cm | zero exact | recommended 80 | live\n", back),
                  forwardUi = ini.rfind("# ui: SRV turret HUD forward | range 0..150 | step 5 | unit cm | zero exact | recommended 0 | live\n", forward),
                  radarForwardUi = ini.rfind("# ui: SRV turret radar forward | range 0..150 | step 5 | unit cm | zero exact | recommended 0 | live\n", radarForward),
@@ -290,10 +293,11 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
                  hudUpUi = ini.rfind("# ui: SRV turret weapon panel up | range 0..100 | step 5 | unit cm | zero exact | recommended 10 | live\n", hudUp),
                  gunnerUpUi = ini.rfind("# ui: SRV turret gunner panel up | range 0..100 | step 5 | unit cm | zero exact | recommended 0 | live\n", gunnerUp),
                  cardsUpUi = ini.rfind("# ui: SRV turret cards up | range 0..100 | step 5 | unit cm | zero exact | recommended 0 | live\n", cardsUp),
+                 bracketCutUi = ini.rfind("# ui: SRV turret bracket cut | range 0..40 | step 1 | unit mm | zero exact | recommended 18 | live\n", bracketCut),
                  depthUi = ini.rfind("# ui: SRV turret HUD depth | choices front, game, real | recommended game | live\n", depth),
                  scissorUi = ini.rfind("# ui: SRV turret HUD screen limit | choices open, game | recommended game | live\n", scissor);
     const bool ui = found(backUi) && back - backUi < 200 && found(forwardUi) && forward - forwardUi < 200 && found(radarForwardUi) && radarForward - radarForwardUi < 200 && found(panelsUi) && panels - panelsUi < 200 && found(radarUi) && radar - radarUi < 200 &&
-                    found(gapUi) && gap - gapUi < 200 && found(systemsUi) && systems - systemsUi < 200 && found(hudUpUi) && hudUp - hudUpUi < 200 && found(gunnerUpUi) && gunnerUp - gunnerUpUi < 200 && found(cardsUpUi) && cardsUp - cardsUpUi < 200 && found(depthUi) && depth - depthUi < 200 && found(scissorUi) && scissor - scissorUi < 200;
+                    found(gapUi) && gap - gapUi < 200 && found(systemsUi) && systems - systemsUi < 200 && found(hudUpUi) && hudUp - hudUpUi < 200 && found(gunnerUpUi) && gunnerUp - gunnerUpUi < 200 && found(cardsUpUi) && cardsUp - cardsUpUi < 200 && found(bracketCutUi) && bracketCut - bracketCutUi < 200 && found(depthUi) && depth - depthUi < 200 && found(scissorUi) && scissor - scissorUi < 200;
     // VR only: the flat profile's allow-list reads none of the keys
     const bool flatClean = !found(flatKeys.find("srv_turret"));
     return inExperimental && ui && flatClean;
@@ -522,6 +526,10 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_hud_up\", 10, 0, 100", "\"experimental.srv_turret_hud_up\", 20, 0, 100")), "control: a drifted default of the weapon-panel height key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_gunner_up\", 0, 0, 100", "\"experimental.srv_turret_gunner_up\", 20, 0, 100")), "control: a drifted default of the gunner-panel height key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_cards_up\", 0, 0, 100", "\"experimental.srv_turret_cards_up\", 20, 0, 100")), "control: a drifted default of the cards-up key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_bracket_cut\", 18, 0, 40", "\"experimental.srv_turret_bracket_cut\", 0, 0, 40")), "control: a drifted default of the bracket cut key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_bracket_cut\", 18, 0, 40", "\"experimental.srv_turret_bracket_cut\", 18, 0, 100")), "control: a drifted range of the bracket cut key trips the pin");
+    check(!wiredModule(replaced(module, "st::gunnerParamsFor(frame, params, cards, g_bracketCutMm.load(std::memory_order_relaxed))", "st::gunnerParamsFor(frame, params, cards)")), "control: a gunner draw that never gives the sheet the bracket cut trips the pin");
+    check(!wiredModule(replaced(module, "gunner up %d cm, cards up %d cm, bracket cut %d mm (live; ", "gunner up %d cm, cards up %d cm (live; ")), "control: a settings line that does not say the bracket cut trips the pin");
     check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out, group == st::Group::kPanels ? g_systemsNearCm.load(std::memory_order_relaxed) : 0, group == st::Group::kPanels ? g_hudUpCm.load(std::memory_order_relaxed) : 0)", "g_forwardCm.load(std::memory_order_relaxed), out)")),
           "control: the radar group made to use the HUD-forward distance (the thin sliver) trips the pin");
     check(!wiredModule(replaced(module, "if (!drawEyeFrame(eye, frame)) {", "if (!readEye(eye, frame)) {")), "control: a draw that uses the tick's frames (a frame old) trips the pin");
@@ -579,7 +587,7 @@ static void wiringCases() {
           "control: a frame sequence published before the shift is copied (a reader would see a half-built frame) trips the pin");
     check(!wiredAccessors(journal, replaced(temporal, "g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);", "g_recommended.store(0,std::memory_order_release);"), journalH),
           "control: a frame sequence that survives an invalidate trips the pin");
-    check(wiredKeys(ini, flatKeys), "edvr.ini: the ten keys in [experimental] with their ui: lines (no menu token) and the flown defaults; the flat profile's allow-list names none");
+    check(wiredKeys(ini, flatKeys), "edvr.ini: the keys in [experimental] with their ui: lines (no menu token) and the flown defaults; the flat profile's allow-list names none");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 0\n", "\nsrv_turret_hud_gap = 96\n"), flatKeys), "control: a drifted shipped default of the gap trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_panels_back = 0\n", "\nsrv_turret_panels_back = 100\n"), flatKeys), "control: a drifted shipped default of the panels' push trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 0\n", "\nsrv_turret_hud_forward = 60\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
@@ -589,6 +597,9 @@ static void wiringCases() {
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_up = 10\n", "\nsrv_turret_hud_up = 20\n"), flatKeys), "control: a drifted shipped default of the weapon-panel height key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_gunner_up = 0\n", "\nsrv_turret_gunner_up = 20\n"), flatKeys), "control: a drifted shipped default of the gunner-panel height key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_cards_up = 0\n", "\nsrv_turret_cards_up = 20\n"), flatKeys), "control: a drifted shipped default of the cards-up key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_bracket_cut = 18\n", "\nsrv_turret_bracket_cut = 0\n"), flatKeys), "control: a drifted shipped default of the bracket cut key trips the pin");
+    check(!wiredKeys(replaced(ini, "# ui: SRV turret bracket cut | range 0..40 | step 1 | unit mm", "# ui: SRV turret bracket cut | range 0..40 | step 5 | unit mm"), flatKeys), "control: a drifted menu row of the bracket cut key trips the pin");
+    check(!wiredKeys(ini, flatKeys + "\nsrv_turret_bracket_cut\n"), "control: the bracket cut key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = game\n", "\nsrv_turret_hud_depth = front\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD depth | choices front, game, real | recommended game", "# ui: SRV turret HUD depth | choices front, game, real | recommended front"), flatKeys), "control: a drifted recommendation of the depth key trips the pin");
     check(!wiredKeys(replaced(ini, "recommended 80 | live\n", "recommended 80 | live | menu\n"), flatKeys), "control: a menu token on an [experimental] key (the generator refuses it) trips the pin");
