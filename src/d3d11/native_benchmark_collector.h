@@ -88,9 +88,7 @@ public:
     void noteDropped(bool cpu, uint64_t count) noexcept;
     bool ready() const noexcept { return phase_ == Phase::Complete; }
     bool takeReport(NativeBenchmarkReport* out) noexcept;
-    // Back to idle. skipCleanClear (experimental.vr_cpu_benchmark_idle) leaves the 16k entries alone while none was
-    // ever created since they were last cleared; everything else resets either way. True when the entries were cleared.
-    bool reset(bool skipCleanClear = false) noexcept;
+    void reset() noexcept;
     uint64_t window() const noexcept { return window_; }
     bool warming() const noexcept { return phase_ == Phase::Warmup; }
     // Sampling only: Drain still accepts delayed completions for the finished
@@ -133,7 +131,6 @@ private:
     uint32_t abortReason_ = kNativeBenchmarkCompleted;
     bool overflow_ = false;
     bool transportLost_ = false;
-    bool entriesUsed_ = false;   // set where an entry or orphan is created, cleared with them
     uint64_t droppedCpu_ = 0;
     uint64_t droppedGpu_ = 0;
     Entry entries_[kCapacity]{};

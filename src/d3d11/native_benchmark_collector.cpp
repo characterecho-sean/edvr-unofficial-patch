@@ -34,10 +34,9 @@ void NativeBenchmarkCollector::noteDropped(bool cpu, uint64_t count) noexcept {
 void NativeBenchmarkCollector::clearEntries() noexcept {
     for (auto& entry : entries_) entry = {};
     for (auto& orphan : orphans_) orphan = {};
-    entriesUsed_ = false;
 }
 
-bool NativeBenchmarkCollector::reset(bool skipCleanClear) noexcept {
+void NativeBenchmarkCollector::reset() noexcept {
     scope_ = 0;
     metadata_ = {};
     warmupStartMs_ = sampleStartMs_ = sampleEndMs_ = drainEndMs_ = lastNowMs_ = 0;
@@ -47,10 +46,7 @@ bool NativeBenchmarkCollector::reset(bool skipCleanClear) noexcept {
     overflow_ = false;
     transportLost_ = false;
     droppedCpu_ = droppedGpu_ = 0;
-    // Only the entry wipe is skipped: nothing was written to a clean collector, so it already reads all zero.
-    if (skipCleanClear && !entriesUsed_) return false;
     clearEntries();
-    return true;
 }
 
 void NativeBenchmarkCollector::begin(uint64_t scope, uint64_t nowMs,
@@ -98,7 +94,6 @@ NativeBenchmarkCollector::Entry* NativeBenchmarkCollector::find(uint64_t sequenc
         entry = {};
         entry.sequence = sequence;
         entry.used = true;
-        entriesUsed_ = true;
         return &entry;
     }
     overflow_ = true;
@@ -122,7 +117,6 @@ NativeBenchmarkCollector::OrphanGpu* NativeBenchmarkCollector::findOrphan(
         *freeSlot = {};
         freeSlot->sequence = sequence;
         freeSlot->used = true;
-        entriesUsed_ = true;
         return freeSlot;
     }
     if (!create) return nullptr;
