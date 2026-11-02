@@ -12,8 +12,11 @@
   render thread is CPU-bound; build 1's DLAA items were worth 0.2-0.4 ms
   against a 0.8 ms leg-to-leg noise floor, and the profile prices were
   diluted about 1.7x by a non-concourse window. Build 2 (/GL flight) is
-  replaced: next is a concourse-only re-export of the existing profile, then
-  a no-build config-bisect flight of the DLAA subscribers.
+  replaced by the draw pair mask.
+- **Build 2 (designed 2026-11-02, "Build 2: the draw pair mask"):** a
+  per-shader-pair mask skips DLAA subscribers that cannot want a draw
+  (#152), plus `drawPathFast` in the instanced hook (#151). Temporary key:
+  `vr_draw_mask`. Awaiting review.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -445,3 +448,94 @@ frame; the export cannot separate them.
   `hookedCreateTexture2D` 0.64 in DLAA R5 against 0.05 off.
 - This replaces the per-function prices in the item sections above, which
   came from a mixed-window `self_split.json`.
+
+## Build 2: the draw pair mask (#152, #151; designed 2026-11-02)
+
+Decided 2026-11-02 with the pilot: the mask plus two free wins plus a
+gate-holder log line; the UI layer family included; a live temporary key
+flown ABBA. No change to when the draw gate closes (AA-off scene masks stay
+out). Research notes outside the repo: `mask-research.md`.
+
+**Mechanism priced.** The DLAA path makes about 14,000 eye draws a frame.
+Most subscribers reject a draw with a hash compare, so the reject itself is
+cheap; the cost is the number of cross-TU calls and live-flag loads paid
+per draw before each one rejects. One mask test per draw that skips several
+such calls is the saving. Estimate 0.8-1.2 ms a frame with DLAA, an upper
+bound: the owner deltas in the concourse profile include the work each
+feature does on the draws it wants, which the mask does not touch.
+
+**The rule for what may be skipped.** A subscriber is skipped only on a draw
+where its uncached code has no effect at all: no counter, no reset, no
+recorded state. That excludes UI depth (it resets about 12 per-draw globals
+that `forwardWithVerdict` reads, and is already memoized at a 91% hit
+rate), `uiLayerNoteOther`, star glow's after-draw count, target sharp, and
+the marker tee (its draw serial must advance). `temporalPassCountDraw`
+stays unconditional.
+
+### Changes
+
+1. **The mask.** A pure header holds a table keyed on the game's (VS hash,
+   PS hash), read from the binding shadow before `engineVelocityBeforeDraw`
+   can substitute the bound shaders. Each entry is a set of "may want" bits,
+   computed on the pair's first draw from the same pure predicates the
+   subscribers use, and stamped with a config generation:
+   - screen motion: the UI-draw pairs and the recognize pair;
+   - weapon motion (offscreen draws only);
+   - the temporal pass rigid-draw VS gate;
+   - engine velocity: pairs with no velocity family (the cached hit path's
+     probe tick and `familyDraws` count only family pairs; to be confirmed
+     against its code, else this bit is dropped);
+   - the UI layer family on the HDR target, keyed additionally on the
+     target kind (`ui_layer_math.h`'s pure rule); the post-tonemap target
+     needs bound SRVs and stays uncached.
+   A clear bit skips the call. A set bit runs the subscriber exactly as
+   today, including its per-frame checks (`sourceFrame == frame`, live and
+   failed flags), which the mask never caches.
+2. **Stale-true safety.** One config generation is bumped at the end of the
+   config refresh (every F8 and ini change, and the profile switch) and by
+   every runtime stand-down that can change a cached predicate. An entry with
+   an old generation is recomputed. Any armed instrument (census, object,
+   blend, quad or depth probe) bypasses the mask. A missing entry means
+   "may want".
+3. **Free win, #151.** `hookedDrawIndexedInstanced` takes `drawPathFast`
+   as the other three draw hooks do.
+4. **Free win.** `fssPanelRectDrawArgs`, a cross-TU call on every instanced
+   draw, moves into the one branch of `beginPanelOverride` that reads it.
+5. **Logs.**
+   - A `draw mask:` line in each perf window: hits, misses and skips per
+     bit, and the key state. Written every window, so zeros mean it ran.
+   - A gate-holder bitmask beside the `drawGateSet` calls, logged on
+     change, naming which term of `drawGateSubscribed` holds the gate.
+   - `edvr_log.py --perf-windows` prints both.
+6. **Temporary key** `vr_draw_mask = on | off`, live from F8, default on.
+   Off runs every subscriber as today. Listed in Status; removed or kept as
+   the behaviour once flown.
+
+### Test seams
+
+- The `aa_off_test` rig (it already drives `draw_fast_path.h` and
+  `classifier_memo.h`) gains the mask: per bit, "mask clear implies the
+  subscriber's predicate rejects" over the known pairs and random pairs; a
+  generation bump recomputes; an armed instrument bypasses.
+- The `sharp_weapons_test` rig: "the UI family bit clear implies
+  `uiLayerFamilyFor` returns none" for every target kind.
+- A source-scan test: every term of `drawGateSubscribed` has a holder bit,
+  and every stand-down flag the mask reads bumps the generation.
+- `edvr_log.py --self-test`: the `draw mask:` and holder lines parsed.
+
+### Flight
+
+One session, DLAA, all on-foot defaults, the concourse spot of 10-31,
+standing still facing one spot. Note each leg's start time.
+1. `vr_draw_mask` on, 3 min. 2. Off, 3 min. 3. Off, 3 min. 4. On, 3 min.
+
+### Pass criteria
+
+- The log is from this build (`--expect-build HEAD`); `--health` names no
+  feature NEVER APPLIED with the key on that applied with it off.
+- The `draw mask:` line shows skips in on legs and none in off legs.
+- No visual difference between on and off legs.
+- Worth keeping if R1 (before the first submit) on legs 1 and 4 is below
+  legs 2 and 3 by more than 0.5 ms and by more than the spread within each
+  pair. Otherwise `ruled out: per-draw subscriber calls as the DLAA cost`,
+  and the mask and its key come out.
