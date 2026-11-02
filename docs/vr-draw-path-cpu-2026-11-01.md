@@ -2,13 +2,13 @@
 
 ## Status
 
-- **State (2026-11-02): build 1 flown (`53c965cd`); it fails the total
-  criterion.** `draw hook CPU` keys on is not below keys off in either mode
-  (see "Flight 2026-11-02"). Item 1 works and is a behaviour fix with AA off
-  (eye rows, marker fix, reticle depth now apply), but its tee saving is spent
-  downstream. Items 2 and 4 cut nothing in flight. Next: decide items 2 and 4
-  (removal needs the keys quoted and asked), and whether item 1 ships for
-  its behaviour. Draft PR #166 holds the build.
+- **State (2026-11-02): build 1 flown (`53c965cd`); it failed the total
+  criterion, and the maintainer approved the cleanup the same day** (branch
+  `build1/cleanup`, based on `c089b802`). Shipped: item 1 as the standard
+  behaviour (it is a behaviour fix with AA off: eye rows, marker fix and
+  reticle depth now apply; its tee saving is spent downstream), item 3, the
+  re-issue counter. Removed: items 2 and 4. No temporary key remains. Draft
+  PR #166 holds the build.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -18,9 +18,9 @@
   marker tee's fast path; changes behaviour, #155), item 2 (benchmark
   collector), item 3 (two early exits inline), item 4 (depth slot cache),
   and a re-issue counter (GLOSSARY: Re-issue).
-- **Temporary keys (never shipped; removed when this closes):**
-  `experimental.vr_eye_rows_without_aa`, `experimental.vr_cpu_benchmark_idle`,
-  `experimental.vr_cpu_depth_slot_cache`.
+- **Temporary keys: all three are gone (2026-11-02).** Item 1's key is
+  removed and its path is the behaviour; items 2 and 4 and their keys are
+  removed with their code. See "The temporary keys".
 - **Confirmed (item 1):** with AA off and the key off, every world draw is
   held as not scene depth (about 64M per leg), the tee never goes fast and
   F113 reports `none` 100%. Key on: fast path 36-46%, F113 scene meshes 94%.
@@ -250,6 +250,27 @@ across a gap where UI depth was off rests on them as much as on the epoch,
 and removing them is not worth a rig rewrite for one compare each.
 
 ## The temporary keys
+
+**Closed 2026-11-02 (cleanup, #157).** What shipped and what went:
+
+- `experimental.vr_eye_rows_without_aa` (item 1): removed, the path as it ran
+  with the key on is the behaviour. `worldSceneDepth` lost its key argument;
+  the F100 rig dropped its key-off cases and kept the on cases and the DLAA
+  agreement counting.
+- `experimental.vr_cpu_benchmark_idle` (item 2): removed with the used flag,
+  `reset(skipCleanClear)` (always clears, as before #161), the `benchmark
+  collector: ... entry clears` line and its `edvr_log.py` parser and row.
+- `experimental.vr_cpu_depth_slot_cache` (item 4): removed with
+  `depth_slot_cache.h`, `uiDepthSetSlotCache`, the `depth slot cache:` line,
+  its rig and its `edvr_log.py` parsing; the UI depth pass works the slot out
+  every call, as before #162.
+- The `vr draw path key:` line, `vrDrawPathKeySweep` and `parse_perf_keys` are
+  gone (nothing uses them). `edvr_log.py --perf-windows` tables the `draw hook
+  CPU:` windows with no dropped-window logic.
+- Kept: item 3, the re-issue counter (#159) with `--tally reissue`, and the
+  `tee held (#155)` tail on the tee cost line.
+
+The rest of this section describes the keys as they were flown.
 
 - In `[experimental]`; off restores today's behaviour exactly. The code
   default is on; it reaches the game because install leaves the live
