@@ -17222,30 +17222,127 @@ def print_health(text, args, runtime_text=None):
 # --perf-windows: the draw hook's CPU windows (src/d3d11/perf_monitor.cpp), one row each (docs\vr-draw-path-cpu-2026-11-01.md). The line:
 #   draw hook CPU: 1800-frame window ending N; M ms/sampled frame mean, ...        perf_monitor.cpp
 # A window ends at N and covers frames N-1799..N.
+PERF_EYES_RE = re.compile(r"eye draws counted this frame (\d+)")
 PERF_WINDOW_RE = re.compile(r"draw hook CPU: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, (?P<samples>\d+) sampled frames")
 
 
+def _perf_window_of(line):
+    """The `draw hook CPU:` window one log line holds, or None: dict end, start, mean, max, samples and eyes (the eye draws counted on the closing frame, None when the line
+    does not say)."""
+    m = PERF_WINDOW_RE.search(line)
+    if not m:
+        return None
+    end, size = int(m.group("end")), int(m.group("size"))
+    eyes = PERF_EYES_RE.search(line)
+    return {"end": end, "start": end - size + 1, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
+            "eyes": int(eyes.group(1)) if eyes else None}
+
+
 def perf_windows(text):
-    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max and samples."""
-    out = []
-    for line in text.splitlines():
-        m = PERF_WINDOW_RE.search(line)
-        if not m:
-            continue
-        end, size = int(m.group("end")), int(m.group("size"))
-        out.append({"end": end, "start": end - size + 1, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples"))})
-    return out
+    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples and eyes."""
+    return [w for w in map(_perf_window_of, text.splitlines()) if w]
 
 
-def print_perf_windows(text):
-    """The --perf-windows report. Returns the process exit code: 1 when the log has no `draw hook CPU:` window."""
-    wins = perf_windows(text)
+# The runtime log's frame cycle lines (src/openxr/native_runtime_host.h): per 30 s window the phase means (nested=0 are the top-level phases; `cycle` is the whole frame,
+# game_before_first_submit is R1, the game's own work before the first eye submit) and the window line, whose elapsed_ms gives the window its span back from its stamp.
+RT_CYCLE_PHASE_RE = re.compile(r"native_frame_cycle_phase,window=(?P<w>\d+),name=(?P<name>cycle|game_before_first_submit),mean=(?P<mean>[\d.]+),.*,nested=0")
+RT_CYCLE_WINDOW_RE = re.compile(r"native_frame_cycle_window,window=(?P<w>\d+),.*?,elapsed_ms=(?P<ms>\d+)")
+
+
+def _trimmed_mean(xs):
+    """Mean with the min and the max dropped; None under three values (nothing would be left worth the name)."""
+    if len(xs) < 3:
+        return None
+    return statistics.mean(sorted(xs)[1:-1])
+
+
+def _perf_stat(label, xs, fmt, qualifier=""):
+    """`R1 ms (2 with runtime data): mean 22.59, trimmed mean n/a (fewer than 3)`."""
+    if not xs:
+        return "%s ms%s: n/a" % (label, qualifier)
+    trimmed = _trimmed_mean(xs)
+    return "%s ms%s: mean %s, trimmed mean %s" % (label, qualifier, fmt % statistics.mean(xs), fmt % trimmed if trimmed is not None else "n/a (fewer than 3)")
+
+
+def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=None, until=None):
+    """The --perf-windows report. Each `draw hook CPU:` window on a line with its hook ms per eye draw and, from the runtime log (rt_text), R1 and the frame cycle: the mean of
+    the runtime windows whose span overlaps the window, weighted by the seconds they overlap. since and until: seconds of the day, bounding the window's closing stamp.
+    Returns the process exit code: 1 when there is no window to report."""
+    wins, rt = [], {}
+
+    def on_gfx(msg, t):
+        w = _perf_window_of(msg)
+        if w:
+            w["close"] = t
+            wins.append(w)
+
+    def on_rt(msg, t):
+        m = RT_CYCLE_PHASE_RE.match(msg)
+        if m:
+            e = rt.setdefault(int(m.group("w")), {})
+            e["close"] = t
+            e["cycle" if m.group("name") == "cycle" else "r1"] = float(m.group("mean"))
+            return
+        m = RT_CYCLE_WINDOW_RE.match(msg)
+        if m:
+            e = rt.setdefault(int(m.group("w")), {})
+            e["close"] = t
+            e["span"] = int(m.group("ms")) / 1000.0
+
+    gscan, _, _ = scan_flight(gfx_path, text, rt_path, rt_text, gfx_on_line=on_gfx, rt_on_line=on_rt if rt_text is not None else None)
     if not wins:
         print("[edvr] no `draw hook CPU:` window in this log: a log shorter than 1800 frames, a build without the line, or not the graphics log (this reads --tag gfx).")
         return 1
-    for w in wins:
-        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled" % (w["end"], w["mean"], w["max"], w["samples"]))
-    print("[edvr] %d window(s)." % len(wins))
+    prev = gscan["first"]
+    for w in wins:   # a window runs from the previous one's closing stamp (the first, from the log's first stamped line) to its own
+        w["from"], prev = prev, w["close"]
+    runtime = [(e["close"] - e["span"], e["close"], e["r1"], e["cycle"]) for e in rt.values() if "span" in e and "r1" in e and "cycle" in e]
+
+    def clock(t):
+        return fmt_clock(t, int(t // DAY))
+
+    def keep(w):
+        if since is None and until is None:
+            return True
+        c = w["close"] % DAY
+        if since is not None and until is not None and since > until:   # across midnight
+            return c >= since or c <= until
+        return (since is None or c >= since) and (until is None or c <= until)
+
+    shown = [w for w in wins if keep(w)]
+    if not shown:
+        print("[edvr] no `draw hook CPU:` window between %s and %s in this log (%d window(s) outside)." % (
+            "%02d:%02d:%02d" % (since // 3600, since % 3600 // 60, since % 60) if since is not None else "start",
+            "%02d:%02d:%02d" % (until // 3600, until % 3600 // 60, until % 60) if until is not None else "end", len(wins)))
+        return 1
+    hooks, r1s, cycles = [], [], []
+    for w in shown:
+        parts = ["window ending %d: %.3f ms mean, %.3f ms max, %d sampled, closed %s" % (w["end"], w["mean"], w["max"], w["samples"], clock(w["close"]))]
+        if w["eyes"]:
+            parts.append("hook %.4f ms per eye draw (%d counted on the closing frame)" % (w["mean"] / w["eyes"], w["eyes"]))
+        else:
+            parts.append("hook ms per eye draw: n/a, no eye-draw count (the draw line counts eye draws only while a draw subscriber is on)")
+        if rt_text is None:
+            parts.append("runtime: no runtime log")
+        else:
+            hit = [(min(w["close"], b) - max(w["from"], a), r1, cyc) for a, b, r1, cyc in runtime if min(w["close"], b) - max(w["from"], a) > 0]
+            if hit:
+                secs = sum(h[0] for h in hit)
+                r1 = sum(h[0] * h[1] for h in hit) / secs
+                cyc = sum(h[0] * h[2] for h in hit) / secs
+                r1s.append(r1)
+                cycles.append(cyc)
+                parts.append("runtime: R1 %.2f ms, cycle %.2f ms (%d runtime window(s), %.1f s overlap)" % (r1, cyc, len(hit), secs))
+            else:
+                parts.append("runtime: NO RUNTIME DATA (no runtime frame cycle window overlaps this window)")
+        hooks.append(w["mean"])
+        print("; ".join(parts))
+    if rt_text is None:
+        tail = "R1 ms: no runtime log; cycle ms: no runtime log"
+    else:
+        q = " (%d with runtime data)" % len(r1s)
+        tail = "%s; %s" % (_perf_stat("R1", r1s, "%.2f", q), _perf_stat("cycle", cycles, "%.2f", q))
+    print("[edvr] %d window(s). %s; %s" % (len(shown), _perf_stat("hook", hooks, "%.3f"), tail))
     return 0
 
 
@@ -17305,7 +17402,8 @@ def main(argv=None):
                          "detour's CPU, and the stage 2 verdict (PASS / WARN / "
                          "STOP) on the world route's injected phase")
     ap.add_argument("--perf-windows", action="store_true",
-                    help="table the graphics log's `draw hook CPU:` windows (docs\\vr-draw-path-cpu-2026-11-01.md)")
+                    help="table the graphics log's `draw hook CPU:` windows (docs\\vr-draw-path-cpu-2026-11-01.md), each with hook ms per eye draw and the paired runtime log's "
+                         "R1 (game_before_first_submit) and frame cycle; --since/--until bound the windows by closing time; ends with count, mean and trimmed mean")
     ap.add_argument("--maps-sharp", action="store_true",
                     help="report an on-foot maps gate flight (the gate is always on): every map or menu the layer took and handed back "
                          "(when, how long, how many eyes skipped the upscaler), the 5 s "
@@ -17447,8 +17545,11 @@ def main(argv=None):
               "its runtime log itself; drop --tag %s." % args.tag)
         return 1
 
-    if (args.since or args.until or args.health_all) and not args.health:
-        print("[edvr] --since, --until and --health-all belong to --health.")
+    if (args.since or args.until) and not (args.health or args.perf_windows):
+        print("[edvr] --since and --until belong to --health and --perf-windows.")
+        return 1
+    if args.health_all and not args.health:
+        print("[edvr] --health-all belongs to --health.")
         return 1
 
     native_dirs = None
@@ -17541,7 +17642,23 @@ def main(argv=None):
     if args.camera_census:
         return print_camera_census(text)
     if args.perf_windows:
-        return print_perf_windows(text)
+        try:
+            since = parse_health_time(args.since) if args.since else None
+            until = parse_health_time(args.until, end=True) if args.until else None
+        except ValueError as e:
+            print("[edvr] bad --since/--until time %s (use HH:MM or HH:MM:SS)" % e)
+            return 1
+        rt_why = None
+        if args.runtime_file:
+            rt_path = os.path.abspath(args.runtime_file)
+            if not os.path.isfile(rt_path):
+                print("[edvr] no such runtime log: %s" % rt_path)
+                return 1
+        else:
+            rt_path, rt_why = pair_runtime_log(path, native_dirs)
+        rt_text = read_text(rt_path) if rt_path else None
+        print("[edvr] runtime log: %s" % (rt_path if rt_path else "NONE FOUND (%s); only the draw hook figure is reported" % rt_why))
+        return print_perf_windows(text, path, rt_text, rt_path, since, until)
     if args.maps_sharp:
         return print_maps_sharp(text)
     if args.route_curve:
@@ -23863,6 +23980,52 @@ def self_test_perf_windows():
         rc = print_perf_windows("nothing here\n")
     if rc != 1 or "no `draw hook CPU:` window" not in buf.getvalue():
         fail("a log with no window -> rc %d:\n%s" % (rc, buf.getvalue()))
+    # The frame, not just the hook clock: the runtime log's R1 (game_before_first_submit) and cycle joined by time, hook ms per eye draw, --since/--until, the summary.
+    def gwin(clock, end, mean, eyes):
+        return ("[%s] draw hook CPU: 1800-frame window ending %d; %s ms/sampled frame mean, 0.900 ms max, 30 sampled frames (one in 60); excludes forwarded game draw time, includes EDVR "
+                "reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every 4th draw, scaled by 4. Temporal AA off; eye draws counted this frame %d "
+                "(counted only while a draw subscriber is on).\n" % (clock, end, mean, eyes))
+    gtext = ("[10:00:00.000] version v0.0.0 (build 00000000)\n" + gwin("10:00:02.000", 1800, "0.500", 4) + gwin("10:01:02.000", 3600, "0.700", 0) + gwin("10:02:02.000", 5400, "0.600", 0))
+
+    def rwin(utc, n, elapsed, r1, cyc):
+        # local = UTC - 5 h (the file name below says 10:00:00.309 local; the first line is 15:00:00 UTC)
+        pre = "2026-11-02 %s UTC pid=1 tid=2 " % utc
+        return (pre + "native_frame_cycle_phase,window=%d,name=cycle,mean=%s,p50=1,p95=1,p99=1,max=1,units=wall_ms,nested=0\n" % (n, cyc) +
+                pre + "native_frame_cycle_phase,window=%d,name=game_before_first_submit,mean=%s,p50=1,p95=1,p99=1,max=1,units=wall_ms,nested=0\n" % (n, r1) +
+                pre + "native_frame_cycle_window,window=%d,boundary=x,admitted=9,valid=9,first=1,last=9,elapsed_ms=%d,valid_cycle_sum_ms=1.000\n" % (n, elapsed))
+    rtext = "2026-11-02 15:00:00.500 UTC pid=1 tid=2 version v0.0.0\n" + rwin("15:00:30.000", 1, 30000, "20.0000", "30.0000") + rwin("15:01:00.000", 2, 30000, "30.0000", "40.0000")
+    gname, rname = "edvr_gfx_20261102_100000.log", "edvr_openxr_20261102_100000_309_1.log"
+
+    def run(**kw):
+        b = io.StringIO()
+        with contextlib.redirect_stdout(b):
+            try:
+                code = print_perf_windows(gtext, gfx_path=gname, rt_text=rtext, rt_path=rname, **kw)
+            except TypeError as e:
+                print("TypeError: %s" % e)
+                code = -1
+        return code, b.getvalue()
+    rc, out = run()
+    for want in ("window ending 1800: 0.500 ms mean", "hook 0.1250 ms per eye draw (4 counted on the closing frame)", "R1 20.00 ms, cycle 30.00 ms",
+                 "window ending 3600: 0.700 ms mean", "no eye-draw count", "R1 25.17 ms, cycle 35.17 ms",
+                 "window ending 5400: 0.600 ms mean", "NO RUNTIME DATA",
+                 "[edvr] 3 window(s). hook ms: mean 0.600, trimmed mean 0.600; R1 ms (2 with runtime data): mean 22.59, trimmed mean n/a (fewer than 3); "
+                 "cycle ms (2 with runtime data): mean 32.59, trimmed mean n/a (fewer than 3)"):
+        if want not in out:
+            fail("--perf-windows with a runtime log lacks %r:\n%s" % (want, out))
+    if rc != 0:
+        fail("--perf-windows with a runtime log exited %d" % rc)
+    rc, out = run(since=parse_health_time("10:01:00"), until=parse_health_time("10:03:00", end=True))
+    if "window ending 1800" in out or "window ending 3600" not in out or "[edvr] 2 window(s). hook ms: mean 0.650" not in out:
+        fail("--since 10:01:00 should keep the last two windows:\n%s" % out)
+    rc, out = run(since=parse_health_time("11:00:00"))
+    if rc != 1 or "no `draw hook CPU:` window between" not in out:
+        fail("--since past every window -> rc %d:\n%s" % (rc, out))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = print_perf_windows(gtext, gfx_path=gname)
+    if rc != 0 or buf.getvalue().count("no runtime log") < 3:
+        fail("no runtime log should be said on every window (rc %d):\n%s" % (rc, buf.getvalue()))
     return ok
 
 
