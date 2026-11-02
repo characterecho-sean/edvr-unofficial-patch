@@ -933,12 +933,17 @@ bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
     // FlatRuntimeDrawScope restored the game's MRTs after the prior draw. Do
     // not copy a texture still bound for output or while the private SRV is
     // live. A later bindTarget reattaches MRT6 for this draw.
-    ID3D11RenderTargetView* rt[8] = {};
-    ctx->OMGetRenderTargets(8, rt, nullptr);
-    engineVelocityNoteStateCalls(1);
-    std::array<Ptr<ID3D11RenderTargetView>, 8> held;
-    for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
-    for (auto* view : rt) if (view == e.slotsRtv.Get()) return false;
+    // The VR profile's eye passes keep MRT6 bound from one substituted draw to the next (nothing puts the game's targets back between
+    // draws), so the first overlay draw after a keyed one always found it bound and was declined: a copy from a resource that is bound as a
+    // render target is legal and the writes the earlier draws made are ordered before it, so there the copy is taken as it is.
+    if (runtimeFlatProfile()) {
+        ID3D11RenderTargetView* rt[8] = {};
+        ctx->OMGetRenderTargets(8, rt, nullptr);
+        engineVelocityNoteStateCalls(1);
+        std::array<Ptr<ID3D11RenderTargetView>, 8> held;
+        for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
+        for (auto* view : rt) if (view == e.slotsRtv.Get()) return false;
+    }
     Ptr<ID3D11ShaderResourceView> boundSrv;
     ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &boundSrv);
     engineVelocityNoteStateCalls(1);
@@ -1803,12 +1808,17 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         sourcePass = depthRes.Get() == static_cast<ID3D11Resource*>(g_sourceDepth.Get());
         if (sourcePass) eye = kEngineVelocitySourceEye;
     }
-    const bool overlayPair = sourcePass && runtimeFlatProfile() &&
-        vsHash == 0xBBE58E40FE88EC80ull && psHash == 0xDB3E8D20CF53FBC0ull;
+    // The overlay pair: decal-like draws of vs_BBE5 / ps_DB3E whose depth state tests GEQUAL and writes no depth, so their MRT6 write carries a depth
+    // (SV_Position.z less a per-material offset) that is not the scene's and the compose's exact test calls the base surface's pixel stale: no history,
+    // the camera term. Guarded in the flat profile's on-foot source pass since 2026-10; in the VR profile's eye passes since 2026-11-02 (the ship hull's
+    // stale-slot streaks: under motion the stale pixels' camera term is 18 to 200 px off the joined hull's, docs/kinematic-motion-injection-2026-09-19.md).
+    const bool overlayDraw = vsHash == 0xBBE58E40FE88EC80ull && psHash == 0xDB3E8D20CF53FBC0ull;
+    const bool overlayPair = overlayDraw && ((sourcePass && runtimeFlatProfile()) || (eyePass && !runtimeFlatProfile()));
     // A different pool producer can change MRT6's substrate. Other scene
     // draws cannot write our private target; their depth writes remain guarded
     // by the consumer's exact DSV comparison.
     if (sourcePass && !overlayPair) g_eyes[kEngineVelocitySourceEye].overlayGroup = false;
+    if (eyePass && !overlayPair && (eye == 0 || eye == 1)) g_eyes[eye].overlayGroup = false;
     auto vsInfo = vs ? g_vs.find(vs) : g_vs.end();
     if (!g_emitLive.load(std::memory_order_acquire) || !(eyePass || sourcePass || selfMarkEyePass) || f < 0 || vsInfo == g_vs.end() ||
         vsInfo->second.family != f) {
@@ -2107,8 +2117,8 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
                 g_guardVerified.game = gameSrv;
             }
             if (++g_draw.overlayGuardedDraws == 1)
-                Log::get().note("engine motion: flat overlay guard active at frame %u: exact BBE/DB3E, %ux%u base, "
-                                "private PS t3, original depth/stencil state retained.", frame, e.width, e.height);
+                Log::get().note("engine motion: %soverlay guard active at frame %u: exact BBE/DB3E, %ux%u base, "
+                                "private PS t3, original depth/stencil state retained.", runtimeFlatProfile() ? "flat " : "", frame, e.width, e.height);
         }
     }
     if (psInstalled) ++g_draw.settersSkipped;
@@ -2537,9 +2547,9 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
     }
     if (g_draw.overlayCopies || g_draw.overlayGuardedDraws || g_guardedFast || g_draw.overlayDeclinedState ||
         g_draw.overlayDeclinedCreate || g_draw.overlayDeclinedShader)
-        Log::get().note("engine motion: flat overlay guard: copies %llu (%.1f MB), guarded draws %llu, "
+        Log::get().note("engine motion: %soverlay guard: copies %llu (%.1f MB), guarded draws %llu, "
                         "declined state %llu, resource %llu, shader %llu.",
-                        u(g_draw.overlayCopies), double(g_draw.overlayBytes) / 1e6, u(g_draw.overlayGuardedDraws + g_guardedFast),
+                        runtimeFlatProfile() ? "flat " : "", u(g_draw.overlayCopies), double(g_draw.overlayBytes) / 1e6, u(g_draw.overlayGuardedDraws + g_guardedFast),
                         u(g_draw.overlayDeclinedState), u(g_draw.overlayDeclinedCreate), u(g_draw.overlayDeclinedShader));
     if (g_draw.selfMarkSeen || g_draw.selfMarkBinds)
         Log::get().note("engine motion: self-marking pixel shaders at the draw path: %llu draws seen, %llu with no "

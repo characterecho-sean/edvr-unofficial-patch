@@ -1544,6 +1544,53 @@ inline void run(const Harness& h) {
                 "flat overlay lifecycle: one base copy per group, refreshed after other producer and next frame");
         h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&
                 number(summary, "shader ") == 0, "flat overlay lifecycle: no guarded path fallback");
+        // The same pair in a VR EYE pass (2026-11-02, the ship hull's stale-slot streaks: the overlay's MRT6 depth is not the scene's, the
+        // compose's exact test calls the base surface's pixel stale and it keeps the camera term). The guard that the flat source pass has had
+        // since 2026-10 now covers the eye passes too: the same one base copy per group, the private t3 for the guarded draw, the game's t3 back
+        // at the next draw, no fallback, and the line says "overlay guard" (not "flat overlay guard") in the VR profile.
+        {
+            edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+            int eyeOverlayNo = 0;
+            auto eyeOverlay = [&] {
+                ++eyeOverlayNo;
+                g.ctx->VSSetShader(overlayVs.Get(), nullptr, 0); g.shadow(BindSlot::Vs, overlayVs.Get(), overlayVsHash);
+                g.setPs(overlayPs.Get(), overlayPsHash);
+                g.ctx->OMSetDepthStencilState(overlayDepth.Get(), 5);
+                edvr::engineVelocityBeforeDraw(g.ctx, true);
+                h.check(edvr::engineVelocityDrawSubstituted(), "VR overlay lifecycle: the overlay draw into an eye produced MRT6");
+                ComPtr<ID3D11ShaderResourceView> bound;
+                g.ctx->PSGetShaderResources(3, 1, &bound);
+                if (!(bound && bound.Get() != sentinel.Get())) std::printf("  VR overlay lifecycle: overlay draw #%d has no private t3 (bound %p, game %p)\n", eyeOverlayNo, static_cast<void*>(bound.Get()), static_cast<void*>(sentinel.Get()));
+                h.check(bound && bound.Get() != sentinel.Get(), "VR overlay lifecycle: the guarded pixel shader has the private snapshot at t3");
+                g.ctx->DrawInstanced(4, 1, 0, 0);
+            };
+            auto eyeUnderlay = [&] {
+                g.setVs(); g.setPs(g.ps.Get(), kPsHash);
+                g.ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
+                g.draw(5);
+                ComPtr<ID3D11ShaderResourceView> bound;
+                g.ctx->PSGetShaderResources(3, 1, &bound);
+                h.check(bound.Get() == sentinel.Get(), "VR overlay lifecycle: the next draw gives the game's t3 back");
+            };
+            g.ordinaryFrame();   // the engine path is live from the first draw of the frames below
+            const size_t eyeMark = g_log.size();
+            g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+            g.pass(0, 1, 5);
+            eyeOverlay(); eyeOverlay();
+            eyeUnderlay(); eyeOverlay();
+            g.endFrame();
+            g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+            g.pass(0, 1, 5);
+            eyeOverlay();
+            g.endFrame(true);
+            const std::string eyeSummary = lastLine("engine motion: overlay guard:", eyeMark);
+            if (number(eyeSummary, "copies ") != 3 || number(eyeSummary, "guarded draws ") != 4) std::printf("  VR overlay lifecycle: the summary line is: %s\n", eyeSummary.c_str());
+            h.check(number(eyeSummary, "copies ") == 3 && number(eyeSummary, "guarded draws ") == 4,
+                    "VR overlay lifecycle: one base copy per group in an eye pass, refreshed after another producer and next frame");
+            h.check(number(eyeSummary, "declined state ") == 0 && number(eyeSummary, "resource ") == 0 && number(eyeSummary, "shader ") == 0,
+                    "VR overlay lifecycle: no guarded path fallback");
+            h.check(lastLine("engine motion: flat overlay guard:", eyeMark).empty(), "VR overlay lifecycle: the VR profile's line is not the flat one");
+        }
         edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     }
     // The VR world route's two reads of the on-foot naming (vr_world_route.cpp, design doc section 82): whether a depth is the
