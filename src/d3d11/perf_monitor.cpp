@@ -6,7 +6,6 @@
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
 #include "vscreen.h"   // vScreenAaOffForDraws, vScreenEyeDrawsThisFrame: the draw hook CPU line
-#include "ui_depth.h"  // uiDepthSlotCacheTakeCounts: the depth slot cache line (VR draw-path test build 1, item 4)
 #include "gpu_census.h"      // gpuCensusFrameSpan: the overlay's GPU time with the application clock off (2026-10-14)
 #include "frame_span_tile.h" // gpuTimeTileText: which GPU number the GPU TIME tile shows
 
@@ -1253,11 +1252,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
         for (size_t c = 0; c < kReissueCallers; ++c) { s.reissueWindowMs[c] = 0.0; s.reissueWindowCalls[c] = 0; }
         s.reissueWindowAll = s.reissueWindowSampledCalls = 0; s.reissueWindowTotalMs = s.reissueWindowMaxMs = 0.0;
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
-        // The depth slot cache's hits and misses over the window (TEMPORARY, experimental.vr_cpu_depth_slot_cache). Written every window: 0 and 0 is the key off or UI depth off or a
-        // window with no qualifying eye draw, never an absent line.
-        uint32_t slotHits = 0, slotMisses = 0;
-        uiDepthSlotCacheTakeCounts(&slotHits, &slotMisses);
-        Log::get().note("depth slot cache: 1800-frame window ending %u; %u hits, %u misses", s.frameNo, slotHits, slotMisses);
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
         const uint32_t edits = s.cfgEdits.exchange(0, std::memory_order_relaxed);

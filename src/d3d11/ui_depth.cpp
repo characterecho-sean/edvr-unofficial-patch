@@ -33,7 +33,6 @@
 #include "../common/log.h"
 #include "binding_shadow.h"
 #include "classifier_memo.h"   // the eye-draw classifiers' memo of their plain decline (built 2026-10-27)
-#include "depth_slot_cache.h"   // the depth-surface slot cache (VR draw-path test build 1, item 4)
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
 #include "native_on_foot_f116.h"   // F116: the terminal hide's frame order and hysteresis (pure)
@@ -2417,31 +2416,14 @@ void holoDescribeSavedOm(char* out, size_t cap, const void* targetRes, const voi
 // Neither writes this pass's per-draw state; eyeIndexFor does register a
 // new target in the frame's table, exactly as the pass's own classifier
 // would at the same draw.
-//
-// The answer is remembered while nothing it depends on has moved (depth_slot_cache.h): bindingEyeKeyGeneration moves with PS SRV 0..3 (binding_shadow.h) and at
-// every frame boundary, g_classifierEpoch with every surface-table write. The experimental key is set by the config sweep through uiDepthSetSlotCache.
-static std::atomic<bool> g_slotCacheKey{true};
-static depthslot::Cache g_slotCache;
-void uiDepthSetSlotCache(bool on) { g_slotCacheKey.store(on, std::memory_order_relaxed); }
-void uiDepthSlotCacheTakeCounts(uint32_t* hits, uint32_t* misses) { depthslot::takeCounts(g_slotCache, hits, misses); }
 int uiDepthSampledSurfaceSlot() {
     if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return -1;
     static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
                                        BindSlot::PsSrv2, BindSlot::PsSrv3};
-    depthslot::Inputs in;
-    in.key = g_slotCacheKey.load(std::memory_order_relaxed);
-    if (in.key) {   // key off reads nothing extra: today's path exactly
-        in.generation = bindingEyeKeyGeneration();
-        in.epoch = g_classifierEpoch;
-        in.on = detail::g_uiDepthOn;
-        in.stoodDown = detail::g_uiDepthStoodDown;
+    for (int i = 0; i < 4; ++i) {
+        if (viewIsSurface(bindingGet(kSlots[i]))) return i;
     }
-    return depthslot::lookup(g_slotCache, in, [] {
-        for (int i = 0; i < 4; ++i) {
-            if (viewIsSurface(bindingGet(kSlots[i]))) return i;
-        }
-        return -1;
-    });
+    return -1;
 }
 
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {

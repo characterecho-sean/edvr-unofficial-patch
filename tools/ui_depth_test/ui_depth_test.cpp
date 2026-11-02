@@ -171,7 +171,6 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
 #include "zscene_gate_test.h"
 #include "world_screen_coverage_test.h"   // after zscene_gate_test.h: F108's motion-pass check uses its texture helpers
 #include "main_depth_tile_test.h"
-#include "depth_slot_cache_test.h"
 int main(int argc, char** argv) {
     // The motion prep's absent-layer gate alone, on the adapter asked for (zscene_gate_test.h); never the build's run.
     if (argc > 1 && std::strcmp(argv[1], "--zscene-gate") == 0) return zgate::runAlone(argc, argv);
@@ -179,7 +178,6 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--main-tile") == 0) return maintile::runAlone(argc, argv);
     // The gate's CPU half first: no device, and a slot slip fails here in a second (zscene_gate_test.h).
     zgate::cpuHalf();
-    check(dsc::cpuHalf(), "depth slot cache (item 4) CPU half");
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     D3D_FEATURE_LEVEL level;
     const auto driver = argc>2 && std::strcmp(argv[2],"hardware")==0 ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP;

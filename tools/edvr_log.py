@@ -17224,12 +17224,8 @@ def print_health(text, args, runtime_text=None):
 #   vr draw path key: experimental.<key> = on|off (was on|off|none) at frame N      src/d3d11/vscreen.cpp, once per key at start-up (was none) and once per change after
 #   draw hook CPU: 1800-frame window ending N; M ms/sampled frame mean, ...        perf_monitor.cpp, the frame counter the key line's N is read from
 # A window ends at N and covers frames N-1799..N; one that a change (was not none) fell in mixes two settings and is dropped.
-PERF_KEY_RE = re.compile(r"vr draw path key: (?P<key>experimental\.vr_(?:eye_rows_without_aa|cpu_depth_slot_cache)) = (?P<value>on|off) \(was (?P<was>on|off|none)\) at frame (?P<frame>\d+)\s*$")
+PERF_KEY_RE = re.compile(r"vr draw path key: (?P<key>experimental\.vr_(?:eye_rows_without_aa)) = (?P<value>on|off) \(was (?P<was>on|off|none)\) at frame (?P<frame>\d+)\s*$")
 PERF_WINDOW_RE = re.compile(r"draw hook CPU: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, (?P<samples>\d+) sampled frames")
-
-
-# Beside each window: `depth slot cache: 1800-frame window ending N; H hits, M misses` (perf_monitor.cpp; item 4's cache, 0 and 0 when the key is off). Joined to the window with the same end.
-PERF_SLOT_RE = re.compile(r"depth slot cache: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<hits>\d+) hits, (?P<misses>\d+) misses")
 
 
 def parse_perf_keys(text):
@@ -17245,11 +17241,6 @@ def parse_perf_keys(text):
 def perf_windows(text):
     """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples, dropped (a key changed inside it) and flips (those changes)."""
     flips = [k for k in parse_perf_keys(text) if k["was"] != "none"]
-    slots = {}
-    for line in text.splitlines():
-        m = PERF_SLOT_RE.search(line)
-        if m:
-            slots[int(m.group("end"))] = (int(m.group("hits")), int(m.group("misses")))
     out = []
     for line in text.splitlines():
         m = PERF_WINDOW_RE.search(line)
@@ -17259,8 +17250,7 @@ def perf_windows(text):
         start = end - size + 1
         inside = [k for k in flips if start - 1 <= k["frame"] <= end]   # start - 1: a flip logged at the previous window's end frame may have run after that window's line
         out.append({"end": end, "start": start, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
-                    "dropped": bool(inside), "flips": inside,
-                    "slot_hits": slots.get(end, (None, None))[0], "slot_misses": slots.get(end, (None, None))[1]})
+                    "dropped": bool(inside), "flips": inside})
     return out
 
 
@@ -17273,8 +17263,7 @@ def print_perf_windows(text):
     for k in parse_perf_keys(text):
         print("[edvr] key %s = %s at frame %d%s" % (k["key"], k["value"], k["frame"], " (start-up)" if k["was"] == "none" else " (was %s)" % k["was"]))
     for w in wins:
-        slot = "slot cache %d hits, %d misses" % (w["slot_hits"], w["slot_misses"]) if w["slot_hits"] is not None else "no slot cache line"
-        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s, %s" % (w["end"], w["mean"], w["max"], w["samples"], slot, "kept" if not w["dropped"] else "dropped: " + "; ".join(
+        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s" % (w["end"], w["mean"], w["max"], w["samples"], "kept" if not w["dropped"] else "dropped: " + "; ".join(
             "%s changed to %s at frame %d" % (k["key"], k["value"], k["frame"]) for k in w["flips"])))
     kept = sum(1 for w in wins if not w["dropped"])
     print("[edvr] %d of %d window(s) kept, %d dropped: a window a temporary key changed in mixes two settings." % (kept, len(wins), len(wins) - kept))
@@ -23874,14 +23863,14 @@ def self_test_perf_keys():
 
     import contextlib
     import io
-    key = "[10:00:01.000] vr draw path key: experimental.vr_cpu_depth_slot_cache = %s (was %s) at frame %d\n"
+    key = "[10:00:01.000] vr draw path key: experimental.vr_eye_rows_without_aa = %s (was %s) at frame %d\n"
     win = ("[10:00:02.000] draw hook CPU: 1800-frame window ending %d; %s ms/sampled frame mean, 0.900 ms max, 30 sampled frames (one in 60); excludes forwarded game draw time, "
            "includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every 4th draw, scaled by 4. Temporal AA off; eye draws counted this frame 0 "
            "(counted only while a draw subscriber is on).\n")
     text = (key % ("on", "none", 1) + win % (1800, "0.500") + key % ("off", "on", 2500) + win % (3600, "0.700") + win % (5400, "0.600")
             + "[10:00:03.000] vr draw path key: experimental.vr_eye_rows_without_aa = off (was on) at frame 6000\n" + win % (7200, "0.650"))
     keys = parse_perf_keys(text)
-    if [(k["key"], k["value"], k["was"], k["frame"]) for k in keys] != [("experimental.vr_cpu_depth_slot_cache", "on", "none", 1), ("experimental.vr_cpu_depth_slot_cache", "off", "on", 2500),
+    if [(k["key"], k["value"], k["was"], k["frame"]) for k in keys] != [("experimental.vr_eye_rows_without_aa", "on", "none", 1), ("experimental.vr_eye_rows_without_aa", "off", "on", 2500),
                                                                           ("experimental.vr_eye_rows_without_aa", "off", "on", 6000)]:
         fail("the key lines parsed to %r" % (keys,))
     wins = perf_windows(text)
@@ -23895,23 +23884,11 @@ def self_test_perf_keys():
         fail("a flip logged at a window's end frame: windows (end, dropped) = %r, expected 3600 and 5400 dropped" % (got,))
     if parse_perf_keys("[10:00:01.000] vr draw path key: experimental.other = on (was none) at frame 1\n") != [] or perf_windows("nothing here\n") != []:
         fail("a line of another instrument parsed as a draw-path key or window")
-    # The depth slot cache's line (perf_monitor.cpp), written beside each window: its counts ride on the window it ends with; a window without one reads None.
-    slot = "[10:00:02.001] depth slot cache: 1800-frame window ending %d; %d hits, %d misses\n"
-    stext = win % (1800, "0.500") + slot % (1800, 41000, 120) + win % (3600, "0.600") + slot % (3600, 0, 0) + win % (5400, "0.700")
-    got = [(w["end"], w["slot_hits"], w["slot_misses"]) for w in perf_windows(stext)]
-    if got != [(1800, 41000, 120), (3600, 0, 0), (5400, None, None)]:
-        fail("the depth slot cache counts parsed to %r" % (got,))
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        print_perf_windows(stext)
-    for want in ("slot cache 41000 hits, 120 misses", "slot cache 0 hits, 0 misses", "no slot cache line"):
-        if want not in buf.getvalue():
-            fail("--perf-windows output lacks %r:\n%s" % (want, buf.getvalue()))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(text)
     out = buf.getvalue()
-    for want in ("ending 1800", "kept", "ending 3600", "dropped: experimental.vr_cpu_depth_slot_cache changed to off at frame 2500", "[edvr] 2 of 4 window(s) kept, 2 dropped"):
+    for want in ("ending 1800", "kept", "ending 3600", "dropped: experimental.vr_eye_rows_without_aa changed to off at frame 2500", "[edvr] 2 of 4 window(s) kept, 2 dropped"):
         if want not in out:
             fail("--perf-windows output lacks %r:\n%s" % (want, out))
     if rc != 0:

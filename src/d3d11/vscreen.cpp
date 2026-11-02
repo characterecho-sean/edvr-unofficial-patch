@@ -118,7 +118,6 @@ std::atomic<bool> g_shadowsSkipped{false};
 // The three temporary keys of VR draw-path test build 1 (docs\vr-draw-path-cpu-2026-11-01.md, "The temporary keys"): experimental.vr_eye_rows_without_aa and
 // experimental.vr_cpu_depth_slot_cache. Code default on; off restores today's behaviour exactly. Set with the config (vScreenRefreshConfigBody) the way g_aaOffDraw is; a stale read only falls back to today.
 std::atomic<bool> g_vrEyeRowsWithoutAa{true};
-std::atomic<bool> g_vrCpuDepthSlotCache{true};
 
 namespace {
 
@@ -6206,10 +6205,8 @@ static void vScreenRefreshConfigBody(bool forced) {
     g_aaOffDraw.store(!temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false), std::memory_order_relaxed);
     // The temporary draw-path keys (test build 1): TEMPORARY, they go with the build's closing.
     {
-        static int lastEyeRows = -1, lastDepthCache = -1;
+        static int lastEyeRows = -1;
         vrDrawPathKeySweep("experimental.vr_eye_rows_without_aa", cfg.getBool("experimental.vr_eye_rows_without_aa", true), g_vrEyeRowsWithoutAa, lastEyeRows);
-        vrDrawPathKeySweep("experimental.vr_cpu_depth_slot_cache", cfg.getBool("experimental.vr_cpu_depth_slot_cache", true), g_vrCpuDepthSlotCache, lastDepthCache);
-        uiDepthSetSlotCache(g_vrCpuDepthSlotCache.load(std::memory_order_relaxed));   // the cache's rig does not link vscreen, so the key is handed down
     }
 }
 

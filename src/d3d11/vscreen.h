@@ -123,7 +123,7 @@ uint32_t vScreenEyeDrawsThisFrame();
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
 // The two remaining temporary keys of VR draw-path test build 1 (docs\vr-draw-path-cpu-2026-11-01.md), as the last config sweep read them; true is the code default.
-// One relaxed load each, for the draw path: items 1 (experimental.vr_eye_rows_without_aa) and 4 (experimental.vr_cpu_depth_slot_cache).
+// One relaxed load each, for the draw path: item 1 (experimental.vr_eye_rows_without_aa).
 bool vScreenVrEyeRowsWithoutAa();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
