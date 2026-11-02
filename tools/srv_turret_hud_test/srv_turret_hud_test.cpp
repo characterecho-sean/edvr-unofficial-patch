@@ -1474,8 +1474,9 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
     vsr->GetDesc(&vd);
     psr->GetDesc(&pd);
     gsr->GetDesc(&gd);
-    check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count + 1,
-          "the signature's elements, the same number in the vertex shader's output and the geometry shader's input, and one more (`pre`) in its output");
+    const bool sheetFam = fam == st::kGunnerSheetSignature;   // the gunner sheet's output also ends with SV_ClipDistance0 (two distances)
+    check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count + (sheetFam ? 2u : 1u),
+          "the signature's elements, the same number in the vertex shader's output and the geometry shader's input, and one more (`pre`) in its output, two more on the gunner sheet");
     for (UINT i = 0; i < S.count; ++i) {
         D3D11_SIGNATURE_PARAMETER_DESC o{}, in{}, out{};
         ck(vsr->GetOutputParameterDesc(i, &o), "output element");
@@ -1494,6 +1495,12 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
         ck(gsr->GetOutputParameterDesc(S.count, &pre), "the extra output element");
         check(!std::strcmp(pre.SemanticName, st::kPreSemantic) && pre.SemanticIndex == 0 && pre.Register == S.count && pre.Mask == 0xF,
               "...and the extra output is TURRETPRE: four components, in the register after the signature's");
+    }
+    if (sheetFam) {   // the gunner sheet's second extra output is SV_ClipDistance0, two components, in the register after TURRETPRE's: the pixel shader neither declares nor needs it
+        D3D11_SIGNATURE_PARAMETER_DESC clip{};
+        ck(gsr->GetOutputParameterDesc(S.count + 1, &clip), "the gunner sheet's clip distance element");
+        check(!std::strcmp(clip.SemanticName, "SV_ClipDistance") && clip.SemanticIndex == 0 && clip.SystemValueType == D3D_NAME_CLIP_DISTANCE && clip.Register == S.count + 1 && clip.Mask == 0x3,
+              "...and the gunner sheet's last output is SV_ClipDistance0: two components, in the register after TURRETPRE's");
     }
     // the pixel shader's inputs are a subset of what the geometry shader writes (SV_Position is the rasterizer's)
     for (UINT i = 0; i < pd.InputParameters; ++i) {
@@ -2482,16 +2489,23 @@ static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
 // The production bytecode again, with a stream-output declaration of its record and rasterized as well, so that what the shader did to every vertex is read back exactly (captureMove). The
 // module makes no twin: the declaration is built here from the signature table, one entry for each element in the signature's order into stream 0 and output slot 0, then the shader's own
 // `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with the moved clip position at Family::posFloat and the game's at Family::preFloat.
+// The gunner sheet's shader writes one more element after `pre`, SV_ClipDistance0 (two floats); its twin streams that out too, as the record's last two floats.
+static constexpr uint32_t kSheetClipFloats = 2;
+static uint32_t twinExtraFloats(uint32_t sig) { return sig == uint32_t(st::kGunnerSheetSignature) ? kSheetClipFloats : 0u; }
 static UINT soDeclarationForTwin(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[st::kMaxSigElements]) {
     const st::Signature& s = st::kSignatures[sig];
     for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
     out[s.count] = D3D11_SO_DECLARATION_ENTRY{0, st::kPreSemantic, 0, 0, static_cast<BYTE>(st::kPreFloats), 0};
+    if (twinExtraFloats(sig)) {
+        out[s.count + 1] = D3D11_SO_DECLARATION_ENTRY{0, "SV_ClipDistance", 0, 0, static_cast<BYTE>(kSheetClipFloats), 0};
+        return s.count + 2;
+    }
     return s.count + 1;
 }
 static ComPtr<ID3D11GeometryShader> twinFromCode(int fam, const void* data, size_t size) {
     D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
     const UINT entries = soDeclarationForTwin(uint32_t(fam), decl);
-    const UINT stride = (st::sigFloats(uint32_t(fam)) + st::kPreFloats) * 4;
+    const UINT stride = (st::sigFloats(uint32_t(fam)) + st::kPreFloats + twinExtraFloats(uint32_t(fam))) * 4;
     ComPtr<ID3D11GeometryShader> twin;
     ck(g_dev->CreateGeometryShaderWithStreamOutput(data, size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
     return twin;
@@ -2626,6 +2640,94 @@ static void latchCases() {
     }
 }
 
+// ---------------------------------------------------------------- the gunner sheet's clip distances
+// The sheet's shader writes SV_ClipDistance0 = (x, y) on every vertex: two distances, in mesh metres, to the planes that cut the leftover brackets (srv_turret_hud_shader.h). The twin streams
+// them out as the record's last two floats. A mesh point (x, y) is the vertex at eye-space (x, y, 1), which the view constants the rig binds give back as the mesh-space point (x, y, -1).
+struct SheetClips {
+    bool wrote = false;     // the twin wrote the one triangle
+    float c[3][2] = {};     // the clip distances of the three vertices
+};
+static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float xy[3][2], bool withView) {
+    check(g_fam == int(st::kGunnerSheetSignature), "the sheet's clip cases run on the gunner sheet's signature");
+    const Cam cam;
+    std::vector<float> clipRows(8 * 4, 0.0f);
+    clipRows[4 * 4 + 0] = cam.p00;
+    clipRows[4 * 4 + 2] = -cam.offX;
+    clipRows[5 * 4 + 1] = cam.p11;
+    clipRows[5 * 4 + 2] = -cam.offY;
+    clipRows[6 * 4 + 2] = -0.5f;
+    clipRows[6 * 4 + 3] = 0.2f;
+    clipRows[7 * 4 + 2] = -1.0f;
+    const auto clipBuf = makeBuffer(UINT(clipRows.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, clipRows.data());
+    const std::vector<float> camRows(276 * 4, 0.0f);
+    const auto camBuf = makeBuffer(UINT(camRows.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, camRows.data());
+    std::vector<Vtx> v;
+    for (int i = 0; i < 3; ++i) v.push_back(vtxOf(Pt{xy[i][0], xy[i][1], 1.0f, 0.5f * 1.0f + 0.2f}, 0, 0));
+    Sample s;
+    DrawOpts o;
+    o.sample = &s;
+    o.soTarget = true;
+    if (withView) {
+        o.clipCb = clipBuf.Get();
+        o.camCb = camBuf.Get();
+    }
+    (void)render(v, cam, twin, defaultParams(), 64, 64, o);
+    SheetClips r;
+    const uint32_t stride = st::sigFloats(uint32_t(st::kGunnerSheetSignature)) + st::kPreFloats + kSheetClipFloats, at = stride - kSheetClipFloats;
+    r.wrote = s.so.NumPrimitivesWritten == 1 && s.records.size() >= 3 * stride;
+    for (int i = 0; r.wrote && i < 3; ++i)
+        for (int k = 0; k < 2; ++k) r.c[i][k] = s.records[size_t(i) * stride + at + k];
+    return r;
+}
+static void sheetClipCases(ID3D11GeometryShader* twin, Fails& f) {
+    const float tol = 2.0e-4f;
+    auto isOne = [](const SheetClips& r) {
+        bool ok = r.wrote;
+        for (int i = 0; i < 3; ++i) ok = ok && r.c[i][0] == 1.0f && r.c[i][1] == 1.0f;
+        return ok;
+    };
+    {   // the target card's left edge: a triangle across x -0.769 (the card's fill starts at -0.7708), under the top edge
+        const float xy[3][2] = {{-0.80f, -0.40f}, {-0.74f, -0.40f}, {-0.74f, -0.36f}};
+        const SheetClips r = sheetClipsOf(twin, xy, true);
+        f.expect(r.wrote && std::fabs(r.c[0][0] - (xy[0][0] + 0.769f)) < tol && std::fabs(r.c[1][0] - (xy[1][0] + 0.769f)) < tol && std::fabs(r.c[2][0] - (xy[2][0] + 0.769f)) < tol,
+                 "gunner sheet clip: in the left region clip.x is the vertex's distance to the plane x -0.769 (positive to its right)");
+        f.expect(r.wrote && r.c[0][0] < 0.0f && r.c[1][0] > 0.0f && r.c[2][0] > 0.0f && r.c[0][0] * r.c[1][0] < 0.0f,
+                 "gunner sheet clip: a left-region triangle across x -0.769 has clip.x of opposite signs on its two sides, so the zero crossing is at the plane");
+        f.expect(r.wrote && r.c[0][1] > 0.0f && r.c[1][1] > 0.0f && r.c[2][1] > 0.0f, "gunner sheet clip: a left-region triangle under the card's top edge has clip.y above 0 at every vertex");
+    }
+    {   // the target card's top edge: one vertex above y -0.309 (the card's fill ends at -0.311)
+        const float xy[3][2] = {{-0.70f, -0.34f}, {-0.60f, -0.34f}, {-0.65f, -0.28f}};
+        const SheetClips r = sheetClipsOf(twin, xy, true);
+        f.expect(r.wrote && std::fabs(r.c[0][1] - (-0.309f - xy[0][1])) < tol && std::fabs(r.c[2][1] - (-0.309f - xy[2][1])) < tol,
+                 "gunner sheet clip: in the left region clip.y is the vertex's distance below the plane y -0.309");
+        f.expect(r.wrote && r.c[0][1] > 0.0f && r.c[1][1] > 0.0f && r.c[2][1] < 0.0f, "gunner sheet clip: a left-region vertex above y -0.309 has clip.y below 0 (the top hook), the vertices under it above 0");
+        f.expect(r.wrote && r.c[0][0] > 0.0f && r.c[1][0] > 0.0f && r.c[2][0] > 0.0f, "gunner sheet clip: ...and that triangle is right of x -0.769, so clip.x keeps it");
+    }
+    {   // the label row on the right: a triangle across x 0.53 (x 0.45 to 0.56), and the label itself right of it
+        const float xy[3][2] = {{0.45f, -0.55f}, {0.56f, -0.55f}, {0.50f, -0.50f}};
+        const SheetClips r = sheetClipsOf(twin, xy, true);
+        f.expect(r.wrote && std::fabs(r.c[0][0] - (xy[0][0] - 0.53f)) < tol && std::fabs(r.c[1][0] - (xy[1][0] - 0.53f)) < tol && std::fabs(r.c[2][0] - (xy[2][0] - 0.53f)) < tol &&
+                     r.c[0][1] == 1.0f && r.c[1][1] == 1.0f && r.c[2][1] == 1.0f,
+                 "gunner sheet clip: in the label row on the right clip.x is the vertex's distance to the plane x 0.53 and clip.y is 1");
+        f.expect(r.wrote && r.c[0][0] < 0.0f && r.c[1][0] > 0.0f && r.c[2][0] < 0.0f, "gunner sheet clip: a label-row triangle across x 0.53 (0.45 to 0.56) has clip.x of both signs, so the dash is cut at the plane");
+        const float label[3][2] = {{0.60f, -0.55f}, {0.70f, -0.55f}, {0.65f, -0.50f}};
+        const SheetClips l = sheetClipsOf(twin, label, true);
+        f.expect(l.wrote && l.c[0][0] > 0.0f && l.c[1][0] > 0.0f && l.c[2][0] > 0.0f && l.c[0][1] == 1.0f && l.c[1][1] == 1.0f && l.c[2][1] == 1.0f,
+                 "gunner sheet clip: the GUNNER CAMERA label (x from 0.6) is right of the plane, so it is kept");
+    }
+    {   // the systems card and the rest of the right side: no plane
+        const float card[3][2] = {{0.55f, -0.45f}, {0.65f, -0.45f}, {0.60f, -0.35f}};
+        f.expect(isOne(sheetClipsOf(twin, card, true)), "gunner sheet clip: a triangle on the systems card (centroid above y -0.481) has clip (1, 1)");
+        const float above[3][2] = {{0.55f, -0.30f}, {0.65f, -0.30f}, {0.60f, -0.25f}};
+        f.expect(isOne(sheetClipsOf(twin, above, true)), "gunner sheet clip: a triangle over the systems card's top edge has clip (1, 1)");
+    }
+    {   // no SheetClip: both triangles that would be clipped come out untouched
+        const float left[3][2] = {{-0.80f, -0.40f}, {-0.74f, -0.40f}, {-0.74f, -0.36f}};
+        const float label[3][2] = {{0.45f, -0.55f}, {0.56f, -0.55f}, {0.50f, -0.50f}};
+        f.expect(isOne(sheetClipsOf(twin, left, false)) && isOne(sheetClipsOf(twin, label, false)), "gunner sheet clip: with no SheetClip bound every clip distance is (1, 1), so a missed constant buffer clips nothing");
+    }
+}
+
 // ---------------------------------------------------------------- the mutants
 static std::string replaceAll(std::string text, const std::string& from, const std::string& to) {
     size_t at = 0;
@@ -2733,6 +2835,7 @@ int main(int argc, char** argv) {
                 check(offScreen(0.48f, -0.25f), "the gunner sheet sends the systems upper-left corner off screen");
                 check(offScreen(-0.62f, -0.16f), "the gunner sheet sends the faint line above a card off screen");
                 check(offScreen(-0.85f, -0.36f), "the gunner sheet sends the border beside a card off screen");
+                sheetClipCases(twinOf[fam].Get(), production);   // the clip planes that cut the leftover brackets, read from the twin's streamed-out clip distances
                 continue;
             }
             moveCases(int(fam), twinOf[fam].Get(), production);
@@ -2830,6 +2933,29 @@ int main(int argc, char** argv) {
                 check(fails.n > 0, what);
             }
         }
+        {   // the gunner sheet's clip planes: an edit of each rule must be caught by the clip cases (the sheet's shader returns before the move, so the move mutants above skip it)
+            g_fam = int(st::kGunnerSheetSignature);
+            const std::string text = kBytes[st::kGunnerSheetSignature].text;
+            const Mutant clipMutants[] = {
+                {"the left plane's x distance dropped", "return float2(p.x - kTargetCardLeftX, kTargetCardTopY - p.y);", "return float2(1.0, kTargetCardTopY - p.y);"},
+                {"the top plane's y distance dropped", "return float2(p.x - kTargetCardLeftX, kTargetCardTopY - p.y);", "return float2(p.x - kTargetCardLeftX, 1.0);"},
+                {"the top plane's sign", "kTargetCardTopY - p.y", "p.y - kTargetCardTopY"},
+                {"the label row's plane dropped", "return float2(p.x - kLabelRowLeftX, 1.0);", "return float2(1.0, 1.0);"},
+                {"the label row taken for the whole right side", "cen.x > 0.0 && cen.y < kCardRowBottomY", "cen.x > 0.0"},
+                {"the left region taken for the whole sheet", "cen.x < 0.0", "cen.x < 10.0"},
+                {"a vertex the view could not place clipped to nothing", ") : float2(1.0, 1.0);", ") : float2(-1.0, -1.0);"},
+            };
+            for (const Mutant& m : clipMutants) {
+                const std::string mutated = replaceAll(text, m.from, m.to);
+                check(mutated != text, "a mutant differs from the production text");
+                const auto mg = twinFromText(int(st::kGunnerSheetSignature), mutated);
+                Fails fails;
+                sheetClipCases(mg.Get(), fails);
+                char what[200];
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of the gunner sheet's shader is caught by the clip cases", m.name);
+                check(fails.n > 0, what);
+            }
+        }
         g_fam = 0;
         {
             Fails fails;
@@ -2852,7 +2978,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of nine signatures, five more in signature H and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of nine signatures, five more in signature H, seven in the gunner sheet's clip planes and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

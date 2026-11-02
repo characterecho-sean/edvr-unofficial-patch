@@ -211,13 +211,27 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
 // sit inside the two fills (y -0.478..-0.325, x about -0.75..-0.50 and 0.50..0.75). Those are drawn. A triangle
 // that reaches the border rows (y -0.246 and above, or y -0.553) is sent off screen. No view bound: the sheet is
 // drawn whole, so a missed constant buffer does not blank the cards.
+// Two bright pieces of the bracket survive that test, because the cells that hold them also hold card text: the
+// vertical bar and top hook left of the target card, and the dash under the systems card's lower-left corner. A
+// clip plane cuts them, not a cell. The vertices carry SV_ClipDistance0, (x, y) distances to two planes in mesh
+// metres, chosen by the triangle's centroid; the pixel shader does not declare it. Dump 131322664001: the dark
+// fills (vs C4B4B334B26E81A9) span x -0.7708..-0.4867 on the target card and from 0.4934 on the systems card, y
+// -0.481..-0.311 on both; the bar sits just left of -0.7708 and the hook above -0.311; the dash sits in the row
+// y -0.553..-0.478 left of x 0.51, and the GUNNER CAMERA label in that row starts near 0.6. A view that could not
+// be read leaves both distances at 1, so nothing is clipped.
 constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    float4 t0 : TEXCOORD0;\n"
     "    float4 pos : SV_Position;\n"
     "};\n"
     "cbuffer SheetClip : register(b1) { float4 clipRows[8]; };\n"
     "cbuffer SheetCam : register(b2) { float4 camBlock[276]; };\n"
-    "struct Moved { Vertex v; float4 pre : TURRETPRE; };\n"
+    "struct Moved { Vertex v; float4 pre : TURRETPRE; float2 clip : SV_ClipDistance0; };\n"
+    "// Dump 131322664001, mesh metres. The target card's fill starts at x -0.7708 and its top edge is y -0.311; the plane sits 2 mm inside the left edge and 2 mm above the top.\n"
+    "static const float kTargetCardLeftX = -0.769;\n"
+    "static const float kTargetCardTopY = -0.309;\n"
+    "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n"
+    "static const float kCardRowBottomY = -0.481;\n"
+    "static const float kLabelRowLeftX = 0.53;\n"
     "float4x4 sheetInv(float4x4 m, out float det) {\n"
     "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n"
     "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n"
@@ -258,16 +272,24 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    local = h.xyz / h.w + camBlock[275].xyz;\n"
     "    return true;\n"
     "}\n"
+    "float2 sheetClip(float3 p, float3 cen) {\n"
+    "    if (cen.x < 0.0) return float2(p.x - kTargetCardLeftX, kTargetCardTopY - p.y);\n"
+    "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) return float2(p.x - kLabelRowLeftX, 1.0);\n"
+    "    return float2(1.0, 1.0);\n"
+    "}\n"
     "[maxvertexcount(3)]\n"
     "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n"
     "    float4 c0 = v[0].pos, c1 = v[1].pos, c2 = v[2].pos;\n"
     "    bool draw = true;\n"
+    "    bool live = false;\n"
+    "    float3 p0 = float3(0.0, 0.0, 0.0), p1 = float3(0.0, 0.0, 0.0), p2 = float3(0.0, 0.0, 0.0);\n"
     "    if (dot(clipRows[4], clipRows[4]) + dot(clipRows[7], clipRows[7]) > 1e-8) {\n"
-    "        float3 p0, p1, p2;\n"
     "        if (liveLocal(c0, p0) && liveLocal(c1, p1) && liveLocal(c2, p2)) {\n"
+    "            live = true;\n"
     "            draw = inFill(p0) && inFill(p1) && inFill(p2);\n"
     "        }\n"
     "    }\n"
+    "    const float3 cen = (p0 + p1 + p2) / 3.0;\n"
     "    const bool locked = an.w > 0.5;\n"
     "    const float3 lk = locked ? tr.xyz - turretLockCentre(c0, c1, c2) : float3(0.0, 0.0, 0.0);\n"
     "    [unroll] for (int i = 0; i < 3; ++i) {\n"
@@ -275,6 +297,7 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "        Moved o;\n"
     "        o.v = v[i];\n"
     "        o.pre = v[i].pos;\n"
+    "        o.clip = live ? sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen) : float2(1.0, 1.0);\n"
     "        float3 d;\n"
     "        const float4 moved = turretMove(corner, d);\n"
     "        o.v.pos = draw ? (locked ? turretLock(corner, lk, d) : moved) : float4(2.0, 2.0, 0.0, 1.0);\n"

@@ -1170,7 +1170,8 @@ static void selfTest() {
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
     // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
     // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 144-byte constant buffer, Turret at b0 (srv_turret_math.h's
-    // TurretParams: nine registers; signature H also GameVS at b1; signature I also SheetClip at b1 and SheetCam at b2). A change to any of them fails here, in the build.
+    // TurretParams: nine registers; signature H also GameVS at b1; signature I also SheetClip at b1 and SheetCam at b2, and ends its output with SV_ClipDistance0, two components,
+    // after TURRETPRE). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
         struct TurretContract { const char* symbol; const char* name; const char* source; };
@@ -1202,10 +1203,12 @@ static void selfTest() {
                 check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
                       D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
                       "the turret HUD shaders reflect as Shader Model 5 geometry shaders");
+                // The gunner sheet (signature I) writes a second element after TURRETPRE, SV_ClipDistance0 (two distances), which clips its leftover card brackets.
+                const bool sheet = i == stm::kGunnerSheetSignature;
                 check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
                       desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 &&
-                      desc.InputParameters == sig.count && desc.OutputParameters == sig.count + 1,
-                      "...taking triangles and emitting at most three vertices as a triangle strip, over as many input elements as the family's signature has and one output element more");
+                      desc.InputParameters == sig.count && desc.OutputParameters == sig.count + (sheet ? 2u : 1u),
+                      "...taking triangles and emitting at most three vertices as a triangle strip, over as many input elements as the family's signature has and one output element more (the gunner sheet two)");
                 bool elements = reflection != nullptr;
                 for (UINT e = 0; elements && e < sig.count; ++e) {
                     D3D11_SIGNATURE_PARAMETER_DESC in{}, out{};
@@ -1218,14 +1221,19 @@ static void selfTest() {
                 D3D11_SIGNATURE_PARAMETER_DESC pre{};
                 check(reflection && SUCCEEDED(reflection->GetOutputParameterDesc(sig.count, &pre)) && !std::strcmp(pre.SemanticName, stm::kPreSemantic) && pre.SemanticIndex == 0 &&
                           pre.Register == sig.count && pre.Mask == 0xF,
-                      "...and its output ends with the TURRETPRE element, four components, in the register after the signature's");
+                      "...and its output continues with the TURRETPRE element, four components, in the register after the signature's");
+                if (sheet) {
+                    D3D11_SIGNATURE_PARAMETER_DESC clip{};
+                    check(reflection && SUCCEEDED(reflection->GetOutputParameterDesc(sig.count + 1, &clip)) && !std::strcmp(clip.SemanticName, "SV_ClipDistance") && clip.SemanticIndex == 0 &&
+                              clip.SystemValueType == D3D_NAME_CLIP_DISTANCE && clip.Register == sig.count + 1 && clip.Mask == 0x3,
+                          "...and the gunner sheet's output ends with SV_ClipDistance0, two components, in the register after TURRETPRE's");
+                }
                 D3D11_SHADER_INPUT_BIND_DESC bind{};
                 ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
                 D3D11_SHADER_BUFFER_DESC bufferDesc{};
                 // Signature H (the Scorpion's hologram) also reads the draw's own vertex constants at b1, GameVS: 280 registers, of which rows 277 to 279 are the camera's right, up and forward.
                 // Signature I reads the draw's VS b0 at GS b1 (SheetClip) and VS b1 at GS b2 (SheetCam) and keeps only the card interior.
                 const bool scene = i == stm::kSceneSignature;
-                const bool sheet = i == stm::kGunnerSheetSignature;
                 const bool turret = SUCCEEDED(reflection ? reflection->GetResourceBindingDescByName("Turret", &bind) : E_FAIL) && bind.Type == D3D_SIT_CBUFFER &&
                       bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 144;
                 if (sheet) {

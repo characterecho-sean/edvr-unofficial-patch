@@ -55,7 +55,10 @@
   at their defaults, camera mode): the 10 s `srv turret hud: panels:` line
   (`edvr_log.py --grep "srv turret hud"`) and `srv turret radar camera: 10 s:`
   (slot calls and radar slots: radar slots above 0 with moves).
-- **Open:** the flight of the stripped build; the two height keys; the proposals above.
+- **Sheet brackets (2026-11-02, built, NOT FLOWN):** the sheet's geometry shader
+  clips the target card's bar and hook (x -0.769, y -0.309) and the SYSTEMS dash
+  (x 0.53, label row) with SV_ClipDistance0; no key. Journal 2026-11-02, last entry.
+- **Open:** the flight of the stripped build and of the clip; the two height keys; the proposals above.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1938,3 +1941,12 @@ Sean's ask: take the TEMPORARY instruments out of main, keep what flew OK (camer
 - **Environment note.** A worktree made by the app had no `third_party\openxr\loader`. Linking that folder from the main checkout (junction) gave the pinned loader; `fetch_openxr_loader.py --verify` passes. Remove the junction with `rmdir` before the worktree is cleaned up.
 - **Proposals for Sean (none removed):** the `on` and `reversed` values with the setter hook; the nine keys at arc close; `srv_turret_hud_depth`'s `game`/`real` and the scissor's `game`; the TURRETPRE output in the shader (its own build and flight); the GPU fallback for u, if the flights show the CPU path always wins; and the "TEMPORARY" word in the settings line.
 - **Still to do:** the flight of the stripped build; the removal decisions above.
+
+### 2026-11-02: the leftover brackets are cut by clip planes (built, not flown)
+
+The gunner frame still showed two bright orange pieces: the vertical bar with its top hook just left of the target card, and a short dash under the SYSTEMS card's lower-left corner. Both are texture on cells the sheet's `inFill` keeps (vs `5DAD41AA66757CE3`, 2016 indices), and those cells also carry card text, so dropping whole cells would cut the text.
+
+- **Measured** (dump `131322664001`, vertices decoded through the game's vertex shader; the instance is identity, scale 1, at the origin, so the position is mesh space). The dark fills (vs `C4B4B334B26E81A9`, 288 indices) span x -0.7708 to -0.4867 on the target card and from 0.4934 on the SYSTEMS card, y -0.481 to -0.311 on both. The sheet's grid rows are y -0.553, -0.478, -0.402, -0.325, -0.246 and -0.166. The target card's bar sits just left of x -0.7708 and its hook above y -0.311, reaching about 2 cm right. The SYSTEMS dash is in the row y -0.553 to -0.478 left of about x 0.51; the GUNNER CAMERA label in that row starts near x 0.6.
+- **Change.** The sheet's geometry shader writes `SV_ClipDistance0` (a `float2`) after `TURRETPRE`. When the view constants gave all three vertices a mesh position, the triangle's centroid picks the planes. Left of x 0 (the target card): x >= -0.769 and y <= -0.309, 2 mm inside the fill's left edge and 2 mm above its top edge. Right of x 0 and under y -0.481 (the label row): x >= 0.53. Every other triangle, a missed constant buffer and a failed inversion get (1, 1), so nothing is clipped. `inFill`, the off-screen drop, the move and the lock are unchanged. The pixel shader does not declare the distance; the rasterizer clips on it.
+- **Gate.** `temporal_shader_build` now expects the sheet's output to end with `SV_ClipDistance0` (two components, in the register after `TURRETPRE`'s). In `tools\srv_turret_hud_test` the sheet's stream-output twin also streams the clip distance, and new WARP cases read it: a left-region triangle across x -0.769 has clip.x of both signs and the distances are exact; a vertex above y -0.309 has clip.y below 0; a label-row triangle across 0.45 to 0.56 straddles 0.53 and the label (from 0.6) is kept; a SYSTEMS card triangle gets (1, 1); with no `SheetClip` every distance is (1, 1). Seven mutants of the rules are caught.
+- **Not flown.** What to look for: the bar and hook left of the CRANFIELD NUTRITION card and the dash under SYSTEMS are gone, and the card text, the planet icon and the label are whole. If a sliver of either bracket remains, the planes are the constants named `kTargetCardLeftX`, `kTargetCardTopY`, `kCardRowBottomY` and `kLabelRowLeftX` at the head of the sheet shader (`srv_turret_hud_shader.h`).
