@@ -211,13 +211,31 @@ void run205(Check&& check) {
         rep.centre[1] = 0.488f;
         rep.centre[2] = 0.488f;
         rep.centre[3] = 0.488f;
+        rep.pitchDeg = -5.5448f;
+        rep.fieldUpDeg = 41.99f;
+        rep.fieldDownDeg = -53.08f;
         f205::formatRun(line, sizeof(line), 7, rep);
         const std::string run = line;
         check(f205::reportReadable(&rep) &&
                   run.find("ADS view circle (F206): press 7: radius 39.42 deg (the widest that keeps the full-detail view's side bars in the black: nearest edge 41.17 deg less the band 1.75 deg); over the run 38.90 to 39.60 deg; "
-                           "drawn on 410 frames over 4.20 s; refused 2, with the share 400; weight peak 1.00; centre (u, v) left 0.512/0.488 right 0.488/0.488") == 0 &&
+                           "drawn on 410 frames over 4.20 s; refused 2, with the share 400; weight peak 1.00; centre (u, v) left 0.512/0.488 right 0.488/0.488; "
+                           "pitch -5.5448 deg (the middle of the field: up +41.99, down -53.08 deg)") == 0 &&
                   run.size() < f205::kRunLineBytes,
               "F206: the press's line states the radius, the nearest edge and the band it is less than (the margin and half the 3 deg soft edge: 1.75 deg), the run's range, the frames and the centre, and fits its buffer");
+        {   // F210b: a report of the size before the pitch fields (a runtime of the build before) is read, without the pitch; one shorter than that is not
+            EdvrNativeViewCircleReport before = rep;
+            before.size = EDVR_NATIVE_VIEW_CIRCLE_REPORT_BASE_BYTES;
+            EdvrNativeViewCircleReport cut = rep;
+            cut.size = EDVR_NATIVE_VIEW_CIRCLE_REPORT_BASE_BYTES - 4;
+            EdvrNativeViewCircleReport nanPitch = rep;
+            nanPitch.fieldUpDeg = std::numeric_limits<float>::quiet_NaN();
+            char oldLine[480];
+            f205::formatRun(oldLine, sizeof(oldLine), 7, before);
+            const std::string oldRun = oldLine;
+            check(f205::reportReadable(&before) && !f205::reportHasPitch(&before) && oldRun.find("pitch") == std::string::npos && oldRun.find("centre (u, v) left 0.512/0.488 right 0.488/0.488") != std::string::npos &&
+                      !f205::reportReadable(&cut) && !f205::reportReadable(&nanPitch) && f205::reportHasPitch(&rep),
+                  "F210b: a report of the size before the pitch fields is read and its line has no pitch; a shorter one, or a pitch figure that is no number, is not written; the full size carries the pitch");
+        }
         EdvrNativeViewCircleReport badRep = rep;
         badRep.radiusDeg = std::numeric_limits<float>::quiet_NaN();
         EdvrNativeViewCircleReport oldRep = rep;
@@ -295,10 +313,12 @@ void run205(Check&& check) {
         // the runtime draws the circle with the mirror, by its weight, at the radius that hides the bars: the three pins of the one point
         const size_t ringAt = stereo.find("if(circle&&circle->on&&mirrorOn&&mirrorWeight>0.f&&fade<1.f) {"), ringEnd = stereo.find("auto failed=[&](XrResult r)", ringAt);
         const std::string ring = ringAt == std::string::npos || ringEnd == std::string::npos ? std::string() : stereo.substr(ringAt, ringEnd - ringAt);
-        check(!ring.empty() && ring.find("radius=scopecircle::coverageRadius(shareMap,mirrorMap,circle->tc[0],circle->tc[1]);") != std::string::npos && ring.find("k.band[2]=mirrorWeight;") != std::string::npos &&
+        check(!ring.empty() && ring.find("radius=scopecircle::coverageRadius(shareMap,mirrorMap,tcp[0],tcp[1]);") != std::string::npos &&
+                  ring.find("scopecircle::pitchCentre(circle->tc[e],axis,pitch,tcp[e])") != std::string::npos && ring.find("scopecircle::fieldMiddleRad(views[0].fov,views[1].fov)") != std::string::npos &&
+                  ring.find("scopecircle::inEyeFrame(views[e].pose.orientation,head,axis)") != std::string::npos && ring.find("scopecircle::headRightAxis(views[0].pose.orientation,views[1].pose.orientation,head)") != std::string::npos && ring.find("k.band[2]=mirrorWeight;") != std::string::npos &&
                   ring.find("radiusRad") == std::string::npos && ring.find("circle->weight") == std::string::npos && stereo.find("mirrorOn=true;mirrorMap=mm;mirrorWeight=weight;") != std::string::npos &&
                   stereo.find("const float weight=leftZoomed?1.f:leftStripBlack;") != std::string::npos,
-              "F206: the renderer draws the circle only while the mirror is, by the mirror's own weight (the strip's, full on a narrowed frame; never the ADS weight), at the radius coverageRadius works out from the actual centre each frame");
+              "F206: the renderer draws the circle only while the mirror is, by the mirror's own weight (the strip's, full on a narrowed frame; never the ADS weight), at the radius coverageRadius works out from the actual centre each frame; F210b: the centre is the sight pitched by the one field-middle delta about the head's axis (one delta, one axis, both eyes)");
     }
 }
 

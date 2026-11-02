@@ -10,6 +10,9 @@
 // circle is drawn exactly while B3's right-eye mirror strip is, by the mirror's own weight, and its radius is the widest that keeps that strip's bars in the black, worked out every frame from the
 // centre and the two views (src\openxr\scope_circle.h coverageRadius). So the circle and the bars it hides come and go together.
 //
+// F210b: the request is still the sight's direction, unchanged on the wire (version 11, words 5..9 as shipped in v0.22.0-rc.5); the RUNTIME turns it down to the middle of the eye's field vertically (the Quest 3's
+// field reaches 42 degrees up and 53 down, so a circle on a straight-ahead sight sat high in the view) before it draws and before it works out the radius, and says how far in the press's line.
+//
 // NEVER DRAWN BY ACCIDENT. A reader that cannot trust the request reads none: nothing published, a word set without the magic, a number that is not one or out of range, a signal that went stale
 // (the d3d11 half stopped publishing: past kStaleHoldMs + kStaleDecayMs of silence, the span B3's own strip takes to decay), and any answer that is not version 11. Without the mirror the request does
 // nothing at all, so every frame outside the full-detail scope is the image the renderer has always drawn.
@@ -18,6 +21,7 @@
 // half writes it into the graphics log, where --health reads it.
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -37,7 +41,12 @@ struct EdvrNativeViewCircleReport {
     float edgeDeg;             // the nearest edge of what the other eye covers, from the circle's centre, on the last drawn frame (the radius plus the margin and half the band)
     float weightPeak;          // the largest weight drawn (the mirror's)
     float centre[4];           // the circle's centre in the left and right eye's image on the last drawn frame: left u, v then right u, v (fractions of the image, v down)
+    // F210b, appended (the version stays 2, the size says who has them): the pitch the centre was turned by on the last drawn frame (degrees, + up: the middle of the field vertically, scope_circle.h
+    // fieldMiddleRad) and the field's up and down angles it is the middle of (the mean over both eyes, degrees, down negative).
+    float pitchDeg, fieldUpDeg, fieldDownDeg;
 };
+// The report's size before F210b: a reader takes a report of at least this many bytes as version 2, and reads the pitch only from one of the full size.
+#define EDVR_NATIVE_VIEW_CIRCLE_REPORT_BASE_BYTES offsetof(EdvrNativeViewCircleReport, pitchDeg)
 // The export's type, spelled without windows.h (HRESULT is long, WINAPI is __stdcall).
 typedef long(__stdcall* EdvrNoteNativeViewCircle)(const EdvrNativeViewCircleReport*);
 // The d3d11.dll export (native_on_foot.cpp): checks the report and writes its line. S_OK when written, E_INVALIDARG for a report it cannot read.

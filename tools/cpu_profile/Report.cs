@@ -145,6 +145,22 @@ internal static class Report
         var report = new Dictionary<string, object?>
         {
             ["schemaVersion"] = 1,
+            // A trace with no game executable at all (the pre-flight smoke) has nothing
+            // to mismatch, so it carries no warning; gameBuild says why nothing is named.
+            ["warnings"] = data.Stacks.Identity.Warning.Length == 0
+                ? Array.Empty<string>() : new[] { "game build mismatch: " + data.Stacks.Identity.Warning },
+            ["gameBuild"] = new Dictionary<string, object?>
+            {
+                ["expectedBuild"] = RvaTable.ExpectedBuild,
+                ["expectedPeTimeDateStamp"] = $"0x{RvaTable.ExpectedTimeDateStamp:X8}",
+                ["expectedImageSize"] = $"0x{RvaTable.ExpectedImageSize:X}",
+                ["capturePeTimeDateStamp"] = $"0x{data.Stacks.Identity.Stamp:X8}",
+                ["captureImageSize"] = $"0x{data.Stacks.Identity.ImageSize:X}",
+                ["gameExecutableInTrace"] = data.Stacks.Identity.GameExecutableInTrace,
+                // When false, every value that needs the RVA table is null in this
+                // report and in frames.jsonl: unmeasured, not zero.
+                ["namesGameFunctions"] = data.Stacks.Identity.NamesGameFunctions,
+            },
             ["input"] = input,
             ["pid"] = pid,
             ["providerGuid"] = Collector.EdvrProvider,
@@ -263,7 +279,7 @@ internal static class Report
             ["symbols"] = (symbols ?? SymbolTable.Off()).ToJson(),
             ["rvaClasses"] = RvaClasses(covered, data, analyzer),
             ["attributionSummary"] = Attribution(covered, data),
-            ["gate"] = Gate(covered),
+            ["gate"] = Gate(covered, data),
             ["windows"] = groups.Select(group => Window(group, data, symbols)).ToArray(),
             ["runtimeLog"] = runtimeLog is null ? null : new Dictionary<string, object?>
             {
@@ -370,7 +386,7 @@ internal static class Report
             ["threads"] = Threads(covered, data),
             ["callerStacksByRegion"] = CallerStacksByRegion(covered, data, 30, symbols),
             ["attribution"] = Attribution(covered, data),
-            ["gate"] = Gate(covered),
+            ["gate"] = Gate(covered, data),
         };
         return result;
     }
@@ -429,6 +445,7 @@ internal static class Report
                 for (var i = 0; i < totals.Length; i++) totals[i] += thread.ClassSamples[i];
             }
         var interval = data.SampleIntervalUs;
+        var named = Named(data);
         return running.Keys.OrderByDescending(thread => running[thread]).Select(thread =>
         {
             var row = new Dictionary<string, object?>
@@ -441,10 +458,11 @@ internal static class Report
                 ["switchOuts"] = data.SwitchOutByThread.GetValueOrDefault(thread),
                 ["samples"] = samples.GetValueOrDefault(thread),
                 ["sampleRunningUs"] = Numeric.Round(samples.GetValueOrDefault(thread) * interval),
-                ["pipelineSamples"] = pipeline.GetValueOrDefault(thread),
-                ["pipelineRunningUs"] = Numeric.Round(pipeline.GetValueOrDefault(thread) * interval),
+                ["pipelineSamples"] = named ? pipeline.GetValueOrDefault(thread) : null,
+                ["pipelineRunningUs"] = named ? Numeric.Round(pipeline.GetValueOrDefault(thread) * interval) : null,
             };
-            if (classes.TryGetValue(thread, out var totals))
+            if (!named) row["samplesByRvaClass"] = null;
+            else if (classes.TryGetValue(thread, out var totals))
             {
                 var byClass = new Dictionary<string, object?>();
                 for (var i = 0; i < totals.Length; i++)
@@ -487,6 +505,7 @@ internal static class Report
                 if (frame.CallerClassSamples[i] > 0)
                     callerLabels[RvaTable.Classes[i].Name] =
                         callerLabels.GetValueOrDefault(RvaTable.Classes[i].Name) + frame.CallerClassSamples[i];
+        var named = Named(data);
         return new Dictionary<string, object?>
         {
             ["definitions"] = definitions,
@@ -511,10 +530,10 @@ internal static class Report
                 ["recoveredFromLoadedModules"] = data.Stacks.RecoveredFrames,
                 ["unresolved"] = data.Stacks.UnresolvedFrames,
             },
-            ["sampleCountsByClass"] = sampleCounts,
-            ["callerSampleCountsByClass"] = callerLabels,
-            ["firstSampledFrameSequence"] = firstSeen,
-            ["lastSampledFrameSequence"] = lastSeen,
+            ["sampleCountsByClass"] = named ? sampleCounts : null,
+            ["callerSampleCountsByClass"] = named ? callerLabels : null,
+            ["firstSampledFrameSequence"] = named ? firstSeen : null,
+            ["lastSampledFrameSequence"] = named ? lastSeen : null,
             ["totalCoveredFrames"] = frames.Count,
         };
     }
@@ -549,7 +568,7 @@ internal static class Report
             var entry = wakerThreads.GetValueOrDefault(segment.WakerThread);
             wakerThreads[segment.WakerThread] = (entry.Count + 1, entry.Us + segment.InsideUs);
         }
-        return new Dictionary<string, object?>
+        var summary = new Dictionary<string, object?>
         {
             ["frames"] = frames.Count,
             ["waitSegments"] = segments.Count,
@@ -587,6 +606,15 @@ internal static class Report
             ["pipelineWaitShare"] = Numeric.Round4(totalUs > 0
                 ? byClass.GetValueOrDefault("pipeline").Us / totalUs : 0),
         };
+        if (!Named(data))
+        {
+            // Waker classes come from the RVA table; the sites, threads and times do not.
+            summary["byWakerClass"] = null;
+            summary["byBlockingSiteAndWakerClass"] = null;
+            summary["pipelineWaitShare"] = null;
+            foreach (var row in (List<Dictionary<string, object?>>)summary["byRegion"]!) row["byClass"] = null;
+        }
+        return summary;
     }
 
     /// What the caller thread was executing, by coarse region of the cycle: the
@@ -650,9 +678,9 @@ internal static class Report
                     ["edvrD3d11"] = edvr,
                     ["systemD3d11"] = system,
                     ["nvidiaUserMode"] = nvidia,
-                    ["pipelineClass"] = pipeline,
-                    ["censusBracket"] = census,
-                    ["schedulerRange"] = scheduler,
+                    ["pipelineClass"] = Named(data) ? pipeline : null,
+                    ["censusBracket"] = Named(data) ? census : null,
+                    ["schedulerRange"] = Named(data) ? scheduler : null,
                     ["topFrameUnresolved"] = topUnresolved,
                     ["anyFrameUnresolved"] = anyUnresolved,
                 },
@@ -851,12 +879,24 @@ internal static class Report
         return $"0x{tops.First:x} < 0x{tops.Second:x} < 0x{tops.Third:x}";
     }
 
-    private static Dictionary<string, object?> Gate(List<FrameCycle> frames)
+    /// Whether game functions were named in this capture. When they were not,
+    /// every value derived from the RVA table is null in the report: a zero would
+    /// read as a measurement, and it is not one.
+    private static bool Named(Collected data) => data.Stacks.Identity.NamesGameFunctions;
+
+    private static readonly string[] GateTableKeys =
+    {
+        "callerPipelineRunningUs", "callerPipelineRunningUsPerFrame", "callerPipelineWaitUs",
+        "callerPipelineWaitUsPerFrame", "threadPipelineRunningUs", "threadPipelineRunningUsPerFrame",
+        "criticalPathShare", "criticalPathShareMeanOfFrames",
+    };
+
+    private static Dictionary<string, object?> Gate(List<FrameCycle> frames, Collected data)
     {
         var callerRunning = frames.Sum(frame => frame.CallerPipelineRunningUs);
         var callerWait = frames.Sum(frame => frame.PipelineWaitUs);
         var threadRunning = frames.Sum(frame => frame.ThreadPipelineRunningUs);
-        return new Dictionary<string, object?>
+        var gate = new Dictionary<string, object?>
         {
             ["frames"] = frames.Count,
             ["callerPipelineRunningUs"] = Numeric.Round(callerRunning),
@@ -870,6 +910,8 @@ internal static class Report
             ["criticalPathShareMeanOfFrames"] = Numeric.Round4(frames.Count > 0
                 ? frames.Average(frame => frame.CriticalPathShare) : 0),
         };
+        if (!Named(data)) foreach (var key in GateTableKeys) gate[key] = null;
+        return gate;
     }
 
     private static Dictionary<string, object?> LegacyFrame(FrameCycle cycle, Collected data,
@@ -1000,6 +1042,7 @@ internal static class Report
 
     public static Dictionary<string, object?> FrameDetail(FrameCycle cycle, Collected data)
     {
+        var named = Named(data);
         var detail = new Dictionary<string, object?>
         {
             ["sequence"] = cycle.Marker.Sequence,
@@ -1060,9 +1103,10 @@ internal static class Report
                     ["threadId"] = thread.ThreadId,
                     ["runningUs"] = Numeric.Round(thread.RunningUs),
                     ["samples"] = thread.Samples,
-                    ["pipelineSamples"] = thread.PipelineSamples,
+                    ["pipelineSamples"] = named ? thread.PipelineSamples : null,
                 };
-                if (thread.ClassSamples is not null)
+                if (!named) row["samplesByRvaClass"] = null;
+                else if (thread.ClassSamples is not null)
                 {
                     var byClass = new Dictionary<string, object?>();
                     for (var i = 0; i < thread.ClassSamples.Length; i++)
@@ -1082,7 +1126,7 @@ internal static class Report
             ["wakerThread"] = segment.WakerThread,
             ["wakerProcess"] = segment.WakerProcess,
             ["wakerReadyTop"] = segment.WakerReadyStackId < 0 ? null : Site(segment.WakerReadyTops),
-            ["wakerClass"] = segment.WakerClass,
+            ["wakerClass"] = named ? segment.WakerClass : null,
             ["wakerSampleAgeUs"] = segment.WakerSampleFound ? Numeric.Round(segment.WakerSampleAgeUs) : null,
             ["regionUs"] = RegionUs(segment),
         }).ToArray();
@@ -1093,17 +1137,17 @@ internal static class Report
         detail["caller"] = new Dictionary<string, object?>
         {
             ["samples"] = cycle.CallerSamples,
-            ["pipelineSamples"] = cycle.CallerPipelineSamples,
+            ["pipelineSamples"] = named ? cycle.CallerPipelineSamples : null,
             ["switchOutStacks"] = cycle.CallerSwitchOutStacks,
             ["readyStacks"] = cycle.CallerReadyStacks,
-            ["samplesByRvaClass"] = callerByClass,
+            ["samplesByRvaClass"] = named ? callerByClass : null,
         };
         detail["gate"] = new Dictionary<string, object?>
         {
-            ["callerPipelineRunningUs"] = Numeric.Round(cycle.CallerPipelineRunningUs),
-            ["callerPipelineWaitUs"] = Numeric.Round(cycle.PipelineWaitUs),
-            ["threadPipelineRunningUs"] = Numeric.Round(cycle.ThreadPipelineRunningUs),
-            ["criticalPathShare"] = Numeric.Round4(cycle.CriticalPathShare),
+            ["callerPipelineRunningUs"] = named ? Numeric.Round(cycle.CallerPipelineRunningUs) : null,
+            ["callerPipelineWaitUs"] = named ? Numeric.Round(cycle.PipelineWaitUs) : null,
+            ["threadPipelineRunningUs"] = named ? Numeric.Round(cycle.ThreadPipelineRunningUs) : null,
+            ["criticalPathShare"] = named ? Numeric.Round4(cycle.CriticalPathShare) : null,
         };
         return detail;
     }

@@ -16314,7 +16314,8 @@ H_F205 = "ADS view circle (F205)"
 H_F206 = "ADS view circle (F206)"
 H_F206_RUN_RE = (r"ADS view circle \(F206\): press (?P<n>\d+): radius (?P<rad>[\d.]+) deg \(the widest that keeps the full-detail view's side bars in the black: nearest edge (?P<edge>[\d.]+) deg "
                  r"less the band (?P<band>[\d.]+) deg\); over the run (?P<lo>[\d.]+) to (?P<hi>[\d.]+) deg; drawn on (?P<frames>\d+) frames over (?P<secs>[\d.]+) s; refused (?P<refused>\d+), "
-                 r"with the share (?P<shared>\d+); weight peak (?P<peak>[\d.]+); centre \(u, v\) left (?P<lu>-?[\d.]+)/(?P<lv>-?[\d.]+) right (?P<ru>-?[\d.]+)/(?P<rv>-?[\d.]+)$")
+                 r"with the share (?P<shared>\d+); weight peak (?P<peak>[\d.]+); centre \(u, v\) left (?P<lu>-?[\d.]+)/(?P<lv>-?[\d.]+) right (?P<ru>-?[\d.]+)/(?P<rv>-?[\d.]+)"
+                 r"(?:; pitch (?P<pitch>[+-][\d.]+) deg \(the middle of the field: up (?P<fup>[+-][\d.]+), down (?P<fdn>[+-][\d.]+) deg\))?$")   # F210b: the pitch the centre was turned by
 H_F206_NONE_RE = r"ADS view circle \(F206\): press (?P<n>\d+): no circle: (?P<why>.+?) \(item (?P<item>\S+), scope (?P<scope>\S+)\)$"
 H_F205_KEY_RE = r"native on foot ADS view circle \(F205\): fix\.native_on_foot_ads_view_circle is (?P<key>on|off) -- "
 H_F205_PRESS_RE = (r"ADS view circle \(F205\): press (?P<n>\d+), Anti-aliasing (?P<aa>on|off): radius (?P<rad>[\d.]+) deg \(ADS FOV (?P<ads>[\d.]+) / hip FOV (?P<hip>[\d.]+) x the headset's half-FOV "
@@ -16353,6 +16354,9 @@ def _hj_f205(rows, ctx):
             text += " (radius %s deg, the widest that keeps the full-detail view's side bars in the black: nearest edge %s less the band %s%s); on %d frame(s) in %d run(s)" % (
                 "/".join(sorted({r["rad"] for r in drawn})[:4]), "/".join(sorted({r["edge"] for r in drawn})[:4]), "/".join(sorted({r["band"] for r in drawn})[:2]),
                 "; over the run " + min((r["lo"] for r in drawn), key=float) + " to " + max((r["hi"] for r in drawn), key=float) + " deg", sum(int(r["frames"]) for r in drawn), len(drawn))
+        pitched = sorted({(r["pitch"], r["fup"], r["fdn"]) for r in drawn if r.get("pitch") is not None})   # F210b: the centre is the sight pitched to the middle of the field vertically
+        if pitched:
+            text += "; the centre pitched by " + "/".join("%s deg (the middle of the field: up %s, down %s deg)" % p for p in pitched[:3])
         refused = sum(int(r["refused"]) for r in f206run)
         if refused:
             text += "; the runtime refused %d frame(s) (the radius that hides the bars too small to be a view, or the centre unusable)" % refused
@@ -23908,9 +23912,9 @@ def self_test_health():
             return ("ADS view circle (F205) runtime: ADS view circle on %d frames, radius %.2f deg (the d3d11 half asked %.2f deg%s), over %.2f s; refused %d, with the share %d; weight peak %.2f; "
                     "centre (u, v) left %.3f/%.3f right %.3f/%.3f" % (frames, rad, req, cut, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3]))
 
-        def c206_run(n=1, rad=39.42, edge=41.17, lo=38.9, hi=39.6, frames=410, secs=4.2, refused=0, shared=410, peak=1.0, centre=(0.512, 0.488, 0.488, 0.488)):
+        def c206_run(n=1, rad=39.42, edge=41.17, lo=38.9, hi=39.6, frames=410, secs=4.2, refused=0, shared=410, peak=1.0, centre=(0.512, 0.488, 0.488, 0.488), pitch=0.0, fup=46.8, fdn=-46.8):   # pitch None: the line as the build before F210b wrote it
             """F206: the press's line, rendered from native_on_foot_f205.h's own format (formatRun)."""
-            return R205("ADS view circle (F206): press %u: radius", n, rad, edge, round(edge - rad, 2), lo, hi, frames, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3])
+            return R205("ADS view circle (F206): press %u: radius", n, rad, edge, round(edge - rad, 2), lo, hi, frames, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3]) + (R205("; pitch %+.4f deg", pitch, fup, fdn) if pitch is not None else "")
 
         def c206_none(n=1, why="the sight's far point was not known in both eyes while the full-detail view stood", item="$wpn_m_sniper_plasma_charged_name;", scope="yes"):
             return R205("ADS view circle (F206): press %u: no circle:", n, why, item, scope)
@@ -23938,6 +23942,10 @@ def self_test_health():
               [("OK", F205R)], has=["2 press(es) with a circle asked"], lacks=["UNPARSED"])
         check("F206: a B3 press whose circle was drawn is OK, with the radius, the nearest edge, the band and the run's range", [c206_run(n=1), c206_run(n=2, rad=39.1, lo=38.7, hi=39.5)], 0, [("OK", F205R)],
               has=["2 B3 press(es) with the circle drawn", "radius 39.10/39.42 deg", "nearest edge 41.17 less the band 1.75", "over the run 38.70 to 39.60 deg", "on 820 frame(s) in 2 run(s)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F210b: the press line names the pitch the centre was turned by and the field's up and down: the Quest 3's -5.5 degrees, and the Pimax's 0", [c206_run(n=1, pitch=-5.5448, fup=41.99, fdn=-53.08), c206_run(n=2, pitch=0.0, fup=46.8, fdn=-46.8)], 0, [("OK", F205R)],
+              has=["the centre pitched by +0.0000 deg (the middle of the field: up +46.80, down -46.80 deg)/-5.5448 deg (the middle of the field: up +41.99, down -53.08 deg)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F210b: a press line from the build before it (no pitch) is still read", [c206_run(n=1, pitch=None), c206_run(n=2, pitch=-5.5448, fup=41.99, fdn=-53.08)], 0, [("OK", F205R)],
+              has=["2 B3 press(es) with the circle drawn", "the centre pitched by -5.5448 deg"], lacks=["UNPARSED", "PARTIAL"])
         check("F206: a B3 press whose window stood and got no circle is PARTIAL, naming the press and the reason", [c206_run(n=1), c206_none(n=2)], 0, [("PARTIAL", F205R)],
               has=["1 B3 press(es) with the circle drawn", "press 2", "the sight's far point was not known in both eyes while the full-detail view stood x1"], lacks=["UNPARSED"])
         check("F206: a run the runtime reported on 0 frames is PARTIAL", [c206_run(n=3, frames=0, refused=40, shared=0)], 0, [("PARTIAL", F205R)], has=["press 3", "the runtime refused 40 frame(s)"], lacks=["UNPARSED"])

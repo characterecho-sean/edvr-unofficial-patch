@@ -64,6 +64,13 @@ internal static class RvaTable
         ("lod_evaluator_4333F60", 0x4333F60, 9, RvaKind.Lod, true),
     ];
 
+    // The identity pair of the game executable every address in this table was
+    // read from. A retarget updates these with the Seeds; the self-test checks
+    // them against src\common\game_signatures.inc.
+    public const int ExpectedBuild = 334925;
+    public const uint ExpectedTimeDateStamp = 0x6ADA8048;
+    public const uint ExpectedImageSize = 0x640C000;
+
     public const uint SchedulerStart = 0x5D6C20;
     public const uint SchedulerEnd = 0x5D7200;
 
@@ -106,6 +113,34 @@ internal static class RvaTable
         _ when SizeOf(item.Name) > 0 => $"decompile size ({SizeOf(item.Name)} bytes)",
         _ => item.Bound == item.Entry + BodyWindow ? "entry+0x2000" : "next known entry",
     };
+}
+
+/// Whether game frames may be named from RvaTable. Warning is empty when they may.
+/// GameExecutableInTrace is false when the analysed process has no game image at
+/// all (the pre-flight smoke fixture): then there is nothing to mismatch.
+internal sealed record GameIdentity(bool NamesGameFunctions, string Warning, uint Stamp, uint ImageSize,
+                                    bool GameExecutableInTrace = true);
+
+internal static class GameBuildGuard
+{
+    /// No game process: no frame is a game frame, so nothing is named and nothing
+    /// is wrong. Unlike Decide(0, 0), this is not a warning.
+    public static GameIdentity NoGameExecutable { get; } = new(false, "", 0, 0, false);
+
+    /// A stamp and size of zero mean the trace did not carry the executable's
+    /// image data; that cannot be shown to be the table's build, so it refuses.
+    public static GameIdentity Decide(uint stamp, uint imageSize)
+    {
+        if (stamp == RvaTable.ExpectedTimeDateStamp && imageSize == RvaTable.ExpectedImageSize)
+            return new GameIdentity(true, "", stamp, imageSize);
+        var what = stamp == 0 && imageSize == 0
+            ? "the game executable's PE timestamp and image size could not be read from the trace"
+            : $"the game executable has PE timestamp 0x{stamp:X8} and image size 0x{imageSize:X}";
+        return new GameIdentity(false,
+            $"{what}, but the RVA table is for build {RvaTable.ExpectedBuild} " +
+            $"(0x{RvaTable.ExpectedTimeDateStamp:X8}, 0x{RvaTable.ExpectedImageSize:X}); " +
+            "game functions are not named and game frames stay unresolved module+offset", stamp, imageSize);
+    }
 }
 
 internal sealed class ModuleInfo(int id, string path, string name, ulong imageBase, ModuleClass moduleClass,
@@ -171,6 +206,7 @@ internal sealed class StackStore
     private readonly List<ModuleInfo> _modules = [];
     private readonly List<int> _classScratch = [];
     public string GameDirectory { get; }
+    public GameIdentity Identity { get; }
     public long ResolvedFrames;
     public long RecoveredFrames;
     public long UnresolvedFrames;
@@ -178,25 +214,57 @@ internal sealed class StackStore
     public StackStore(TraceLog log, int pid)
     {
         _log = log;
-        // The game directory decides which d3d11.dll is EDVR's, so it is resolved
-        // from the loaded module list before any stack is classified.
-        var exe = log.ModuleFiles.FirstOrDefault(module =>
-            string.Equals(System.IO.Path.GetFileName(module.FilePath), "elitedangerous64.exe",
-                          StringComparison.OrdinalIgnoreCase));
-        GameDirectory = exe is null ? "" : (System.IO.Path.GetDirectoryName(exe.FilePath) ?? "");
         // Anything mapped before the session started is only in the Loader
         // rundown, so a code address TraceEvent leaves unattributed is retried
         // against these ranges before it is called unresolved.
         _processModules = log.Processes.LastProcessWithID(pid)?.LoadedModules;
         _kernelModules = log.Processes.LastProcessWithID(0)?.LoadedModules;
+        // The game directory decides which d3d11.dll is EDVR's, so it is resolved
+        // from the loaded module list before any stack is classified. The identity
+        // is the analysed process's own image: a trace can hold two Elite images (a
+        // relaunch after a patch, two installs). Only when the process lists none
+        // does a lone game image elsewhere in the trace stand in; two or more
+        // cannot be told apart, so that refuses rather than guess.
+        var exe = _processModules?.Select(module => module.ModuleFile)
+            .FirstOrDefault(file => file is not null && IsGameExe(file.FilePath));
+        var ambiguous = false;
+        if (exe is null)
+        {
+            var inTrace = log.ModuleFiles.Where(file => IsGameExe(file.FilePath)).ToList();
+            exe = inTrace.Count == 1 ? inTrace[0] : null;
+            ambiguous = inTrace.Count > 1;
+        }
+        GameDirectory = exe is null ? "" : (System.IO.Path.GetDirectoryName(exe.FilePath) ?? "");
+        Identity = exe is null && !ambiguous
+            ? GameBuildGuard.NoGameExecutable
+            : GameBuildGuard.Decide(exe is null ? 0 : unchecked((uint)exe.ImageId),
+                                    exe is null ? 0 : unchecked((uint)exe.ImageSize));
     }
+
+    private static bool IsGameExe(string path) =>
+        string.Equals(System.IO.Path.GetFileName(path), "elitedangerous64.exe", StringComparison.OrdinalIgnoreCase);
 
     /// Self-test mode: stacks are supplied directly instead of resolved from a
     /// trace, so every computation over classified stacks is testable offline.
-    public StackStore(string gameDirectory = "")
+    /// The identity defaults to the table's own build; a test passes another to
+    /// run the mismatch paths.
+    public StackStore(string gameDirectory = "", GameIdentity? identity = null)
     {
         _log = null;
         GameDirectory = gameDirectory;
+        Identity = identity ??
+                   GameBuildGuard.Decide(RvaTable.ExpectedTimeDateStamp, RvaTable.ExpectedImageSize);
+    }
+
+    /// The table classes a game RVA falls in; none when this build is not the
+    /// table's, because then the RVA names a different function.
+    public int[] ClassesFor(uint rva)
+    {
+        if (!Identity.NamesGameFunctions) return [];
+        var found = new List<int>();
+        for (var c = 0; c < RvaTable.Classes.Length; c++)
+            if (RvaTable.Classes[c].Contains(rva)) found.Add(c);
+        return found.ToArray();
     }
 
     public int Count => _stacks.Count;
@@ -270,9 +338,8 @@ internal sealed class StackStore
             if (gameCount == 1) top1 = rva;
             else if (gameCount == 2) top2 = rva;
             else if (gameCount == 3) top3 = rva;
-            for (var c = 0; c < RvaTable.Classes.Length; c++)
-                if (RvaTable.Classes[c].Contains(rva) && !_classScratch.Contains(c))
-                    _classScratch.Add(c);
+            foreach (var c in ClassesFor(rva))
+                if (!_classScratch.Contains(c)) _classScratch.Add(c);
         }
         info.ModuleIds = moduleIds.ToArray();
         info.Addresses = addresses.ToArray();
