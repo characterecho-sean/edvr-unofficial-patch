@@ -10399,11 +10399,11 @@ H_SRV_TURRET = "srv turret view"
 H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud", "srv turret anchor", "srv turret:")
 # Rows of these kinds are state, kept whatever --since says, and are not by themselves a sign the turret view was entered.
 H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
-# nine keys since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
+# ten keys since the systems-near key (optional, so a log from before it still parses), nine since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
 # the push-back), so the newer keys are optional and the rule reads their absence as the older line
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
-                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)? \(live; ")
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)? \(live; ")
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
@@ -16574,7 +16574,7 @@ def _hj_srv_turret(rows, ctx):
         v = s0.get(name) if s0 else None
         return None if v is None else int(v)
 
-    back, forward, rforward, panels, radar, gap = key("back"), key("forward"), key("rforward"), key("panels"), key("radar"), key("gap")
+    back, forward, rforward, panels, radar, gap, systems = key("back"), key("forward"), key("rforward"), key("panels"), key("radar"), key("gap"), key("systems")
     legacy = s0 is not None and panels is None   # a settings line from before the push-back keys: the camera and the gap only
 
     def cm(v):
@@ -16633,7 +16633,7 @@ def _hj_srv_turret(rows, ctx):
     last = secs[-1] if secs else None
     # whether a HUD key is above 0, from the settings line, else from the last 10 s line's windows (a group that ran has one)
     if s0 is not None:
-        hud_on = any(v > 0 for v in (forward, rforward, panels, radar, gap) if v is not None)
+        hud_on = any(v > 0 for v in (forward, rforward, panels, radar, gap, systems) if v is not None)
         hud_keys = ", ".join("%s %s" % (name, cm(v)) for name, v in parts[1:])
     elif last:
         groups = _srv_turret_windows(last)
@@ -24265,8 +24265,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on"):   # nine keys: both push-backs 110 cm, the first build's pull off (fixture values, not the shipped defaults)
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor)
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0):   # twelve keys: fixture values, not the shipped defaults
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
@@ -24502,6 +24502,9 @@ def self_test_health():
         check("srv turret radar forward: the radar-forward key alone above 0 is a hud that is on, OK with draws bound, and the 10 s line's radar T is said beside the panels' T",
               st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=70)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(panels=None, radar=0, tradar=(0.0, 0.0, 0.3), t=(0.0, 0.0, 0.0))), (14, st_view(False))], 0, [("OK", ST)],
               has=["hud forward 0 cm, radar forward 70 cm, panels back 0 cm", "T (0.000,0.000,0.000), radar T (0.000,0.000,0.300)", "; windows: panels off, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "hud off by key"])
+        check("srv turret systems: the systems-near key alone above 0 is a hud that is on, so a stay with no draw through the shader is NEVER APPLIED",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0, systems=40)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0"], lacks=["UNPARSED", "hud off by key"])
         check("srv turret radar forward: the radar-forward key alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming it",
               st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=70)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, radar=0, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
               has=["a hud key was above 0 (hud forward 0 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)"])

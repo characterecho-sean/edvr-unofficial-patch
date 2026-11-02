@@ -10,7 +10,7 @@
   residual and the setter's 10 s lines, the update counter, the third-writer
   note. Dead math went with them (`srv_turret_math.h`). Full local build green
   on the stripped tree. NOT FLOWN as stripped; merge to main waits on Sean's word.
-- **Camera mode** (`experimental.srv_turret_radar_anchor = camera`, the default,
+- **Camera mode** (`experimental.srv_turret_radar_anchor = camera`, kept,
   FLOWN OK in e443b0c2): code path unchanged. The slot hook on 0x36BF3C0 moves the
   radar's schematic camera back; u is the turret's forward from the CPU camera
   sample (the Unmap tee), with the GPU readback kept as the fallback; the radar's
@@ -20,8 +20,12 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`, flown defaults; see the table in the journal
-  2026-11-01 "camera mode flown OK"): unchanged. Nothing removed.
+- **Keys** (`[experimental]`): twelve. Baked from the 2026-11-02 Frontier flight:
+  camera back 80, HUD forward 0, radar forward 0, panels back 0, systems near 70,
+  weapon panel up 10, gunner up 0. Screen limit is game, radar anchor is off,
+  depth is game. `srv_turret_hud_up` raises the weapon panel and
+  `srv_turret_gunner_up` raises the gunner frame, along the seat, at the game's
+  own depth. The centre reticle and the Escape menu's 360-index draws stay.
 - **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
   anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
   `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
@@ -34,7 +38,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The nine `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The twelve `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
@@ -50,9 +54,26 @@
   at their defaults, camera mode): the 10 s `srv turret hud: panels:` line
   (`edvr_log.py --grep "srv turret hud"`) and `srv turret radar camera: 10 s:`
   (slot calls and radar slots: radar slots above 0 with moves).
-- **Open:** the flight of the stripped build; the proposals above.
+- **Open:** the flight of the stripped build; the two height keys; the proposals above.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
+
+### 2026-11-02: the Escape-menu move was the wrong panel
+
+Sean: the power and systems panel is not the Escape menu. Moving the 360-index
+mesh of vs `5DAD41AA66757CE3`, vs `C4B4B334B26E81A9` and vs `4EF6DDB075A927FA`
+(present only in dump `050120038002`) locked the headset view. That bind is
+reverted. Dump `050105383001` (menu closed) and the gunner screenshot
+identify the frame: the orange brackets, the bottom arc and the GUNNER
+CAMERA label are the 2016-index sheet of vs `5DAD41AA66757CE3`; the target
+card and the SYSTEMS card are the 288-index mesh of vs `C4B4B334B26E81A9`.
+`experimental.srv_turret_systems_near` moves both toward the camera along
+the turret, at the game's own depth. The centre reticle (vs
+`E508648660A352B2`), the 6-index quad and the 360-index menu draws stay.
+The hologram far window is no longer opened by this key. Placement defaults
+are camera back 90, HUD forward 0, radar forward 0, panels back 110, and the
+gunner distance ships at 65. `srv_turret_hud_up` raises the weapon panel and
+`srv_turret_gunner_up` raises this frame, both along the seat, default 0.
 
 Log `edvr_gfx_20261030_124737.log`, eye dumps `125141609001` and
 `125159159002` (manual, 18:51:41 and 18:51:59 UTC, seat kind 0x4). Pimax

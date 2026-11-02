@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the nine experimental keys, the families and the
+// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the ten experimental keys, the families and the
 // maths; srv_turret_hud_shader.h and srv_turret_hud_binding.h are the private geometry shaders and their binding (tools/srv_turret_hud_test runs them on WARP);
 // journal_vehicle_latch.h is the Scorpion latch; srv_radar_anchor.h is the hooks that move the radar's schematic in the game; srv_turret.cpp is this module.
 //
@@ -10,12 +10,12 @@
 // watcher and the key; alignTick adds srvTurretBackSeatedZ() to the seated z of the eye alignment it already publishes (one publisher, so the serials stay coherent) and
 // tells srvTurretNotePublished what it published. Applied at once, with no ramp: the game itself cuts the camera on a view switch.
 //
-// PART 2, THE HUD. While the Scorpion's turret view is on and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and
-// experimental.srv_turret_hud_gap is above 0 the draw gate is open (srvTurretHudWantsDraws), forwardWithVerdict opens a scope for every draw, and a draw of one of the HUD families' shader pairs (srv_turret_math.h
-// kFamilies: the two hologram families that draw the weapon panels from records 0.27 to 0.70 m out and the larger panels from 1.3 m and deeper, and the radar-named billboards and the
-// target hologram sphere that draw the radar from 0.11 to 0.44 m) into an eye target, as a triangle list or strip, whose group (panels or radar) has a push above 0, a gap above 0 or
+// PART 2, THE HUD. While the Scorpion's turret view is on and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back,
+// experimental.srv_turret_hud_gap and experimental.srv_turret_systems_near is above 0 the draw gate is open (srvTurretHudWantsDraws), forwardWithVerdict opens a scope for every draw, and a draw of one of the HUD families' shader pairs (srv_turret_math.h
+// kFamilies: the two hologram families that draw the weapon panels from records 0.27 to 0.70 m out and the larger hologram panels from 1 m and deeper, and the radar-named billboards and the
+// target hologram sphere that draw the radar from 0.11 to 0.44 m) into an eye target, as a triangle list or strip, whose group (panels or radar) has a push above 0, a gap above 0,
 // its forward key above 0 (HUD forward for the panels, radar forward for the radar), is issued through that signature's private geometry shader, for EVERY issue the draw path makes of it (the game's own, the UI layer's, the interface
-// depth's): the scope spans the whole function and puts the game's geometry stage back on every way out. The shader moves each vertex in 3D (srv_turret_math.h THE MOVE): every vertex
+// depth's): the scope spans the whole function and puts the game's geometry stage back on every way out. experimental.srv_turret_systems_near, on the panels group only, writes a second radial window (vertices past 1 m and under 4 m). That window is not confirmed as the power and systems panel: a flight at 40 cm did not move it. The Escape menu is a different mesh and is not bound. The shader moves each vertex in 3D (srv_turret_math.h THE MOVE): every vertex
 // forward by the group's forward key (the radar's own, so it can stay near field and be seen from above, not carried level with the head into a sliver), then, within 1 m of a fixed ANCHOR (the head's seated position when the view came on), along its ray from the anchor by the group's push, deeper (or
 // the gap, nearer, for a group with no push). Each frame the frame tick (srvTurretFrameTick -> cacheGeometry) reads the host's head and eye matrices and tangents, steps the anchor and publishes each
 // eye's frame (tangents with the jitter, the anchor and the two translations in the eye's space) for the log and as a fallback. That tick runs at the Present boundary and the host's
@@ -45,7 +45,7 @@
 // WHAT THE LOG SHOWS (a flight in the turret view must tell "never ran" from "ran"):
 //   "srv turret: the vehicle is the Scorpion|not the Scorpion (event E)"   each change of the latch (journal_watch.cpp, the worker thread): E is LoadGame, LaunchSRV, Music, DockSRV,
 //     SRVDestroyed, Shutdown or NewJournal (another journal file).
-//   "srv turret settings: ..."        the nine keys (the last three, the depth mode as front, game or real, the scissor as open or game and the radar anchor as on, reversed, off or camera, as text), at the first frame and at each change.
+//   "srv turret settings: ..."        the ten keys (the depth mode as front, game or real, the scissor as open or game, the radar anchor as on, reversed, off or camera, and the systems panel's pull in centimetres), at the first frame and at each change.
 //   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|radar forward changed|recentre|head away)"      each time the anchor is taken (the head's seated position).
 //     A frozen head pose (the same bits frame after frame) never latches it; "head away" is the safety net: the head stayed more than 35 cm from the anchor for 90 frames in a row.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the Scorpion's turret view (the view bit AND the latch).
@@ -121,8 +121,8 @@ inline void srvTurretHudCountIssue(ID3D11DeviceContext* ctx) {
     if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) srvTurretHudNoteIssue(ctx);
 }
 
-// True while the Scorpion's turret view is on (VR) and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and
-// experimental.srv_turret_hud_gap is above 0.
+// True while the Scorpion's turret view is on (VR) and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back,
+// experimental.srv_turret_hud_gap and experimental.srv_turret_systems_near is above 0.
 // Also a term of the draw gate (vscreen.cpp drawGateSubscribed).
 inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(std::memory_order_relaxed); }
 
@@ -137,6 +137,8 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial);
 // the draw's eye (0 left, 1 right, -1 unknown). True when the family's private shader is bound for the issues that follow; End puts the game's geometry stage and constant
 // slot back and is called only after a true Begin.
 bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye);
+// The gunner camera's curved panel, before the HUD-family test. True only for its 2016-index sheet and its 288-index cards while experimental.srv_turret_systems_near is above 0.
+bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint32_t indexCount, int eye);
 void srvTurretHudEnd(ID3D11DeviceContext* ctx);
 // Once a frame, render thread (vScreenFrameBoundary): settles a binding that did not restore.
 void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx);

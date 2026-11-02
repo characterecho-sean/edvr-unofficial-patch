@@ -4215,8 +4215,20 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
 // own mapping of the bound target, else ui depth's frame table, read only, and last the table's registering form (what the layer's decision and the pixel probe make at the same
 // draw; the first interface draw of a frame registers its target, the left eye's first). Refused when the eye is unknown. NOINLINE: the draw path pays this call only while the
 // pass is wanted.
-__declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self) {
+static int srvTurretDrawEye(State* s) {
+    if (!s->rtv0Eye) return -1;
+    const ResourceInfo* info = rtv0Resolved(s);
+    if (!info) return -1;
+    const int layerEye = uiLayerEyeOfGameTarget(info->resource);
+    if (layerEye == 0 || layerEye == 1) return layerEye;
+    const int tableEye = uiDepthEyeOfTargetReadOnly(info->resource);
+    if (tableEye == 0 || tableEye == 1) return tableEye;
+    return uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+}
+__declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self, char kind, UINT indexCount) {
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    if (srv_turret::gunnerSignature(vs, kind, indexCount) >= 0)
+        return srvTurretGunnerBegin(self, vs, kind, indexCount, srvTurretDrawEye(s));
     if (!srv_turret::isFamilyVs(vs)) return false;
     const int family = srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps));
     if (family < 0) return false;
@@ -4312,7 +4324,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Issue 140: the SRV turret view's HUD. After kSkip (a skipped draw is not issued at all), before anything issues: the scope spans every issue of a matched draw below and
     // puts the game's geometry stage back on every way out. Off, this is one relaxed load.
     SrvTurretHudScope turretHud(self);
-    if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self);
+    if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self, kind, count);
     // Issue 140: the radar picture's writers (the terrain schematic and the Scorpion icon), noted so the camera mode can tell the radar's own billboards from the others. One relaxed load otherwise.
     if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw

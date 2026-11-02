@@ -33,16 +33,17 @@
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
 // first translated forward (experimental.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE NINE KEYS (all live, all VR only, 0 = the game's own; the last three are text switches). They are [experimental] keys; every default is the value Sean flew with (2026-11-01, flight
-// e443b0c2), and the shipped ini and the module's literals say the same (the rig pins both):
-//   experimental.srv_turret_camera_back  centimetres, 0..150, default 25: the camera moves back in the turret view, over the turret's axis. Part 1: published as the seated z of the eye alignment
+// THE TEN KEYS (all live, all VR only, 0 = the game's own; three of them are text switches). They are [experimental] keys. The four placement defaults are the camera Sean flew on
+// 2026-11-02 (Frontier, edvr_gfx_20261102_040458, settled from 04:08:34): camera back 90, HUD forward 0, radar forward 0, panels back 110. The scissor stays open and the radar anchor
+// stays camera (with radar forward at 0 those modes match what that flight had set). The shipped ini and the module's literals say the same (the rig pins both):
+//   experimental.srv_turret_camera_back  centimetres, 0..150, default 90: the camera moves back in the turret view, over the turret's axis. Part 1: published as the seated z of the eye alignment
 //                               (alignTick), the single publisher of that alignment, so its serials stay coherent.
-//   experimental.srv_turret_hud_forward  centimetres, 0..150, default 65: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
+//   experimental.srv_turret_hud_forward  centimetres, 0..150, default 0: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
 //                               (seated -z), so the panels sit in front of the head as they did with the old camera move, without the camera moving for it.
-//   experimental.srv_turret_radar_forward centimetres, 0..150, default 50: the same for the radar group (Group::kRadar), instead of the HUD-forward value, so it can stay near field and be seen
+//   experimental.srv_turret_radar_forward centimetres, 0..150, default 0: the same for the radar group (Group::kRadar), instead of the HUD-forward value, so it can stay near field and be seen
 //                               from above (carried level with the head the disc is seen edge-on).
-//   experimental.srv_turret_panels_back  centimetres, 0..200, default 135: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
-//                               the anchor; the larger panels of the same families, at 1.3 m and more, stay. Part 2: a private pass-through geometry shader per output signature
+//   experimental.srv_turret_panels_back  centimetres, 0..200, default 110: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
+//                               the anchor; vertices past 1 m are the systems-near window, which a flight did not see move the power panel. Part 2: a private pass-through geometry shader per output signature
 //                               (srv_turret_hud_shader.h) around every issue of the families' draws; the rule is per vertex.
 //   experimental.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
 //   experimental.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
@@ -52,6 +53,10 @@
 //                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
+//   experimental.srv_turret_systems_near centimetres, 0..200, default 0: meant for the vehicle power and systems panel. What it writes now is a second radial window on the two hologram
+//                               families, vertices further than 1 m from the anchor and no further than 4 m, this much nearer along the ray. A flight at 40 cm did not move the panel. The Escape menu
+//                               is a different mesh and is not bound: translating it locked the headset view. The weapon panels inside 1 m stay on panels_back. The reticle, past 4 m, stays. A pull
+//                               reaches a vertex only when it is further than the pull plus 10 cm (and further than 1 m). 0 leaves the game's own depth.
 //   experimental.srv_turret_radar_anchor on | reversed | off | camera, default camera (THE RADAR'S OWN CAMERA below). on: the radar's terrain schematic (the volume the disc's picture is drawn from, about
 //                               0.44 m behind the eye at the stock camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the turret's seated forward (on) or against it (reversed), put
 //                               in the anchor's axes: a hook on its placement setter adds the offset to the translation the game sets (srv_radar_anchor.cpp, build 334925 only). While the placement holds that offset the
@@ -81,11 +86,14 @@ namespace edvr {
 namespace srv_turret {
 
 // ---- the keys -------------------------------------------------------------------------------------------------------------------------------------------------
-inline constexpr int kBackDefaultCm = 25, kBackMaxCm = 150;   // experimental.srv_turret_camera_back
-inline constexpr int kForwardDefaultCm = 65, kForwardMaxCm = 150;   // experimental.srv_turret_hud_forward
-inline constexpr int kRadarForwardDefaultCm = 50, kRadarForwardMaxCm = 150;   // experimental.srv_turret_radar_forward
+inline constexpr int kBackDefaultCm = 80, kBackMaxCm = 150;   // experimental.srv_turret_camera_back
+inline constexpr int kForwardDefaultCm = 0, kForwardMaxCm = 150;   // experimental.srv_turret_hud_forward
+inline constexpr int kRadarForwardDefaultCm = 0, kRadarForwardMaxCm = 150;   // experimental.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
-inline constexpr int kPanelsDefaultCm = 135, kRadarDefaultCm = 0, kPushMaxCm = 200;   // experimental.srv_turret_panels_back and experimental.srv_turret_radar_back
+inline constexpr int kPanelsDefaultCm = 0, kRadarDefaultCm = 0, kPushMaxCm = 200;   // experimental.srv_turret_panels_back and experimental.srv_turret_radar_back
+inline constexpr int kSystemsNearDefaultCm = 70, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 70 is the distance kept on 2026-11-02.
+inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
+inline constexpr int kGunnerUpDefaultCm = 0, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
@@ -94,7 +102,7 @@ enum class DepthMode : uint8_t { kGame = 0, kReal = 1, kFront = 2 };
 // The key's default, as the module's literal and the shipped ini say it (the rig pins both): game, the value Sean flew with.
 inline constexpr DepthMode kDepthDefault = DepthMode::kGame;
 inline constexpr const char* kDepthDefaultText = "game";
-inline constexpr const char* kScissorDefaultText = "open";   // experimental.srv_turret_hud_scissor: open (the other: game)
+inline constexpr const char* kScissorDefaultText = "game";   // experimental.srv_turret_hud_scissor: game (the other: open). game is the screen limit kept on 2026-11-02.
 inline const char* depthModeName(DepthMode m) { return m == DepthMode::kReal ? "real" : m == DepthMode::kFront ? "front" : "game"; }
 // The key's text; anything else is the default (the settings line says which it took).
 inline DepthMode depthModeOf(const char* text) {
@@ -106,8 +114,8 @@ inline DepthMode depthModeOf(const char* text) {
 // 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset. camera (the default, flown OK in flight e443b0c2): the placement
 // is the game's own, and the radar's schematic CAMERA is moved back by the radar-forward key instead (THE RADAR'S OWN CAMERA below).
 enum class RadarAnchorMode : uint8_t { kOn = 0, kReversed = 1, kOff = 2, kCamera = 3 };
-inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kCamera;
-inline constexpr const char* kRadarAnchorDefaultText = "camera";
+inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kOff;
+inline constexpr const char* kRadarAnchorDefaultText = "off";
 inline const char* radarAnchorModeName(RadarAnchorMode m) {
     return m == RadarAnchorMode::kReversed ? "reversed" : m == RadarAnchorMode::kOff ? "off" : m == RadarAnchorMode::kCamera ? "camera" : "on";
 }
@@ -117,7 +125,7 @@ inline RadarAnchorMode radarAnchorModeOf(const char* text) {
     if (text && !std::strcmp(text, "reversed")) return RadarAnchorMode::kReversed;
     if (text && !std::strcmp(text, "off")) return RadarAnchorMode::kOff;
     if (text && !std::strcmp(text, "camera")) return RadarAnchorMode::kCamera;
-    return kRadarAnchorDefault;   // anything else, and nothing: the default (camera)
+    return kRadarAnchorDefault;   // anything else, and nothing: the default (off)
 }
 // Signature H's geometry shader reads the draw's vertex constants at GS slot 1: the draw's own VS slot 1, rows 277 to 279 the camera's right, up and forward in world axes.
 inline constexpr uint32_t kGameCbSlot = 1;
@@ -162,7 +170,7 @@ struct Signature {
     SigElement el[kMaxSigElements];
     bool psReadsPosition;        // the family's pixel shader also reads SV_POSITION.xy
 };
-inline constexpr uint32_t kSignatureCount = 8;
+inline constexpr uint32_t kSignatureCount = 9;
 inline constexpr Signature kSignatures[kSignatureCount] = {
     {"1989E6D3", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 6, 3}, {"SV_Position", 0, 4}}, false},
     {"2CECEC30", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 7, 2}, {"SV_Position", 0, 4}}, true},
@@ -172,6 +180,7 @@ inline constexpr Signature kSignatures[kSignatureCount] = {
     {"9611A454", 3, {{"__USER_RADAR_LOCALKEY_COLOUR", 0, 3}, {"__USER_RADAR_LOCALKEY_POSITIONOFFSET", 0, 2}, {"SV_Position", 0, 4}}, false},
     {"B932058F", 2, {{"__USER_RADAR_LOCALKEY_COLOUR", 0, 3}, {"SV_Position", 0, 4}}, false},
     {"5559BD94", 3, {{"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3}, {"__USER_VERTEX_M_TEXCOORD", 0, 2}, {"SV_Position", 0, 4}}, true},
+    {"5DAD41AA", 2, {{"TEXCOORD", 0, 4}, {"SV_Position", 0, 4}}, false},
 };
 // The floats of one vertex as the vertex shader writes it (the signature), and where the clip position, the last element, starts in it. The geometry shader writes the signature and then one
 // more element, `pre` (kPreSemantic, 4 floats): the clip position as the game made it, before the move. The pixel shaders do not read it and nothing in the module reads it back.
@@ -531,7 +540,9 @@ constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 ||
 // ones the game projects with, the eye jitter included), translates it forward by T (experimental.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
 // a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre, when a camera key changes and when the head stays far from it; the eye's view of it is A_eye), judged on the
 // distance of the translated vertex from A:
-//     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q, for any Q.z (the reprojection is linear in Q)
+//     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d
+//     else if (gap2 != 0 and dMin2 < d < dMax2)   Q = A + V (d - gap2) / d   else   Q = P1;   reproject Q, for any Q.z (the reprojection is linear in Q)
+// The second window is experimental.srv_turret_systems_near on the panels group. It is not confirmed as the power panel. The first window wins when a vertex is in both.
 // gap < 0 is the push-back (deeper), gap > 0 the pull (nearer). The result keeps the NDC z of the vertex (z' = ndcZ w') when that is a valid depth, so the game's own depth values stand;
 // otherwise ndcZ = kFallbackNdcZ. Elite is REVERSED Z with an infinite far plane (cb0[6] = (0, 0, 0, 0.025): clip z is the constant 0.025, NDC z = 0.025 / w): a vertex the game had
 // behind the eye (w < 0) or inside its 2.5 cm near plane (0 < w < 0.025, z / w above 1) has no valid depth, and the moved vertex would fail the rasterizer's depth clip (0 <= z <= w) and
@@ -553,26 +564,29 @@ inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor,
 // triangle's centre onto the target in tx, ty, tz, and anchoredMove has no copy of it.
 inline constexpr float kContentInvZMax = 20.0f;   // z_c of 5 cm or more
 
-// The geometry shader's constant buffer (GS slot 0, which the game never binds): four registers.
-//   [0] gap, dMin, dMax, depth       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
+// The geometry shader's constant buffer (GS slot 0, which the game never binds): five registers.
+//   [0] gap, dMin, dMax, depth       the near move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
 //   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
 //   [2] ax, ay, az, lock             the anchor in the eye's space: X right, Y up, Z forward (= clip w); lock: THE LOCK above, 0 as the module writes it
 //   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes; invZc: 1 / the content depth z_c (THE CONTENT DEPTH above), 0 as the module writes it
+//   [4] gap2, dMin2, dMax2, 0        a second radial window. experimental.srv_turret_systems_near writes it for the panels group. It is not the Escape menu.
 struct TurretParams {
     float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float ax = 0.0f, ay = 0.0f, az = 0.0f, lock = 0.0f;
     float tx = 0.0f, ty = 0.0f, tz = 0.0f, invZc = 0.0f;
+    float gap2 = 0.0f, dMin2 = 0.0f, dMax2 = 0.0f, pad2 = 0.0f;   // the systems panel's pull; pad2 stays 0
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
-static_assert(sizeof(TurretParams) == 64, "the turret shader's cbuffer is four 16-byte registers");
+static_assert(sizeof(TurretParams) == 80, "the turret shader's cbuffer is five 16-byte registers");
 
 // One eye's side of the constants for a frame: its tangents (jitter included), the anchor and the HUD-forward translation, both in the eye's space (X right, Y up, Z forward).
 struct EyeFrame {
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float a[3] = {0.0f, 0.0f, 0.0f};
-    float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation (experimental.srv_turret_hud_forward)
+    float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation: HUD forward, plus the weapon panel's seat-up (experimental.srv_turret_hud_up)
     float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (experimental.srv_turret_radar_forward)
+    float tNear[3] = {0.0f, 0.0f, 0.0f};    // the gunner panel: toward the camera (experimental.srv_turret_systems_near) plus its seat-up (experimental.srv_turret_gunner_up)
 };
 
 // The constants with the depth mode written (the module applies the key to whatever paramsForGroup made).
@@ -604,43 +618,92 @@ inline TurretParams pushParamsFor(const EyeFrame& e, float backM, Group group = 
 // The translation alone: no radial move (gap 0), every vertex moves by T.
 inline TurretParams translateParamsFor(const EyeFrame& e, Group group = Group::kPanels) { return makeParams(e, 0.0f, kPushNearM, kPushSplitM, group); }
 
-// Which constants a group's draws run with, from its push key, the gap key and its forward key (centimetres; the panels' is experimental.srv_turret_hud_forward, the radar's
-// experimental.srv_turret_radar_forward): the push when above 0, else the pull when the gap is above 0, else the translation alone when the group's forward key is above 0 (the eye frame's T for the
-// group carries it), else none (false: the draw goes through as the game made it). The group's translation is in every case.
-inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm, int forwardCm, TurretParams& out) {
-    if (pushCm > 0) {
+// The curved game panel's pull (experimental.srv_turret_systems_near), on constants that already carry the group's near window. Positive centimetres become metres nearer. The window starts at
+// 1 m or at the pull plus 10 cm, whichever is further, and ends at 4 m, so a vertex the weapon push already owns (inside 1 m) is not also pulled, and d - gap2 stays positive.
+inline void applySystemsNear(TurretParams& p, int nearCm) {
+    if (nearCm <= 0) {
+        p.gap2 = p.dMin2 = p.dMax2 = p.pad2 = 0.0f;
+        return;
+    }
+    const int cm = nearCm > kSystemsNearMaxCm ? kSystemsNearMaxCm : nearCm;
+    p.gap2 = static_cast<float>(cm) / 100.0f;
+    const float margin = p.gap2 + kWindowNearM;
+    p.dMin2 = margin > kPushSplitM ? margin : kPushSplitM;
+    p.dMax2 = kWindowFarM;
+    p.pad2 = 0.0f;
+}
+
+// Which constants a group's draws run with, from its push key, the gap key and its forward key (the panels' forward key is experimental.srv_turret_hud_forward, the radar's
+// experimental.srv_turret_radar_forward): the push when above 0, else the pull when the gap is above 0, else the translation alone when the group's forward key is above 0, else none
+// (false: the draw goes through as the game made it). experimental.srv_turret_systems_near is not one of these windows. It moves the gunner panel on its own draws (gunnerParamsFor).
+// hudUpCm opens the panels group when it is the only panels key above 0; the metres are already in e.t (eyeFrameFrom). The radar group ignores it.
+inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm, int forwardCm, TurretParams& out, int systemsNearCm = 0, int hudUpCm = 0) {
+    (void)systemsNearCm;
+    if (pushCm > 0)
         out = pushParamsFor(e, static_cast<float>(pushCm > kPushMaxCm ? kPushMaxCm : pushCm) / 100.0f, group);
-        return true;
-    }
-    if (gapCm > 0) {
+    else if (gapCm > 0)
         out = paramsFor(e, static_cast<float>(gapCm > kGapMaxCm ? kGapMaxCm : gapCm) / 100.0f, group);
-        return true;
-    }
-    if (forwardCm > 0) {
+    else if (forwardCm > 0 || (group == Group::kPanels && hudUpCm > 0))
         out = translateParamsFor(e, group);
-        return true;
-    }
-    return false;
+    else
+        return false;
+    return true;
+}
+
+// The gunner camera's curved panel (dump 050105383001). The sheet is vs 5DAD41AA at 2016 indices. The two cards on it, CASPIAN EXPLORER and SYSTEMS, are vs C4B4B334 at 288 indices.
+// The Escape menu is the 360-index draws of those shaders and is not this. The centre reticle is vs E5086486 and is not this. Positive centimetres move the whole panel toward the camera
+// along the turret, the same axis as the HUD-forward key, and the depth written stays the game's own.
+inline constexpr uint64_t kGunnerSheetVs = 0x5DAD41AA66757CE3ull;
+inline constexpr uint64_t kGunnerCardsVs = 0xC4B4B334B26E81A9ull;
+inline constexpr uint32_t kGunnerSheetIndices = 2016;
+inline constexpr uint32_t kGunnerCardsIndices = 288;
+inline constexpr int kGunnerCardsSignature = 1;
+inline constexpr int kGunnerSheetSignature = 8;
+static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature + 1 == kSignatureCount && kSignatures[kGunnerCardsSignature].el[1].index == 7 && kSignatures[kGunnerSheetSignature].count == 2,
+              "the gunner cards use the hologram signature B, and the sheet is the last signature");
+inline int gunnerSignature(uint64_t vs, char kind, uint32_t indexCount) {
+    if (kind != 'I' && kind != 'X') return -1;
+    if (vs == kGunnerCardsVs && indexCount == kGunnerCardsIndices) return kGunnerCardsSignature;
+    if (vs == kGunnerSheetVs && indexCount == kGunnerSheetIndices) return kGunnerSheetSignature;
+    return -1;
 }
 inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g == Group::kPanels ? hudForwardCm : radarForwardCm; }
 inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPanels ? panelsCm : radarCm; }
 
-// The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
-// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; the depth mode one of 0, 1 and 2; 1 / the content depth in [0, 20] (z_c of 5 cm or more,
-// or none); the lock 0 or 1; and a move that does something (a gap or a translation).
+// The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| and |gap2| <= 2 m; a window that moves starts above its gap and above 0
+// (dMax > dMin > max(gap, 0)), so the divisor d - gap is positive; an empty near window is allowed only while the systems pull (gap2) is the move; r > l and up > dn; the anchor and the
+// translation within 2 m; the depth mode one of 0, 1 and 2; 1 / the content depth in [0, 20] (z_c of 5 cm or more, or none); the lock 0 or 1; the systems register's pad 0; and a move that
+// does something (a gap, a translation, or the systems pull).
 inline bool paramsUsable(const TurretParams& p) {
-    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc};
+    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc, p.gap2, p.dMin2, p.dMax2, p.pad2};
     for (float f : all)
         if (!std::isfinite(f)) return false;
     if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;
     if (p.lock != 0.0f && p.lock != 1.0f) return false;
     if (p.depth != 0.0f && p.depth != 1.0f && p.depth != 2.0f) return false;
-    if (!(std::fabs(p.gap) <= kAnchorLimitM)) return false;
-    if (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin)) return false;
+    if (p.pad2 != 0.0f) return false;
+    if (!(std::fabs(p.gap) <= kAnchorLimitM) || !(std::fabs(p.gap2) <= kAnchorLimitM)) return false;
+    const bool farMoves = p.gap2 != 0.0f;
+    const bool nearIdle = p.gap == 0.0f && !(p.dMax > p.dMin);   // the systems pull alone: the near window matches nothing
+    if (!nearIdle && (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin))) return false;
+    if (farMoves && (!(p.dMin2 > p.gap2) || !(p.dMin2 > 0.0f) || !(p.dMax2 > p.dMin2))) return false;
     if (!(p.r > p.l) || !(p.up > p.dn)) return false;
     const double a2 = double(p.ax) * p.ax + double(p.ay) * p.ay + double(p.az) * p.az, t2 = double(p.tx) * p.tx + double(p.ty) * p.ty + double(p.tz) * p.tz;
     if (!(a2 < double(kAnchorLimitM) * kAnchorLimitM) || !(t2 <= double(kAnchorLimitM) * kAnchorLimitM)) return false;
-    return p.gap != 0.0f || t2 > 0.0;
+    return p.gap != 0.0f || t2 > 0.0 || farMoves;
+}
+
+// After paramsUsable: the gunner panel's constants are a pure translation toward the camera, depth mode game.
+inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out) {
+    const double t2 = double(e.tNear[0]) * e.tNear[0] + double(e.tNear[1]) * e.tNear[1] + double(e.tNear[2]) * e.tNear[2];
+    if (!(t2 > 0.0)) return false;
+    out = makeParams(e, 0.0f, 0.0f, 0.0f);
+    out.tx = e.tNear[0];
+    out.ty = e.tNear[1];
+    out.tz = e.tNear[2];
+    out.depth = 0.0f;
+    out.gap2 = out.dMin2 = out.dMax2 = out.pad2 = 0.0f;
+    return paramsUsable(out);
 }
 
 // Whether a vertex's own NDC depth (clip z / w) is a valid one for Elite's reversed Z: w > 0 and 0 <= z / w <= 1. A vertex the game put behind the eye, or inside the 2.5 cm near plane, is not.
@@ -671,11 +734,12 @@ inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* befo
     const T V[3] = {P1[0] - T(p.ax), P1[1] - T(p.ay), P1[2] - T(p.az)};
     const T d = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
     const bool inWindow = d > T(p.dMin) && d < T(p.dMax);
+    const bool farWindow = !inWindow && p.gap2 != 0.0f && d > T(p.dMin2) && d < T(p.dMax2);   // the systems-near window; the near window wins when both match
     const bool translated = p.tx != 0.0f || p.ty != 0.0f || p.tz != 0.0f;
-    if (!translated && !inWindow) return false;
+    if (!translated && !inWindow && !farWindow) return false;
     T Q[3] = {P1[0], P1[1], P1[2]};
-    if (inWindow) {
-        const T k = (d - T(p.gap)) / d;
+    if (inWindow || farWindow) {
+        const T k = (d - (inWindow ? T(p.gap) : T(p.gap2))) / d;
         Q[0] = T(p.ax) + V[0] * k;
         Q[1] = T(p.ay) + V[1] * k;
         Q[2] = T(p.az) + V[2] * k;
@@ -818,12 +882,23 @@ public:
 // eye's frame is v = R_e^T (A - E), turned into the shader's axes (x, y, -z) so that Z is the forward distance (clip w). The HUD-forward translation is (0, 0, -F) in the seated frame
 // (forward), turned the same way, for each group's forward distance (the panels', the radar's). tangents are {left, right, down, up} plus the eye jitter's tangent shift (the game
 // projects with those). False when anything is not finite or the tangents are not a frustum.
-inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, double radarForwardM, const float tangents[4], EyeFrame& out) {
+// A translation longer than the shader accepts (2 m) is shortened along itself, so a forward move and an up move together still run.
+inline void limitTranslation(float t[3]) {
+    const double l2 = double(t[0]) * t[0] + double(t[1]) * t[1] + double(t[2]) * t[2];
+    const double lim2 = double(kAnchorLimitM) * kAnchorLimitM;
+    if (!(l2 > lim2)) return;
+    const float s = static_cast<float>(double(kAnchorLimitM) / std::sqrt(l2));
+    t[0] *= s;
+    t[1] *= s;
+    t[2] *= s;
+}
+
+inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, double radarForwardM, const float tangents[4], EyeFrame& out, double nearM = 0.0, double hudUpM = 0.0, double gunnerUpM = 0.0) {
     for (int i = 0; i < 12; ++i)
         if (!std::isfinite(head[i]) || !std::isfinite(eyeToHead[i])) return false;
     for (int i = 0; i < 4; ++i)
         if (!std::isfinite(tangents[i])) return false;
-    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM) || !std::isfinite(radarForwardM)) return false;
+    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM) || !std::isfinite(radarForwardM) || !std::isfinite(nearM) || !std::isfinite(hudUpM) || !std::isfinite(gunnerUpM)) return false;
     double R[3][3], E[3];
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
@@ -833,12 +908,15 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
         E[i] = head[i * 4 + 3];
         for (int k = 0; k < 3; ++k) E[i] += double(head[i * 4 + k]) * eyeToHead[k * 4 + 3];
     }
-    double v[3], tv[3], tr[3];
+    double v[3], tv[3], tr[3], tn[3], hu[3], gu[3];
     for (int j = 0; j < 3; ++j) {
         v[j] = 0.0;
         for (int i = 0; i < 3; ++i) v[j] += R[i][j] * (anchor[i] - E[i]);
         tv[j] = R[2][j] * (-forwardM);        // R^T (0, 0, -F)
         tr[j] = R[2][j] * (-radarForwardM);   // ... for the radar
+        tn[j] = R[2][j] * nearM;              // the opposite way: toward the camera, for the gunner panel
+        hu[j] = R[1][j] * hudUpM;             // R^T (0, U, 0): seat up, for the weapon panel
+        gu[j] = R[1][j] * gunnerUpM;          // the same axis, for the gunner panel
     }
     out.l = tangents[0];
     out.r = tangents[1];
@@ -853,8 +931,20 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
     out.tRadar[0] = static_cast<float>(tr[0]);
     out.tRadar[1] = static_cast<float>(tr[1]);
     out.tRadar[2] = static_cast<float>(-tr[2]);
+    out.tNear[0] = static_cast<float>(tn[0]);
+    out.tNear[1] = static_cast<float>(tn[1]);
+    out.tNear[2] = static_cast<float>(-tn[2]);
+    out.t[0] += static_cast<float>(hu[0]);
+    out.t[1] += static_cast<float>(hu[1]);
+    out.t[2] += static_cast<float>(-hu[2]);
+    out.tNear[0] += static_cast<float>(gu[0]);
+    out.tNear[1] += static_cast<float>(gu[1]);
+    out.tNear[2] += static_cast<float>(-gu[2]);
+    limitTranslation(out.t);
+    limitTranslation(out.tNear);
     return std::isfinite(out.a[0]) && std::isfinite(out.a[1]) && std::isfinite(out.a[2]) && std::isfinite(out.t[0]) && std::isfinite(out.t[1]) && std::isfinite(out.t[2]) &&
-           std::isfinite(out.tRadar[0]) && std::isfinite(out.tRadar[1]) && std::isfinite(out.tRadar[2]);
+           std::isfinite(out.tRadar[0]) && std::isfinite(out.tRadar[1]) && std::isfinite(out.tRadar[2]) && std::isfinite(out.tNear[0]) && std::isfinite(out.tNear[1]) &&
+           std::isfinite(out.tNear[2]);
 }
 
 // P00 of an eye's projection as Elite renders it, from the tangents {left, right, down, up}: the NDC span 2 over the tangent span. 0 when the tangents are not a frustum (the log prints it).

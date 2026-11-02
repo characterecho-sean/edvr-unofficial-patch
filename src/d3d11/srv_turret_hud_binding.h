@@ -217,7 +217,7 @@ inline void release(T*& value) {
     if (p) guarded("srv.turret.release", [&] { p->Release(); });
 }
 
-// One 64-byte buffer per eye, made on first use and rewritten (UpdateSubresource) only when a number changes, never per draw. A failed create or write is not
+// One 80-byte buffer per eye, made on first use and rewritten (UpdateSubresource) only when a number changes, never per draw. A failed create or write is not
 // retried on that device: get() answers null and the caller declines.
 class Constants {
     ID3D11Device* device_ = nullptr;  // identity only: the buffer holds its device alive, so the address cannot be reused
@@ -232,8 +232,8 @@ public:
     ~Constants() { reset(); }
 
     ID3D11Buffer* get(ID3D11DeviceContext* ctx, const TurretParams& p) {
-        // paramsUsable (srv_turret_math.h): finite; a pull is a positive gap and a push a negative one, up to 2 m; the window of anchor distances starts above the gap and above 0 (the
-        // divisor d - gap stays positive); a frustum; an anchor and a translation within 2 m; and a move that does something (a gap, or a translation with a gap of 0).
+        // paramsUsable (srv_turret_math.h): finite; a pull is a positive gap and a push a negative one, up to 2 m; a window that moves starts above its gap and above 0 (the
+        // divisor d - gap stays positive); the systems pull is the same on its own register; a frustum; an anchor and a translation within 2 m; and a move that does something.
         if (!ctx || !paramsUsable(p)) return nullptr;
         ID3D11Device* d = nullptr;
         if (!guarded("srv.turret.constants.device", [&] { ctx->GetDevice(&d); }) || !d) {

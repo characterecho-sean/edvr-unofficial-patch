@@ -1,10 +1,12 @@
 #pragma once
 // The SRV turret HUD's private geometry shaders (srv_turret.h says why): one pass-through for each distinct vertex-shader OUTPUT SIGNATURE among the families that draw the turret
-// view's HUD (srv_turret_math.h: kFamilies, kSignatures). Compiled at BUILD time by tools/temporal_shader_build into kSrvTurretHudGs<X>Bytecode (never in the game), created by
+// view's HUD (srv_turret_math.h: kFamilies, kSignatures). experimental.srv_turret_systems_near writes a second radial window on the panels group (vertices past 1 m and under 4 m). That window is not
+// confirmed as the power and systems panel. Compiled at BUILD time by tools/temporal_shader_build into kSrvTurretHudGs<X>Bytecode (never in the game), created by
 // shaderSwapCreateGs.
 //
 // WHAT IT DOES. In the turret view the weapon panels (the weapon arc brackets, the weapon names, the ammo counts, the INFO strip) are drawn from records about 0.27 to 0.70 m
-// from the eye, the radar from 0.11 to 0.44 m, and the larger panels (SYSTEMS, the location panel) from 1.3 m and more. Every shader below is the same triangle-list pass-through
+// from the eye, the radar from 0.11 to 0.44 m, and the larger hologram panels from 1.3 m and more. The systems-near window covers those larger-panel vertices and leaves the weapon panels inside 1 m alone.
+// Every shader below is the same triangle-list pass-through
 // that moves each vertex in 3D (one shared function, turretMove, so the eight copies cannot drift): it reconstructs the vertex's eye-space position P from its clip position and the
 // eye's projection tangents (left, right, down, up as the game projects, the eye jitter included; NDC y is up), translates it by T (the HUD-forward key; every vertex), moves it along
 // its ray from the ANCHOR A (a fixed point in the seated frame, in the eye's space here) by `gap` metres nearer (a NEGATIVE gap: deeper, the push-back) when its distance from A lies in
@@ -33,8 +35,8 @@
 // names (the radar and hologram families); the position is always the last member, named `pos`. A pixel shader that also reads SV_POSITION.xy takes the rasterizer's, which is not an
 // interpolant, so it needs nothing here.
 //
-// THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): four registers, srv_turret_math.h's TurretParams -- {gap, dMin, dMax, depth mode}, {left, right, down, up},
-// {the anchor in the eye's space: X right, Y up, Z forward; the lock}, {the translation in the same axes, and 1 / the content depth or 0}.
+// THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): five registers, srv_turret_math.h's TurretParams -- {gap, dMin, dMax, depth mode}, {left, right, down, up},
+// {the anchor in the eye's space: X right, Y up, Z forward; the lock}, {the translation in the same axes, and 1 / the content depth or 0}, {the curved game panel's pull: gap2, dMin2, dMax2, 0}.
 //
 // THE LOCK (an.w = 1; srv_turret_math.h THE LOCK; only the radar billboards' draw-time correction sets it): tr.xyz is then the billboard's target in the eye's space, and every vertex of a
 // triangle moves by tr.xyz - C, C the midpoint of the triangle's longest edge, its eye-space points rebuilt from the game's clip positions (turretLockCentre). A quad's two triangles share
@@ -54,6 +56,7 @@
 //   F  vs 9611A454527F7FEB + ps 1E1C49DC51C0E509                           RADAR_LOCALKEY_COLOUR xyz, RADAR_LOCALKEY_POSITIONOFFSET xy, SV_POSITION
 //   G  vs B932058F26B76691 + ps 65861AC394D51526                           RADAR_LOCALKEY_COLOUR xyz, SV_POSITION
 //   H  vs 5559BD94B6852E83 + ps EA02FAC2BD6C643C or E95634B0F61D218F        M_LIGHTINGPOSITION xyz, M_TEXCOORD xy, SV_POSITION (the Scorpion's hologram: the near quad of ps EA02FAC2, and the target hologram sphere)
+//   I  vs 5DAD41AA66757CE3                                      the gunner camera's curved sheet, 2016 indices only   TEXCOORD0 xyzw, SV_POSITION
 namespace edvr {
 
 // The shader text: EDVR_SRV_TURRET_GS_HEAD (the constant buffer and the opening of the `Vertex` struct), the members, EDVR_SRV_TURRET_GS_TAIL (the struct's end and the pass-through).
@@ -65,6 +68,7 @@ namespace edvr {
     "    float4 tn;   // the eye's tangents as the game projects: x left, y right, z down, w up\n" \
     "    float4 an;   // the anchor in the eye's space: X right, Y up, Z forward (= clip w)\n" \
     "    float4 tr;   // the translation (HUD forward) in the same axes; w: 1 / the content depth (the radar billboards' correction: the translation scaled by w / z_c), else 0\n" \
+    "    float4 fr;   // the curved game panel: x gap2, metres nearer; y dMin2 and z dMax2, the window past 1 m. The near window (mv) wins when both match. w stays 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -76,10 +80,12 @@ namespace edvr {
     "    const float3 v = p1 - an.xyz;\n" \
     "    const float d = length(v);\n" \
     "    const bool win = d > mv.y && d < mv.z;\n" \
+    "    const bool far = !win && fr.x != 0.0 && d > fr.y && d < fr.z;\n" \
     "    const bool tra = any(tr.xyz != 0.0);\n" \
-    "    if (!win && !tra) return c;\n" \
+    "    if (!win && !far && !tra) return c;\n" \
     "    float3 q = p1;\n" \
     "    if (win) q = an.xyz + v * ((d - mv.x) / d);\n" \
+    "    else if (far) q = an.xyz + v * ((d - fr.x) / d);\n" \
     "    dq = q - p;\n" \
     "    const float zn = c.z / w;\n" \
     "    float ndcZ = (w > 0.0 && zn >= 0.0 && zn <= 1.0) ? zn : 0.999;\n" \
@@ -187,6 +193,12 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     EDVR_SRV_TURRET_GS_TAIL_B
     "        o.v.l += g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z;\n"
     EDVR_SRV_TURRET_GS_TAIL_C;
+
+// The gunner camera's curved sheet (vs 5DAD41AA66757CE3, 2016 indices). The cards on that sheet use signature B.
+constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
+    "    float4 t0 : TEXCOORD0;\n"
+    "    float4 pos : SV_Position;"
+    EDVR_SRV_TURRET_GS_TAIL;
 
 #undef EDVR_SRV_TURRET_GS_HEAD
 #undef EDVR_SRV_TURRET_GS_TAIL

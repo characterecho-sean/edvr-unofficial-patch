@@ -505,8 +505,8 @@ static void mathCases() {
     check(std::fabs(st::p00OfTangents(asym) - 2.0f / 1.9f) < 1e-5f, "...for an off-centre frustum too");
     const float flat[4] = {0.5f, 0.5f, -1, 1}, nan[4] = {NAN, 1, -1, 1};
     check(st::p00OfTangents(flat) == 0.0f && st::p00OfTangents(nan) == 0.0f && st::p00OfTangents(nullptr) == 0.0f, "tangents that are no frustum give no P00");
-    check(sizeof(st::TurretParams) == 64 && st::kPreFloats == 4 && !std::strcmp(st::kPreSemantic, "TURRETPRE"),
-          "the constants are four registers (64 bytes); the shader's own `pre` output is four floats named TURRETPRE");
+    check(sizeof(st::TurretParams) == 80 && st::kPreFloats == 4 && !std::strcmp(st::kPreSemantic, "TURRETPRE"),
+          "the constants are five registers (80 bytes); the shader's own `pre` output is four floats named TURRETPRE");
     {   // the eye's frame from the host's pose: the anchor and the HUD-forward translation in the shader's axes (X right, Y up, Z forward)
         const float tn[4] = {-1.0f, 1.2f, -0.9f, 1.1f};
         const float level[12] = {1, 0, 0, 0.1f, 0, 1, 0, 0.2f, 0, 0, 1, 0.3f}, leftEye[12] = {1, 0, 0, -0.03f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
@@ -541,6 +541,15 @@ static void mathCases() {
         bad[3] = NAN;
         const float noFrustum[4] = {1.0f, 1.0f, -1.0f, 1.0f};
         check(!st::eyeFrameFrom(bad, leftEye, atHead, 0.7, 0.4, tn, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, 0.4, noFrustum, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, NAN, tn, e), "a pose that is not finite, or tangents that are no frustum, give no frame");
+        st::EyeFrame raised;
+        check(st::eyeFrameFrom(level, leftEye, atHead, 0.0, 0.0, tn, raised, 0.65, 0.25, 0.40) && std::fabs(raised.t[0]) < 1e-6f && std::fabs(raised.t[1] - 0.25f) < 1e-6f && std::fabs(raised.t[2]) < 1e-6f &&
+                  std::fabs(raised.tRadar[0]) < 1e-6f && std::fabs(raised.tRadar[1]) < 1e-6f && std::fabs(raised.tRadar[2]) < 1e-6f && std::fabs(raised.tNear[0]) < 1e-6f && std::fabs(raised.tNear[1] - 0.40f) < 1e-6f &&
+                  std::fabs(raised.tNear[2] + 0.65f) < 1e-6f,
+              "a level head: 25 cm of weapon-panel up is +0.25 on Y, 40 cm of gunner up is +0.40 on Y, and 65 cm nearer is -0.65 on Z; the radar does not rise");
+        st::EyeFrame capped;
+        check(st::eyeFrameFrom(level, leftEye, atHead, 0.0, 0.0, tn, capped, 2.0, 0.0, 1.0), "a gunner move past 2 m still builds a frame");
+        const double cappedLen = std::sqrt(double(capped.tNear[0]) * capped.tNear[0] + double(capped.tNear[1]) * capped.tNear[1] + double(capped.tNear[2]) * capped.tNear[2]);
+        check(std::fabs(cappedLen - 2.0) < 1e-5 && capped.tNear[1] > 0.8f && capped.tNear[2] < -1.7f, "a 2 m nearer move plus 1 m up is shortened to 2 m and still points up and toward the camera");
     }
     {   // the anchor: followed for the settle, then latched; taken again on a key change, a recentre; cleared with the view
         st::AnchorTracker tr;
@@ -747,6 +756,32 @@ static void mathCases() {
         check(st::paramsForGroup(e, P, 0, 96, 70, out) && out == st::paramsFor(e, 0.96f), "no push and the gap above 0: the pull");
         check(st::paramsForGroup(e, P, 0, 0, 70, out) && out == st::translateParamsFor(e) && out.gap == 0.0f, "no push and no gap but HUD forward: the translation alone (gap 0)");
         check(!st::paramsForGroup(e, P, 0, 0, 0, out), "all three at 0: no constants (the draw is the game's own)");
+        check(!st::paramsForGroup(e, P, 0, 0, 0, out, 40) && !st::paramsForGroup(e, R, 0, 0, 0, out, 40),
+              "the systems-near key does not move the hologram families");
+        {
+            st::EyeFrame lifted = e;
+            lifted.t[1] = 0.25f;
+            check(st::paramsForGroup(lifted, P, 0, 0, 0, out, 0, 25) && std::fabs(out.ty - 0.25f) < 1e-6f && out.tz == e.t[2],
+                  "the weapon-panel height key alone moves that panel up");
+            check(!st::paramsForGroup(lifted, R, 0, 0, 0, out, 0, 25), "the weapon-panel height key does not move the radar");
+        }
+        {
+            st::EyeFrame closer = e;
+            closer.tNear[0] = 0.0f;
+            closer.tNear[1] = 0.0f;
+            closer.tNear[2] = -0.40f;
+            st::TurretParams gunner{};
+            check(st::gunnerParamsFor(closer, gunner) && gunner.gap == 0.0f && gunner.gap2 == 0.0f && gunner.depth == 0.0f && std::fabs(gunner.tz + 0.40f) < 1e-6f && st::paramsUsable(gunner),
+                  "the gunner panel moves 40 cm toward the camera, at the game's own depth");
+            closer.tNear[1] = 0.30f;
+            check(st::gunnerParamsFor(closer, gunner) && gunner.depth == 0.0f && std::fabs(gunner.ty - 0.30f) < 1e-6f && std::fabs(gunner.tz + 0.40f) < 1e-6f,
+                  "the gunner panel's height is the same translation, 30 cm up, and the depth stays the game's own");
+            check(!st::gunnerParamsFor(e, gunner), "a gunner move of 0 leaves the panel as the game placed it");
+            check(st::gunnerSignature(st::kGunnerCardsVs, 'X', 288) == st::kGunnerCardsSignature && st::gunnerSignature(st::kGunnerSheetVs, 'I', 2016) == st::kGunnerSheetSignature &&
+                      st::gunnerSignature(st::kGunnerCardsVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 6) < 0 &&
+                      st::gunnerSignature(0xE508648660A352B2ull, 'X', 6) < 0,
+                  "only the 288-index cards and the 2016-index sheet are the gunner panel; the Escape menu, the small quad and the reticle are not");
+        }
         check(st::paramsForGroup(e, P, 999, 0, 0, out) && out == st::pushParamsFor(e, 2.0f) && st::paramsForGroup(e, P, 0, 999, 0, out) && out == st::paramsFor(e, 2.0f), "a key past its range is held to 200 cm");
         {   // the radar group carries its own translation: the same push, the same frame, a different T
             const float tp[3] = {0.0f, 0.0f, 0.7f}, trd[3] = {0.0f, 0.0f, 0.3f};
@@ -802,7 +837,7 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
     // the families: the pairs, their records, and that the reticle's sprite and the excluded families are not among them
-    check(st::kFamilyCount == 9 && st::kSignatureCount == 8, "nine families (shader pairs) over eight output signatures");
+    check(st::kFamilyCount == 9 && st::kSignatureCount == 9, "nine families (shader pairs) over nine output signatures, the last the gunner sheet");
     struct Pair {
         uint64_t vs, ps;
         const char* name;
@@ -867,9 +902,10 @@ static void mathCases() {
             ok = ok && !st::topologyCarried(t);
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
-    check(st::kBackDefaultCm == 25 && st::kForwardDefaultCm == 65 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 50 && st::kPanelsDefaultCm == 135 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
+    check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
+              st::kSystemsNearDefaultCm == 70 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 0 && st::kGunnerUpMaxCm == 100 &&
               st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
-          "the keys' defaults, the values flown with: camera back 25, HUD forward 65, radar forward 50, panels back 135, radar back 0, gap 0");
+          "the keys' defaults, the 2026-11-02 flight: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, gap 0, systems near 70, weapon panel up 10, gunner up 0");
 }
 
 // ---------------------------------------------------------------- the move, through the stream-output twin of the production shader and of each mutant
@@ -1069,6 +1105,24 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         bool still = true;
         for (size_t i = 0; i < 5; ++i) still = still && std::memcmp(m.pre[i].data(), m.post[i].data(), 16) == 0;
         f.expect(still && std::memcmp(m.pre[5].data(), m.post[5].data(), 16) != 0, "(d) vertices at 1.4 m, 2.8 m and 500 m (the larger panels, the reticle), at 1.0005 m and at 1.9 cm are untouched bit for bit; the one at 0.5 m moved");
+    }
+    {   // (d2) the gunner panel: every vertex moves 40 cm toward the camera, and the game's depth is kept
+        st::EyeFrame frame = frameOfCam(cam);
+        frame.tNear[2] = -0.40f;
+        st::TurretParams p;
+        f.expect(st::gunnerParamsFor(frame, p) && p.depth == 0.0f && std::fabs(p.tz + 0.40f) < 1e-6f && p.gap == 0.0f && p.gap2 == 0.0f,
+                 "(d2) the gunner move is a translation toward the camera at the game's depth");
+        const std::vector<Pt> pts = {dirPt(0, 0, 1, 1.4f), dirPt(0.2f, 0.1f, 1, 2.2f), dirPt(0, 0, 1, 0.5f), dirPt(0.15f, -0.05f, 1, 0.8f)};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(d2) the gunner move: every vertex is the CPU reference's", p, m, 4);
+        bool nearer = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3], pout[3];
+            eyePos(m.pre[i], cam, pin);
+            eyePos(m.post[i], cam, pout);
+            nearer = nearer && closeTo(pout[0], pin[0], 3e-4) && closeTo(pout[1], pin[1], 3e-4) && closeTo(pout[2], pin[2] - 0.40, 3e-4);
+        }
+        f.expect(nearer, "(d2) every vertex of the panel moves 40 cm toward the camera and keeps its sideways place");
     }
     {   // (e) a pull: the first build's gap, window gap + 0.10 to 4.0 m from the anchor
         const float a[3] = {0.10f, 0.05f, 0.0f};
@@ -1396,7 +1450,7 @@ struct SigBytes {
 };
 #define EDVR_RIG_SIG_BYTES(L) {edvr::kSrvTurretHudGs##L##Bytecode, sizeof(edvr::kSrvTurretHudGs##L##Bytecode), edvr::kSrvTurretHudGs##L}
 static const SigBytes kBytes[st::kSignatureCount] = {EDVR_RIG_SIG_BYTES(A), EDVR_RIG_SIG_BYTES(B), EDVR_RIG_SIG_BYTES(C), EDVR_RIG_SIG_BYTES(D), EDVR_RIG_SIG_BYTES(E),
-                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H)};
+                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I)};
 #undef EDVR_RIG_SIG_BYTES
 
 static void linkageCases(int fam, ID3D11GeometryShader* gs) {
@@ -1651,12 +1705,12 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
 // ---------------------------------------------------------------- the radar anchor moved in the game (experimental.srv_turret_radar_anchor): the key, the offset's bits, the placement rule, the direction, the families
 static void radarAnchorCases() {
     using A = st::RadarAnchorMode;
-    check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kCamera &&
-              st::radarAnchorModeOf(nullptr) == A::kCamera && st::radarAnchorModeOf("Off") == A::kCamera && st::radarAnchorModeOf("reverse") == A::kCamera && st::radarAnchorModeOf("On") == A::kCamera,
-          "the radar anchor key's text: on, reversed, off and camera; anything else (and nothing) is the default, camera");
+    check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kOff &&
+              st::radarAnchorModeOf(nullptr) == A::kOff && st::radarAnchorModeOf("Off") == A::kOff && st::radarAnchorModeOf("reverse") == A::kOff && st::radarAnchorModeOf("On") == A::kOff,
+          "the radar anchor key's text: on, reversed, off and camera; anything else (and nothing) is the default, off");
     check(!std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") &&
-              st::kRadarAnchorDefault == A::kCamera && st::radarAnchorModeOf(st::kRadarAnchorDefaultText) == st::kRadarAnchorDefault && !std::strcmp(st::kRadarAnchorDefaultText, "camera"),
-          "the modes' names are the key's values, and the default is camera (the module's literal and the shipped ini say the same: the wiring scan)");
+              st::kRadarAnchorDefault == A::kOff && st::radarAnchorModeOf(st::kRadarAnchorDefaultText) == st::kRadarAnchorDefault && !std::strcmp(st::kRadarAnchorDefaultText, "off"),
+          "the modes' names are the key's values, and the default is off (the module's literal and the shipped ini say the same: the wiring scan)");
     const st::RadarAnchorOffset on45 = st::radarAnchorOffset(true, A::kOn, 45), rev30 = st::radarAnchorOffset(true, A::kReversed, 30);
     check(on45.bits[0] == 0u && on45.bits[1] == 0u && on45.bits[2] == 0x3EE66666u && on45.m[0] == 0.0f && on45.m[1] == 0.0f && on45.m[2] == 0.45f && !on45.zero(),
           "on at 45 cm: (0, 0, +0.45) m in the anchor's axes, the float's bits 0x3EE66666 in z and x, y zero");
@@ -1802,7 +1856,7 @@ static void slotCameraCases() {
     using A = st::RadarAnchorMode;
     check(st::radarAnchorModeOf("camera") == A::kCamera && !std::strcmp(st::radarAnchorModeName(A::kCamera), "camera") && st::radarAnchorModeOf("Camera") == st::kRadarAnchorDefault &&
               !std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed"),
-          "experimental.srv_turret_radar_anchor takes camera (another spelling falls to the default, which is camera too), and the settings line names it");
+          "experimental.srv_turret_radar_anchor takes camera (another spelling falls to the default, which is off), and the settings line names it");
     check(st::radarAnchorOffset(true, A::kCamera, 65).zero() && !st::radarAnchorOffset(true, A::kOn, 65).zero(), "camera mode publishes a zero setter offset (the restore gives the game its placement back)");
     check(st::radarCameraBackM(true, A::kCamera, 65) == 0.65f && st::radarCameraBackM(true, A::kCamera, 500) == 1.5f && st::radarCameraBackM(false, A::kCamera, 65) == 0.0f &&
               st::radarCameraBackM(true, A::kOn, 65) == 0.0f && st::radarCameraBackM(true, A::kOff, 65) == 0.0f && st::radarCameraBackM(true, A::kCamera, 0) == 0.0f,
@@ -1953,8 +2007,8 @@ static void depthMathCases() {
     const float t[3] = {0.0f, 0.0f, 0.7f};
     const st::EyeFrame e = frameOfCam(Cam{}, nullptr, t);
     const st::TurretParams game = st::translateParamsFor(e), real = st::withDepth(game, M::kReal), front = st::withDepth(game, M::kFront);
-    check(st::kDepthDefault == M::kGame && st::depthModeOf(st::kDepthDefaultText) == st::kDepthDefault && !std::strcmp(st::kDepthDefaultText, "game") && !std::strcmp(st::kScissorDefaultText, "open"),
-          "the depth key's default is game, the scissor key's open (the module's literals and the shipped ini say the same: the wiring scan)");
+    check(st::kDepthDefault == M::kGame && st::depthModeOf(st::kDepthDefaultText) == st::kDepthDefault && !std::strcmp(st::kDepthDefaultText, "game") && !std::strcmp(st::kScissorDefaultText, "game"),
+          "the depth key's default is game, the scissor key's game (the module's literals and the shipped ini say the same: the wiring scan)");
     check(game.depth == 0.0f && real.depth == 1.0f && front.depth == 2.0f && st::withDepth(front, M::kGame) == game && !(real == game) && !(front == real),
           "the constants carry the mode as 0, 1 or 2, and a different mode is a different set of numbers (the buffer is rewritten)");
     st::TurretParams bad = game;
@@ -2288,11 +2342,11 @@ static void constantsCases() {
     check(c.get(g_ctx.Get(), p0) == first && c.written() == p0, "the same numbers: the same buffer, not rewritten");
     const st::TurretParams p1 = st::pushParamsFor(frameOfCam(cam, a, t), 1.2f);
     check(c.get(g_ctx.Get(), p1) == first && c.written() == p1, "other numbers: the same buffer, rewritten");
-    // what the shader sees is the four registers
+    // what the shader sees is the five registers
     const auto readBack = [&](ID3D11Buffer* source) {
         D3D11_BUFFER_DESC bd{};
         source->GetDesc(&bd);
-        check(bd.ByteWidth == 64, "the buffer is four 16-byte registers");
+        check(bd.ByteWidth == 80, "the buffer is five 16-byte registers");
         bd.BindFlags = bd.MiscFlags = bd.StructureByteStride = 0;
         bd.Usage = D3D11_USAGE_STAGING;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -2372,8 +2426,9 @@ static void constantsCases() {
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 25 && st::kForwardDefaultCm == 65 && st::kRadarForwardDefaultCm == 50 && st::kPanelsDefaultCm == 135 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0,
-          "the keys' defaults: camera back 25, HUD forward 65, radar forward 50, panels back 135, radar back 0, no gap (the pull is off)");
+    check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 && st::kSystemsNearDefaultCm == 70 &&
+              st::kHudUpDefaultCm == 10 && st::kGunnerUpDefaultCm == 0,
+          "the keys' defaults: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, no gap, systems near 70, weapon panel up 10, gunner up 0");
 }
 
 // ---------------------------------------------------------------- triangle strips (some of the HUD's strokes are drawn as one)
@@ -2631,7 +2686,7 @@ int main(int argc, char** argv) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
             for (const std::string& k : production.kinds) std::printf("  failed: %s\n", k.c_str());
         }
-        check(production.n == 0, "the production shaders and binding pass every move, picture, strip, binding and issue-end case, for all eight signatures");
+        check(production.n == 0, "the production shaders and binding pass every move, picture, strip, binding and issue-end case, for all nine signatures");
 
         // THE MUTANTS: each through the same cases (the move's numbers and pictures), each must fail at least one, in each signature's text. They are edits of the shared function turretMove
         // and of the pass-through that calls it.
@@ -2734,7 +2789,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of nine signatures, five more in signature H and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);
