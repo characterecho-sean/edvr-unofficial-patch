@@ -58,7 +58,7 @@
   estimation or generic pool matching. NPC (Explorer Cam, VR): F1, F2 and the
   one-join-per-frame fix FLOWN OK (F14, 7d0e052e; Sean: "NPCs looked good").
   F15 (E on the first-person panel) FLOWN OK (050026). F16 priced it: clears
-  0.003-0.005, join 0.03, pose 0.03-0.09 ms. NPC hair: last entry, NOT FLOWN.
+  0.003-0.005, join 0.03, pose 0.03-0.09 ms. NPC hair: last entry, FLOWN OK.
 
 ## Premise
 
@@ -4439,7 +4439,7 @@ The release review found (still present on b259e6bf) that after a frame whose ch
 - Tests: skin_engine_test L15 (the review's case: a character written only to the second buffer, retained in the next frame, none there and history on the frame after; two mixed frames in a row; reordered dispatches; overlapping rows; unequal palette sizes in both orders) and L12.i/i2. Mutants frame-after-mixed-joined, mixed-flag-not-kept and mixed-flag-never-cleared are each caught by L15; mixed-palette-joined is re-anchored.
 - Cost: one frame without NPC motion after a mixed frame. The cited flights used one palette buffer for all dispatches, so the trigger has not been seen in play. Nothing counts the refused frame separately: it shows as a `no history` frame in the join line beside `on another palette buffer` in the chain line.
 
-### 2026-11-01 NPC hair: drawn by pairs no family keys, so a turning head left it at the camera term (VR, A6A3 keyed with the second skin, built, installed on Frontier, NOT FLOWN)
+### 2026-11-01 NPC hair: drawn by pairs no family keys, so a turning head left it at the camera term (VR, A6A3 keyed with the second skin, FLOWN OK, ON MAIN 7125a52e)
 
 The pilot's report: several NPCs' hair ghosts or smears as if it had no motion vectors. Evidence is the Frontier log `edvr_gfx_20261101_154307` (v0.22.0-rc.5-5-g3fa86924, native on foot, DLSS performance preset K, 2016x2016 in, 4032x4032 out; no Anti-aliasing off arm in this flight, so whether hair shows it with AA off is still unknown) and seven eye runs, 154737508001 to 154858267007 (15:47:37 to 15:48:58), four of them with NPCs in view. Run 154858 holds a standing woman with curly hair at 1.2 m, 16 consecutive frames.
 
@@ -4455,5 +4455,6 @@ Full build green on the merged tree (branch `claude/laughing-chandrasekhar-a1e5e
 - Not covered: the prepass (depth only, nothing to export), A1CE / C6CD (no skinning chain the clone recognises) and 617C (blended, wrong pose-load shape). If the next dump still shows slot -1 on hair pixels, the remaining pair is among those and the ledger names it.
 - Log signatures. Working: `engine motion: family vs_A6A39338C06E03A1: live; substituted N binds ... patched [ps_1AE6AB9A94C0456E]` with N above 0 once an NPC with hair is in view; `skin join: second skin this window: binds writing E` higher than before; no `takes no second skin` line for vs_A6A3; in an eye dump the hair box has slot codes other than 0xBF800000 and SkinE valid on most of it. Not working: that family line says STOOD DOWN or `refused [...]`, or the hair box still reads slot -1.
 - Cost to read: hair draws gain the cloned vertex chain (about 8 draws an NPC across both eyes, 5,079 and 25,521 indices each).
-- Next flight: an NPC with hair that turns its head or walks, DLSS on, the eye-dump key once, then `python tools\edvr_log.py --target frontier --expect-build HEAD --health`. The scripts that produced the numbers above (hair box, per-frame motion, the raw-frame shift, the ledger and the pair scan) are in the hand-over folder `npc-hair-20261101-scripts`.
+- Flown 2026-11-01 on the installed build (g45857cf4): the pilot, "Hair looks good now"; merged to main on his word. No eye dump or log was read for it, so the slot and SkinE signatures above are unconfirmed and the real-pair WARP checks (K9, corpus identity) never finished. The next flight bullet below was the plan.
+- Next flight (as planned): an NPC with hair that turns its head or walks, DLSS on, the eye-dump key once, then `python tools\edvr_log.py --target frontier --expect-build HEAD --health`. The scripts that produced the numbers above (hair box, per-frame motion, the raw-frame shift, the ledger and the pair scan) are in the hand-over folder `npc-hair-20261101-scripts`.
 - Open, separate: the same dump shows the camera term itself wrong for every pixel without a record on some frames. In 154858 the chosen camera rows equal the previous frame's (zero rotation delta, 24324 and 24328) and, on 24330, jump 5.5 cm in translation and back on 24331, while the raw frames moved under 1 px. The recorded motion at the hair on those two frames is -42.7 and +43.7 px, on the wall (4 to 7 m) -3.8 to -7.5 and +4.9 to +8.6, and on the face (E) 0.9 and 1.2. This is the camera-pick family of the sky flicker arc (`docs/sky-flicker-2026-10-13.md`) showing up on foot with the eye-target rule on (`changed_picks=0`), and it hits the nearest unowned surface hardest, which is the hair. It is not fixed here. Issue 167.
