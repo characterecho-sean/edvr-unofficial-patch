@@ -115,9 +115,6 @@ std::atomic<bool> g_drawGateWanted{true};
 // frame boundary invalidates both once engine velocity needs them again.
 std::atomic<bool> g_aaOffDraw{false};
 std::atomic<bool> g_shadowsSkipped{false};
-// The three temporary keys of VR draw-path test build 1 (docs\vr-draw-path-cpu-2026-11-01.md, "The temporary keys"): experimental.vr_eye_rows_without_aa and
-// experimental.vr_cpu_depth_slot_cache. Code default on; off restores today's behaviour exactly. Set with the config (vScreenRefreshConfigBody) the way g_aaOffDraw is; a stale read only falls back to today.
-std::atomic<bool> g_vrEyeRowsWithoutAa{true};
 
 namespace {
 
@@ -6099,17 +6096,6 @@ uint32_t vScreenEyeDrawsThisFrame() {
 }
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
-bool vScreenVrEyeRowsWithoutAa() { return g_vrEyeRowsWithoutAa.load(std::memory_order_relaxed); }
-
-// One temporary draw-path key: read it, store it, and say so when it differs from the last sweep's (or, the first time, say where it starts: was none).
-// The line carries the perf monitor's frame number, the one `draw hook CPU:` windows end at, so edvr_log.py --perf-windows drops the window a flip fell in.
-static void vrDrawPathKeySweep(const char* full, bool v, std::atomic<bool>& flag, int& last) {
-    if (last != (v ? 1 : 0)) {
-        Log::get().note("vr draw path key: %s = %s (was %s) at frame %u", full, v ? "on" : "off", last < 0 ? "none" : (last ? "on" : "off"), perfMonitorFrameNo());
-        last = v ? 1 : 0;
-    }
-    flag.store(v, std::memory_order_relaxed);
-}
 
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
 // The configure calls stay in this one body: the reload gate is the only difference between the two.
@@ -6203,11 +6189,6 @@ static void vScreenRefreshConfigBody(bool forced) {
     drawGateSet(drawGateSubscribed(s));
     // The AA-off fast path's switch (draw_fast_path.h): the same reading as uiLayerConfigure's VR gate.
     g_aaOffDraw.store(!temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false), std::memory_order_relaxed);
-    // The temporary draw-path keys (test build 1): TEMPORARY, they go with the build's closing.
-    {
-        static int lastEyeRows = -1;
-        vrDrawPathKeySweep("experimental.vr_eye_rows_without_aa", cfg.getBool("experimental.vr_eye_rows_without_aa", true), g_vrEyeRowsWithoutAa, lastEyeRows);
-    }
 }
 
 void vScreenRefreshConfig() {

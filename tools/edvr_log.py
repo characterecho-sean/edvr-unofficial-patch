@@ -890,7 +890,6 @@ def parse_reissue(text):
     for w in out:
         h = hooks.get(w["frame"])
         w["hook"] = h["mean"] if h else None
-        w["flipped"] = bool(h and h["dropped"])   # a temporary key changed inside the window: it mixes two settings
     return out
 
 
@@ -17220,37 +17219,21 @@ def print_health(text, args, runtime_text=None):
     return rc
 
 
-# --perf-windows: the draw hook's CPU windows (src/d3d11/perf_monitor.cpp) with the temporary draw-path keys' changes taken out (docs\vr-draw-path-cpu-2026-11-01.md). Two lines:
-#   vr draw path key: experimental.<key> = on|off (was on|off|none) at frame N      src/d3d11/vscreen.cpp, once per key at start-up (was none) and once per change after
-#   draw hook CPU: 1800-frame window ending N; M ms/sampled frame mean, ...        perf_monitor.cpp, the frame counter the key line's N is read from
-# A window ends at N and covers frames N-1799..N; one that a change (was not none) fell in mixes two settings and is dropped.
-PERF_KEY_RE = re.compile(r"vr draw path key: (?P<key>experimental\.vr_(?:eye_rows_without_aa)) = (?P<value>on|off) \(was (?P<was>on|off|none)\) at frame (?P<frame>\d+)\s*$")
+# --perf-windows: the draw hook's CPU windows (src/d3d11/perf_monitor.cpp), one row each (docs\vr-draw-path-cpu-2026-11-01.md). The line:
+#   draw hook CPU: 1800-frame window ending N; M ms/sampled frame mean, ...        perf_monitor.cpp
+# A window ends at N and covers frames N-1799..N.
 PERF_WINDOW_RE = re.compile(r"draw hook CPU: (?P<size>\d+)-frame window ending (?P<end>\d+); (?P<mean>[\d.]+) ms/sampled frame mean, (?P<max>[\d.]+) ms max, (?P<samples>\d+) sampled frames")
 
 
-def parse_perf_keys(text):
-    """Every `vr draw path key:` line, in order: dicts key, value, was ('none' on the start-up line), frame."""
-    out = []
-    for line in text.splitlines():
-        m = PERF_KEY_RE.search(line)
-        if m:
-            out.append({"key": m.group("key"), "value": m.group("value"), "was": m.group("was"), "frame": int(m.group("frame"))})
-    return out
-
-
 def perf_windows(text):
-    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples, dropped (a key changed inside it) and flips (those changes)."""
-    flips = [k for k in parse_perf_keys(text) if k["was"] != "none"]
+    """Every `draw hook CPU:` window, in order: dicts end, start, mean, max and samples."""
     out = []
     for line in text.splitlines():
         m = PERF_WINDOW_RE.search(line)
         if not m:
             continue
         end, size = int(m.group("end")), int(m.group("size"))
-        start = end - size + 1
-        inside = [k for k in flips if start - 1 <= k["frame"] <= end]   # start - 1: a flip logged at the previous window's end frame may have run after that window's line
-        out.append({"end": end, "start": start, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples")),
-                    "dropped": bool(inside), "flips": inside})
+        out.append({"end": end, "start": end - size + 1, "mean": float(m.group("mean")), "max": float(m.group("max")), "samples": int(m.group("samples"))})
     return out
 
 
@@ -17260,13 +17243,9 @@ def print_perf_windows(text):
     if not wins:
         print("[edvr] no `draw hook CPU:` window in this log: a log shorter than 1800 frames, a build without the line, or not the graphics log (this reads --tag gfx).")
         return 1
-    for k in parse_perf_keys(text):
-        print("[edvr] key %s = %s at frame %d%s" % (k["key"], k["value"], k["frame"], " (start-up)" if k["was"] == "none" else " (was %s)" % k["was"]))
     for w in wins:
-        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled, %s" % (w["end"], w["mean"], w["max"], w["samples"], "kept" if not w["dropped"] else "dropped: " + "; ".join(
-            "%s changed to %s at frame %d" % (k["key"], k["value"], k["frame"]) for k in w["flips"])))
-    kept = sum(1 for w in wins if not w["dropped"])
-    print("[edvr] %d of %d window(s) kept, %d dropped: a window a temporary key changed in mixes two settings." % (kept, len(wins), len(wins) - kept))
+        print("window ending %d: %.3f ms mean, %.3f ms max, %d sampled" % (w["end"], w["mean"], w["max"], w["samples"]))
+    print("[edvr] %d window(s)." % len(wins))
     return 0
 
 
@@ -17326,8 +17305,7 @@ def main(argv=None):
                          "detour's CPU, and the stage 2 verdict (PASS / WARN / "
                          "STOP) on the world route's injected phase")
     ap.add_argument("--perf-windows", action="store_true",
-                    help="table the graphics log's `draw hook CPU:` windows and drop any window a temporary draw-path key changed in "
-                         "(`vr draw path key:` lines; docs\\vr-draw-path-cpu-2026-11-01.md), so no window mixes two settings")
+                    help="table the graphics log's `draw hook CPU:` windows (docs\\vr-draw-path-cpu-2026-11-01.md)")
     ap.add_argument("--maps-sharp", action="store_true",
                     help="report an on-foot maps gate flight (the gate is always on): every map or menu the layer took and handed back "
                          "(when, how long, how many eyes skipped the upscaler), the 5 s "
@@ -23611,7 +23589,7 @@ def self_test():
         ok = False
     if not self_test_reissue():
         ok = False
-    if not self_test_perf_keys():
+    if not self_test_perf_windows():
         ok = False
     if not self_test_switches():
         ok = False
@@ -23851,44 +23829,31 @@ def self_test_pose():
 COVER_FIXTURE = "terrain_cover_fixture.log"
 
 
-def self_test_perf_keys():
-    r"""The temporary draw-path keys (docs\vr-draw-path-cpu-2026-11-01.md): the key-change line src/d3d11/vscreen.cpp writes (parse_perf_keys), and --perf-windows, which tables the
-    `draw hook CPU:` windows and drops any window a key change fell in, so no window mixes two settings. Returns ok."""
+def self_test_perf_windows():
+    r"""--perf-windows (docs\vr-draw-path-cpu-2026-11-01.md): the `draw hook CPU:` windows parsed and tabled. Returns ok."""
     ok = True
 
     def fail(message):
         nonlocal ok
-        print("self_test_perf_keys: %s" % message)
+        print("self_test_perf_windows: %s" % message)
         ok = False
 
     import contextlib
     import io
-    key = "[10:00:01.000] vr draw path key: experimental.vr_eye_rows_without_aa = %s (was %s) at frame %d\n"
     win = ("[10:00:02.000] draw hook CPU: 1800-frame window ending %d; %s ms/sampled frame mean, 0.900 ms max, 30 sampled frames (one in 60); excludes forwarded game draw time, "
            "includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every 4th draw, scaled by 4. Temporal AA off; eye draws counted this frame 0 "
            "(counted only while a draw subscriber is on).\n")
-    text = (key % ("on", "none", 1) + win % (1800, "0.500") + key % ("off", "on", 2500) + win % (3600, "0.700") + win % (5400, "0.600")
-            + "[10:00:03.000] vr draw path key: experimental.vr_eye_rows_without_aa = off (was on) at frame 6000\n" + win % (7200, "0.650"))
-    keys = parse_perf_keys(text)
-    if [(k["key"], k["value"], k["was"], k["frame"]) for k in keys] != [("experimental.vr_eye_rows_without_aa", "on", "none", 1), ("experimental.vr_eye_rows_without_aa", "off", "on", 2500),
-                                                                          ("experimental.vr_eye_rows_without_aa", "off", "on", 6000)]:
-        fail("the key lines parsed to %r" % (keys,))
-    wins = perf_windows(text)
-    # The start-up line (was none) is not a flip; 2500 falls in the window ending 3600 (1801..3600) and 6000 in the one ending 7200 (5401..7200).
-    if [(w["end"], w["mean"], w["dropped"]) for w in wins] != [(1800, 0.5, False), (3600, 0.7, True), (5400, 0.6, False), (7200, 0.65, True)]:
-        fail("the windows parsed to %r" % ([(w["end"], w["mean"], w["dropped"]) for w in wins],))
-    # A flip logged AT a window's end frame may have run after that window's line printed, so it can touch the window just ended and the next one: both are dropped.
-    edge = key % ("on", "none", 1) + win % (1800, "0.500") + key % ("off", "on", 3600) + win % (3600, "0.700") + win % (5400, "0.600") + win % (7200, "0.650")
-    got = [(w["end"], w["dropped"]) for w in perf_windows(edge)]
-    if got != [(1800, False), (3600, True), (5400, True), (7200, False)]:
-        fail("a flip logged at a window's end frame: windows (end, dropped) = %r, expected 3600 and 5400 dropped" % (got,))
-    if parse_perf_keys("[10:00:01.000] vr draw path key: experimental.other = on (was none) at frame 1\n") != [] or perf_windows("nothing here\n") != []:
-        fail("a line of another instrument parsed as a draw-path key or window")
+    text = win % (1800, "0.500") + win % (3600, "0.700") + win % (5400, "0.600")
+    got = [(w["end"], w["start"], w["mean"], w["max"], w["samples"]) for w in perf_windows(text)]
+    if got != [(1800, 1, 0.5, 0.9, 30), (3600, 1801, 0.7, 0.9, 30), (5400, 3601, 0.6, 0.9, 30)]:
+        fail("the windows parsed to %r" % (got,))
+    if perf_windows("nothing here\n") != []:
+        fail("a line of another instrument parsed as a window")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(text)
     out = buf.getvalue()
-    for want in ("ending 1800", "kept", "ending 3600", "dropped: experimental.vr_eye_rows_without_aa changed to off at frame 2500", "[edvr] 2 of 4 window(s) kept, 2 dropped"):
+    for want in ("window ending 1800: 0.500 ms mean", "window ending 3600: 0.700 ms mean", "window ending 5400: 0.600 ms mean", "[edvr] 3 window(s)."):
         if want not in out:
             fail("--perf-windows output lacks %r:\n%s" % (want, out))
     if rc != 0:

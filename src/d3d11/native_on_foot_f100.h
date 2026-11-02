@@ -63,10 +63,9 @@ inline uint32_t teeHeldBy(const TeeState& s, uint32_t frame) noexcept {
 inline bool sceneDepthSizeMatch(bool haveDepth, uint32_t depthW, uint32_t depthH, uint32_t colourW, uint32_t colourH) noexcept {
     return haveDepth && depthW != 0 && depthH != 0 && depthW == colourW && depthH == colourH;
 }
-// The world draw's "is scene depth" argument: the probe's answer (eyeOfDraw >= 0) while the probe is wanted or experimental.vr_eye_rows_without_aa is off
-// (today's decision exactly); the size test only with the probe not wanted and the key on.
-inline bool worldSceneDepth(bool probeWanted, bool keyOn, bool probeSaysScene, bool sizeMatch) noexcept {
-    return probeWanted || !keyOn ? probeSaysScene : sizeMatch;
+// The world draw's "is scene depth" argument: the probe's answer (eyeOfDraw >= 0) while the probe is wanted; the size test only with the probe not wanted.
+inline bool worldSceneDepth(bool probeWanted, bool probeSaysScene, bool sizeMatch) noexcept {
+    return probeWanted ? probeSaysScene : sizeMatch;
 }
 
 inline bool teeFast(uint32_t fastFrame, uint32_t frameNow, uint64_t vs) noexcept {

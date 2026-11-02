@@ -29327,20 +29327,13 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     }
     ++rn.draws;
     const uint64_t ps = bindingShaderHash(BindSlot::Ps);
-    // #155: with AA off the depth probe is not wanted and eyeOfDraw names no scene depth; with experimental.vr_eye_rows_without_aa on, the depth view's
-    // size against this colour target's stands in (nofoot::f100::worldSceneDepth). While the probe is wanted (DLAA) the size test is only counted against
-    // the probe's answer; with the key off it is not asked at all, so the decision is today's.
+    // #155: with AA off the depth probe is not wanted and eyeOfDraw names no scene depth; the depth view's size against this colour target's stands in
+    // (nofoot::f100::worldSceneDepth). While the probe is wanted (DLAA) the size test is only counted against the probe's answer.
     const bool probeScene = eyeOfDraw(frame) >= 0;
     const bool probeWanted = depthProbeWanted();
-    const bool keyOn = vScreenVrEyeRowsWithoutAa();
-    bool sizeScene = false;
-    if (probeWanted) {
-        sizeScene = sceneDepthSize(frame, t->w, t->h);
-        ++(sizeScene == probeScene ? g_win.sceneSizeAgree : g_win.sceneSizeDisagree);
-    } else if (keyOn) {
-        sizeScene = sceneDepthSize(frame, t->w, t->h);
-    }
-    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, nofoot::f100::worldSceneDepth(probeWanted, keyOn, probeScene, sizeScene));
+    const bool sizeScene = sceneDepthSize(frame, t->w, t->h);
+    if (probeWanted) ++(sizeScene == probeScene ? g_win.sceneSizeAgree : g_win.sceneSizeDisagree);
+    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, nofoot::f100::worldSceneDepth(probeWanted, probeScene, sizeScene));
     // F100: a census frame still sends every world draw here (the F87f capture below sees the same draws as before); only the census's own note, its
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);

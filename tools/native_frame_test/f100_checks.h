@@ -213,19 +213,17 @@ inline void run100(Check&& check) {
         const bool differ = !f100::sceneDepthSizeMatch(true, 2632, 2684, 1316, 1342) && !f100::sceneDepthSizeMatch(true, 2632, 2684, 2632, 2683) &&
                             !f100::sceneDepthSizeMatch(true, 2684, 2632, 2632, 2684);
         const bool noDepth = !f100::sceneDepthSizeMatch(false, 2632, 2684, 2632, 2684) && !f100::sceneDepthSizeMatch(true, 0, 0, 0, 0);
-        // The decision (the world draw's sceneRefWhy argument): the probe's answer while the probe is wanted or the key is off; the size test only without the
-        // probe with the key on.
+        // The decision (the world draw's sceneRefWhy argument): the probe's answer while the probe is wanted; the size test only without the
+        // probe.
         bool probeDecides = true;
         for (int probe = 0; probe < 2; ++probe)
             for (int size = 0; size < 2; ++size) {
-                probeDecides = probeDecides && f100::worldSceneDepth(true, true, probe != 0, size != 0) == (probe != 0);    // DLAA: never the size
-                probeDecides = probeDecides && f100::worldSceneDepth(true, false, probe != 0, size != 0) == (probe != 0);
-                probeDecides = probeDecides && f100::worldSceneDepth(false, false, probe != 0, size != 0) == (probe != 0);  // key off: today's
+                probeDecides = probeDecides && f100::worldSceneDepth(true, probe != 0, size != 0) == (probe != 0);    // DLAA: never the size
             }
-        const bool sizeDecides = f100::worldSceneDepth(false, true, false, true) && !f100::worldSceneDepth(false, true, false, false) &&
-                                 !f100::worldSceneDepth(false, true, true, false);
+        const bool sizeDecides = f100::worldSceneDepth(false, false, true) && !f100::worldSceneDepth(false, false, false) &&
+                                 !f100::worldSceneDepth(false, true, false);
         check(same && differ && noDepth && probeDecides && sizeDecides,
-              "#155: same-size depth and colour are scene depth; a size mismatch or no depth view is not; the size test decides only with the probe not wanted and the key on");
+              "#155: same-size depth and colour are scene depth; a size mismatch or no depth view is not; the size test decides only with the probe not wanted");
     }
     {   // the tee clock's arithmetic: 10 MHz QPC, 64 calls clocked at 20 ticks (2 us) each, 2,000,000 calls over 90 frames
         const double ns = f100::teeNsPerCall(64 * 20, 64, 10000000);
