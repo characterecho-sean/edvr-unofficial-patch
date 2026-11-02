@@ -1084,6 +1084,7 @@ int selfTest(){
   blackPassSelfTest(true);
   shareSelfTest(false);
   shareSelfTest(true);
+  circleAspectSelfTest();   // F210
   desktopStateSelfTest();
   embeddedShaderPin();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;

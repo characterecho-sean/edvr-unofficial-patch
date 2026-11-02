@@ -545,3 +545,168 @@ void shareSelfTest(bool owned) {
     check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==2,what);
   }
 }
+
+// ---- F210: the ADS view circle on an eye that is not square and a frustum that is not symmetric (Quest 3) ----------------------------------------------------------------------------------------
+// The pilot's Quest 3 (Virtual Desktop) draws each eye into a 3072x3264 image, whose frustum is not symmetric (eye 0: left -53.42, right +39.41, up +41.99, down -53.08 degrees; eye 1 the horizontal mirror
+// of it). The circle must be round in ANGLE and centred on the sight's far point in each eye's own view whatever the eye's pixel aspect and frustum. The rig renders the real frame (the share, the
+// mirror's bars, the circle) into such eyes and measures what was DRAWN, not what was asked, in the pixels:
+//   (1) the circle's drawn edge (its own darkness, the ring over the bars: 1 - ring / bars, half black) is at one angle from the sight's point in every direction, within kEdgeTolDeg of the radius the facts
+//       name, and that radius is the nearest edge of what the other eye covers less the margin and half the band, worked out here from the tangent planes and not from the renderer's code;
+//   (2) the centre of the edge (the mean of its unit directions) lands on the sight's point, within kCentreTolDeg, and the facts' centre pixel is that tangent's pixel;
+//   (3) inside the circle's clear part no pixel is darker than the same frame without bars, and outside half a band beyond it every pixel is black;
+//   (4) it is the widest: a circle a quarter of a degree wider lets a bar through somewhere, in the eye that sets the radius (the radius is one for both eyes).
+// The rig bites. Edited by hand into the renderer's circle constants (not kept), the square-pixel mistake (the eye's height taken as its width) moved the drawn edge 3.7 degrees at 3072 x 3264, one eye's
+// tangents used for both eyes moved it 23.8 degrees in the other eye, and a frustum made symmetric about the image middle moved it 10.7 degrees: each failed these checks.
+struct AspectCase {const char* name;unsigned w,h;XrFovf fov[2];float tc[2][2];double yawDeg;};   // yawDeg: the displays canted outward by this much (0 parallel); then tc[0] is the sight as a tangent of the head's frame and each eye's own is worked out
+void circleAspectSelfTest() {
+  namespace sc=edvr::openxr::scopecircle;
+  using namespace edvr::openxr::shareview;
+  constexpr double k=kPi/180.0,kEdgeTolDeg=.1,kCentreTolDeg=.05;
+  const AspectCase cases[]={
+    {"Quest 3, 3072x3264 (Virtual Desktop), the sight straight ahead",3072,3264,{fovDeg(-53.42,39.41,41.99,-53.08),fovDeg(-39.41,53.42,41.99,-53.08)},{{0.f,0.f},{0.f,0.f}},0.0},
+    {"Quest 3, 2064x2208, the sight a little right of and below the axis, a pair of eyes' parallax apart",2064,2208,{fovDeg(-53.42,39.41,41.99,-53.08),fovDeg(-39.41,53.42,41.99,-53.08)},{{.08f,-.05f},{.075f,-.05f}},0.0},
+    {"Quest 3 as the earlier session had it (up 0.9657, down 1.4281), 3072x3264, the sight above the axis",3072,3264,{{float(std::atan(-1.3466)),float(std::atan(.8218)),float(std::atan(.9657)),float(std::atan(-1.4281))},
+                                                                                                      {float(std::atan(-.8218)),float(std::atan(1.3466)),float(std::atan(.9657)),float(std::atan(-1.4281))}},{{-.06f,.12f},{-.065f,.12f}},0.0},
+    {"synthetic, not square and not symmetric (640x1000; -62/+28 and -30/+58 degrees horizontally, +25/-47 and +22/-50 vertically)",640,1000,{fovDeg(-62,28,25,-47),fovDeg(-30,58,22,-50)},{{.12f,-.1f},{.1f,-.12f}},0.0},
+    {"Quest 3 with its displays canted 10.75 degrees outward, 3072x3264, the sight 0.05 right of and 0.09 below the head's axis",3072,3264,{fovDeg(-53.42,39.41,41.99,-53.08),fovDeg(-39.41,53.42,41.99,-53.08)},{{.05f,-.09f},{0.f,0.f}},10.75},
+    {"control: square 512x512 and symmetric +-45 degrees, the sight off the middle",512,512,{fovDeg(-45,45,45,-45),fovDeg(-45,45,45,-45)},{{.2f,.1f},{.2f,.1f}},0.0},
+  };
+  for(const AspectCase& c:cases) {
+    char what[640];
+    Fixture f;f.runtime.unorm=true;f.runtime.width=c.w;f.runtime.height=c.h;
+    for(unsigned i=0;i<2;++i){f.sizes[i].recommendedImageRectWidth=c.w;f.sizes[i].recommendedImageRectHeight=c.h;f.sizes[i].maxImageRectWidth=c.w;f.sizes[i].maxImageRectHeight=c.h;f.views[i].fov=c.fov[i];f.views[i].pose.orientation=yawQuat(i==0?c.yawDeg:-c.yawDeg);}
+    if(f.init()!=XR_SUCCESS){std::snprintf(what,sizeof(what),"F210 (%s): the renderer initialises",c.name);check(false,what);continue;}
+    const DXGI_FORMAT format=DXGI_FORMAT(f.renderer.format());
+    // the captures: one flat gray, whatever their size (a bilinear stretch of one colour is that colour)
+    ComPtr<ID3D11Texture2D> grayTex;
+    {D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=8;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+     std::vector<uint32_t> px(64,rgbaOf(200,200,200));D3D11_SUBRESOURCE_DATA data{px.data(),32,0};
+     check(SUCCEEDED(f.runtime.device->CreateTexture2D(&d,&data,&grayTex)),"F210 gray texture");}
+    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"F210 capture owner");
+    const vr::Texture_t gt{grayTex.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+    check(capture.capture(vr::Eye_Left,&gt)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&gt)==vr::VRCompositorError_None,"F210 capture");
+    // one frame: the share and its bars (strip 1), with or without the circle; the plain frame (strip 0) is the picture with no bar at all
+    struct Frame {std::vector<uint16_t> lum[2];StereoShareFacts facts;};
+    const auto frame=[&](float strip,const StereoViewCircle* circle) {
+      Frame fr;XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+      check(f.renderer.renderCaptured(f.views,space,capture,layer,nullptr,nullptr,nullptr,0.f,nullptr,1.f,nullptr,strip,false,nullptr,circle)==XR_SUCCESS,"F210 render");
+      fr.facts=f.renderer.shareFacts();
+      for(unsigned e=0;e<2;++e) {
+        const std::vector<uint32_t> img=readWhole(f,e,image);fr.lum[e].resize(img.size());
+        for(size_t i=0;i<img.size();++i){unsigned r=0,g=0,b=0;rgbOf(format,img[i],r,g,b);fr.lum[e][i]=uint16_t(r+g+b);}
+      }
+      return fr;
+    };
+    // each eye's own tangents of the sight: as given, or (canted) those of one world direction, the head-frame tangent c.tc[0], turned into each view
+    float tcE[2][2];
+    for(int e=0;e<2;++e)for(int a=0;a<2;++a)tcE[e][a]=c.tc[e][a];
+    if(c.yawDeg!=0.0) {
+      double rot[2][3][3];for(int e=0;e<2;++e)rotationOf(f.views[e].pose.orientation,rot[e]);
+      const double n=std::sqrt(double(c.tc[0][0])*c.tc[0][0]+double(c.tc[0][1])*c.tc[0][1]+1.0);
+      const double world[3]={c.tc[0][0]/n,c.tc[0][1]/n,-1.0/n};
+      for(int e=0;e<2;++e) {   // view = R^T world
+        double v[3];for(int i=0;i<3;++i)v[i]=rot[e][0][i]*world[0]+rot[e][1][i]*world[1]+rot[e][2][i]*world[2];
+        tcE[e][0]=float(v[0]/-v[2]);tcE[e][1]=float(v[1]/-v[2]);
+      }
+    }
+    StereoViewCircle req;req.on=true;
+    for(int e=0;e<2;++e)for(int a=0;a<2;++a)req.tc[e][a]=tcE[e][a];
+    const Frame plain=frame(0.f,nullptr),bars=frame(1.f,nullptr),ring=frame(1.f,&req);
+    const StereoShareFacts& facts=ring.facts;
+    // the radius, worked out here from the geometry alone: the distance from the sight's point in each eye's view to the nearest edge of what the OTHER eye drew (the views turned against each other by their poses), in true angle, less the margin and half the band, the smaller of the two eyes. The tangent planes' edges are planes through the centre of projection: the angle from a
+    // unit direction to a plane is asin of its distance along the plane's normal.
+    double u3[2][3];
+    for(int e=0;e<2;++e)sc::unitOf(tcE[e],u3[e]);
+    const Tangents tg[2]={tangentsOf(c.fov[0]),tangentsOf(c.fov[1])};
+    const auto edgeDistance=[&](const double u[3],const Tangents& other) {
+      const auto planeAngle=[&](double nx,double ny,double nz) {
+        const double n=std::sqrt(nx*nx+ny*ny+nz*nz);
+        const double s=(u[0]*nx+u[1]*ny+u[2]*nz)/n;
+        return std::asin(s<-1.0?-1.0:s>1.0?1.0:s);
+      };
+      // inside the left edge: x + left * z >= 0 (z is -1 forward); the right edge: -x - right * z >= 0; the same in y
+      return std::fmin(std::fmin(planeAngle(1,0,other.left),planeAngle(-1,0,-other.right)),std::fmin(planeAngle(0,1,other.down),planeAngle(0,-1,-other.up)));
+    };
+    double r01[3][3],r10[3][3],in1[3],in0[3];   // a left view direction into the right view, and the other way
+    relativeRotation(f.views[0].pose.orientation,f.views[1].pose.orientation,r01);relativeRotation(f.views[1].pose.orientation,f.views[0].pose.orientation,r10);
+    for(int i=0;i<3;++i){in1[i]=r01[i][0]*u3[0][0]+r01[i][1]*u3[0][1]+r01[i][2]*u3[0][2];in0[i]=r10[i][0]*u3[1][0]+r10[i][1]*u3[1][1]+r10[i][2]*u3[1][2];}
+    const double dLeftInRight=edgeDistance(in1,tg[1]),dRightInLeft=edgeDistance(in0,tg[0]);
+    const double expectR=(std::fmin(dLeftInRight,dRightInLeft)-kEdgeMarginDeg*k-.5*kBandDeg*k)/k;
+    std::snprintf(what,sizeof(what),"F210 (%s): the circle is drawn, at the radius the geometry gives (%.3f deg; the facts say %.3f)",c.name,expectR,double(facts.circleRadiusDeg));
+    check(facts.circleDrawn&&!facts.circleRefused&&facts.circleWeight==1.f&&std::fabs(double(facts.circleRadiusDeg)-expectR)<.02,what);
+    const double R=facts.circleRadiusDeg,bandDeg=kBandDeg;
+    bool widestIn[2]={false,false};
+    for(int e=0;e<2;++e) {
+      const Tangents& t=tg[e];
+      const auto& lp=plain.lum[e];const auto& lb=bars.lum[e];const auto& lr=ring.lum[e];
+      const unsigned w=c.w,h=c.h;
+      // the circle's own darkness at a pixel: the ring over the bars, where the bars leave enough of the picture to read it from
+      std::vector<float> dark(size_t(w)*h,-1.f);
+      for(size_t i=0;i<dark.size();++i)if(lp[i]>0&&lb[i]*4>=lp[i])dark[i]=1.f-float(lr[i])/float(lb[i]);
+      const auto sampleDark=[&](double tx,double ty,bool& ok) {
+        const double px=(tx-t.left)/(t.right-t.left)*w-.5,py=(t.up-ty)/(t.up-t.down)*h-.5;
+        ok=false;
+        if(px<0||py<0)return 0.0;
+        const unsigned x0=unsigned(px),y0=unsigned(py);
+        if(x0+1>=w||y0+1>=h)return 0.0;
+        const double fx=px-x0,fy=py-y0;
+        const float a=dark[size_t(y0)*w+x0],b=dark[size_t(y0)*w+x0+1],cc=dark[size_t(y0+1)*w+x0],d=dark[size_t(y0+1)*w+x0+1];
+        if(a<0||b<0||cc<0||d<0)return 0.0;
+        ok=true;
+        return (a*(1-fx)+b*fx)*(1-fy)+(cc*(1-fx)+d*fx)*fy;
+      };
+      // the edge in 72 directions of the tangent plane about the centre: the half-black crossing, then its angle from the centre
+      double worst=0.0,sum[3]={0,0,0};unsigned found=0;const unsigned rays=72;
+      for(unsigned a=0;a<rays;++a) {
+        const double ang=2.0*kPi*a/rays,dx=std::cos(ang),dy=std::sin(ang);
+        double s0=0.0,s1=-1.0;bool ok=false;
+        for(double s=0.0;s<3.0;s+=.002) {
+          const double v=sampleDark(tcE[e][0]+s*dx,tcE[e][1]+s*dy,ok);
+          if(!ok)break;
+          if(v>=.5){s1=s;break;}
+          s0=s;
+        }
+        if(s1<0)continue;
+        for(int it=0;it<40;++it){const double sm=.5*(s0+s1);const double v=sampleDark(tcE[e][0]+sm*dx,tcE[e][1]+sm*dy,ok);if(ok&&v>=.5)s1=sm;else s0=sm;}
+        const double tx=tcE[e][0]+s1*dx,ty=tcE[e][1]+s1*dy,n=std::sqrt(tx*tx+ty*ty+1.0);
+        const double th=sc::angleFromCentre(tx,ty,u3[e])/k;
+        worst=std::fmax(worst,std::fabs(th-R));
+        sum[0]+=tx/n;sum[1]+=ty/n;sum[2]+=-1.0/n;++found;
+      }
+      double centreErr=1e9;
+      if(found) {
+        const double n=std::sqrt(sum[0]*sum[0]+sum[1]*sum[1]+sum[2]*sum[2]);
+        const double dot=(sum[0]*u3[e][0]+sum[1]*u3[e][1]+sum[2]*u3[e][2])/n;
+        centreErr=std::acos(dot>1.0?1.0:dot)/k;
+      }
+      std::snprintf(what,sizeof(what),"F210 (%s) eye %d: the drawn edge is at one angle from the sight's point in %u of %u directions (worst %.3f deg from the %.3f deg radius, within %.2f), and its centre lands on the sight's point to %.4f deg (within %.2f)",
+                    c.name,e,found,rays,worst,R,kEdgeTolDeg,centreErr,kCentreTolDeg);
+      std::printf("%s\n",what);   // the measured figures, for the journal
+      check(found>=rays*3/5&&worst<kEdgeTolDeg&&centreErr<kCentreTolDeg,what);
+      const double cu=(double(tcE[e][0])-t.left)/(t.right-t.left),cv=(t.up-double(tcE[e][1]))/(t.up-t.down);
+      std::snprintf(what,sizeof(what),"F210 (%s) eye %d: the facts name the sight's pixel (%.4f, %.4f of the image)",c.name,e,cu,cv);
+      check(std::fabs(double(facts.circleCentreUv[2*e])-cu)<1e-4&&std::fabs(double(facts.circleCentreUv[2*e+1])-cv)<1e-4,what);
+      // inside the clear part no bar and no circle; beyond half a band outside, black; and the widest
+      bool inside=true,outside=true,letsThrough=false;unsigned clearPixels=0;
+      const double wider=R+.25;
+      for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x) {
+        const double tx=t.left+(t.right-t.left)*(x+.5)/w,ty=t.up+(t.down-t.up)*(y+.5)/h;
+        const double th=sc::angleFromCentre(tx,ty,u3[e])/k;
+        const size_t i=size_t(y)*w+x;
+        if(th<R-.5*bandDeg-.1){++clearPixels;inside=inside&&lr[i]==lb[i]&&lb[i]==lp[i];}
+        else if(th>R+.5*bandDeg+.1)outside=outside&&lr[i]<=3;
+        if(!letsThrough&&lp[i]>60&&lb[i]<lp[i]) {
+          const double circle=std::fmax(0.0,std::fmin(1.0,(th-(wider-.5*bandDeg))/bandDeg)),barB=1.0-double(lb[i])/double(lp[i]);
+          if(circle+1e-3<barB)letsThrough=true;
+        }
+      }
+      std::snprintf(what,sizeof(what),"F210 (%s) eye %d: inside the circle's clear part (%u pixels) no bar and no circle, and beyond half a band outside it every pixel is black",c.name,e,clearPixels);
+      check(inside&&outside&&clearPixels>1000,what);
+      widestIn[e]=letsThrough;
+    }
+    // the radius is one for both eyes (the two circles fuse), set by the eye whose bars are nearer: in that eye a circle a quarter of a degree wider lets a bar through, so it is the widest there is
+    std::snprintf(what,sizeof(what),"F210 (%s): it is the widest circle that hides the bars: a quarter of a degree wider lets a bar through in the eye that sets the radius (left %d, right %d)",c.name,int(widestIn[0]),int(widestIn[1]));
+    check(widestIn[0]||widestIn[1],what);
+    f.renderer.shutdown();
+  }
+}

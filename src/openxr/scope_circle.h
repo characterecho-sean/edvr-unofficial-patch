@@ -7,6 +7,12 @@
 // direction c is theta = acos(dot(d / |d|, c)); the black weight is weight x (1 - saturate((E - theta - margin) / band)) with E = R + margin + band / 2, so the pixel is half black at theta = R
 // (the radius, as the d3d11 half states it), clear from R - band / 2 inward and fully black from R + band / 2 outward. margin and band are the share's (eye_share.h: 0.25 and 3 degrees):
 // the same soft edge the black bars have. The constants ride the share's constant buffer unchanged in size: rightAng holds {c.x, c.y, c.z, E}, band {margin, 1 / band, weight, 0}, misc.w = 2.
+//
+// F210: nothing here depends on an eye's pixel aspect or on how asymmetric its frustum is. A pixel's direction is the tangent plane's point lerp'd across THAT eye's own image with THAT eye's own tangents,
+// the centre is a direction in the same plane, and every distance is an angle between unit directions, so the circle is round in angle and sits on the centre whatever the image's size and the frustum's
+// shape. openxr_stereo_test's circleAspectSelfTest renders the real frame into the Quest 3's eyes (3072 x 3264 and 2064 x 2208; eye 0 left -53.42, right +39.41, up +41.99, down -53.08 degrees, eye 1 the
+// mirror; displays parallel and canted) and a synthetic one, and measures the drawn edge in the pixels: it is at one angle from the centre to 0.01 degree and its centre is the centre to 0.001 degree.
+// What a Quest 3 eye shows is the centre's PLACE in the image: a sight on the forward axis is at (0.621, 0.403) of the left eye's image, 372 px right of and 315 px above its middle at 3072 x 3264.
 #include "eye_share.h"
 
 #include <cmath>
