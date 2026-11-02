@@ -40,6 +40,7 @@
 #include "xess_engine.h"   // XeSS-SR: the VR eye pass's Intel engine (xessAvailable, xessEvaluate, xessSlotTotals)
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
+#include "depth_writer_probe.h"   // depthWriterArm: who wrote each pixel's depth, the same armed frame
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
 #include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
 #include "ui_resolve.h"
@@ -6813,6 +6814,9 @@ static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot*
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
+    // The depth writer map rides the same run when advanced.pixel_probe has a point (one key arms both): the id of the last draw that
+    // changed each pixel's depth, for naming what disowns a pool record's slot.
+    if(pixelProbeConfigured())depthWriterArm(g_eyeRunStamp);
     mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
     if(!companion) {
         g_airborneCompanion=AirborneCompanionRequest{};

@@ -684,6 +684,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\pixel_probe.cpp" ^
+    "src\d3d11\depth_writer_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\store_hook.cpp" "src\d3d11\view_source.cpp" "src\d3d11\optimized_station.cpp" "src\d3d11\pad_state_probe.cpp" "src\d3d11\hmd_reset_press.cpp" ^
@@ -2439,6 +2440,7 @@ python "tools\eye_depth_dump.py" "%OBJ%\drawsnapshot" || exit /b 1
 python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
 python "tools\eye_jump_lattice.py" --self-test || exit /b 1
 python "tools\eye_inputs.py" --self-test || exit /b 1
+python "tools\depth_writer_join.py" --self-test || exit /b 1
 python "tools\eye_decisions.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 exit /b 0
@@ -4016,6 +4018,24 @@ if not exist "%OBJ%\pixelprobe" mkdir "%OBJ%\pixelprobe"
 if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_depth_writer_probe_test
+echo [edvr] === depth_writer_probe_test.exe ===
+REM Build gate for the depth writer probe (src\d3d11\depth_writer_probe.*), the "who wrote this pixel's depth" instrument that rides
+REM advanced.pixel_probe: a WARP device, a 256x256 R32G8X24 depth and scissor-clipped depth-only draws drive the module directly. Asserts
+REM the map names the LAST draw that changed each pixel (an earlier owner is replaced, a repeat of the same depth changes nothing), a
+REM read-only draw is not followed, the files and the log carry the owners, the game's compute state is put back, a view that is no eye's
+REM depth is counted and not followed, an array depth is declined once, and an unarmed probe does nothing.
+if not exist "%OBJ%\depthwriter" mkdir "%OBJ%\depthwriter"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\depthwriter\\" /Fe"%OBJ%\depthwriter\depth_writer_probe_test.exe" ^
+    "tools\depth_writer_probe_test\depth_writer_probe_test.cpp" "src\d3d11\depth_writer_probe.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: depth writer probe test build failed & exit /b 1 )
+"%OBJ%\depthwriter\depth_writer_probe_test.exe" --dry-run || exit /b 1
+"%OBJ%\depthwriter\depth_writer_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_holo_test

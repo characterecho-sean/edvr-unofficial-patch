@@ -45,6 +45,7 @@
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
+#include "depth_writer_probe.h"   // beside it: who wrote each pixel's depth in the same armed frame
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
@@ -1869,7 +1870,14 @@ __forceinline bool desktopWindowSkipsDraw(State* s, ID3D11DeviceContext* self, c
 // on its own whether a run is armed and this is its frame. Unconfigured
 // costs the one bool load pixelProbeWantsDraws() is for; nothing below it
 // runs.
+// depth_writer_probe.h's eye resolver: the depth probe's settled scene pair, the identity lookup that never scans.
+bool depthWriterResolveEye(ID3D11DepthStencilView* dsv, int* outEye) {
+    int target = -1;
+    return depthProbeCurrentSceneEyeOf(dsv, outEye, &target);
+}
+
 void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
+    if (depthWriterWantsDraws()) depthWriterBeforeDraw(self);   // its own gate: a depth-only draw has no eye colour at slot 0
     if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
     const ResourceInfo* info = rtv0Resolved(s);
     if (!info) return;
@@ -1885,11 +1893,13 @@ void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
 // it have fully returned.
 void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
                         uint32_t instances, bool indirect) {
-    if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
-    const ResourceInfo* info = rtv0Resolved(s);
-    if (!info) return;
-    const int eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
-    if (eye < 0) return;
+    const bool writerWants = depthWriterWantsDraws();
+    const bool pixelWants = pixelProbeWantsDraws() && s->rtv0Eye;
+    if (!writerWants && !pixelWants) return;
+    const ResourceInfo* info = pixelWants ? rtv0Resolved(s) : nullptr;
+    int eye = -1;
+    if (info) eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+    if (!writerWants && eye < 0) return;
     DrawInfo di;
     di.count = count;
     di.instances = instances;
@@ -1922,7 +1932,8 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
         di.depthFunc = static_cast<uint32_t>(dd.DepthFunc);
         ds->Release();
     }
-    pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
+    if (writerWants) depthWriterAfterDraw(self, di);
+    if (info && eye >= 0) pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
 }
 
 // kind, count and instances describe the draw for the census and the census
@@ -6437,7 +6448,7 @@ void vScreenFrameBoundary() {
         tkQuadProbe.run([&] { quadProbeTick(g_state->ownerCtx); });
         tkDrawCensusTick.run([&] { drawCensusTick(g_state->ownerCtx); });
         tkObjectProbe.run([&] { objectProbeFrameBoundary(g_state->ownerCtx); });
-        tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); });
+        tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); depthWriterFrameBoundary(g_state->ownerCtx); });
         // Before drawGateSet below re-samples the draw gate, so a capture that starts here is seen by the next frame's first draw.
         tkBlendProbe.run([&] { blendProbeFrameBoundary(g_state->frameNo); });
         tkWakePulse.run([&] { wakePulseReport(); });
@@ -7314,6 +7325,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
+    depthWriterSetEyeResolver(&depthWriterResolveEye);
 
     // The panel size is NOT read from config here.
     //
@@ -7642,6 +7654,7 @@ void shutdownVScreenFixes() {
     particleShutdown();
     objectProbeShutdown();
     pixelProbeShutdown();
+    depthWriterShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
