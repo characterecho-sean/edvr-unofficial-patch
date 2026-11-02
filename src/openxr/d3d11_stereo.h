@@ -65,6 +65,9 @@ struct StereoShareFacts {
   // drawn by (the mirror's; 0 when not asked) and its centre in each eye's image: left u, v then right u, v (fractions, v down).
   bool circleDrawn = false, circleRefused = false;
   float circleRadiusDeg = 0.0f, circleEdgeDeg = 0.0f, circleWeight = 0.0f, circleCentreUv[4]{};
+  // F210b: the pitch the centre was turned by (degrees, + up; the middle of the field vertically, scope_circle.h fieldMiddleRad) and the field's up and down angles it is the middle of (the mean over
+  // both eyes, degrees, down negative). 0 and the field's own angles when not asked.
+  float circlePitchDeg = 0.0f, circleFieldUpDeg = 0.0f, circleFieldDownDeg = 0.0f;
 };
 
 struct StereoDispatch {

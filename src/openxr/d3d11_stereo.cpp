@@ -344,6 +344,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
   shareFacts_.drawn=shareFacts_.refused=false;
   shareFacts_.leftBlacked=shareFacts_.mirrorDrawn=false;shareFacts_.mirrorWidth=0.f;
   shareFacts_.circleDrawn=shareFacts_.circleRefused=false;shareFacts_.circleRadiusDeg=shareFacts_.circleEdgeDeg=shareFacts_.circleWeight=0.f;
+  shareFacts_.circlePitchDeg=shareFacts_.circleFieldUpDeg=shareFacts_.circleFieldDownDeg=0.f;
   for(int k=0;k<4;++k)shareFacts_.circleCentreUv[k]=0.f;
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
@@ -473,6 +474,9 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
   // own weight (the strip's through the entry ramp and the exit hold, full on a narrowed frame), so a frame never has the bars without the circle or the circle without the bars. Its radius is the
   // widest that keeps the bars in the black (scope_circle.h coverageRadius: the distance from the sight's centre in each eye to the nearest edge of what the other eye covers, less the margin and half
   // the band, the smaller of the two eyes), worked out every frame from the actual centre and the views; a radius under kMinCircleDeg is no view, and the circle is not drawn that frame (refused).
+  // F210b: the centre is the sight's direction pitched by the middle of the field vertically (scope_circle.h fieldMiddleRad: the mean over both eyes of (up + down) / 2, on the Quest 3 -5.5 degrees), about
+  // the head's horizontal axis, one value and one axis for both eyes so the two circles stay one world direction (canted displays included). A headset whose up and down are opposite has none: the centre
+  // is the sight's, untouched, and its frames are what they were.
   // A request that is off, or no mirror: no pass at all, and both eyes are the images the renderer has always drawn.
   ShareConstants ring[2]{};bool ringOn=false;
   if(circle&&circle->on&&mirrorOn&&mirrorWeight>0.f&&fade<1.f) {
@@ -483,9 +487,22 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     bool usable=true;
     double centre[2][3]{};
     shareview::Tangents tg[2];
+    float tcp[2][2]={{circle->tc[0][0],circle->tc[0][1]},{circle->tc[1][0],circle->tc[1][1]}};   // the centre in each eye's own tangent plane, after the pitch
     for(int e=0;e<2&&usable;++e){tg[e]=shareview::tangentsOf(views[e].fov);usable=shareview::tangentsUsable(tg[e])&&scopecircle::unitOf(circle->tc[e],centre[e]);}
+    const double pitch=scopecircle::fieldMiddleRad(views[0].fov,views[1].fov);
+    if(usable&&pitch!=0.0) {
+      double head[3];
+      usable=std::isfinite(pitch)&&scopecircle::headRightAxis(views[0].pose.orientation,views[1].pose.orientation,head);
+      for(int e=0;e<2&&usable;++e){
+        double axis[3];scopecircle::inEyeFrame(views[e].pose.orientation,head,axis);
+        usable=scopecircle::pitchCentre(circle->tc[e],axis,pitch,tcp[e])&&scopecircle::unitOf(tcp[e],centre[e]);
+      }
+    }
     if(usable) {
-      radius=scopecircle::coverageRadius(shareMap,mirrorMap,circle->tc[0],circle->tc[1]);
+      shareFacts_.circlePitchDeg=float(pitch*kDeg);
+      shareFacts_.circleFieldUpDeg=float(0.5*(double(views[0].fov.angleUp)+double(views[1].fov.angleUp))*kDeg);
+      shareFacts_.circleFieldDownDeg=float(0.5*(double(views[0].fov.angleDown)+double(views[1].fov.angleDown))*kDeg);
+      radius=scopecircle::coverageRadius(shareMap,mirrorMap,tcp[0],tcp[1]);
       usable=std::isfinite(radius);
       if(usable)shareFacts_.circleEdgeDeg=float((radius+margin+0.5*band)*kDeg);
     }
@@ -499,8 +516,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         k.rightAng[0]=float(centre[e][0]);k.rightAng[1]=float(centre[e][1]);k.rightAng[2]=float(centre[e][2]);k.rightAng[3]=float(radius+margin+0.5*band);
         k.band[0]=float(margin);k.band[1]=float(1.0/band);k.band[2]=mirrorWeight;k.band[3]=0.f;
         k.misc[3]=2.f;
-        shareFacts_.circleCentreUv[2*e]=float((double(circle->tc[e][0])-tg[e].left)/(tg[e].right-tg[e].left));
-        shareFacts_.circleCentreUv[2*e+1]=float((tg[e].up-double(circle->tc[e][1]))/(tg[e].up-tg[e].down));
+        shareFacts_.circleCentreUv[2*e]=float((double(tcp[e][0])-tg[e].left)/(tg[e].right-tg[e].left));
+        shareFacts_.circleCentreUv[2*e+1]=float((tg[e].up-double(tcp[e][1]))/(tg[e].up-tg[e].down));
       }
       shareFacts_.circleRadiusDeg=float(radius*kDeg);
       ringOn=true;

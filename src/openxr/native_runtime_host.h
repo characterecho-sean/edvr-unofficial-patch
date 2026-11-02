@@ -2841,7 +2841,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // F206: one run of the ADS view circle, from the first frame it was asked (the request on with the mirror drawn, a weight above 0) to the first without. Counted here; at its end traced
   // (view_circle_press) and told to the d3d11 half (edvrNoteNativeViewCircle), which writes the graphics log's "ADS view circle (F206)" line. A d3d11.dll without the export is not told.
   struct CirclePressState {
-    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,refused=0,shared=0;float radiusDeg=0.f,radiusMinDeg=0.f,radiusMaxDeg=0.f,edgeDeg=0.f,centre[4]{};
+    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,refused=0,shared=0;float radiusDeg=0.f,radiusMinDeg=0.f,radiusMaxDeg=0.f,edgeDeg=0.f,centre[4]{};float pitchDeg=0.f,fieldUpDeg=0.f,fieldDownDeg=0.f;
   } circleRun;
   void circlePress(bool rendered) {
     auto& p=circleRun;
@@ -2855,6 +2855,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         p.radiusDeg=f.circleRadiusDeg;p.radiusMinDeg=p.frames==1?f.circleRadiusDeg:(std::min)(p.radiusMinDeg,f.circleRadiusDeg);p.radiusMaxDeg=(std::max)(p.radiusMaxDeg,f.circleRadiusDeg);
         if(f.circleEdgeDeg>0.f)p.edgeDeg=f.circleEdgeDeg;
         for(int k=0;k<4;++k)p.centre[k]=f.circleCentreUv[k];
+        p.pitchDeg=f.circlePitchDeg;p.fieldUpDeg=f.circleFieldUpDeg;p.fieldDownDeg=f.circleFieldDownDeg;
         p.lastUs=frameCycleUs();
       } else if(f.circleRefused) ++p.refused;
       return;
@@ -2865,15 +2866,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     report.frames=p.frames;report.refusedFrames=p.refused;report.sharedFrames=p.shared;
     report.seconds=float(double(p.lastUs-p.firstUs)/1e6);report.radiusDeg=p.radiusDeg;report.radiusMinDeg=p.radiusMinDeg;report.radiusMaxDeg=p.radiusMaxDeg;report.edgeDeg=p.edgeDeg;report.weightPeak=p.peak;
     for(int k=0;k<4;++k)report.centre[k]=p.centre[k];
+    report.pitchDeg=p.pitchDeg;report.fieldUpDeg=p.fieldUpDeg;report.fieldDownDeg=p.fieldDownDeg;
     HRESULT told=S_FALSE;
     if(graphicsProxy) {
       const auto note=reinterpret_cast<EdvrNoteNativeViewCircle>(GetProcAddress(graphicsProxy,"edvrNoteNativeViewCircle"));
       if(note)told=note(&report);
     }
     nativeTracePrintf("view_circle_press,frames=%u,refused=%u,shared=%u,seconds=%.3f,radius_deg=%.3f,radius_min_deg=%.3f,radius_max_deg=%.3f,edge_deg=%.3f,weight_peak=%.3f,"
-                      "centre_uv=%.4f/%.4f/%.4f/%.4f,told_graphics=%s\n",
+                      "centre_uv=%.4f/%.4f/%.4f/%.4f,pitch_deg=%.4f,field_up_deg=%.3f,field_down_deg=%.3f,told_graphics=%s\n",
       report.frames,report.refusedFrames,report.sharedFrames,double(report.seconds),double(report.radiusDeg),double(report.radiusMinDeg),double(report.radiusMaxDeg),double(report.edgeDeg),
-      double(report.weightPeak),double(report.centre[0]),double(report.centre[1]),double(report.centre[2]),double(report.centre[3]),told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
+      double(report.weightPeak),double(report.centre[0]),double(report.centre[1]),double(report.centre[2]),double(report.centre[3]),
+      double(report.pitchDeg),double(report.fieldUpDeg),double(report.fieldDownDeg),told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
   // B3, the scope zoom's window (scope_zoom_state.h; the request is the provider's version 11 answer, scope_zoom_window.h): whether eye 0's told frustum is narrowed this frame. Set in
   // WaitGetPoses where the trim sets the frame's frusta; the located views the layer lies on, the raw getter's answer, the temporal pass's announcements and the hidden-area mesh stay

@@ -86,20 +86,32 @@ inline int formatNoCircle(char* buf, size_t n, uint32_t press, NoCircle why, con
 // The runtime's report of one run of the circle (view_circle.h), as the graphics log gets it (edvrNoteNativeViewCircle): the press line. "ADS view circle (F206): press N: radius X deg" is what
 // --health reads. Y, the nearest edge of what the other eye covers, less the band (the margin and half the 3 deg soft edge: Y - X) is the radius; the run's smallest and largest radius say how it
 // followed the window.
+// F210b: a report of the full size also carries the pitch the centre was turned by and the field's up and down angles; one of the size before it (a runtime of the build before) is read without them.
+inline bool reportHasPitch(const EdvrNativeViewCircleReport* r) noexcept { return r && r->size >= sizeof(EdvrNativeViewCircleReport); }
 inline bool reportReadable(const EdvrNativeViewCircleReport* r) noexcept {
-    if (!r || r->size < sizeof(EdvrNativeViewCircleReport) || r->version != EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_2) return false;
+    if (!r || r->size < EDVR_NATIVE_VIEW_CIRCLE_REPORT_BASE_BYTES || r->version != EDVR_NATIVE_VIEW_CIRCLE_REPORT_VERSION_2) return false;
     const float values[] = {r->seconds, r->radiusDeg, r->radiusMinDeg, r->radiusMaxDeg, r->edgeDeg, r->weightPeak, r->centre[0], r->centre[1], r->centre[2], r->centre[3]};
     for (float v : values)
         if (!(v == v) || v > 1e9f || v < -1e9f) return false;
+    if (reportHasPitch(r)) {
+        const float pitch[] = {r->pitchDeg, r->fieldUpDeg, r->fieldDownDeg};
+        for (float v : pitch)
+            if (!(v == v) || v > 1e9f || v < -1e9f) return false;
+    }
     return true;
 }
 inline int formatRun(char* buf, size_t n, uint32_t press, const EdvrNativeViewCircleReport& r) noexcept {
-    return std::snprintf(buf, n,
+    const int head = std::snprintf(buf, n,
                          "ADS view circle (F206): press %u: radius %.2f deg (the widest that keeps the full-detail view's side bars in the black: nearest edge %.2f deg less the band %.2f deg); "
                          "over the run %.2f to %.2f deg; drawn on %u frames over %.2f s; refused %u, with the share %u; weight peak %.2f; centre (u, v) left %.3f/%.3f right %.3f/%.3f",
                          press, static_cast<double>(r.radiusDeg), static_cast<double>(r.edgeDeg), static_cast<double>(r.edgeDeg - r.radiusDeg), static_cast<double>(r.radiusMinDeg),
                          static_cast<double>(r.radiusMaxDeg), r.frames, static_cast<double>(r.seconds), r.refusedFrames, r.sharedFrames, static_cast<double>(r.weightPeak),
                          static_cast<double>(r.centre[0]), static_cast<double>(r.centre[1]), static_cast<double>(r.centre[2]), static_cast<double>(r.centre[3]));
+    if (!reportHasPitch(&r) || head < 0 || static_cast<size_t>(head) >= n) return head;
+    // F210b: the centre is the sight pitched by the middle of the field vertically (the mean over both eyes of up and down, signed); a headset whose up and down are opposite reads +0.0000
+    const int tail = std::snprintf(buf + head, n - static_cast<size_t>(head), "; pitch %+.4f deg (the middle of the field: up %+.2f, down %+.2f deg)", static_cast<double>(r.pitchDeg),
+                                   static_cast<double>(r.fieldUpDeg), static_cast<double>(r.fieldDownDeg));
+    return tail < 0 ? head : head + tail;
 }
 inline constexpr size_t kRunLineBytes = 480;
 
