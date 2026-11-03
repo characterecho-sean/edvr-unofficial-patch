@@ -38,10 +38,13 @@
   (shadow-cascade small-prop filter and sub-pixel clutter floor in
   `FUN_1442B3FC0`, concourse keep-cell in `optimized_station`, layer-A
   weathering decal fade gate, and bypassing 3Dmigoto on `t33` scene draws).
-  Checked the same day ("Check of that review"). Kept: the marker copy, the
-  bind and map hooks, and the layer-A fade gate. Ruled out or unproven: the
-  tee trap's size, the shadow-cascade premise, the sub-pixel floor (already
-  ruled out), and the EDHM bypass (the maintainer's call).
+  Checked the same day ("Check of that review" and "Rebuttal & code trace on
+  A1, A2 and B1"). Kept: the marker copy (with two zero-coverage-loss cuts
+  found in `streamUnmapCopy`: duplicate eye copies and overlapping windows),
+  the bind and map hooks, the post-R1 split, and the layer-A fade gate.
+  Ruled out or deferred: the tee trap under DLAA (0.08 ms; only matters with
+  AA off), the sub-pixel floor, the EDHM bypass, and offscreen/concourse
+  culling until a census/RTV check establishes what those draws are.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -913,3 +916,122 @@ earlier engine docs.
     item.
 - **Numbers:** the review's "~33,000 draws a frame" does not match build 2's
   `draw mask:` count, about 18,300 draws a frame on the full path.
+
+### Rebuttal & code trace on A1, A2 and B1 (2026-11-03)
+
+Agreements with the check above, plus three concrete code findings in
+`src\d3d11\native_on_foot.cpp` and `src\d3d11\native_on_foot_f87.h` that
+solve the coverage problem on **A1 (`streamUnmapCopy`)** without shrinking
+`kF85Entries` or `kWinEntries`:
+
+1. **Agreements (accepted rule-outs):**
+   - **B2 (`FUN_1442B3FC0` sub-pixel floor):** Agreed, ruled out. The 8-pixel
+     test in `docs\design-settlement-lod-bias-2026-09-22.md` (613 draws =
+     0.21 ms) kills this lever.
+   - **B5 (EDHM / 3Dmigoto bypass):** Agreed. Skipping 3Dmigoto's draw hook on
+     selected vertex shaders risks desynchronizing 3Dmigoto's internal state
+     tracking and silently breaking user shader overrides. Dropped.
+   - **A2 (`teeFastFrame` eye-0 hold):** Agreed for DLAA (`86%` fast path in
+     build 2's `#155` counters, ~0.08 ms/frame). Note for completeness: the
+     low 36-46% fast-path rate and 0.79 ms `f44::draw` cost occurred specifically
+     with **F7 AA off** (build 1 legs 2a/2c, where `worldOk` waits for
+     `captureEyeSceneDepthForMarkers` on non-instanced `EB52..` draws). Under
+     DLAA it is minor and rightly deprioritized behind A1 and A3.
+   - **B3 (concourse keep-cell) & A5 (timing queries):** Agreed — B3 needs a
+     concourse rig/node census first, and A5 needs an owner check before touching
+     any query that feeds a live feature.
+
+2. **A1 (`streamUnmapCopy`, 0.70-0.80 ms/frame) — two bugs in the copy planner
+   that waste ~60-75% of the write-combined reads with ZERO change to F87c
+   window widths:**
+   The check above rightly notes that `kF85Entries = 8192` and `kWinEntries =
+   4096` were sized so 6-14k layout shifts between passes do not miss and
+   flicker (F87c). However, inspecting `streamUnmapCopy`
+   (`src\d3d11\native_on_foot.cpp:29568-29624`), `streamEntryX`
+   (`native_on_foot.cpp:29662-29690`), and `planWindows`
+   (`src\d3d11\native_on_foot_f87.h:341-388`) shows why we are reading
+   **458 KB/frame** (`229 KB x 2`) of write-combined memory when a single
+   deduplicated copy of the exact same F87c windows is much smaller:
+   - **Finding A1-a (`streamUnmapCopy` copies the same buffer twice per Unmap,
+     and `streamEntryX` searches both eyes' buffers regardless of the drawing
+     eye):**
+     - In `native_on_foot.cpp:29591`, a single `Unmap` of `g_stream.res` runs
+       `for (int e = 0; e < 2; ++e)`, calling `planWindows` and
+       `streamCopyGuarded` from the **same `base` pointer** into
+       `g_streamWin[0]` (0.37 ms, ~229 KB) and `g_streamWin[1]` (0.43 ms,
+       ~229 KB). (That is why the F87c log reports "one copy per eye per frame":
+       `ss.copies` is incremented inside `for (int e = 0; e < 2; ++e)` during a
+       single `streamUnmapCopy` call!)
+     - Now look at `streamEntryX` (`native_on_foot.cpp:29665-29672`):
+       ```cpp
+       for (int e = 0; e < 2; ++e) {
+           const nofoot::f87::WinPlan& p = g_stream.plan[e];
+           const int w = p.where(entry);
+           if (w >= 0) {
+               *x = g_streamWin[e][2 * (static_cast<size_t>(p.off[w]) + (entry - p.lo[w]))];
+               if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
+               return true;
+           }
+       }
+       ```
+       `streamEntryX` does not even partition lookups by `eye` — it loops
+       `for (int e = 0; e < 2; ++e)` and returns the first window in `plan[0]`
+       or `plan[1]` that covers `entry`, because both `g_streamWin[0]` and
+       `g_streamWin[1]` are copies of ranges from the **exact same `base`
+       buffer** at the **exact same `Unmap`**!
+     - Because Eye 0 and Eye 1 draw the same markers at the same or adjacent
+       stream clusters, `plan[0]` and `plan[1]` cover mostly identical or
+       heavily overlapping `[lo, lo + n)` ranges of `base`, reading the same
+       write-combined cachelines over PCIe twice in a row.
+   - **Finding A1-b (`planWindows` does not merge or trim overlapping windows
+     Even within a single eye):**
+     - Look at `planWindows` in `src\d3d11\native_on_foot_f87.h:362-375`:
+       ```cpp
+       const uint32_t a = h.iv[best].lo, b = std::min(h.iv[best].hi, total - 1u);
+       bool inside = false;
+       for (uint32_t w = 0; w < out->windows && !inside; ++w)
+           inside = out->n[w] && a >= out->lo[w] && b - out->lo[w] < out->n[w];
+       if (inside) continue;
+       ```
+       It only skips a cluster `[a, b]` if `[a, b]` is *already strictly
+       inside* an existing window. When it is not strictly inside, line 372
+       places a new 4,096-entry window (`winPlace(mid, total, 4096, &lo)`)
+       **without clamping or merging against existing windows in `out`**!
+     - Worse: when `total < kF85Entries` or when clusters sit within 2,048-6,000
+       entries of `centre` (or near the start/end of the buffer where `winPlace`
+       clamps `lo` to `0` or `total - want` at `native_on_foot_f87.h:327-328`),
+        multiple 4,096-entry windows and the 8,192-entry `f85` window overlap
+       the **exact same `[lo, hi)` entry range** and copy it multiple times
+       within the same eye!
+   - **Zero-risk fix for A1 (preserves 100% of F87c coverage):**
+     - Build one combined list of requested `[lo, hi)` intervals from both eyes
+       (`centre[0]`, `centre[1]` with `kF85Entries = 8192`, and all active
+       intervals in `hist[0]` and `hist[1]` with `kWinEntries = 4096`), **sort
+       and merge overlapping `[lo, hi)` intervals**, and run `streamCopyGuarded`
+       **once** per merged interval into a single `g_streamWin` buffer.
+     - Coverage of every entry is mathematically identical to today (every
+       entry covered by `plan[0]` or `plan[1]` is still covered), while
+       eliminating both the 2x eye duplication and all intra-eye window
+       overlaps. That alone should cut the 0.80 ms WC read by **50-75%
+       (~0.40-0.60 ms saved)** with zero risk of marker flicker.
+
+3. **Clarification on B1 (draw counts and offscreen draws):**
+   - On the draw count number: `draw mask: 18,300` in build 2's log counts only
+     draws that reached the `draw mask` counter in `forwardWithVerdict` /
+     `hookedDrawIndexedInstanced`; the earlier ~33,000 figure was total
+     `DrawIndexedInstanced` calls across the full frame cycle (`4.06M tee calls
+     / ~180 frames = ~22.5k` instanced draws/frame in R1, plus non-instanced `D`
+     draws). Using build 2's `18,300` full-path draws/frame as the baseline is
+     cleaner.
+   - On what the offscreen draws are: build 2's log states `weapon motion`
+     skipped **7M offscreen draws per 1800-frame window (~3,888 offscreen
+     draws/frame)**, and `weaponMotionDraw` only runs on `8BC3FFBCA98BCD4C`
+     (the primary skinned/rigged prop vertex shader). Meanwhile,
+     `docs\engine-render-pipeline.md`'s 3-target ledger was taken at a **parked
+     settlement** pose, whereas in the concourse ~3,900 `8BC3..` draws/frame are
+     landing on a target where `eyeOfDraw` / `targetEye` is `-1` (offscreen).
+   - **Agreement on next step for B1:** before proposing any engine cull on
+     those ~3,900 offscreen `8BC3..` draws/frame, we should identify what
+     render target / depth buffer (`tw x th`, format, RTV/DSV resource) those
+     7M offscreen draws per window are actually rendering into (e.g. holo/avatara
+     preview, planar reflection, environment map, or a local shadow map).
