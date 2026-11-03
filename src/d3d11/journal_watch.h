@@ -308,6 +308,9 @@ bool journalHeldItemName(char* out, size_t cap);
 // F66a: the native on-foot tick asks for the 100 ms Status.json cadence while it is active (journalWatchSetEagerStatus is the FSS latch's and
 // the flat profile's; the worker reads on the faster of the two). Any thread.
 void journalWatchSetEagerStatusOnFoot(bool eager);
+// The SRV turret entry fade (srv_turret_entry_fade.h) asks for the 100 ms Status.json cadence while the commander is in the Scorpion, so the turret-view bit that starts its hold is read
+// within 100 ms of the file changing and not 500. Any thread.
+void journalWatchSetEagerStatusSrv(bool eager);
 // F147: the native on-foot tick asks for the suit loadout's weapon slots (journal_loadout_reader.h) while native on foot is active. The reader runs only in the VR profile
 // (a flat caller is refused) and only after the first request: its first poll reads the current journal once from its start, every later one only the appended bytes, and
 // while the request is false it does not poll. Any thread.

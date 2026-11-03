@@ -137,6 +137,7 @@
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
 #include "srv_turret.h"   // issue 140: the SRV turret view's camera, a term of the eye alignment alignTick publishes
+#include "srv_turret_entry_fade.h"   // issue 140: the hold to black on entering the turret view (a term of the comfort fade's mix)
 #include "temporal_shader_bytecode.h"   // F85c: kReticleDepthBytecode (tools/temporal_shader_build)
 #include "temporal_pass.h"   // F52: temporalPassEyeRows, the temporal pass's camera rows for an eye (the marker correction's reference)
 #include "ui_depth.h"  // F46: uiDepthEyeOfTargetReadOnly, ui depth's frame table (the marker probe's eyes; read only)
@@ -37511,7 +37512,8 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     s1::circleTick(GetTickCount64());   // F206: the ADS view circle's request (its centre in each eye), every tick of a press B3 applies to; after the lens tick, whose item it reads
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
-    {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
+    {   // F123: the comfort fade is the max of F109's snap fade, the containment's and the SRV turret's entry hold, sent once a frame
+        g_fadeMix.turret = srvTurretEntryFadeTick(frameNo);   // after alignTick, which published the turret's camera move on the edge's own frame
         const double fade = g_fadeMix.next();
         if (fade >= 0.0) edvr::comfort::publish(static_cast<float>(fade), GetTickCount64());
     }

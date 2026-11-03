@@ -304,14 +304,14 @@ private:
     Open lEp_, cEp_;
 };
 
-// The comfort fade has one signal and two publishers (F109's snap turn and this): each sets its own level, the level sent is their max, once a frame. A frame with both clear
-// publishes nothing, except the first one after a level, which publishes 0 (a reader that was last told 0.4 would otherwise decay it).
+// The comfort fade has one signal and three publishers (F109's snap turn, this, and the SRV turret's entry hold, srv_turret_entry_fade.h): each sets its own level, the level sent is
+// their max, once a frame. A frame with all clear publishes nothing, except the first one after a level, which publishes 0 (a reader that was last told 0.4 would otherwise decay it).
 struct FadeMix {
-    double snap = 0.0, contain = 0.0;
+    double snap = 0.0, contain = 0.0, turret = 0.0;
     bool published = false;
     // The level to publish this frame, or -1 when there is nothing to say.
     double next() noexcept {
-        const double lvl = std::max(snap > 0.0 ? snap : 0.0, contain > 0.0 ? contain : 0.0);
+        const double lvl = std::max(std::max(snap > 0.0 ? snap : 0.0, contain > 0.0 ? contain : 0.0), turret > 0.0 ? turret : 0.0);
         if (lvl > 0.0 || published) {
             published = lvl > 0.0;
             return lvl > 1.0 ? 1.0 : lvl;

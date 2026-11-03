@@ -5,6 +5,7 @@
 
 #include "srv_radar_anchor.h"
 #include "srv_turret_hud_binding.h"
+#include "srv_turret_entry_fade.h"
 #include "srv_turret_math.h"
 
 #include "draw_gate.h"
@@ -1005,11 +1006,13 @@ void srvTurretFrameTick(uint32_t frameNo) {
 }
 
 double srvTurretBackSeatedZ() { return g_backSeatedZ; }
+bool srvTurretViewOn() { return g_on; }
 
 void srvTurretNotePublished(double seatedZ, uint32_t serial) {
     const double back = -seatedZ;   // metres the camera is behind the game's own
     if (std::fabs(back - g_loggedBackM) < 5.0e-4) return;
     g_loggedBackM = back;
+    if (back > 0.0) srvTurretEntryFadeNoteMove(serial);   // the entry fade waits for the runtime to report this serial applied
     if (back > 0.0)
         Log::get().note("srv turret camera: back %.2f m published (serial %u)", back, static_cast<unsigned>(serial));
     else
