@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **OFFLINE ANALYSIS DONE; CAPTURE PROBE BUILT, NOT FLOWN.** The ask (Sean,
+State 2026-11-03: **OFFLINE ANALYSIS DONE; CAPTURE PROBE FLOWN, ALL ANSWERED.** The ask (Sean,
 2026-11-03): port the legacy client's cockpit glass shader and offer it as a
 Visual-tab option in both flat and VR. Branch
 `claude/cockpit-glass-shader-port-1852e3`.
@@ -26,11 +26,12 @@ Settled offline (sections 1 to 3):
   `fss-scanner.md` and `bloom-artifact-2026-10-20.md` found nothing in
   these archives. Their "no DXBC offline" conclusion is withdrawn.
 
-Open, needs a capture (section 5): the canopy draw's blend, depth and
-target state; which permutations are bound in flight; the CB1/CB2 values
-and the directional-light buffer layout the port reads. The existing
-census cannot get these: `census_cb_watch` stops at 768 bytes, and the
-registers needed run from CB1[55] to CB1[326].
+Probe FLOWN 2026-11-03 (Steam, flat, docked and in sunlight; section 7).
+It answered C1 to C6. What it changes: only intact q3 draws; blend is
+straight alpha; t1 holds one light, direction in view space; docked, the
+sun is off and CB1[257] ambient is 0 everywhere, so a legacy model on t1
+alone leaves the canopy unlit in a hangar and the port must read the
+probes. Live's dirt on this ship: a constant warm grey at 7.5% of its mask.
 
 Decisions for Sean (section 6):
 
@@ -38,14 +39,10 @@ Decisions for Sean (section 6):
   texture, and live's shadow map is a moment map, not depth.
 - Key name and values.
 - Whether ice and condensation stay stock in the first version.
-- Legacy RGB dirt: waits for the probe flight (2026-11-03, item 4).
+- Legacy RGB dirt (item 4): live side measured; the legacy side needs a
+  legacy-client capture.
 
-Next flight: Steam, flat, with `experimental.cockpit_glass_probe = on` in
-`edvr-flat.ini` (and `edvr.ini`). Sit in a lit station hangar, then
-launch into open space in sunlight, at least 30 s in each. Then
-`python tools\edvr_log.py --target steam --expect-build HEAD` and grep
-`glass probe:`. Then write the replacement shader against the logged
-values.
+Next: no flight. The decisions above, then the replacement shader.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`,
 `tools\cockpit_glass_probe_test`, the `:rig_cockpit_glass_probe_test`
@@ -224,7 +221,59 @@ build carries a debug view for those.
    own legacy install, or an EDVR-made look-alike. A legacy-client frame
    capture in flat would show it. Decided 2026-11-03: wait for the probe
    flight's `pDirtDiffuse` (CB2[11]) and t9 values, which say how far
-   live's flat-colour dirt already is from legacy, then choose.
+   live's flat-colour dirt already is from legacy, then choose. The
+   flight (section 7) gives the live side only.
+
+## 7. Probe flight 2026-11-03 (Steam, flat)
+
+Log `edvr_gfx_20261103_090854.log`, build `v0.22.0-rc.5-50-g625de17e`
+(matches). Flat 3840x2160. Eight samples: 1 to 4 docked in a station
+hangar, 5 leaving, 6 to 8 in open space in sunlight. No readback was
+dropped. One ship throughout.
+
+- **C2, permutations.** Only PS `4E4FF61E8A08FC7E` (intact, q3) with VS
+  `8C091FFD08644E02`, one draw a frame (about 3,050 per 30 s), docked
+  and in space. `other-ps=0`. Ice, condensation and q0 to q2 never drew
+  on this rig.
+- **C1, output state.** Blend is straight alpha on colour and alpha
+  (`SRC_ALPHA`, `INV_SRC_ALPHA`), write mask 0xF, one RTV,
+  R11G11B10_FLOAT. Depth test `GREATER_EQUAL` (reverse Z), no depth
+  write. Stencil writes 5 under mask 0x5. Back faces culled. The blend
+  multiplies colour by alpha again, though live's albedo already carries
+  coverage, so live's dirt colour is scaled by alpha twice.
+- **C5, the light buffer.** t1 is 48 bytes: one light, and
+  `g_numDirectionalLights` CB1[245].y = 1. Offset +0 is the colour in HDR
+  units, the same as CB1[293] (about 800 to 2,360 in sunlight). Offset
+  +16 is the direction in view space: CB1[277] and [278] dotted with the
+  world sun direction CB1[291] give t1's x and y (checked on sample 6).
+  Offset +32 reads (1, 0, 0, int 1). Legacy's second light has no source.
+- **Docked, the sun is off.** Its colour is 1e-13 in every docked
+  sample. A hangar is lit only by local lights and the reflection probes
+  (t0, t2, t3), none of which the legacy model reads.
+- **No ambient constant.** `gAmbientColour` CB1[257] is 0 in all eight
+  samples. The legacy VS ambient has to come from the probes (t3) or not
+  at all.
+- **C3, other frame constants.** `gHDRScalingWrite` CB1[90].y = 1/256
+  (read scale .z = 256). Shadow: t5 3072x2048 R16G16B16A16, six cascades
+  (CB1[326].x) in a 3x2 atlas (CB1[318..323]). CB1[55] = (1, 0, 0, 0):
+  no cracks, ice or condensation. CB1[56] = (0, 1): tint alpha 0, alpha
+  multiplier 1.
+- **C4, material** (CB2, unchanged across samples): `pDirtDiffuse` (0.274,
+  0.246, 0.208), a warm grey; dirt alpha multiplier CB2[0].x 0.5; mask
+  scale and offset CB2[6].zw 0.5 and -0.2; dirt roughness CB2[13].y 0.8.
+  CB2[17].w = 0.8787, so dirt and imperfection coverage is scaled by
+  1 - saturate(0.8787 x 1.0526) = 0.075. On this ship live's dirt is a
+  constant warm grey at 7.5% of its mask. What CB2[17].w is (a per-ship
+  wear value, or fixed per material) is unknown from one ship.
+- **C6, slots.** t3 is a BC6H 256x256 cube array of 64 cubes, t4 a
+  512x512 R16G16_FLOAT LUT, t6 and t7 BC7, t8 BC4, t9 BC7 1024x1024. s0 anisotropic
+  x16 wrap; s1 and s2 trilinear clamp. b1 is 5,376 bytes, b2 288, both
+  bound from byte 0.
+
+What this changes in section 4: the replacement needs the probes (t0,
+t2, t3) for ambient and for any light in a hangar, one directional
+light, and output written for a straight-alpha blend. Only the q3
+intact variant is needed on this rig.
 
 ## Ruled out
 
@@ -235,3 +284,8 @@ build carries a debug view for those.
   (`fss-scanner.md`), because the earlier scans used the standard FNV
   basis; under EDVR's basis 634 dumped shaders match archive blobs
   byte for byte.
+- ruled out: ambient from `gAmbientColour` CB1[257], because it was 0 in
+  all eight probe samples, docked and in sunlight (section 7).
+- ruled out: lighting the canopy from t1 alone in a hangar, because the
+  sun's colour there is 1e-13; hangar light reaches the glass only
+  through local lights and probes (section 7).
