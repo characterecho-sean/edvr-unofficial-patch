@@ -132,7 +132,7 @@ inline int flatQueryTrackerFormatEscape(char* out, size_t size, uint32_t cause, 
                                         uint64_t msSinceFirstCall) {
     return std::snprintf(out, size,
         "flat replay query tracker: first escape: cause=%s call=%s query=%s#%u kind=%s thread=%u context=%016llX; seen begins=%llu ends=%llu "
-        "open=%u, %llu ms after the first observed call; uncertain now stays set for the session (only a new context clears it)",
+        "open=%u, %llu ms after the first observed call; uncertain now stays set for the rest of the session",
         flatQueryCauseName(cause), call ? call : "?", flatQueryCodeName(queryCode), queryCode, flatQueryKindName(kind), thread, context,
         static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends), open, static_cast<unsigned long long>(msSinceFirstCall));
 }
@@ -145,6 +145,19 @@ inline int flatQueryTrackerFormatIgnoredTimingEnd(char* out, size_t size, uint32
         "ends=%llu, %llu ms after the first observed call): a timing bracket counts no draws, so an unobserved one cannot make a replay unsafe",
         flatQueryCodeName(queryCode), queryCode, thread, context, static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends),
         static_cast<unsigned long long>(msSinceFirstCall));
+}
+
+// The first Begin of a Timing query already open as a Timing entry (the mirror rule of 2026-11-03: not an escape). Its End went unobserved, typically because it
+// was issued in VR after a flat-to-VR switch. Written once per session, with the unmatched-End count beside it.
+inline int flatQueryTrackerFormatStaleTimingBegin(char* out, size_t size, uint32_t queryCode, uint32_t thread, unsigned long long context,
+                                                  uint64_t begins, uint64_t ends, uint64_t staleBegins, uint64_t unmatchedEnds,
+                                                  uint64_t msSinceFirstCall) {
+    return std::snprintf(out, size,
+        "flat replay query tracker: a Begin of a timing query already open as a timing query is not an escape (first: query=%s#%u thread=%u context=%016llX; seen "
+        "begins=%llu ends=%llu stale timing begins=%llu unmatched timing ends=%llu, %llu ms after the first observed call): its End went unobserved and a timing "
+        "bracket counts no draws, so the entry is re-opened",
+        flatQueryCodeName(queryCode), queryCode, thread, context, static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends),
+        static_cast<unsigned long long>(staleBegins), static_cast<unsigned long long>(unmatchedEnds), static_cast<unsigned long long>(msSinceFirstCall));
 }
 
 class FlatQueryRejectStats {

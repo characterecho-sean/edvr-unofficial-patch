@@ -4,7 +4,7 @@
 namespace edvr {
 // A pure, bounded model of query brackets on the immediate context. An
 // unpaired count-bearing End or a full table leaves replay unsafe until the
-// context is replaced; neither Present nor ClearState ends a GPU query.
+// session ends (nothing in production resets a tracker); neither Present nor ClearState ends a GPU query.
 struct FlatReplayQueryTracker {
     enum class Kind : uint8_t { EndOnly, Timing, Count, Unknown };
     // Why `uncertain` first became true (log only, 2026-11-03; the decision never reads it). The values are the numbers
@@ -14,7 +14,7 @@ struct FlatReplayQueryTracker {
     Entry active[64]{};
     bool uncertain = false;
     // The first escape: its cause, the kind and identity of the call that caused it, and what the tracker had seen by then (that call
-    // included). Never cleared except by resetForNewContext.
+    // included). Holds for the rest of the session: resetForNewContext has no production caller (tests only).
     Cause firstCause = Cause::None;
     Kind firstCauseKind = Kind::Unknown;
     const void* firstCauseIdentity = nullptr;
@@ -26,6 +26,11 @@ struct FlatReplayQueryTracker {
     // that one End set the sticky flag and refused every on-foot DLSS frame. safe() already ignores an open Timing bracket (it counts no draws), so an unobserved
     // one cannot make a replay unsafe either.
     uint64_t unmatchedTimingEnds = 0;
+    // Begins of a Timing query that is already open as a Timing entry (2026-11-03): counted, never an escape. The mirror of the case above: after a flat-to-VR
+    // switch the game's End of an observed Timing Begin is issued in VR and never seen, so the entry stays open, and on the way back to flat the game's next
+    // Begin on the same query would have been a duplicate-begin escape and set the sticky flag. A Timing bracket counts no draws, so the entry is simply
+    // re-opened (same identity, still Timing). Every other duplicate Begin (Count, Unknown, mixed kinds) still escapes.
+    uint64_t staleTimingBegins = 0;
 
     uint32_t openCount() const {
         uint32_t n = 0;
@@ -36,6 +41,7 @@ struct FlatReplayQueryTracker {
         ++begins;
         if (!identity) { escape(Cause::NullIdentity, kind, identity); return; }
         for (auto& entry : active) if (entry.identity == identity) {
+            if (entry.kind == Kind::Timing && kind == Kind::Timing) { ++staleTimingBegins; return; } // its End went unobserved; re-open in place
             escape(Cause::DuplicateBegin, kind, identity); return; // duplicate Begin has ambiguous semantics
         }
         for (auto& entry : active) if (!entry.identity) {
