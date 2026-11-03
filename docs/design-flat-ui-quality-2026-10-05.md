@@ -57,7 +57,7 @@
   Anti-Aliasing", flat Performance tab under UI quality, default off; "flat ui layer smaa:" lines). Seen working at 2560x1440 (15:43);
   nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost.
 - **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them.
-- **2026-11-03, bars and dust in the flat layer (built, NOT FLOWN):** the supercruise bars and both dusts are taken, as in VR; last entry, "the supercruise bars and the dust".
+- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; last entry, "the supercruise bars and the dust".
 - **Next on Epic:** SS 0.5 on the shipped build (copy route, eced5813's admission change), 100% at SS 1.0, then all three maps.
 
 ## Purpose
@@ -1166,7 +1166,7 @@ distributor panel: its diagonal runs show a step every pixel or two, where the g
   line never printed in flat, so no log line goes away. On the Deck, a same-scene frame-time comparison against the previous build would
   price it under DXVK.
 
-## 2026-11-03: the supercruise bars and the dust in the flat UI layer (BUILT, NOT FLOWN)
+## 2026-11-03: the supercruise bars and the dust in the flat UI layer (FLOWN OK)
 
 A user report: in flat, the supercruise vertical bars and the supercruise space dust blur under motion. The upscaler's history smears them: a bar is
 one render pixel wide and a dust streak moves about its own width a frame, so successive frames never overlap and there is nothing to accumulate.
@@ -1202,3 +1202,9 @@ or a station) with them, in both editions.
   no longer smear when the view turns. If `no-camera-rows` climbs, the recipe did not take for that pair; if `no-density-gain` climbs, the layer is
   narrower than the render (lower Supersampling, or raise UI quality). Frame time: the strip shader and the extra layer draws are small; the smoothing,
   when on, is the larger cost.
+- **Flight (Frontier, 2026-11-03, log `edvr_gfx_20261103_044624`, build v0.22.0-rc.5-38-g7cc31c5a, VR then flat in one session):** Sean: works in both
+  profiles. Flat, 3840x2160, DLSS, UI quality 100, HUD Anti-Aliasing on: in supercruise every window read `supercruise-bars asked=2700 decided=2700
+  taken=2700 ... refused=0 (none)` and the same for `space-dust` (one draw a frame each at 90 fps), the strip pass at `tent half-width 1.00 layer px in a
+  3840x2160 viewport` (layer and render the same size: the looser flat density rule is what admitted the bars); near a body `normal-space-dust taken=2669
+  of 2672` (3 refused: `not-hdr-target=1 tone-unproven=2`, at a transition). `no-camera-rows` and `other-shift` never appeared: the two new recipes give
+  the rows and the rows carry the frame's phase. `flat ui layer smaa: key=on smoothed=2669 raw-fault=0 size=3840x2160`.
