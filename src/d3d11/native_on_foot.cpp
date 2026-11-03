@@ -1457,7 +1457,7 @@ void readKey() {
             g_f140TrimCm[i].store(static_cast<float>(v[i]), std::memory_order_relaxed);
         }
     }
-    // F62b (live; F92b: a user key, the Native on foot page's "ADS: aim with head") the ADS head-aim, and its two sign keys (TEMPORARY: 1, -1, or 0 for that axis off;
+    // F62b (live; F92b: a user key, the Native on foot page's "ADS: Look to Aim") the ADS head-aim, and its two sign keys (TEMPORARY: 1, -1, or 0 for that axis off;
     // anything else positive reads 1, negative -1).
     {
         const bool on = cfg.getString("fix.native_on_foot_ads_head_aim", "on") == "on";
@@ -8906,7 +8906,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsFootLast = onFoot;
     }
     const bool signChanged = ySign != g_adsYSignLast || pSign != g_adsPSignLast;
-    if (key != g_adsKeyLast)   // F92b: the toggle, live (the Native on foot page's "ADS: aim with head"); in ADS it unwinds or engages the head aim below
+    if (key != g_adsKeyLast)   // F92b: the toggle, live (the Native on foot page's "ADS: Look to Aim"); in ADS it unwinds or engages the head aim below
         Log::get().note("native on foot ADS head aim (F92b): %s (live; in ADS: %s)", key ? "on" : "off", g_adsState == kAdsActive ? "yes" : "no");
     g_adsKeyLast = key;
     g_adsYSignLast = ySign;

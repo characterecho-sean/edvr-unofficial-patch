@@ -931,12 +931,12 @@ they were there (flown 2026-09-07).
      in `edvr.ini` order, the switch first and the HUD last: **Native on foot VR**
      (the feature switch, `fix.native_on_foot`); **Look and aim** (Look to aim,
      Turn style, Snap turn step, Look to aim smoothing); **Aiming down sights**
-     (ADS: sight in both eyes, ADS: aim with head, ADS: scope zoom, A1: the scope
+     (ADS: sight eye, ADS: Look to Aim, ADS: scope zoom, A1: the scope
      lens, `fix.native_on_foot_ads_scope_zoom`, on by default since it flew OK; its
      reference FOV is the developer tier's `experimental.native_on_foot_ads_scope_zoom_fov`
      row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default on since F205, the user's choice of the scoped
      Executioner's optic: on takes the lens from the left eye drawn as the zoomed view, at full detail, with an equal black edge in each eye's outer view
-     while the zoom stands, the press taking both eyes whatever ADS: sight in both eyes says, and needing a temporal Anti-aliasing mode; off is the digital
+     while the zoom stands, the press taking both eyes whatever ADS: sight eye says, and needing a temporal Anti-aliasing mode; off is the digital
      zoom with no edge; with ADS: scope zoom on, every ADS press also shows the view inside a circle around the sight in both eyes, black outside, its
      radius the same share of the headset's view that flat's ADS FOV keeps of the screen, with Anti-aliasing on or off: F205, with no row of its own
      since F205b, the pilot's word); **Body and

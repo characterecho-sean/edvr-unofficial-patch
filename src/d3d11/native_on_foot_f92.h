@@ -1,4 +1,4 @@
-// F92b (native on-foot VR): the ADS head aim as a user toggle, live mid-press (fix.native_on_foot_ads_head_aim, the Native on foot page's "ADS: aim with head").
+// F92b (native on-foot VR): the ADS head aim as a user toggle, live mid-press (fix.native_on_foot_ads_head_aim, the Native on foot page's "ADS: Look to Aim").
 // Journal: the arc doc, F92b.
 //
 // Header only, no game or D3D11 state, so native_frame_test runs the very functions the hooks use.
