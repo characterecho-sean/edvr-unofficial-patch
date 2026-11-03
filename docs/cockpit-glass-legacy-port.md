@@ -437,7 +437,7 @@ times live's blemish channel, which sits at the edges, with live's dirt colour 0
 times a mask 8x smaller; its smudge glare is 1,000 times legacy's (1.0 against 0.001) and its crack glare
 50 times; its alpha has no 0.02 base. Legacy's own streak texture is Frontier's and is not shipped.
 
-﻿## 11. Measured values, EDVR's streaks and the ice overlay (built 2026-11-03, not flown)
+## 11. Measured values, EDVR's streaks and the ice overlay (built 2026-11-03, not flown)
 
 Sean's choices (2026-11-03): the shader takes the values section 10 measured; the dirt pattern is EDVR's own
 streak texture (legacy's is Frontier's); ice and condensation stay as the game draws them, with the legacy dirt
