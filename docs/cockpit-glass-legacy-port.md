@@ -23,7 +23,7 @@ t1 holds one light, direction in view space; docked, the sun is off and CB1[257]
 
 Decisions (Sean, 2026-11-03), all applied in section 8: an approximation of the legacy look is accepted; key
 `visual.cockpit_glass = odyssey | legacy`; the intact canopy only, ice and condensation stay stock; live's
-constant dirt colour stands in for the legacy RGB dirt texture (no legacy-client capture needed); the canopy
+constant dirt colour stands in for the legacy RGB dirt texture (reopened by the third flight, section 9); the canopy
 keeps live's reflection-probe lighting as its ambient, so it stays lit in a hangar.
 
 Flown once (3ae212ae, Steam, flat): the swap ran (binds = canopy-seen, about 3,050 per 30 s) and little
@@ -31,7 +31,11 @@ differed, because the shader scaled dirt colour and glare by live's alpha-only f
 live's tilted normal. Fixed in 5b9c36f9 (section 8, "After the first flight"). Flown again: the canopy was covered in bright golden
 dirt speckle in sunlight, because the direct light lacked live's 1/pi (section 8, "After the second flight").
 
-Open: the second flight; the tuned constants (section 8).
+Third flight (0756063a, Sean): the dirt sits where the ice forms, which is not realistic. Live's masks put
+dirt and smudges on the canopy mesh's blue vertex channel and ice on its green one; on this canopy the two
+cover the same areas by eye (not measured). Where legacy put its dirt cannot be read offline (section 9).
+
+Open: where legacy's dirt was (section 9); the tuned constants (section 8).
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -368,6 +372,32 @@ alpha 0.2; at k = 0.075 colour 8.281 (wanted 8.289), alpha 0.015; smudge glare r
   (the probe ambient), glares toward the sun, shows the dirt at the amounts live gives it, and nothing flickers
   between the eyes. Compare with `odyssey` on the same ship. Then the draw cost at the same spot.
 - Switching the key in the F8 menu while in the cockpit takes effect within a few frames, both ways.
+
+## 9. Where the dirt goes (third flight, 2026-11-03)
+
+Flight 0756063a (Steam, flat; log `edvr_gfx_20261103_104211.log`). Sean: as ice forms it takes the place of
+the dirt; the dirt sits just where the other effects would be, which is not realistic.
+
+What the live shaders say (read from the disassembly):
+
+- The port's dirt is placed by live's arithmetic: blemish map t9 channel x (checked against the swizzles of
+  the three hex-tiled samples, instructions 112-119 of the intact PS) times the dirt vertex mask. The VS
+  takes the dirt mask from the vertex colour dotted with CB2[3] and the smudge mask with CB2[4]; the probe
+  read both as (0, 0, 1, 0), the blue channel.
+- The ice VS (`63C6E375A08C78AA`) takes the ice mask from CB2[2], (0, 1, 0, 0), the green channel, and the
+  ice PS (`7F770D61DEA7CD30`) thresholds its own texture (t10.z) against it. Dirt and ice read different
+  channels, so what Sean saw means the artwork's blue and green channels cover the same areas (by eye, not
+  measured). Live hides that by
+  drawing its dirt at 7.5% opacity; at legacy strength it shows.
+
+What legacy did: its dirt is the RGB dirt texture (t2) times a vertex mask, `dot(colour, cb0[4])` times
+cb0[3].x. Neither can be read offline. cb0[4], the channel the legacy dirt mask used, is a material value,
+and the legacy archive holds only shaders. The texture is in the undecoded legacy assets. Whether the legacy
+canopy mesh carries the same vertex colours as live's is also unknown.
+
+To see it: a frame capture of the legacy client (`elite-dangerous-64`, build 312425) in the cockpit, read at
+the canopy draw (PS A816DE90739BF4C0): the texture bound at t2, the vertex colour stream and cb0[3..4].
+RenderDoc is not installed on this machine. Until then, any change to where the dirt goes is a guess.
 
 ## Ruled out
 
