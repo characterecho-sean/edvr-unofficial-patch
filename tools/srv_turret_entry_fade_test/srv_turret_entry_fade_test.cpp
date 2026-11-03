@@ -11,7 +11,7 @@
 //   and none contains a phrase tools/edvr_log.py's turret rule reads.
 //   THE EARLY EDGE (srv_turret_sheet_latch.h): the gunner sheet's draw raises the view before Status.json does; Status.json taking over is no edge and says how long it lagged; a latch with no
 //   sheet draw for a second expires; a non-Scorpion never raises it; the off edge stays Status-driven (a sheet that stops does not turn a Status-on view off, a Status off edge with the sheet
-//   still drawing latches again); and the entry fade's hold starts on the early edge.
+//   still drawing latches again on its next draw, but a draw from before the off edge does not: leaving the turret turns the view off at the Status.json edge); and the entry fade's hold starts on the early edge.
 //   THE WIRING: the module is called every frame after alignTick and before the mix, its level is a term of FadeMix's max, the move's publish is told to it, the luma probe's frame-by-frame mode
 //   and the Status.json cadence are asked for, and the new source is in the build.
 #include "../../src/d3d11/srv_turret_entry_fade.h"
@@ -342,8 +342,43 @@ static void latchCases() {
         latchStep(m, 1000, true, true, 0);
         r = latchStep(m, 1100, false, true, 0);
         check(!r.on && r.event == sl::Event::kNone, "a Status.json off edge with no sheet in the last second turns the view off at once");
-        r = latchStep(m, 1200, false, true, 700);   // a sheet seen 500 ms ago, before the exit: fresh
-        check(r.on && r.event == sl::Event::kRaised, "... but a sheet draw seen within the last second raises it (the 1000 ms rule is the whole rule)");
+        r = latchStep(m, 1200, false, true, 700);   // a sheet last seen before the Status.json on step: stale for a raise (the old rule raised here)
+        check(!r.on && r.event == sl::Event::kNone, "... and a sheet draw older than the last step that saw Status.json on does not raise it, however fresh it is");
+        r = latchStep(m, 1300, false, true, 1290);
+        check(r.on && r.event == sl::Event::kRaised, "... while a draw after the off edge does (a sheet still drawing re-latches on its next draw)");
+    }
+    {   // the exit: the sheet stops when the game's fade starts, Status.json flips off 600 ms later. The view goes off on that step and nothing raises or expires after it.
+        sl::Latch l;
+        latchStep(l, 1000, false, true, 990);   // the early edge
+        latchStep(l, 1200, true, true, 1190);   // Status.json agrees
+        bool onUntil = true;
+        for (uint64_t now = 1200; now <= 5400; now += 100) onUntil = latchStep(l, now, true, true, now <= 5000 ? now - 5 : 5000).on && onUntil;
+        check(onUntil, "the view is on while Status.json says on");
+        // the sheet last drew at 5000; Status.json goes off at 5600 (600 ms later)
+        sl::Result r = latchStep(l, 5500, true, true, 5000);
+        check(r.on, "... still on at 5500 (the sheet gone 500 ms, Status.json on)");
+        r = latchStep(l, 5600, false, true, 5000);
+        check(!r.on && r.event == sl::Event::kNone, "the Status.json off step turns the view off at once: no raise from the draw 600 ms old");
+        bool quiet = true;
+        for (uint64_t now = 5700; now <= 8000; now += 100) {
+            r = latchStep(l, now, false, true, 5000);
+            quiet = quiet && !r.on && r.event == sl::Event::kNone;
+        }
+        check(quiet, "... and nothing raises or expires after it (no latch expired line)");
+        // a sheet truly still drawing after the off edge re-latches on its next draw
+        r = latchStep(l, 8100, false, true, 8095);
+        check(r.on && r.event == sl::Event::kRaised, "a draw after the off edge raises it again");
+        // the rule is in the source: a mutant that drops the newer-than-Status condition is the old behaviour, which this scenario fails
+        const std::string src = readText("src/d3d11/srv_turret_sheet_latch.h");
+        check(has(src, "} else if (!latched_ && fresh && newer) {") && has(src, "const bool newer = in.sheetSeenMs > lastStatusOnMs_;") && has(src, "lastStatusOnMs_ = in.nowMs;"),
+              "the latch raises only on a sheet draw newer than the last Status.json on step");
+        std::string mutant = src;
+        const size_t at = mutant.find("fresh && newer");
+        mutant.replace(at, 14, "fresh");
+        check(!has(mutant, "fresh && newer"), "the mutant that drops the newer-than-Status condition no longer has it, so the source pin above fails on it");
+        // and the old behaviour, written out here, raises on the exit step, which the scenario's check above forbids
+        const bool oldFresh = (5600 - 5000) <= sl::kExpireMs;
+        check(oldFresh, "control: the draw 600 ms old IS fresh, so only the newer-than condition keeps it from raising");
     }
     {   // the entry fade's hold starts on the early edge: the machine is fed the latch's `on`
         sl::Latch l;

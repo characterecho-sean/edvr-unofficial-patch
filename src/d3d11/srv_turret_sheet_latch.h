@@ -12,7 +12,9 @@
 //
 // THE LATCH. While Status.json has the view off, the Scorpion is known and a sheet draw was seen within kExpireMs, the view is on. Status.json reporting the turret takes over with no
 // edge (the latch clears, `on` stays true). A latch with no sheet draw for kExpireMs and Status.json still off clears (a false positive turns off again). Turning off stays
-// Status-driven: a sheet that stops does not turn the view off while Status.json says on, and a Status.json off edge while the sheet is still drawing just latches again.
+// Status-driven: a sheet that stops does not turn the view off while Status.json says on, and a Status.json off edge while the sheet is still drawing latches again on its next draw. A raise needs a sheet draw NEWER than the last step that saw Status.json on: on leaving
+// the turret the sheet stops when the game's fade starts and Status.json flips off half a second or more later, and a draw from before that off edge must not raise the view again (it
+// would hold the camera moved back until the latch expired, a second after the last draw). The clock is GetTickCount64, so a draw in the same tick waits for a later one.
 #include <cstdint>
 
 namespace edvr {
@@ -48,6 +50,7 @@ public:
     Result step(const Input& in) {
         Result r;
         const bool fresh = in.sheetSeenMs != 0 && in.nowMs >= in.sheetSeenMs && in.nowMs - in.sheetSeenMs <= kExpireMs;
+        const bool newer = in.sheetSeenMs > lastStatusOnMs_;   // a draw after the last step that saw Status.json on
         if (!in.scorpion) {
             if (latched_) {
                 r.event = Event::kDropped;
@@ -63,6 +66,7 @@ public:
                 r.lagMs = in.nowMs - raisedMs_;
             }
             latched_ = false;
+            lastStatusOnMs_ = in.nowMs;
             r.on = true;
             return r;
         }
@@ -70,7 +74,7 @@ public:
             r.event = Event::kExpired;
             r.lagMs = in.nowMs - raisedMs_;
             latched_ = false;
-        } else if (!latched_ && fresh) {
+        } else if (!latched_ && fresh && newer) {
             latched_ = true;
             raisedMs_ = in.nowMs;
             r.event = Event::kRaised;
@@ -79,11 +83,15 @@ public:
         return r;
     }
     bool latched() const { return latched_; }
-    void reset() { latched_ = false; }
+    void reset() {
+        latched_ = false;
+        lastStatusOnMs_ = 0;
+    }
 
 private:
     bool latched_ = false;
     uint64_t raisedMs_ = 0;
+    uint64_t lastStatusOnMs_ = 0;   // nowMs of the last step with statusOn true
 };
 
 }  // namespace sheetlatch
