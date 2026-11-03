@@ -2152,6 +2152,27 @@ void testFlatLayerRules() {
             ? layer.substr(backOffAt, standDownAt - backOffAt) : "";
         check(backOffBody.find("if (runtimeFlatProfile() && std::strcmp(what, \"the HDR HUD path\") == 0) flatUiTrailReport();") != std::string::npos,
               "wiring: flatBackOff reports the back-off trail under the flat profile, for the HDR HUD path only");
+        // The VR HDR HUD path's and the weapons layer's stand-downs are back-offs (2026-11-03): their lines say when they re-arm, never "the rest of the session".
+        const size_t standEnd = layer.find("struct RippleShared", standDownAt);
+        const std::string standBody = standDownAt != std::string::npos && standEnd != std::string::npos ? layer.substr(standDownAt, standEnd - standDownAt) : "";
+        check(!standBody.empty() && standBody.find("void weaponsStandDown(") != std::string::npos &&
+                  standBody.find("for the rest of the session") == std::string::npos && standBody.find("until the game is restarted") == std::string::npos &&
+                  standBody.find("stands down for %llu s (back-off %u this session)") != std::string::npos &&
+                  standBody.find("sharp weapons: stands down for %llu s (back-off %u this session)") != std::string::npos,
+              "wiring: crispStandDown (VR) and weaponsStandDown say how long they back off, never 'for the rest of the session' or 'until the game is restarted'");
+        const size_t boundaryAt = layer.find("void uiLayerFrameBoundary(");
+        const std::string boundaryBody = boundaryAt != std::string::npos ? layer.substr(boundaryAt, 6000) : "";
+        check(boundaryBody.find("ui quality: the HDR HUD path re-armed after its back-off (back-off %u this session)") != std::string::npos &&
+                  boundaryBody.find("sharp weapons: re-armed after its back-off (back-off %u this session)") != std::string::npos,
+              "wiring: the frame boundary re-arms the HDR HUD path and the weapons layer after their back-offs, one line each with the back-off count");
+        const size_t keyAt = layer.find("if (g_keyNoted && (text != g_keyText || target != g_target)) {");
+        const std::string keyBody = keyAt != std::string::npos ? layer.substr(keyAt, 500) : "";
+        check(keyBody.find("g_crispStoodDown = false;") != std::string::npos && keyBody.find("g_weaponsStoodDown = false;") != std::string::npos,
+              "wiring: a live change of fix.ui_quality clears the HDR HUD path's and the weapons layer's stand-downs");
+        check(layer.find("ui quality: lost HUD layer %u (of the first %u lines of episode %u)") != std::string::npos &&
+                  layer.find("if (!runtimeFlatProfile()) noteHudLost(g_draw.eye, e, g_draw.seq);") != std::string::npos &&
+                  layer.find("if (content) noteToneSightSlots(ctx);") != std::string::npos,
+              "wiring: a lost HUD layer in VR names the texture the tonemap-shaped draws read, and the slot read is made only while content is outstanding");
         const size_t endAt = layer.find("void uiLayerCrispToneEnd(");
         const size_t storeAt = layer.find("e.hdrToneSeq = seq;", endAt);
         const size_t publishAt = layer.find("if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);", endAt);

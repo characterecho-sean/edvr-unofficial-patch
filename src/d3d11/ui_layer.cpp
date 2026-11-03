@@ -162,7 +162,8 @@ void refreshLive() {
 // untouched.
 // The flat profile backs off instead of standing down for the session (2026-10-09 11:32 flight: one missed tonemap on
 // the first take ended the session's layer, while route changes, menus and frames with no 3D scene are normal in flat).
-// The back-off lifts itself at the frame boundary after kFlatBackOffMs, with a line each way. VR is unchanged.
+// The back-off lifts itself at the frame boundary after kFlatBackOffMs, with a line each way. (VR's HDR HUD path and the weapons layer
+// use the same ladder since 2026-11-03, below.)
 constexpr uint64_t kFlatBackOffMs = 30000;
 uint64_t g_flatBackOffUntilMs = 0;
 uint32_t g_flatBackOffs = 0;
@@ -171,20 +172,40 @@ uint32_t g_flatBackOffs = 0;
 constexpr uint64_t kFlatBackOffFirstMs = 2000, kFlatBackOffCleanMs = 300000;
 uint64_t g_flatBackOffLastMs = 0;
 uint32_t g_flatBackOffStep = 0;
-void flatBackOff(const char* what, const char* why) {
-    const uint64_t now = GetTickCount64();
+// The one ladder, shared by every back-off here (the flat layer and HDR HUD path, and, in VR, the HDR HUD path and in both profiles the
+// sharp weapons layer; 2026-11-03, the Quest 3 report: the VR HDR HUD path and the weapons layer used to stand down for the session after
+// one 30-frame run of misses, and the game's own HUD return after a combat instance is such a run). The clock is the tick count; the rigs
+// add g_backOffSkewMs to it so a re-arm can be tested without waiting.
+uint64_t g_backOffSkewMs = 0;
+uint64_t backOffNowMs() { return GetTickCount64() + g_backOffSkewMs; }
+// Starts one back-off at `now` and returns its length in ms (2 s, 4, 8, 16, then 30; starting over after five clean minutes).
+uint64_t backOffAdvance(uint64_t now) {
     if (g_flatBackOffLastMs && now - g_flatBackOffLastMs >= kFlatBackOffCleanMs) g_flatBackOffStep = 0;
     uint64_t ms = kFlatBackOffFirstMs << (g_flatBackOffStep < 4 ? g_flatBackOffStep : 4);
     if (ms > kFlatBackOffMs) ms = kFlatBackOffMs;
     ++g_flatBackOffStep;
     g_flatBackOffLastMs = now;
-    g_flatBackOffUntilMs = now + ms;
     ++g_flatBackOffs;
+    return ms;
+}
+void flatBackOff(const char* what, const char* why) {
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_flatBackOffUntilMs = now + ms;
     Log::get().note("ui quality: flat layer: %s backs off for %llu s (back-off %u this session) -- %s. The cockpit HUD is "
                     "drawn as it always was until it re-arms.",
                     what, static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
     if (runtimeFlatProfile() && std::strcmp(what, "the HDR HUD path") == 0) flatUiTrailReport();
 }
+
+// VR's HDR HUD path and the sharp weapons layer (both profiles) back off on timers of their own, each re-armed at the frame boundary
+// (uiLayerFrameBoundary) and by a live change of fix.ui_quality. The flat layer's single timer above is unchanged.
+uint64_t g_crispBackOffUntilMs = 0, g_weaponsBackOffUntilMs = 0;
+uint32_t g_crispBackOffNo = 0, g_weaponsBackOffNo = 0;   // the session's back-off count when each began (the re-arm line quotes it)
+// The HUD-layer lost-content instrument (noteHudLost, VR only): up to kHudLostLines lines an episode, a new episode at each re-arm of the HDR HUD path, and
+// no more than kHudLostEpisodes episodes a session (so a path that never recovers cannot fill the log).
+constexpr uint32_t kHudLostLines = 24, kHudLostEpisodes = 4;
+uint32_t g_hudLostLines = 0, g_hudLostEpisodes = 1;
 
 void crispStandDown(const char* why) {
     if (g_crispStoodDown) return;
@@ -194,22 +215,32 @@ void crispStandDown(const char* why) {
         flatBackOff("the HDR HUD path", why);
         return;
     }
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_crispBackOffUntilMs = now + ms;
+    g_crispBackOffNo = g_flatBackOffs;
     Log::get().note(
-        "ui quality: the HDR HUD path stands down for the rest of the session -- %s. The "
+        "ui quality: the HDR HUD path stands down for %llu s (back-off %u this session) -- %s. The "
         "cockpit's holo panels, flight HUD, target sprite and holograms are drawn as they always "
-        "were (the rest of the layer is unaffected). Turning fix.ui_quality off and on re-arms it.",
-        why ? why : "a refusal");
+        "were (the rest of the layer is unaffected). It re-arms by itself after the back-off, and a failure in a row backs off longer "
+        "(2 s, 4, 8, 16, then 30 s); turning fix.ui_quality off and on re-arms it at once.",
+        static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
 }
 
 // The weapons layer's own failure: the layer, its source pass or its re-issue could not be trusted. The weapons fire, and the scope's gunsight mark that rides the layer,
-// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
+// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected. It backs off on the same ladder as the HDR HUD path.
 void weaponsStandDown(const char* why) {
     if (g_weaponsStoodDown) return;
     g_weaponsStoodDown = true;
     refreshLive();
-    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
-                    "rest of the layer is unaffected). It stays down until the game is restarted.",
-                    why ? why : "a refusal");
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_weaponsBackOffUntilMs = now + ms;
+    g_weaponsBackOffNo = g_flatBackOffs;
+    Log::get().note("sharp weapons: stands down for %llu s (back-off %u this session) -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
+                    "rest of the layer is unaffected). It re-arms by itself after the back-off, and a failure in a row backs off longer (2 s, 4, 8, 16, then 30 s); "
+                    "turning fix.ui_quality off and on re-arms it at once.",
+                    static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
 }
 
 // ---------------------------------------------------------------- the shield ripple (shield_ripple.h; docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield
@@ -1096,11 +1127,21 @@ void noteWeaponPair(uint64_t vs, uint64_t ps, UiLayerDecision d) {
 //   (c) the weapons were drawn into a second HDR target the tonemap does not read: wOtherTargets counts them, the sighting names the resource it read;
 //   (d) the tonemap was seen and refused (an outcome other than 'admitted').
 // Every tonemap-shaped draw the admission sees is recorded (a handful a frame); a lost layer prints the last few, newest first, with the eye's state.
+// One 2D texture a tonemap-shaped draw sampled while the layer's content was outstanding and the draw matched none of it (noteToneSightSlots): what the HUD-layer
+// lost-content line (noteHudLost) describes. Only those sightings carry slots; every other sighting is the pointer alone, as before.
+struct ToneSlot {
+    const void* res = nullptr;
+    uint32_t w = 0, h = 0, fmt = 0, bind = 0;   // the texture's description: width, height, DXGI_FORMAT, D3D11_BIND_FLAG bits
+    int8_t eyeTable = -1;                       // the eye whose render target the depth pass's table says it is (read only), or -1
+    uint8_t slot = 0;                           // the PS slot
+};
 struct ToneSight {
     uint64_t seq = 0;
     const void* res = nullptr;  // the first 2D texture the draw samples (the HDR source it was admitted on, or what it read instead)
     int8_t eye = -1;            // the eye whose content it matched, or -1
     uint8_t outcome = 0;        // 0 admitted, 1 no eye's content matched it, 2 the 8-bit layer was busy, 3 a second tonemap for the eye
+    uint8_t nSlots = 0;
+    ToneSlot slots[4];
 };
 ToneSight g_toneSights[6];
 uint32_t g_toneSightCount = 0;
@@ -1110,6 +1151,7 @@ void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
     t.res = res;
     t.eye = static_cast<int8_t>(eye);
     t.outcome = outcome;
+    t.nSlots = 0;
 }
 uint32_t g_lostLines = 0;
 // A layer whose frame held the scope's gunsight mark and no weapons fire is lost as a mark (A3): one line a press of the sights says so, and the weapons fire's 24 lines are not spent on it.
@@ -1145,6 +1187,95 @@ void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq, bool markOnly = fa
         label, eye == 0 ? "left" : "right", markOnly ? "gunsight mark" : "weapons", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
         static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
         static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
+}
+
+// The HDR HUD path's lost-content instrument (VR only; the flat profile admits through its own known pairs, which note no sightings). The 2026-11-03 Quest 3
+// report: after a combat instance the game's tonemap read, for about 30 frames, a texture other than the HDR target the HUD went into, so admission missed
+// every frame and the path stood down. The candidates and what settles each, from the lines below:
+//   (a) the tonemap read a texture of another size or format (the description says which; a post-processed or resolved copy of the scene, not the HDR target);
+//   (b) the tonemap read a texture the depth pass knows as an eye's render target ("E0"/"E1"): the game moved the HUD's target to another resource;
+//   (c) the tonemap read a texture none of the above and the HUD's target is also unchanged: the draw is not the eye's tonemap, and the tonemap itself did not run.
+// The WRITER of each texture is not named: that needs a table of every render-target bind and copy on every draw, a per-frame cost on the frames that miss
+// nothing; the description and the eye-table membership are what is known without it.
+// Cost: noteToneSightSlots runs only for a sighting that matched nothing while a layer's content was outstanding, and only while the episode has lines
+// left; noteHudLost runs only for a frame that lost its content.
+void noteToneSightSlots(ID3D11DeviceContext* ctx) {
+    if (!ctx || g_toneSightCount == 0 || g_hudLostLines >= kHudLostLines || runtimeFlatProfile()) return;
+    ToneSight& t = g_toneSights[(g_toneSightCount - 1) % 6];
+    guarded("uiLayer.toneSlots", [&] {
+        for (UINT s = 0; s < 4 && t.nSlots < 4; ++s) {
+            Ptr<ID3D11ShaderResourceView> srv;
+            ctx->PSGetShaderResources(s, 1, &srv);
+            if (!srv) continue;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+            srv->GetDesc(&vd);
+            if (vd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) continue;
+            Ptr<ID3D11Resource> r;
+            srv->GetResource(&r);
+            Ptr<ID3D11Texture2D> tex;
+            if (!r || FAILED(r.As(&tex))) continue;
+            D3D11_TEXTURE2D_DESC d{};
+            tex->GetDesc(&d);
+            ToneSlot& o = t.slots[t.nSlots++];
+            o.res = r.Get();
+            o.w = d.Width;
+            o.h = d.Height;
+            o.fmt = static_cast<uint32_t>(d.Format);
+            o.bind = d.BindFlags;
+            o.eyeTable = static_cast<int8_t>(uiDepthEyeOfTargetReadOnly(r.Get()));
+            o.slot = static_cast<uint8_t>(s);
+        }
+    });
+}
+
+// The sightings, newest first, as the second line of a lost HUD frame: each sighting's frame, the eye it matched and why not, and, for one that carries slots, each
+// texture it read with its description.
+void formatToneSights(char* out, size_t cap) {
+    static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
+    out[0] = 0;
+    size_t used = 0;
+    const uint32_t n = g_toneSightCount < 6 ? g_toneSightCount : 6;
+    for (uint32_t i = 0; i < n; ++i) {
+        const ToneSight& t = g_toneSights[(g_toneSightCount - 1 - i) % 6];
+        int w = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s[frame %llu, eye %d, %s", i ? " " : "", static_cast<unsigned long long>(t.seq),
+                            static_cast<int>(t.eye), kOutcome[t.outcome < 4 ? t.outcome : 0]);
+        if (w < 0) return;
+        used += static_cast<size_t>(w);
+        if (t.nSlots == 0) w = _snprintf_s(out + used, cap - used, _TRUNCATE, ", read %p]", t.res);
+        else {
+            w = _snprintf_s(out + used, cap - used, _TRUNCATE, ", read");
+            if (w < 0) return;
+            used += static_cast<size_t>(w);
+            for (uint32_t k = 0; k < t.nSlots; ++k) {
+                const ToneSlot& o = t.slots[k];
+                char eyeText[16] = "";
+                if (o.eyeTable >= 0) _snprintf_s(eyeText, _TRUNCATE, " E%d", static_cast<int>(o.eyeTable));
+                w = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s t%u %p %ux%u fmt %u bind 0x%x%s", k ? ";" : "", static_cast<unsigned>(o.slot), o.res, o.w, o.h, o.fmt, o.bind, eyeText);
+                if (w < 0) return;
+                used += static_cast<size_t>(w);
+            }
+            w = _snprintf_s(out + used, cap - used, _TRUNCATE, "]");
+        }
+        if (w < 0) return;
+        used += static_cast<size_t>(w);
+    }
+    if (!n) _snprintf_s(out, cap, _TRUNCATE, "none yet");
+}
+
+void noteHudLost(int eye, const Eye& e, uint64_t nextSeq) {
+    if (g_hudLostLines >= kHudLostLines) return;
+    ++g_hudLostLines;
+    Log::get().note(
+        "ui quality: lost HUD layer %u (of the first %u lines of episode %u): the %s eye's HUD content is frame %llu (%u draws, into %p, layer %ux%u) and no tonemap published it "
+        "(streak %u of %u); its weapons layer holds frame %llu; the next HUD draw is frame %llu.",
+        g_hudLostLines, kHudLostLines, g_hudLostEpisodes, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, e.hdrTarget, e.hdrW, e.hdrH,
+        e.hdrMissStreak + 1, kCrispHdrMissFrames, static_cast<unsigned long long>(e.wSeq), static_cast<unsigned long long>(nextSeq));
+    char sights[760];
+    formatToneSights(sights, sizeof(sights));
+    Log::get().note(
+        "ui quality: lost HUD layer %u: the last tonemap-shaped draws seen, newest first (tN is the PS slot, then the texture, its width x height, DXGI format number, "
+        "bind flags, and E0/E1 where the depth pass knows it as that eye's render target; its writer is not tracked): %s.",
+        g_hudLostLines, sights);
 }
 
 // ------------------------------------------------------------ the layer
@@ -2166,6 +2297,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && e.hdrSeq != g_draw.seq) {
         if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
             ++g_win.hdrLost;
+            if (!runtimeFlatProfile()) noteHudLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline (review R1): a content-frame no
             // tonemap re-issue published -- the already-published case does
             // NOT count (hdrToneSeq == hdrSeq). The tonemap runs every frame
@@ -3792,11 +3924,14 @@ void uiLayerConfigure(Config& cfg) {
     // flat phase machine's, read per draw from the camera rows (flat_ui_layer.cpp): as shipped by construction.
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
                          temporal != g_temporal;
-    // A live change of the key re-arms a stood-down layer, either half of it
-    // (the LDR take's or the HDR HUD path's): the player asked.
+    // A live change of the key re-arms a stood-down layer, every half of it
+    // (the LDR take's, the HDR HUD path's and the weapons layer's, with the back-offs they were waiting out): the player asked.
     if (g_keyNoted && (text != g_keyText || target != g_target)) {
         g_stoodDown = false;
         g_crispStoodDown = false;
+        g_weaponsStoodDown = false;
+        g_crispBackOffUntilMs = g_weaponsBackOffUntilMs = 0;
+        for (Eye& e : g_eye) { e.hdrMissStreak = 0; e.wMissStreak = 0; }
     }
     g_keyText = text;
     g_target = target;
@@ -5512,6 +5647,8 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     }
     if (eye < 0) {
         noteToneSight(seq, seenRes, -1, 1);
+        // A tonemap-shaped draw that matched nothing while a layer's content is outstanding is the one sighting the lost-HUD line may need described.
+        if (content) noteToneSightSlots(ctx);
         // Outstanding HUD content this frame, but this draw reads no eye's
         // HUD source. Only the eye's OWN tonemap failing to read it is a
         // failed consumer (review R1): the draw must BE the tonemap -- the
@@ -5539,8 +5676,8 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
                     (c.wSeq == seq && c.wDraws && c.wSrv && c.wToneSeq != c.wSeq);
             }
             if (failedConsumer) {
-                // Named once, counted -- and the crisp path stands down to
-                // stock rather than lose the HUD for the session.
+                // Named once, counted -- and the crisp path backs off to
+                // stock (it re-arms at a frame boundary) rather than lose the HUD.
                 crispToneDecline(CrispToneDecline::kNoHdrSlot, vs, ps);
                 crispStandDown("no PS slot of the tonemap reads an eye's HUD source");
             }
@@ -6896,7 +7033,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     rippleIdleTick();
     // The flat profile's back-off (flatBackOff) lifts itself here.
     if (runtimeFlatProfile() && g_flatBackOffUntilMs && !detail::g_uiLayerIssueBlocked &&
-        GetTickCount64() >= g_flatBackOffUntilMs) {
+        backOffNowMs() >= g_flatBackOffUntilMs) {
         g_flatBackOffUntilMs = 0;
         g_stoodDown = false;
         g_crispStoodDown = false;
@@ -6905,6 +7042,27 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         Log::get().note("ui quality: flat layer: re-armed after its back-off (%u this session); the cockpit HUD is taken "
                         "again from the next frame behind a proven tonemap.",
                         g_flatBackOffs);
+    }
+    // VR's HDR HUD path and the weapons layer (both profiles) lift their back-offs here, one line each. Nothing is read unless a timer is set.
+    if ((g_crispBackOffUntilMs || g_weaponsBackOffUntilMs) && !detail::g_uiLayerIssueBlocked) {
+        const uint64_t now = backOffNowMs();
+        if (g_crispBackOffUntilMs && now >= g_crispBackOffUntilMs) {
+            g_crispBackOffUntilMs = 0;
+            g_crispStoodDown = false;
+            for (Eye& e : g_eye) { e.hdrMissStreak = 0; e.hdrDraws = 0; }   // the content taken before the stand-down is stale
+            if (g_hudLostEpisodes < kHudLostEpisodes) { ++g_hudLostEpisodes; g_hudLostLines = 0; }   // the lost-HUD instrument's lines, for the next episode
+            refreshLive();
+            Log::get().note("ui quality: the HDR HUD path re-armed after its back-off (back-off %u this session); the cockpit HUD is taken "
+                            "again from the next frame behind a tonemap that reads its HUD source.", g_crispBackOffNo);
+        }
+        if (g_weaponsBackOffUntilMs && now >= g_weaponsBackOffUntilMs) {
+            g_weaponsBackOffUntilMs = 0;
+            g_weaponsStoodDown = false;
+            for (Eye& e : g_eye) { e.wMissStreak = 0; e.wDraws = 0; e.wFires = e.wMarks = 0; }
+            refreshLive();
+            Log::get().note("sharp weapons: re-armed after its back-off (back-off %u this session); the weapons fire is taken "
+                            "again from the next frame.", g_weaponsBackOffNo);
+        }
     }
     // F30: the eye check's stand-down is re-armed on the next native render-mode edge (the setter's count), logged. A stand-down by
     // anything else is left alone, and a re-arm by fix.ui_quality (g_stoodDown cleared) clears the flag.

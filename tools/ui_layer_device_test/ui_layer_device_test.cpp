@@ -60,6 +60,15 @@ uint32_t layerWidth();
 bool hudFrame(ID3D11DeviceContext* ctx, uint64_t seq, const float ldr[4], const float hdr[4]);
 bool failedCoverageRetiresWithoutPublishing();
 bool missingConsumerLeavesCurrentDrawStock(ID3D11DeviceContext* ctx);
+// The back-off of the HDR HUD path and the weapons layer: null when every step held, else the step that did not.
+const char* vrHudPathBacksOffAndRearms(ID3D11DeviceContext* ctx);
+const char* backOffLadderRestartsAfterCleanMinutes();
+const char* weaponsBackOffAndRearmVr(ID3D11DeviceContext* ctx);
+const char* weaponsBackOffAndRearmFlat(ID3D11DeviceContext* ctx);
+const char* flatHudPathBackOffUnchanged(ID3D11DeviceContext* ctx);
+const char* toggleClearsBothStandDowns();
+const char* hudLostLinesAreBoundedPerEpisode(ID3D11DeviceContext* ctx);
+const char* toneSlotsDescribeTheReadTextures(ID3D11DeviceContext* ctx);
 }  // namespace devtest
 }  // namespace edvr
 
@@ -323,6 +332,21 @@ int main(int argc, char** argv) {
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B after the in-place composite: every retained device child is still B's");
     check(devtest::missingConsumerLeavesCurrentDrawStock(ctxB.Get()),
           "missing HUD consumer stands down before binding the layer and leaves the current draw stock");
+
+    // The back-off of the HDR HUD path and the weapons layer (2026-11-03): a stand-down is a back-off that lifts itself at a frame boundary, not the session's.
+    const auto steps = [&](const char* step, const char* what) {
+        if (step) std::printf("  failed step: %s\n", step);
+        check(step == nullptr, what);
+    };
+    steps(devtest::vrHudPathBacksOffAndRearms(ctxB.Get()),
+          "VR: the 30th consecutive HUD miss stands the HDR HUD path down for 2 s, it re-arms at the first frame boundary after (not before), and the 2nd and 3rd failures back off 4 s and 8 s");
+    steps(devtest::backOffLadderRestartsAfterCleanMinutes(), "VR: the back-off ladder grows with failures in a row and starts over after five clean minutes");
+    steps(devtest::weaponsBackOffAndRearmVr(ctxB.Get()), "VR: the weapons layer's stand-down backs off 2 s then 4 s and re-arms at the frame boundary");
+    steps(devtest::weaponsBackOffAndRearmFlat(ctxB.Get()), "flat: the weapons layer's stand-down backs off 2 s then 4 s and re-arms at the frame boundary");
+    steps(devtest::flatHudPathBackOffUnchanged(ctxB.Get()), "flat: the HDR HUD path's back-off is still its own 2 s timer and re-arms at the frame boundary");
+    steps(devtest::toggleClearsBothStandDowns(), "a live change of fix.ui_quality clears the weapons stand-down and the HDR HUD path's, with their back-offs");
+    steps(devtest::hudLostLinesAreBoundedPerEpisode(ctxB.Get()), "the lost-HUD instrument prints 24 lines an episode and a re-arm starts the next episode");
+    steps(devtest::toneSlotsDescribeTheReadTextures(ctxB.Get()), "the lost-HUD instrument describes each texture the unmatched tonemap-shaped draw read, and reads nothing with no lines left or in flat");
 
     uiLayerShutdown();
     std::printf("ui_layer_device_test: %u checks, %u failures\n", g_checks, g_fails);
