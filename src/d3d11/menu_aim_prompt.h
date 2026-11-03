@@ -34,7 +34,7 @@ constexpr const char* kNotes[] = {
     "",
     "Mouse/controller aim (the game's own):",
     "  The mouse and right stick aim as in the flat game. Your head looks around on its own.",
-    "  In the sights your head aims; mouse and stick only turn you (ADS: aim with head).",
+    "  In the sights your head aims; mouse and stick only turn you (ADS: Look to Aim).",
     "  Precise and familiar. Where you look and where you point can differ.",
     "",
     "Look to aim:",
