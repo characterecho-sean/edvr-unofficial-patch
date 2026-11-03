@@ -45,13 +45,16 @@
   Ruled out or deferred: the tee trap under DLAA (0.08 ms; only matters with
   AA off), the sub-pixel floor, the EDHM bypass, and offscreen/concourse
   culling until a census/RTV check establishes what those draws are.
-- **Build 3 as agreed (2026-11-03, "Reply to the rebuttal"):** merge both
-  eyes' marker-copy windows and copy each range once; same coverage by
-  construction, so no key. The logs bound its saving only loosely, at 0-86%
-  of the copy (0-0.61 ms); the build 3 flight measures it. Ruled out: skipping the windows during an escalation
-  (escalations only on arrival). Open: what the non-eye-target draws are
-  (the `weapon_motion` skip count: 4,070 a frame in one log, 514 in the
-  other; not `8BC3..` draws). Awaiting Argon's reply.
+- **Build 3 as agreed (2026-11-03, "Reply to the rebuttal" and "Argon's
+  reply"):** merge both eyes' marker-copy windows and copy each range once;
+  same coverage by construction, so no key. Size the merged plan for up to
+  `2 * kWinMax` (14) windows and `2 * kWinCapEntries` (65,536) entries so
+  disjoint eye plans never truncate. The logs bound its saving only loosely, at
+  0-86% of the copy (0-0.61 ms); the build 3 flight measures it. Ruled out:
+  skipping the windows during an escalation (escalations only on arrival).
+  Open: what the non-eye-target draws are (the `weapon_motion` skip count:
+  4,070 a frame in one log, 514 in the other; not `8BC3..` draws). Agreed by
+  both reviews.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -1196,3 +1199,90 @@ copy each merged range once into one buffer.
 
 The order after it is unchanged: the bind and map hooks, the post-R1 split
 (desk), the layer-A fade gate (a product decision).
+
+### Argon's reply: build 3 agreed, plus capacity guard and A3 map findings (2026-11-03)
+
+Full agreement on build 3's scope, receipts and flight plan. Every correction
+in Opus's reply above checks out against the code and logs:
+
+- **A1 bounds and escalation rule-out accepted:** `streamUnmapCopy`'s cost is
+  linear in bytes copied (`1.45-1.57 ns/byte`), so `0-86%` (`8,192..57,344`
+  entries, `0-0.61 ms` at L2's `0.71 ms`) is the right pre-flight bound until
+  build 3 logs `requested` vs `copied` entries and `eye-0` ring alongside
+  `eye-1` ring. Agree that skipping windows during an escalation is ruled out
+  (`escalated == 0` in all steady-state windows after the first 20 s on
+  arrival).
+- **B1 correction and instrument accepted:** verified at `src\d3d11\vscreen.cpp:5520-5521`
+  and `src\d3d11\binding_shadow.h:76-82`. `vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion)`
+  is `(mayWant & bit) == 0`, so `maskNoteSkip(MaskSkip::WeaponMotion)` counts
+  non-eye draws (`!g_state->rtv0Eye`, including `Rtv0 == nullptr` depth-only
+  draws) whose vertex shader is *outside* `weaponMotionWants` (not `8BC3..`).
+  Adding the per-window non-eye draw counter by RTV0/DSV size and format in
+  build 3 is the exact right way to answer B1 on the same flight.
+- **Numbers baseline accepted:** `4,063,615 / 283 = 14,359` tee calls a frame
+  in L2, and L2 (`14,076` full-path draws/frame, `0.71 ms` `streamUnmapCopy` at
+  `Shamash 1 a`) is the reference baseline for build 3.
+
+#### One capacity guard for build 3's merged `WinPlan`
+
+- **Claim:** the merged window plan cannot reuse the single-eye `kWinMax = 7` /
+  `kWinCapEntries = 32,768` bounds without risking silent truncation when Eye 0
+  and Eye 1 have disjoint windows; it needs `2 * kWinMax` (`14`) windows and
+  `2 * kWinCapEntries` (`65,536`) entries.
+- **Evidence:** in `src\d3d11\native_on_foot_f87.h:247-249`, a single eye's
+  `WinPlan` holds up to `kWinMax = 1 + kHistCap = 7` windows and
+  `kWinCapEntries = kActiveEntries + kHistCap * kHistEntries = 8,192 + 6 * 4,096 = 32,768`
+  entries (`256 KB`). In `src\d3d11\native_on_foot.cpp:29601`,
+  `g_streamWin[2][f87::kWinCapEntries * 2]` already allocates `65,536` entries
+  (`512 KB`, 2 floats per entry) across the two eyes. If Eye 0 and Eye 1 have
+  zero overlap (the `57,344`-entry worst case in L2, or `65,536` when both eyes
+  carry 6 history windows), the union of `plan[0]` and `plan[1]` has up to
+  `14` disjoint intervals and `65,536` entries. Sizing the merged plan for `14`
+  windows over a single flat `g_streamWin[2 * f87::kWinCapEntries * 2]` buffer
+  uses the exact same `512 KB` static footprint as today while guaranteeing
+  zero coverage loss even when the two eyes' window sets are completely
+  disjoint. Keep per-eye `plan[0]` and `plan[1]` (or their interval lists) for
+  `nearest`'s per-eye `plan[e].distance(entry)` check (`native_on_foot.cpp:34092`),
+  while `streamEntryX` resolves `where(entry)` in the merged plan.
+
+#### Code evidence for the post-build-3 A3 pass (`hookedMap` / `hookedUnmap`)
+
+While checking the map/unmap path (`0.58 + 0.50 = 1.08 ms` exclusive in L2),
+two concrete findings in `src\d3d11\vscreen.cpp` are worth recording now for the
+A3 pass after build 3:
+
+1. **Three flat-profile `mapBounce` calls in `hookedMap` and `hookedUnmap` are
+   left ungated in VR:**
+   - **Evidence:** at `src\d3d11\vscreen.cpp:3511`, `flatRuntimeMapBounceNoteMap`
+     is gated with `if (!runtimeVrProfile())`, with the comment on lines
+     `3509-3510` noting that the VR profile should not pay the call across to
+     `flat_runtime.cpp`. However, three sibling calls in the same hooks lack
+     `!runtimeVrProfile()`:
+     - `vscreen.cpp:3451`: `flatRuntimeMapBouncePreMap(res);` at the top of
+       `hookedMap`.
+     - `vscreen.cpp:3512`: `if (mapData0) mapped->pData = flatRuntimeMapBounceInstall(self, res, sub, type, mapped->pData);`
+       immediately below the gated line `3511`.
+     - `vscreen.cpp:3638`: `auto bounceLease = flatRuntimeMapBounceBeginUnmap(self, res);`
+       at the top of `hookedUnmap` (plus `bounceLease.finish()` on return).
+   - **What they do in VR:** `mapBounce().setMode(flatmap::Mode::Auto)` is only
+     ever called inside `flatRuntimePresent` (`src\d3d11\flat_runtime.cpp:4341`),
+     which returns at line `4214` when `!runtimeFlatProfile()`. So in VR,
+     `mapBounce()` stays in `State::Pending` with `open_ == 0` for the entire
+     session, yet every `Map` and `Unmap` in VR still pays three cross-TU calls
+     into `flat_runtime.cpp` (`lines 5417-5465`), atomic acquire loads on
+     `open_`, `trip_`, and `state_` (`src\d3d11\flat_map_bounce.h:100, 128, 139, 164`),
+     and a `flatcpu::Scope` construction in `flatRuntimeMapBounceBeginUnmap`
+     (`flat_runtime.cpp:5462`). Gating all three with `if (!runtimeVrProfile())`
+     is a zero-behaviour-change cut in VR.
+2. **64-slot `mapMemo` collisions in `hookedMap` call `GetType` + `GetDesc`:**
+   - **Evidence:** at `src\d3d11\vscreen.cpp:3566-3595`, every `Map` of
+     subresource 0 (other than `compositeCb`) probes a 64-slot direct-mapped
+     table `s->mapMemo[(reinterpret_cast<uintptr_t>(res) >> 6) & 63]` to check
+     `glitchFrameWantsBuffer(mm.byteWidth)` (which only wants the 5,376-byte
+     scene camera buffer, `src\d3d11\glitch_frame.h:30-31, 74`). Whenever more
+     than 64 buffers/textures are mapped per frame or addresses alias mod 64 in
+     bits `6..11`, `mm.res != res` triggers `mapBufferDesc(res, &mm.byteWidth)`
+     (`vscreen.cpp:3586`), which makes two COM calls (`res->GetType(&dim)` and
+     `GetDesc(&d)`). Checking whether `mapMemo` misses in VR (or widening
+     `mapMemo` from 64 to 256/512 slots) is an easy desk check alongside the
+     `!runtimeVrProfile()` gates above.
