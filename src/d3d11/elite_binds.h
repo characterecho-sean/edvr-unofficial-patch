@@ -174,6 +174,10 @@ struct EliteResetBind {
     int           filesSeen;
     char          file[64];
 };
+// Any one action by its element name (2026-11-03: the SRV turret view's ToggleBuggyTurretButton shares HMDReset's parser). The HMDReset functions below are this with the name fixed.
+bool eliteBindsAction(const char* elementName, EliteResetBind* out);
+bool eliteBindsActionDir(const char* elementName, const wchar_t* dir, EliteResetBind* out);
+bool eliteBindsActionIn(const char* elementName, const char* text, size_t len, EliteResetBind* out);
 bool eliteBindsHmdReset(EliteResetBind* out);
 bool eliteBindsHmdResetDir(const wchar_t* dir, EliteResetBind* out);
 // The pure half, over the text of one .binds file; exposed for the smoke test.

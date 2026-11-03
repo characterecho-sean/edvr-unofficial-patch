@@ -123,6 +123,34 @@ void absentAndNeighbours() {
     check(!eliteBindsHmdResetIn("x", 1, nullptr), "no output: false");
 }
 
+// The SRV turret view's key (Elite's ToggleBuggyTurretButton, issue 179) goes through the same parser by element name (eliteBindsActionIn); HMDReset above is the same parser with its name fixed.
+bool parseTurret(const std::string& body, EliteResetBind* out) {
+    const std::string text = binds(body);
+    return eliteBindsActionIn("ToggleBuggyTurretButton", text.data(), text.size(), out);
+}
+void turretKey() {
+    EliteResetBind b;
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_FaceUp\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.present && b.count == 1 && b.slot[0].observable && b.slot[0].needsProof && b.slot[0].binding.kind == HotkeyKind::Pad && b.slot[0].binding.padButtons != 0 &&
+              std::strcmp(b.slot[0].label, "GamePad:GamePad_FaceUp") == 0,
+          "Sean's turret key (GamePad_FaceUp) is a pad button: found, observable, trusted after a first press");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_T\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && b.slot[0].observable && !b.slot[0].needsProof && b.slot[0].binding.kind == HotkeyKind::Key && b.slot[0].binding.vk == 'T',
+          "a keyboard turret key is observable and needs no proof");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"231D0200\" Key=\"Joy_12\" />\n\t\t<Secondary Device=\"Keyboard\" Key=\"Key_F9\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 2 && b.slot[0].observable && b.slot[0].binding.kind == HotkeyKind::Joy && b.slot[0].binding.joyDevice == 0x231D0200u && b.slot[0].binding.joyInput == 11 &&
+              b.slot[1].observable && b.slot[1].binding.vk == VK_F9,
+          "a joystick button with a keyboard secondary: both slots observable");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"Mouse\" Key=\"Mouse_7\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && !b.slot[0].observable,
+          "a mouse button past the fifth is bound and cannot be seen (the press falls back)");
+    check(!parseTurret("\t<HMDReset>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_F12\" />\n\t</HMDReset>\n", &b) && !b.present && b.count == 0,
+          "a file with HMDReset and no turret element: not present, and the HMD key is not read as the turret key");
+    check(parseTurret("\t<HMDReset>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_F12\" />\n\t</HMDReset>\n\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_FaceUp\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && b.slot[0].binding.kind == HotkeyKind::Pad, "with both elements the turret key is the turret element's, not HMDReset's");
+    check(!eliteBindsActionIn(nullptr, "x", 1, &b) && !eliteBindsActionIn("", "x", 1, &b) && !eliteBindsActionIn("ToggleBuggyTurretButton", "x", 1, nullptr), "no element name, or no output: false");
+}
+
 std::wstring scratchDir() {
     wchar_t tmp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, tmp);
@@ -186,6 +214,7 @@ int wmain(int argc, wchar_t** argv) {
     unobservable();
     mouse();
     absentAndNeighbours();
+    turretKey();
     folder();
     std::printf("seat_press_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -6,6 +6,7 @@
 #include "srv_radar_anchor.h"
 #include "srv_turret_hud_binding.h"
 #include "srv_turret_entry_fade.h"
+#include "srv_turret_press.h"
 #include "srv_turret_math.h"
 #include "srv_turret_sheet_latch.h"
 
@@ -49,7 +50,7 @@ namespace {
 static_assert(st::kBackDefaultCm == 80 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kRadarForwardMaxCm == 150 &&
                   st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 &&
                   st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 &&
-                  st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 6 && st::kCardShiftMaxMm == 30 &&
+                  st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 7 && st::kCardShiftMaxMm == 30 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
               "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
@@ -64,7 +65,7 @@ std::atomic<bool> g_scissorOpen{false};      // experimental.srv_turret_hud_scis
 static_assert(st::kRadarAnchorDefault == st::RadarAnchorMode::kOff, "the literal default of experimental.srv_turret_radar_anchor in readKeys is off, which the ini ships");
 std::atomic<int> g_anchorMode{static_cast<int>(st::kRadarAnchorDefault)};   // experimental.srv_turret_radar_anchor as a st::RadarAnchorMode (0 on, 1 reversed, 2 off, 3 camera)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
-st::sheetlatch::Latch g_sheetLatch;         // the early edge: the gunner sheet drew and Status.json has not said so yet (srv_turret_sheet_latch.h)
+st::sheetlatch::EntryGate g_sheetLatch;       // the early edge: the gunner sheet drew and Status.json has not said so yet (srv_turret_sheet_latch.h)
 bool g_latchRaisedEdge = false;             // the current on edge was raised by the latch (the agreed line is said only for such an edge)
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -218,7 +219,7 @@ void readKeys() {
     const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 35, 0, 100);
     const int cardsUp = cfg.getIntInRange("experimental.srv_turret_cards_up", 0, 0, 100);
     const int targetCardShift = cfg.getIntInRange("experimental.srv_turret_target_card_shift", 7, 0, 30);
-    const int systemsCardShift = cfg.getIntInRange("experimental.srv_turret_systems_card_shift", 6, 0, 30);
+    const int systemsCardShift = cfg.getIntInRange("experimental.srv_turret_systems_card_shift", 7, 0, 30);
     const std::string depthText = cfg.getString("experimental.srv_turret_hud_depth", "game");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());
     const bool scissorOpen = cfg.getString("experimental.srv_turret_hud_scissor", "game") != "game";
@@ -979,13 +980,41 @@ void srvTurretFrameTick(uint32_t frameNo) {
     const bool turret = journalSrvTurretView();
     const bool scorpion = journalSrvScorpion();
     const uint64_t tickMs = GetTickCount64();
-    st::sheetlatch::Input latchIn;
-    latchIn.nowMs = tickMs;
-    latchIn.statusOn = turret;
-    latchIn.scorpion = scorpion;
-    latchIn.sheetSeenMs = detail::g_srvTurretSheetSeenMs.load(std::memory_order_relaxed);
-    const st::sheetlatch::Result latch = g_sheetLatch.step(latchIn);
-    const bool on = latch.on;
+    // The press (srv_turret_press.h): the player's turret key, watched and never consumed. GuiFocus comes from Status.json through journalGuiFocus, known once the field has been seen in the file;
+    // an unknown GuiFocus counts as 0 (Status.json leaves it out when no panel is open, as on foot), a known one above 0 is a panel open (the galaxy map, station services ...).
+    const SrvTurretPressState press = srvTurretPressPoll();
+    uint32_t guiFocus = 0;
+    if (!journalGuiFocus(&guiFocus)) guiFocus = 0;
+    st::sheetlatch::GateIn gateIn;
+    gateIn.nowMs = tickMs;
+    gateIn.pressEdge = press.pressed;
+    gateIn.observable = press.observable;
+    gateIn.epoch = press.epoch;
+    gateIn.scorpion = scorpion;
+    gateIn.srvSeat = (journalSeatKind() & 4u) != 0;
+    gateIn.guiFocusZero = guiFocus == 0;
+    gateIn.statusOn = turret;
+    gateIn.sheetSeenMs = detail::g_srvTurretSheetSeenMs.load(std::memory_order_relaxed);
+    const st::sheetlatch::GateOut gate = g_sheetLatch.step(gateIn);
+    const st::sheetlatch::Result& latch = gate.latch;
+    const bool on = gate.on;
+    if (gate.event == st::sheetlatch::GateEvent::kFellBack) {
+        Log::get().note("srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): %s",
+                        gate.fallback == st::sheetlatch::FallbackWhy::kUnobservable ? press.why : "the view went on with no press seen in the preceding 2000 ms, so the watcher is blind (a device it does not see)");
+    } else if (gate.event == st::sheetlatch::GateEvent::kFallbackOff) {
+        Log::get().note("srv turret press: the bindings changed; the press is trusted again");
+    }
+    {   // the press gate's words for the entry fade, which runs later in this frame
+        SrvTurretPressWords w;
+        w.ageMs = static_cast<double>(gate.pressAgeMs);
+        w.waiting = gate.waiting;
+        w.sheetEdge = gate.sheetEdge;
+        w.noPress = gate.noPress;
+        w.fallback = static_cast<uint8_t>(gate.fallback);
+        w.sheetLagMs = static_cast<double>(gate.sheetLagMs);
+        w.statusLagMs = static_cast<double>(gate.statusLagMs);
+        srvTurretEntryFadeNotePress(w);
+    }
     if (on != g_on) {
         g_on = on;
         if (on) g_latchRaisedEdge = latch.event == st::sheetlatch::Event::kRaised;
@@ -1003,7 +1032,8 @@ void srvTurretFrameTick(uint32_t frameNo) {
             Log::get().note("srv turret view: the gunner sheet latch dropped after %llu ms: the journal no longer calls the Scorpion", static_cast<unsigned long long>(latch.lagMs));
     }
     // Watching: the Scorpion in its SRV seat with the view off. The draw gate is open and the gunner sheet's draws are noted (srvTurretGunnerBegin), nothing is moved (srvTurretHudBeginDraw).
-    const bool watching = scorpion && (journalSeatKind() & 4u) != 0 && !on;
+    // The press gate decides when (srv_turret_sheet_latch.h EntryGate): from a counted press for 2000 ms, or the whole time in the Scorpion with the view off while the press cannot be relied on.
+    const bool watching = gate.gateOpen && !on;
     if (watching != detail::g_srvTurretWatchOnly.load(std::memory_order_relaxed)) detail::g_srvTurretWatchOnly.store(watching, std::memory_order_relaxed);
     if (turret && !on && !g_ignored) {
         g_ignored = true;
@@ -1015,16 +1045,16 @@ void srvTurretFrameTick(uint32_t frameNo) {
     g_backSeatedZ = st::backSeatedZ(on, backCm);
     anchorTick(on, frameNo, radarForwardCm);   // the radar moved in the game (experimental.srv_turret_radar_anchor): nothing unless `on`
     const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0 || systemsNearCm > 0 || hudUpCm > 0 || gunnerUpCm > 0 || cardsUpCm > 0);   // any HUD key, including the gunner frame and the card height; a group whose own keys are 0 is left alone per draw
-    const bool gate = wanted || watching;   // the draw gate: the HUD move, or the watch for the gunner sheet
+    const bool drawGate = wanted || watching || (on && gate.gateOpen);   // the draw gate: the HUD move, the watch for the gunner sheet, or the sheet still being noted while a raised view waits for Status.json
     if (wanted) {
         cacheGeometry(on, backCm, forwardCm, radarForwardCm);
     } else {
         g_anchor.reset();   // the next stay (or the next key) takes the anchor afresh
         g_anchorOk.store(false, std::memory_order_release);
     }
-    if (gate != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
-        detail::g_srvTurretHudWanted.store(gate, std::memory_order_relaxed);
-        if (gate) drawGateArm();   // the gate re-samples at the frame boundary after this tick; this makes the very next draw see it too
+    if (drawGate != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
+        detail::g_srvTurretHudWanted.store(drawGate, std::memory_order_relaxed);
+        if (drawGate) drawGateArm();  // the gate re-samples at the frame boundary after this tick; this makes the very next draw see it too
     }
     // The 10 s line: only for a window in which the turret view was on at some point.
     const uint64_t now = GetTickCount64();

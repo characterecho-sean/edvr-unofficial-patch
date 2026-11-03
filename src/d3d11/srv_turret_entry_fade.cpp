@@ -46,6 +46,7 @@ struct Pending {
 };
 Pending g_pending;
 uint32_t g_reports = 0;
+SrvTurretPressWords g_press;   // srvTurretEntryFadeNotePress: this frame's press gate words
 bool g_capSaid = false;
 
 // A reading into the window: the pair of its frame (the other eye's reading may be there already), or a new pair in seq order.
@@ -102,6 +103,8 @@ void report(const ef::Run& run) {
     }
     ef::formatRun(line, sizeof(line), run);
     say(line);
+    ef::formatPressEntry(line, sizeof(line), run);   // the press-to-sheet line: one flight measures it
+    say(line);
     const double lo = run.startMs - ef::kLeadMs;
     const double runEnd = run.fadeEnded ? run.endMs : (run.settle != ef::Settle::kNone ? run.settleMs + ef::kFadeInMs : run.startMs + ef::kCapMs);
     const double hi = runEnd + ef::kTailMs;
@@ -139,6 +142,8 @@ void report(const ef::Run& run) {
 
 }  // namespace
 
+void srvTurretEntryFadeNotePress(const SrvTurretPressWords& w) { g_press = w; }
+
 void srvTurretEntryFadeNoteMove(uint32_t serial) {
     ++g_moveCount;
     g_moveSerial = serial;
@@ -165,6 +170,13 @@ double srvTurretEntryFadeTick(uint32_t frameNo) {
     in.moving = srvTurretBackSeatedZ() != 0.0;
     in.moveCount = g_moveCount;
     in.moveSerial = g_moveSerial;
+    in.pressAgeMs = g_press.ageMs;
+    in.pressWaiting = g_press.waiting;
+    in.sheetEdge = g_press.sheetEdge;
+    in.noPress = g_press.noPress;
+    in.fallback = g_press.fallback;
+    in.sheetLagMs = g_press.sheetLagMs;
+    in.statusLagMs = g_press.statusLagMs;
     if (in.on || g_machine.phase() != ef::Phase::kIdle) {
         EdvrNativeNowPose np{};
         // The word is meaningful from the version 3 input on (the same guard the F89 readers use); 0 is "not reported", which the machine reads as no signal.
@@ -182,6 +194,12 @@ double srvTurretEntryFadeTick(uint32_t frameNo) {
             report(g_machine.prev());
         }
         if (ev.skipped) report(g_machine.run());   // no hold ran: its one line now
+    }
+    if (ev.pressTimedOut && g_reports < ef::kMaxReports) {   // the press raised no view: its one line (within the same cap as the run reports)
+        ++g_reports;
+        char line[240];
+        ef::formatPressNoView(line, sizeof(line), g_machine.pressFrame(), now - g_machine.pressStartMs());
+        say(line);
     }
     if (ev.ended) {
         g_pending.active = true;

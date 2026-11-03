@@ -12,6 +12,10 @@
 //   THE EARLY EDGE (srv_turret_sheet_latch.h): the gunner sheet's draw raises the view before Status.json does; Status.json taking over is no edge and says how long it lagged; a latch with no
 //   sheet draw for a second expires; a non-Scorpion never raises it; the off edge stays Status-driven (a sheet that stops does not turn a Status-on view off, a Status off edge with the sheet
 //   still drawing latches again on its next draw, but a draw from before the off edge does not: leaving the turret turns the view off at the Status.json edge); and the entry fade's hold starts on the early edge.
+//   THE PRESS (srv_turret_sheet_latch.h EntryGate): the player's turret key blacks the view over kPressRampMs before the view is known to be on, opens the draw gate for kPressWaitMs, and the
+//   first sheet draw in the window raises the view with the cap counted from the sheet; no sheet and the black fades back with no edge; presses outside the Scorpion's SRV seat, with GuiFocus
+//   above 0 or with the view on do nothing; Status.json ends the wait; a key that cannot be observed, or a view with no press seen before it, trips the fallback to the always-open gate,
+//   and a change of bindings resets it.
 //   THE WIRING: the module is called every frame after alignTick and before the mix, its level is a term of FadeMix's max, the move's publish is told to it, the luma probe's frame-by-frame mode
 //   and the Status.json cadence are asked for, and the new source is in the build.
 #include "../../src/d3d11/srv_turret_entry_fade.h"
@@ -488,6 +492,312 @@ static void lineCases() {
     check(ef::kMaxReports * (1 + ef::kMaxTraceLines) <= 100, "the instrument's lines a session are bounded (entries times a run line and its trace lines)");
 }
 
+// ---- THE PRESS (srv_turret_sheet_latch.h EntryGate, srv_turret_entry_fade.h kPress phases) ---------------------------------------------------------------------------------------
+// The gate and the machine run as the frame tick and the module run them: the gate first (tick-domain milliseconds), then the machine fed the gate's words. A frame every 10 ms.
+struct PSim {
+    sl::EntryGate g;
+    ef::Machine m;
+    uint64_t tick = 100000;
+    uint32_t frame = 100, count = 0, serial = 0, applied = 1, epoch = 1, nextSerial = 0;
+    bool observable = true, scorpion = true, seat = true, gui0 = true, status = false, moving = true, press = false, publishNext = false;
+    uint64_t sheet = 0;
+    sl::GateOut go;
+    ef::Events ev;
+    double level = 0.0;
+    static constexpr uint64_t kDt = 10;
+    double step() {
+        sl::GateIn in;
+        in.nowMs = tick;
+        in.pressEdge = press;
+        in.observable = observable;
+        in.epoch = epoch;
+        in.scorpion = scorpion;
+        in.srvSeat = seat;
+        in.guiFocusZero = gui0;
+        in.statusOn = status;
+        in.sheetSeenMs = sheet;
+        go = g.step(in);
+        if (publishNext) {
+            ++count;
+            serial = nextSerial;
+            publishNext = false;
+        }
+        ef::Input mi;
+        mi.nowMs = static_cast<double>(tick);
+        mi.frame = frame;
+        mi.on = go.on;
+        mi.moving = moving;
+        mi.moveCount = count;
+        mi.moveSerial = serial;
+        mi.appliedWord = applied;
+        mi.pressAgeMs = static_cast<double>(go.pressAgeMs);
+        mi.pressWaiting = go.waiting;
+        mi.sheetEdge = go.sheetEdge;
+        mi.noPress = go.noPress;
+        mi.fallback = static_cast<uint8_t>(go.fallback);
+        mi.sheetLagMs = static_cast<double>(go.sheetLagMs);
+        mi.statusLagMs = static_cast<double>(go.statusLagMs);
+        level = m.step(mi, ev);
+        press = false;
+        tick += kDt;
+        ++frame;
+        return level;
+    }
+    // Steps for ms; sheetDrawing: a sheet draw in every frame.
+    void run(uint64_t ms, bool sheetDrawing = false) {
+        const uint64_t t0 = tick;
+        while (tick - t0 < ms) {
+            if (sheetDrawing) sheet = tick;
+            step();
+        }
+    }
+    uint64_t pressNow() {   // a press edge in this frame; returns its tick
+        const uint64_t p = tick;
+        press = true;
+        step();
+        return p;
+    }
+};
+
+static bool nearly(double a, double b, double tol = 1e-9) { return std::fabs(a - b) <= tol; }
+
+static void pressCases() {
+    {   // the ramp from the press, and the gate open only in the window
+        PSim s;
+        s.run(100);
+        check(!s.go.gateOpen && !s.go.waiting && s.level == 0.0, "in the Scorpion's SRV seat with the view off and no press the draw gate is CLOSED (the always-open gate is gone) and the level is 0");
+        const uint64_t p = s.pressNow();
+        check(s.go.event == sl::GateEvent::kCounted && s.go.waiting && s.go.gateOpen && s.ev.pressStarted && s.m.phase() == ef::Phase::kPress, "a press with the Scorpion known, the SRV seat, the view off and GuiFocus 0 counts: the gate opens and the ramp begins");
+        check(s.level == 0.0, "... the ramp starts at 0 in the press's own frame");
+        while (s.tick - p < 50) s.step();
+        s.step();
+        check(nearly(s.level, 0.5), "50 ms after the press the level is 0.5 (a linear ramp over kPressRampMs = 100 ms)");
+        check(nearly(ef::kPressRampMs, 100.0) && sl::kPressWaitMs == 2000, "kPressRampMs is 100 ms and kPressWaitMs is 2000 ms");
+        bool monotone = true, open = true;
+        double prev = s.level;
+        while (s.tick - p < 1900) {
+            s.step();
+            monotone = monotone && s.level >= prev - 1e-12;
+            prev = s.level;
+            open = open && s.go.gateOpen && s.go.waiting;
+        }
+        check(monotone && s.level == 1.0 && open, "the level rises to 1 by 100 ms and stays at 1 while the gate is open, to 1900 ms");
+        check(s.m.entries() == 0 && !s.m.run().published && s.m.phase() == ef::Phase::kPress, "no entry has begun and the camera move is not published: the camera is not moved by the press");
+        uint64_t closedAt = 0;
+        bool timedOut = false;
+        for (int i = 0; i < 40 && !closedAt; ++i) {
+            s.step();
+            if (!s.go.gateOpen) closedAt = s.tick - PSim::kDt - p;
+            timedOut = timedOut || s.ev.pressTimedOut;
+        }
+        check(closedAt > 2000 && closedAt <= 2000 + 2 * PSim::kDt && timedOut, "the gate closes kPressWaitMs (2000 ms) after the press and no sooner");
+        check(!s.go.waiting && s.m.phase() == ef::Phase::kPressBack && s.level == 1.0, "... the press did nothing: the fade back begins from 1");
+        // the no-sheet path: fades back over kFadeInMs, no edge, no camera move
+        double last = s.level;
+        bool down = true;
+        const uint64_t q = s.tick;
+        while (s.tick - q < 190) {
+            s.step();
+            down = down && s.level <= last + 1e-12 && s.level >= 0.0;
+            last = s.level;
+        }
+        check(down && s.level > 0.0 && s.level < 0.2, "the black fades back linearly: it never rises and is nearly gone 190 ms later");
+        s.run(30);
+        check(s.level == 0.0 && s.m.phase() == ef::Phase::kIdle && s.m.entries() == 0 && !s.go.gateOpen, "... and is exactly 0 and idle after kFadeInMs, with no entry, no view edge and the gate closed");
+    }
+    {   // the press with no camera move wanted does not black the view
+        PSim s;
+        s.moving = false;
+        s.run(50);
+        s.pressNow();
+        s.run(300);
+        check(s.level == 0.0 && s.m.phase() == ef::Phase::kIdle && s.go.waiting, "with no camera move to wait for the press does not black the view (the gate still waits for the sheet)");
+    }
+    {   // the sheet path: black from the press, the hold from the sheet edge to applied plus the margin, the fade-in; the cap counts from the sheet
+        PSim s;
+        s.run(100);
+        const uint64_t p = s.pressNow();
+        double minLevel = 1.0;
+        while (s.tick - p < 310) {   // the black from the end of the ramp to the sheet
+            s.step();
+            if (s.tick - p > 110) minLevel = std::fmin(minLevel, s.level);
+        }
+        const uint64_t sheetTick = s.tick;
+        s.sheet = sheetTick;
+        s.publishNext = true;
+        s.nextSerial = 7;
+        s.step();
+        check(s.go.on && s.go.sheetEdge && !s.go.noPress && s.ev.started && s.level == 1.0 && s.m.run().entry == 1 && s.m.run().pressed && s.m.run().viaSheet, "the first gunner sheet draw in the window raises the view; the entry follows the press");
+        check(s.m.run().startMs == static_cast<double>(sheetTick) && s.m.run().pressMs == static_cast<double>(p), "the run starts at the sheet edge (the cap's zero), and remembers the press");
+        check(s.ev.published && s.m.run().published && s.m.run().serial == 7, "the camera move is published at the edge and is the entry's");
+        s.applied = 4;
+        for (int i = 0; i < 10; ++i) {
+            s.sheet = s.tick;
+            s.status = s.tick >= p + 422;
+            s.step();
+            minLevel = std::fmin(minLevel, s.level);
+        }
+        check(s.m.phase() == ef::Phase::kHold, "an older applied serial does not end the hold");
+        s.applied = 8;
+        s.sheet = s.tick;
+        s.step();
+        const double appliedMs = s.m.run().appliedMs;
+        check(s.ev.appliedSeen, "the runtime reporting the move applied is seen");
+        while (s.m.phase() == ef::Phase::kHold) {
+            s.sheet = s.tick;
+            s.status = s.tick >= p + 422;
+            s.step();
+            minLevel = std::fmin(minLevel, s.level);
+        }
+        check(minLevel == 1.0 && s.m.run().settle == ef::Settle::kApplied && s.m.run().settleMs >= appliedMs + ef::kSettleMarginMs, "the black holds from the press to the edge to the applied serial plus the margin");
+        while (s.m.phase() == ef::Phase::kFadeIn) {
+            s.sheet = s.tick;
+            s.status = true;
+            s.step();
+        }
+        check(s.level == 0.0 && s.m.run().fadeEnded && s.m.run().endMs - s.m.run().settleMs >= ef::kFadeInMs && s.m.run().endMs - s.m.run().settleMs <= ef::kFadeInMs + 2.0 * PSim::kDt, "... then the existing 200 ms fade-in to 0");
+        check(s.m.run().sheetLagMs == static_cast<double>(sheetTick - p) && s.m.run().statusLagMs == 430.0, "the run carries the press-to-sheet time (310 ms) and the press-to-Status.json time (430 ms)");
+        char line[400];
+        ef::formatPressEntry(line, sizeof(line), s.m.run());
+        check(has(line, "srv turret entry fade: entry 1: press at frame 110; sheet +310 ms after the press; Status.json +430 ms after the press"), "the entry's press line carries the press frame, the sheet time and the Status.json time");
+        // a press while the view is on does nothing in this change
+        const double before = s.level;
+        s.press = true;
+        s.step();
+        check(s.go.event == sl::GateEvent::kNone && !s.ev.pressStarted && s.level == before && s.m.entries() == 1, "a press while the view is on (leaving the turret) does nothing");
+    }
+    {   // the cap counts from the sheet edge, not from the press: a signal that never comes ends the hold 800 ms after the sheet
+        PSim s;
+        s.run(100);
+        const uint64_t p = s.pressNow();
+        s.run(300);
+        s.sheet = s.tick;
+        s.publishNext = true;
+        s.nextSerial = 9;
+        s.step();
+        while (s.m.phase() == ef::Phase::kHold) {
+            s.sheet = s.tick;
+            s.step();
+        }
+        const ef::Run& r = s.m.run();
+        check(r.settle == ef::Settle::kCap && r.capFired, "a runtime that never reports the move applied ends the hold at the cap");
+        check(r.settleMs - r.startMs >= ef::kCapMs - ef::kFadeInMs && r.settleMs - r.startMs <= ef::kCapMs - ef::kFadeInMs + 2.0 * PSim::kDt, "... 800 ms after the sheet edge (the existing whole-run cap of 1000 ms counts from the sheet)");
+        check(r.settleMs - static_cast<double>(p) > ef::kCapMs, "... which is more than 1000 ms after the press, so the cap is not counted from the press");
+    }
+    {   // presses in any other state do nothing
+        struct Case { const char* name; bool scorpion, seat, gui0; };
+        const Case cases[] = {{"the journal does not call the vehicle the Scorpion", false, true, true}, {"the seat is not the SRV", true, false, true}, {"GuiFocus is above 0 (a panel is open)", true, true, false}};
+        for (const Case& c : cases) {
+            PSim s;
+            s.run(100);
+            s.scorpion = c.scorpion;
+            s.seat = c.seat;
+            s.gui0 = c.gui0;
+            s.pressNow();
+            check(s.go.event != sl::GateEvent::kCounted && !s.go.waiting && !s.go.gateOpen && !s.ev.pressStarted && s.level == 0.0, c.name);
+            s.run(400);
+            check(s.level == 0.0 && !s.go.gateOpen && s.m.phase() == ef::Phase::kIdle, "... and nothing follows: no black, the gate stays closed");
+        }
+    }
+    {   // Status.json reporting the turret without a sheet ends the wait and raises the view
+        PSim s;
+        s.run(100);
+        s.pressNow();
+        s.run(300);
+        s.status = true;
+        s.publishNext = true;
+        s.nextSerial = 3;
+        s.step();
+        check(s.go.on && !s.go.sheetEdge && !s.go.noPress && s.ev.started && s.level == 1.0 && !s.go.waiting && s.m.run().pressed, "Status.json on without a sheet ends the wait and raises the view; the press stands");
+        check(s.m.run().sheetLagMs < 0.0 && s.m.run().statusLagMs == 310.0 && s.go.fallback == sl::FallbackWhy::kNone, "... the run has no sheet time, Status.json's time (310 ms), and no fallback");
+        char line[400];
+        ef::formatPressEntry(line, sizeof(line), s.m.run());
+        check(has(line, "entry 1: press at frame 110; no sheet draw seen; Status.json +310 ms after the press") && noReadPhrase(line), "the press line says no sheet draw was seen");
+    }
+    {   // a press seen and not counted precedes a Status.json raise: not blind. The same raise 2.5 s after it is.
+        PSim s;
+        s.run(100);
+        s.gui0 = false;
+        s.pressNow();
+        s.gui0 = true;
+        s.run(500);
+        s.status = true;
+        s.step();
+        check(s.go.on && s.go.noPress && s.go.event != sl::GateEvent::kFellBack && s.go.fallback == sl::FallbackWhy::kNone, "a view raised 500 ms after a press the watcher saw is not a blind watcher");
+        PSim t;
+        t.run(100);
+        t.gui0 = false;
+        t.pressNow();
+        t.gui0 = true;
+        t.run(2500);
+        t.status = true;
+        t.step();
+        check(t.go.event == sl::GateEvent::kFellBack && t.go.fallback == sl::FallbackWhy::kBlind, "... and the same raise 2500 ms after it is");
+    }
+    {   // the blind fallback trips, behaves as a4ebcbec, and resets on a bindings change
+        PSim s;
+        s.run(100);
+        s.status = true;
+        s.step();   // the view goes on by Status.json with no press ever seen
+        check(s.go.event == sl::GateEvent::kFellBack && s.go.fallback == sl::FallbackWhy::kBlind && s.go.on && s.go.noPress && s.ev.started, "a view that goes on by Status.json with no press seen trips the fallback (blind watcher), and the entry still holds");
+        check(s.m.run().noPress && s.m.run().fallback == 2 && !s.m.run().pressed, "... the run says no press was seen and why");
+        char line[400];
+        ef::formatPressEntry(line, sizeof(line), s.m.run());
+        check(has(line, "entry 1: no press was seen (the press watcher saw nothing before the view went on: fallback); the view was raised by Status.json") && noReadPhrase(line), "the press line says no press was seen, the fallback and what raised the view");
+        s.status = false;
+        s.run(400);
+        check(!s.go.on && s.go.gateOpen && !s.go.waiting, "in the fallback the gate is open while the Scorpion's view is off, with no press");
+        s.sheet = s.tick;
+        s.step();
+        check(s.go.on && s.go.sheetEdge && s.go.noPress && s.ev.started && s.level == 1.0 && s.m.run().entry == 2 && s.m.run().viaSheet, "... and the sheet raises the view unfiltered, the hold starting at the sheet (a4ebcbec)");
+        ef::formatPressEntry(line, sizeof(line), s.m.run());
+        check(has(line, "entry 2: no press was seen") && has(line, "raised by the gunner sheet's draw"), "... the line says the sheet raised it");
+        s.run(1100);   // the sheet stops: the latch expires and the view goes off
+        check(!s.go.on, "the sheet stopping turns the latch off after a second");
+        s.epoch = 2;
+        s.step();
+        check(s.go.event == sl::GateEvent::kFallbackOff && s.go.fallback == sl::FallbackWhy::kNone && !s.go.gateOpen, "a change of bindings resets the fallback: the gate is closed again");
+        s.pressNow();
+        check(s.go.event == sl::GateEvent::kCounted && s.go.waiting, "... and a press counts again");
+    }
+    {   // no observable slot: fallback from the first step, a press does nothing
+        PSim s;
+        s.observable = false;
+        s.step();
+        check(s.go.event == sl::GateEvent::kFellBack && s.go.fallback == sl::FallbackWhy::kUnobservable && s.go.gateOpen, "no observable slot (a mouse button past the fifth, an axis, unbound, no .binds): fallback at once, the gate open in the Scorpion");
+        s.run(50);
+        s.pressNow();
+        check(s.go.event != sl::GateEvent::kCounted && !s.go.waiting && s.level == 0.0, "... and a press (which cannot be trusted) starts nothing");
+        s.sheet = s.tick;
+        s.step();
+        check(s.go.on && s.go.sheetEdge && s.go.noPress && s.m.run().fallback == 1, "... the sheet raises the view and holds from there");
+        char line[400];
+        ef::formatPressEntry(line, sizeof(line), s.m.run());
+        check(has(line, "the press watcher cannot see the key: fallback") && noReadPhrase(line), "... the line says the key cannot be seen");
+        s.observable = true;
+        s.epoch = 2;
+        s.status = false;
+        s.run(1100);
+        s.step();
+        check(s.go.fallback == sl::FallbackWhy::kNone, "a re-read that finds the key observable ends the fallback");
+    }
+    {   // a sheet draw from before the press does not raise the view (the window filters it), and a press after a view that just ended
+        PSim s;
+        s.run(100);
+        s.sheet = s.tick - 5;   // a stale draw, before any press
+        s.run(50);
+        check(!s.go.on, "a sheet draw with no press does not raise the view while the press is trusted");
+        const uint64_t p = s.pressNow();
+        s.step();
+        check(!s.go.on && p > s.sheet, "... and a draw from before the press still does not");
+    }
+    {   // the lines
+        char line[400];
+        ef::formatPressNoView(line, sizeof(line), 4321, 2013.0);
+        check(has(line, "srv turret entry fade: press at frame 4321: the press raised no view in 2000 ms") && noReadPhrase(line), "the line of a press that raised no view says so, in 2000 ms");
+    }
+}
+
 static void wiringCases() {
     const std::string nof = readText("src/d3d11/native_on_foot.cpp");
     const size_t tick = nof.find("g_fadeMix.turret = srvTurretEntryFadeTick(frameNo);");
@@ -501,12 +811,23 @@ static void wiringCases() {
     const size_t note = st.find("void srvTurretNotePublished(");
     check(note != std::string::npos && st.find("srvTurretEntryFadeNoteMove(serial)", note) != std::string::npos && has(st, "bool srvTurretViewOn() { return g_on; }"),
           "srv_turret.cpp tells the entry fade the serial of the camera move and says whether the view is on");
-    check(has(st, "g_sheetLatch.step(latchIn)") && has(st, "latchIn.statusOn = turret;") && has(st, "latchIn.scorpion = scorpion;") && has(st, "const bool on = latch.on;") &&
+    check(has(st, "g_sheetLatch.step(gateIn)") && has(st, "gateIn.statusOn = turret;") && has(st, "gateIn.scorpion = scorpion;") && has(st, "const bool on = gate.on;") &&
               has(st, "srv turret view: Status.json agreed %llu ms after the sheet") && has(st, "(the gunner sheet drew; Status.json not yet)") && has(st, "the gunner sheet latch expired after"),
-          "the frame tick takes `on` from the latch fed Status.json's bit and the Scorpion, and says the raise, the agreement and the expiry");
+          "the frame tick takes `on` from the press gate fed Status.json's bit and the Scorpion, and says the raise, the agreement and the expiry");
+    check(has(st, "srvTurretPressPoll()") && has(st, "gateIn.pressEdge = press.pressed;") && has(st, "gateIn.observable = press.observable;") && has(st, "gateIn.epoch = press.epoch;") &&
+              has(st, "gateIn.srvSeat = (journalSeatKind() & 4u) != 0;") && has(st, "if (!journalGuiFocus(&guiFocus)) guiFocus = 0;") && has(st, "gateIn.guiFocusZero = guiFocus == 0;") &&
+              has(st, "srvTurretEntryFadeNotePress(w);") && has(st, "srv turret press: falling back to the gunner-sheet watch") && has(st, "srv turret press: the bindings changed; the press is trusted again"),
+          "the frame tick polls the turret key's press once a frame, tells the gate the Scorpion, the SRV seat, Status.json's GuiFocus (unknown counts as 0) and the bindings epoch, tells the entry fade the gate's words, and logs the fallback");
     check(has(st, "if (st::isGunnerSheetSignature(sig) && (eye == 0 || eye == 1)) detail::g_srvTurretSheetSeenMs.store(GetTickCount64(), std::memory_order_relaxed);") &&
-              has(st, "const bool watching = scorpion && (journalSeatKind() & 4u) != 0 && !on;") && has(st, "const bool gate = wanted || watching;"),
-          "the sheet's draw is timed on the draw path, and the draw gate is open while the Scorpion's view is off");
+              has(st, "const bool watching = gate.gateOpen && !on;") && has(st, "const bool drawGate = wanted || watching || (on && gate.gateOpen);") && !has(st, "const bool watching = scorpion && (journalSeatKind() & 4u) != 0 && !on;"),
+          "the sheet's draw is timed on the draw path, and the draw gate follows the press gate, not the Scorpion's seat alone (the always-open gate is gone)");
+    const std::string pm = readText("src/d3d11/srv_turret_press.cpp");
+    check(has(pm, "eliteBindsAction(\"ToggleBuggyTurretButton\", &w.bind)") && has(pm, "setGameMirrored(true)") && has(pm, "eliteBindsFingerprint()") && has(pm, "hotkey.read_game_bindings") && has(pm, "CANNOT be seen") &&
+              has(pm, "srv turret press: Elite's ToggleBuggyTurretButton in %s"),
+          "the press watcher reads ToggleBuggyTurretButton through the shared action parser, watches each slot as a game-mirrored hotkey, re-reads on a bindings change and says which slots are watched and which cannot be seen");
+    const std::string eb = readText("src/d3d11/elite_binds.cpp");
+    check(has(eb, "return eliteBindsActionIn(\"HMDReset\", text, len, out);") && has(eb, "return eliteBindsActionDir(\"HMDReset\", dirC, out);") && !has(eb, "<HMDReset>\") != std::string::npos"),
+          "HMD reset's functions are the shared action parser with the name fixed (one parser, not a copy)");
     const std::string vsc = readText("src/d3d11/vscreen.cpp");
     const size_t gun = vsc.find("return srvTurretGunnerBegin(self, vs, kind, indexCount, srvTurretDrawEye(s));");
     const size_t watchOnly = vsc.find("if (srvTurretWatchOnly()) return false;");
@@ -526,7 +847,9 @@ static void wiringCases() {
     const std::string jw = readText("src/d3d11/journal_watch.cpp");
     check(has(jw, "g_eagerSrv.load(std::memory_order_relaxed)") && has(jw, "void journalWatchSetEagerStatusSrv(bool eager)"), "the journal watcher has the SRV cadence request and reads it in its wake-up");
     const std::string bat = readText("build.bat");
-    check(has(bat, "\"src\\d3d11\\srv_turret_entry_fade.cpp\""), "build.bat compiles the module into d3d11.dll");
+    check(has(bat, "\"src\\d3d11\\srv_turret_entry_fade.cpp\"") && has(bat, "\"src\\d3d11\\srv_turret_press.cpp\""), "build.bat compiles the module and the press watcher into d3d11.dll");
+    check(has(mod, "in.pressAgeMs = g_press.ageMs;") && has(mod, "ef::formatPressEntry") && has(mod, "ef::formatPressNoView") && has(mod, "void srvTurretEntryFadeNotePress("),
+          "the module feeds the machine the press gate's words and writes the press line of each entry and the line of a press that raised no view");
 }
 
 int main(int argc, char** argv) {
@@ -540,6 +863,7 @@ int main(int argc, char** argv) {
     }
     machineCases();
     latchCases();
+    pressCases();
     lineCases();
     wiringCases();
     std::printf("PASS srv_turret_entry_fade_test --self-test: %u checks\n", g_checks);

@@ -324,17 +324,18 @@ int scanAllUsesIn(const std::string& text, EliteBindUse* out, int max) {
 
 }  // namespace
 
-bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
+bool eliteBindsActionIn(const char* elementName, const char* text, size_t len, EliteResetBind* out) {
     if (!out) return false;
     out->present = false;
     out->count = 0;
     memset(out->slot, 0, sizeof(out->slot));
-    if (!text) return false;
+    if (!text || !elementName || !elementName[0]) return false;
     const std::string body(text, len);
-    out->present = body.find("<HMDReset>") != std::string::npos;
+    const std::string want(elementName);
+    out->present = body.find("<" + want + ">") != std::string::npos;
     if (!out->present) return false;
     walkSlots(body, [&](const std::string& element, const std::string& device, const std::string& key, const std::string& prefix) {
-        if (element != "HMDReset" || out->count >= 2) return;
+        if (element != want || out->count >= 2) return;
         EliteResetSlot& s = out->slot[out->count++];
         snprintf(s.label, sizeof(s.label), "%s:%s%s", device.c_str(), prefix.c_str(), key.c_str());
         s.observable = false;
@@ -373,7 +374,11 @@ bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
     return true;
 }
 
-bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) {
+bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
+    return eliteBindsActionIn("HMDReset", text, len, out);
+}
+
+bool eliteBindsActionDir(const char* elementName, const wchar_t* dirC, EliteResetBind* out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     if (!dirC || !dirC[0]) return false;
@@ -385,12 +390,18 @@ bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) {
         if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
         ++out->filesSeen;
         // The first file that CONTAINS the element answers alone (the camera lookup's rule).
-        if (eliteBindsHmdResetIn(text.data(), text.size(), out)) {
+        if (eliteBindsActionIn(elementName, text.data(), text.size(), out)) {
             snprintf(out->file, sizeof(out->file), "%s", c.utf8);
             return true;
         }
     }
     return false;
+}
+
+bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) { return eliteBindsActionDir("HMDReset", dirC, out); }
+
+bool eliteBindsAction(const char* elementName, EliteResetBind* out) {
+    return eliteBindsActionDir(elementName, bindingsDir().c_str(), out);
 }
 
 bool eliteBindsHmdReset(EliteResetBind* out) {

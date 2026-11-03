@@ -94,6 +94,138 @@ private:
     uint64_t lastStatusOnMs_ = 0;   // nowMs of the last step with statusOn true
 };
 
+// ---- THE PRESS GATE (issue 179; docs/srv-turret-hud-2026-10-30.md, "2026-11-03: the press") --------------------------------------------------------------------------------------
+// a4ebcbec kept the draw gate open the whole time the commander was in the Scorpion with the view off, to catch the sheet; that cost the AA-off fast path there. The press gate opens it
+// only when it is needed: the player presses Elite's turret key (ToggleBuggyTurretButton, watched by srv_turret_press.cpp), and the sheet is watched from the press until kPressWaitMs
+// after it. Wrapped around the latch above, which still raises the view and still lets Status.json take over; the gate adds what a press means:
+//   * a press counts when the Scorpion is known, the seat is the SRV, the view is off and Status.json's GuiFocus is 0; presses in any other state do nothing;
+//   * a counted press opens the window; only a sheet draw at or after the press raises the view; Status.json reporting the turret ends the wait and raises it too; no view within
+//     kPressWaitMs and the press did nothing (the window closes);
+//   * a watcher that cannot be trusted ends the feature's dependence on it. FALLBACK, for the rest of the session or until the bindings change: when no slot of the action can be
+//     observed (a mouse button past the fifth, an axis, an unbound action, no readable .binds), or when the view goes on (by Status.json or by a sheet) with no press seen in the
+//     preceding kBlindWindowMs (the watcher is blind: a joystick the game reads in a way it misses). In fallback the gate is open while the commander is in the Scorpion with the view
+//     off, the sheet raises the view unfiltered and the hold starts there: a4ebcbec's behaviour.
+constexpr uint64_t kPressWaitMs = 2000;
+constexpr uint64_t kBlindWindowMs = 2000;
+
+enum class FallbackWhy : uint8_t { kNone, kUnobservable, kBlind };
+enum class GateEvent : uint8_t {
+    kNone,
+    kCounted,      // a press counted this step: the window opened
+    kTimedOut,     // the window ended with no view (or the state it needed went away): the press did nothing
+    kFellBack,     // the watcher cannot be trusted: fallback begins (GateOut::fallback says why)
+    kFallbackOff   // the bindings changed: the press is trusted again
+};
+
+struct GateIn {
+    uint64_t nowMs = 0;
+    bool pressEdge = false;        // the watcher saw a press edge this frame
+    bool observable = false;       // every slot of the action can be watched
+    uint32_t epoch = 0;            // the watcher's bindings epoch (changes when the bindings are re-read)
+    bool scorpion = false;         // journalSrvScorpion
+    bool srvSeat = false;          // journalSeatKind() & 4
+    bool guiFocusZero = true;      // Status.json GuiFocus is 0 (or absent)
+    bool statusOn = false;         // Status.json's turret-view bit
+    uint64_t sheetSeenMs = 0;      // the raw sheet stamp
+};
+
+struct GateOut {
+    bool on = false;               // the view is on (the latch's answer, filtered by the press)
+    Result latch;                  // the latch's own result: its event is kRaised, kStatusAgreed ...
+    bool gateOpen = false;         // the draw gate: the sheet is being watched
+    bool waiting = false;          // a counted press, the view still off, inside the window
+    int64_t pressAgeMs = -1;       // ms since the counted press while it is live (waiting, or the view on), else -1
+    int64_t sheetLagMs = -1;       // the sheet draw that raised the view, ms after the press; -1 unknown
+    int64_t statusLagMs = -1;      // Status.json's first on after the press, ms after it; -1 not yet
+    bool sheetEdge = false;        // the view went on this step by the sheet (the latch's kRaised)
+    bool noPress = false;          // the view went on this step with no counted press
+    FallbackWhy fallback = FallbackWhy::kNone;
+    GateEvent event = GateEvent::kNone;
+};
+
+class EntryGate {
+public:
+    GateOut step(const GateIn& in) {
+        GateOut o;
+        const uint64_t now = in.nowMs;
+        if (in.epoch != epoch_) {
+            epoch_ = in.epoch;
+            if (why_ != FallbackWhy::kNone) {
+                why_ = FallbackWhy::kNone;
+                o.event = GateEvent::kFallbackOff;
+            }
+        }
+        if (!in.observable && why_ == FallbackWhy::kNone) {
+            why_ = FallbackWhy::kUnobservable;
+            o.event = GateEvent::kFellBack;
+        }
+        if (in.pressEdge) {
+            anyPress_ = true;
+            lastPressMs_ = now;
+        }
+        const bool inState = in.scorpion && in.srvSeat;
+        // A counted press: everything the view needs is in place and the view is off.
+        if (in.pressEdge && why_ == FallbackWhy::kNone && inState && !prevOn_ && in.guiFocusZero && pressMs_ == 0) {
+            pressMs_ = now;
+            sheetLag_ = statusLag_ = -1;
+            o.event = GateEvent::kCounted;
+        }
+        // The window ends: no view in time, or the state it needed is gone.
+        if (pressMs_ != 0 && !prevOn_ && o.event != GateEvent::kCounted && (now - pressMs_ > kPressWaitMs || !inState)) {
+            pressMs_ = 0;
+            o.event = GateEvent::kTimedOut;
+        }
+        // The latch. In press mode only a sheet draw at or after the counted press may raise the view.
+        uint64_t sheet = in.sheetSeenMs;
+        if (why_ == FallbackWhy::kNone) sheet = (pressMs_ != 0 && sheet >= pressMs_) ? sheet : 0;
+        Input li;
+        li.nowMs = now;
+        li.statusOn = in.statusOn;
+        li.scorpion = in.scorpion;
+        li.sheetSeenMs = sheet;
+        o.latch = latch_.step(li);
+        o.on = o.latch.on;
+        o.sheetEdge = o.latch.event == Event::kRaised;
+        if (o.sheetEdge && pressMs_ != 0 && sheet >= pressMs_) sheetLag_ = static_cast<int64_t>(sheet - pressMs_);
+        if (in.statusOn && pressMs_ != 0 && statusLag_ < 0) statusLag_ = static_cast<int64_t>(now - pressMs_);
+        if (o.on && !prevOn_) {   // the view went on this step
+            o.noPress = pressMs_ == 0;
+            if (pressMs_ == 0 && why_ == FallbackWhy::kNone && armed_ && (!anyPress_ || now - lastPressMs_ > kBlindWindowMs)) {
+                why_ = FallbackWhy::kBlind;
+                o.event = GateEvent::kFellBack;
+            }
+        }
+        if (!o.on && prevOn_) pressMs_ = 0;   // leaving the turret ends the press
+        armed_ = inState && !o.on;
+        prevOn_ = o.on;
+        o.fallback = why_;
+        o.waiting = pressMs_ != 0 && !o.on;
+        o.gateOpen = why_ != FallbackWhy::kNone ? (inState && !o.on) : (o.waiting || latch_.latched());
+        o.pressAgeMs = pressMs_ != 0 ? static_cast<int64_t>(now - pressMs_) : -1;
+        o.sheetLagMs = sheetLag_;
+        o.statusLagMs = statusLag_;
+        return o;
+    }
+    // Stood down (not VR, the session ended): back to the start. A fallback and the press seen stay.
+    void reset() {
+        latch_.reset();
+        pressMs_ = 0;
+        prevOn_ = armed_ = false;
+    }
+    FallbackWhy fallback() const { return why_; }
+
+private:
+    Latch latch_;
+    uint64_t pressMs_ = 0;       // the counted press, 0 none
+    uint64_t lastPressMs_ = 0;
+    bool anyPress_ = false;      // a press edge of any kind was ever seen
+    bool prevOn_ = false;
+    bool armed_ = false;         // last step: in the Scorpion's SRV seat with the view off, so a view going on now is a real entry
+    uint32_t epoch_ = 0;
+    FallbackWhy why_ = FallbackWhy::kNone;
+    int64_t sheetLag_ = -1, statusLag_ = -1;
+};
+
 }  // namespace sheetlatch
 }  // namespace srv_turret
 }  // namespace edvr

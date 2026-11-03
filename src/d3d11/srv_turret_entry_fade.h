@@ -44,6 +44,10 @@ constexpr double kPublishWaitMs = 250.0;
 constexpr double kFadeInMs = 200.0;
 // The whole run, from the edge to the level back at 0, is held to this: the hold phase ends at kCapMs - kFadeInMs at the latest. A missing signal cannot leave the headset black.
 constexpr double kCapMs = 1000.0;
+// THE PRESS (2026-11-03): the player's press of the turret key (srv_turret_sheet_latch.h EntryGate) takes the view to black before the view is known to be on, so it reads as the game's own
+// fade-out. The ramp to black from the press; the camera is not moved until the edge. The edge (the sheet's first draw, or Status.json) then runs the hold as before and the cap counts
+// from it. A press that raises no view fades back in over kFadeInMs.
+constexpr double kPressRampMs = 100.0;
 // The instrument: the luma window starts this long before the edge, and the report is written this long after the run ends (the readbacks land one to three frames late), and the
 // trace reaches this far past the run's end.
 constexpr double kLeadMs = 1000.0;   // was 300; the trace shows the game's own fade against the early edge
@@ -55,7 +59,7 @@ constexpr uint32_t kMaxTraceLines = 7;   // a run of lead 1000 + cap 1000 + tail
 constexpr uint32_t kSamplesPerLine = 40;   // about 19 characters each: a line stays inside the log's 1200
 constexpr uint32_t kMaxSamples = kMaxTraceLines * kSamplesPerLine;
 
-enum class Phase : uint8_t { kIdle, kHold, kFadeIn };
+enum class Phase : uint8_t { kIdle, kHold, kFadeIn, kPress, kPressBack };   // kPress: the ramp to black after a counted press, waiting for the edge; kPressBack: the press raised no view, fading back in
 // What ended the hold phase.
 enum class Settle : uint8_t { kNone, kApplied, kMargin, kNoPublish, kCap, kViewOff };
 // Why an edge did not start a hold.
@@ -69,6 +73,14 @@ struct Input {
     uint32_t moveCount = 0;   // how many times the move has been published (srvTurretNotePublished), ever
     uint32_t moveSerial = 0;  // ... and the serial of the latest
     uint32_t appliedWord = 0; // EdvrNativeNowPose::eyeAlignApplied: the serial + 1 of the alignment the latest pose carries; 0 when the runtime does not report (or there is no frame)
+    // The press gate's words (EntryGate): all idle at their defaults.
+    double pressAgeMs = -1.0; // ms since the counted press while it is live, else -1
+    bool pressWaiting = false;// a counted press, the view still off, inside the window
+    bool sheetEdge = false;   // this step's edge came from the gunner sheet's draw
+    bool noPress = false;     // this step's edge came with no counted press
+    uint8_t fallback = 0;     // the gate's FallbackWhy: 0 none, 1 the key cannot be watched, 2 the watcher was blind
+    double sheetLagMs = -1.0; // the sheet draw that raised the view, ms after the press; -1 unknown
+    double statusLagMs = -1.0;// Status.json's first on, ms after the press; -1 not yet
 };
 
 // What one run did, kept after it ends for the report.
@@ -92,6 +104,13 @@ struct Run {
     bool capFired = false;
     bool cutShort = false;       // a new entry began before this run's fade-in ended
     Skip skip = Skip::kNone;
+    bool pressed = false;        // the entry followed a counted press
+    double pressMs = 0.0;
+    uint32_t pressFrame = 0;
+    bool noPress = false;        // the edge came with no counted press
+    bool viaSheet = false;       // the edge came from the gunner sheet's draw (else Status.json)
+    uint8_t fallback = 0;
+    double sheetLagMs = -1.0, statusLagMs = -1.0;
 };
 
 struct Events {
@@ -101,6 +120,8 @@ struct Events {
     bool appliedSeen = false;    // the runtime reported the move applied this step
     bool settled = false;        // the hold phase ended this step (the fade-in began)
     bool ended = false;          // the level reached 0 this step
+    bool pressStarted = false;   // a counted press began the ramp to black
+    bool pressTimedOut = false;  // the press raised no view: the fade back in begins
 };
 
 // The state machine, one step a frame. level() is how black the view is, 0 to 1.
@@ -111,16 +132,36 @@ public:
         ev = Events{};
         const bool edge = in.on && !wasOn_;
         wasOn_ = in.on;
+        // The press: tracked from the step the gate reports it live to the step it is not (the view going off, or the window ending).
+        if (in.pressAgeMs >= 0.0 && !pressTracked_) {
+            pressTracked_ = true;
+            pressStartMs_ = in.nowMs - in.pressAgeMs;
+            pressFrame_ = in.frame;
+            if (!edge && !in.on && in.pressWaiting && in.moving && (phase_ == Phase::kIdle || phase_ == Phase::kPressBack)) {
+                phase_ = Phase::kPress;
+                pressFrom_ = level_;
+                ev.pressStarted = true;
+            }
+        } else if (in.pressAgeMs < 0.0) {
+            pressTracked_ = false;
+        }
         if (edge) {
-            // A new entry. A run still fading in is cut short (the new hold starts at 1, which the player sees as the level jumping up, not a second pop).
-            if (phase_ != Phase::kIdle) run_.cutShort = true;
+            // A new entry. A run still holding or fading in is cut short (the new hold starts at 1, which the player sees as the level jumping up, not a second pop). A press ramp or fade
+            // back is not a run: the hold takes over from it.
+            if (phase_ == Phase::kHold || phase_ == Phase::kFadeIn) run_.cutShort = true;
             prev_ = run_;
             havePrev_ = true;
             run_ = Run{};
             run_.entry = ++entries_;
             run_.startMs = in.nowMs;
             run_.startFrame = in.frame;
-            baseCount_ = lastCount_;   // the publish counted before this frame's tick is the last entry's; one in this frame is the move for this one
+            run_.pressed = in.pressAgeMs >= 0.0;
+            run_.pressMs = pressStartMs_;
+            run_.pressFrame = pressFrame_;
+            run_.noPress = in.noPress;
+            run_.viaSheet = in.sheetEdge;
+            run_.fallback = in.fallback;
+            baseCount_ = lastCount_;  // the publish counted before this frame's tick is the last entry's; one in this frame is the move for this one
             if (!in.moving) {
                 run_.skip = Skip::kNoMove;
                 phase_ = Phase::kIdle;
@@ -133,6 +174,15 @@ public:
             }
         }
         lastCount_ = in.moveCount;
+        if (!edge && in.pressAgeMs >= 0.0) {   // the lags are told as the gate learns them; the run (if any) keeps the latest
+            if (in.sheetLagMs >= 0.0) run_.sheetLagMs = in.sheetLagMs;
+            if (in.statusLagMs >= 0.0) run_.statusLagMs = in.statusLagMs;
+        } else if (edge) {
+            run_.sheetLagMs = in.sheetLagMs;
+            run_.statusLagMs = in.statusLagMs;
+        }
+        if (phase_ == Phase::kPress) pressStep(in, ev);
+        if (phase_ == Phase::kPressBack) backStep(in, ev);
         if (phase_ == Phase::kHold) holdStep(in, ev);
         if (phase_ == Phase::kFadeIn) fadeStep(in, ev);
         return level_;
@@ -151,9 +201,35 @@ public:
         phase_ = Phase::kIdle;
         level_ = 0.0;
         wasOn_ = false;
+        pressTracked_ = false;
     }
+    // The press that began the last ramp (for the "raised no view" line).
+    double pressStartMs() const { return pressStartMs_; }
+    uint32_t pressFrame() const { return pressFrame_; }
 
 private:
+    void pressStep(const Input& in, Events& ev) {
+        if (!in.pressWaiting) {   // the window ended with no view (an edge would have taken the phase in step())
+            phase_ = Phase::kPressBack;
+            backFrom_ = level_;
+            backStartMs_ = in.nowMs;
+            ev.pressTimedOut = true;
+            return;
+        }
+        const double t = (in.nowMs - pressStartMs_) / kPressRampMs;
+        level_ = pressFrom_ + (1.0 - pressFrom_) * (t >= 1.0 ? 1.0 : (t <= 0.0 ? 0.0 : t));
+    }
+
+    void backStep(const Input& in, Events&) {
+        const double t = (in.nowMs - backStartMs_) / kFadeInMs;
+        if (t >= 1.0) {
+            phase_ = Phase::kIdle;
+            level_ = 0.0;
+        } else {
+            level_ = backFrom_ * (t <= 0.0 ? 1.0 : 1.0 - t);
+        }
+    }
+
     void holdStep(const Input& in, Events& ev) {
         if (!run_.published && in.moveCount > baseCount_ && in.moveSerial != 0) {
             run_.published = true;
@@ -212,6 +288,9 @@ private:
     double level_ = 0.0;
     bool wasOn_ = false, havePrev_ = false;
     uint32_t entries_ = 0, lastCount_ = 0, baseCount_ = 0;
+    bool pressTracked_ = false;
+    double pressStartMs_ = 0.0, pressFrom_ = 0.0, backFrom_ = 0.0, backStartMs_ = 0.0;
+    uint32_t pressFrame_ = 0;
     Run run_{}, prev_{};
 };
 
@@ -261,6 +340,27 @@ inline int formatRun(char* out, size_t cap, const Run& r) {
         std::snprintf(published, sizeof(published), "move never published");
     return std::snprintf(out, cap, "srv turret entry fade: entry %u: hold started at frame %u; %s; %s; %s; %s; cap (%.0f ms) %s",
                          static_cast<unsigned>(r.entry), static_cast<unsigned>(r.startFrame), published, applied, settled, ended, kCapMs, r.capFired ? "FIRED" : "not fired");
+}
+
+// The press line of an entry (one a run, within the same cap as the run's report): which press started it and how long the sheet and Status.json took, so one flight measures the
+// press-to-sheet time. A run with no counted press says so and why (the watcher cannot see the key, or it was blind, or just no press was counted) and what raised the view.
+inline int formatPressEntry(char* out, size_t cap, const Run& r) {
+    if (r.pressed) {
+        char sheet[64], status[80];
+        if (r.sheetLagMs >= 0.0) std::snprintf(sheet, sizeof(sheet), "sheet +%.0f ms after the press", r.sheetLagMs);
+        else std::snprintf(sheet, sizeof(sheet), "no sheet draw seen");
+        if (r.statusLagMs >= 0.0) std::snprintf(status, sizeof(status), "Status.json +%.0f ms after the press", r.statusLagMs);
+        else std::snprintf(status, sizeof(status), "Status.json had not reported when this was written");
+        return std::snprintf(out, cap, "srv turret entry fade: entry %u: press at frame %u; %s; %s", static_cast<unsigned>(r.entry), static_cast<unsigned>(r.pressFrame), sheet, status);
+    }
+    const char* why = r.fallback == 1 ? "the press watcher cannot see the key: fallback" : r.fallback == 2 ? "the press watcher saw nothing before the view went on: fallback" : "no press was counted";
+    return std::snprintf(out, cap, "srv turret entry fade: entry %u: no press was seen (%s); the view was raised by %s", static_cast<unsigned>(r.entry), why,
+                         r.viaSheet ? "the gunner sheet's draw" : "Status.json");
+}
+// A press that raised no view: said when the fade back in begins. The wait is capped at kPressWaitMs in the line.
+inline int formatPressNoView(char* out, size_t cap, uint32_t pressFrame, double waitedMs) {
+    return std::snprintf(out, cap, "srv turret entry fade: press at frame %u: the press raised no view in %.0f ms; the black fades back in over %.0f ms, no camera move", static_cast<unsigned>(pressFrame),
+                         waitedMs > 2000.0 ? 2000.0 : waitedMs, kFadeInMs);
 }
 
 // One frame of the luma trace: the game's eye image mean luminance, both eyes (a negative mean is a reading that never came back), at tMs from the edge. phase is ' ' before the hold,
@@ -313,5 +413,13 @@ inline int formatCapLine(char* out, size_t cap) {
 double srvTurretEntryFadeTick(uint32_t frameNo);
 // srvTurretNotePublished, when it publishes the camera move: the serial the move went out under.
 void srvTurretEntryFadeNoteMove(uint32_t serial);
+// srvTurretFrameTick, once a frame BEFORE the tick above: the press gate's words for this frame (srv_turret_sheet_latch.h GateOut), copied into the machine's input.
+struct SrvTurretPressWords {
+    double ageMs = -1.0;
+    bool waiting = false, sheetEdge = false, noPress = false;
+    uint8_t fallback = 0;
+    double sheetLagMs = -1.0, statusLagMs = -1.0;
+};
+void srvTurretEntryFadeNotePress(const SrvTurretPressWords& w);
 
 }  // namespace edvr

@@ -785,9 +785,9 @@ static void mathCases() {
                   "the cards-up key adds 20 cm of seat-up on the two cards only");
             check(st::gunnerParamsFor(closer, gunner, false) && std::fabs(gunner.ty - 0.30f) < 1e-6f, "the curved sheet does not take the cards-up translation");
             check(!st::gunnerParamsFor(e, gunner), "a gunner move of 0 leaves the panel as the game placed it");
-            {   // the cards' content shifts: whole millimetres into metres, held to 0 to 30 mm, 7 and 6 by default
+            {   // the cards' content shifts: whole millimetres into metres, held to 0 to 30 mm, 7 and 7 by default
                 st::TurretParams sh;
-                bool ok = st::gunnerParamsFor(closer, sh) && sh.targetShiftM == 0.007f && sh.systemsShiftM == 0.006f;
+                bool ok = st::gunnerParamsFor(closer, sh) && sh.targetShiftM == 0.007f && sh.systemsShiftM == 0.007f;
                 ok = ok && st::gunnerParamsFor(closer, sh, false, 12, 3) && sh.targetShiftM == 0.012f && sh.systemsShiftM == 0.003f;
                 ok = ok && st::gunnerParamsFor(closer, sh, false, 99, -4) && sh.targetShiftM == 0.030f && sh.systemsShiftM == 0.0f;
                 ok = ok && st::gunnerParamsFor(closer, sh, true, 0, 0) && sh.targetShiftM == 0.0f && sh.systemsShiftM == 0.0f;
@@ -797,7 +797,7 @@ static void mathCases() {
                 bad = sh;
                 bad.systemsShiftM = -0.001f;
                 ok = ok && !st::paramsUsable(bad);
-                check(ok, "the cards' content shifts reach the sheet's constants in metres (7 and 6 mm by default, the keys' values otherwise, held to 0..30 mm) and a shift outside that range is refused");
+                check(ok, "the cards' content shifts reach the sheet's constants in metres (7 and 7 mm by default, the keys' values otherwise, held to 0..30 mm) and a shift outside that range is refused");
             }
             check(st::gunnerSignature(st::kGunnerCardsVs, 'X', 288) == st::kGunnerCardsSignature && st::gunnerSignature(st::kGunnerSheetVs, 'I', 2016) == st::kGunnerSheetSignature &&
                       st::gunnerSignature(st::kGunnerCardsVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 6) < 0 &&
@@ -933,7 +933,7 @@ static void mathCases() {
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
     check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
-              st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 6 && st::kCardShiftMaxMm == 30 &&
+              st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 7 && st::kCardShiftMaxMm == 30 &&
               st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
           "the keys' defaults, the 2026-11-02 and 2026-11-03 flights: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, gap 0, systems near 80, weapon panel up 10, gunner up 35");
 }
@@ -2868,23 +2868,31 @@ static void sheetShiftCases(ID3D11GeometryShader* twin, Fails& f) {
     const float label[3][3] = {{0.60f, -0.55f, kRigSheetZ}, {0.70f, -0.55f, kRigSheetZ}, {0.65f, -0.52f, kRigSheetZ}};
     double sT[3], sS[3];
     eyeShift(kRigAcrossTarget, 7, sT);
-    eyeShift(kRigAcrossSystems, 6, sS);
-    const st::TurretParams shipped = paramsOf(7, 6);
+    eyeShift(kRigAcrossSystems, 7, sS);
+    const st::TurretParams shipped = paramsOf(7, 7);
     f.expect(movesBy(sheetMovesOf(twin, target, shipped), sT), "gunner sheet shift: a target-card content triangle moves by the translation and the target key (7 mm) along U = (0.7451, 0, 0.6670), rightwards");
     f.expect(movesBy(sheetMovesOf(twin, bar, shipped), sT), "gunner sheet shift: ...and so does a triangle of the target region left of the fill (the cut follows it)");
-    f.expect(movesBy(sheetMovesOf(twin, systems, shipped), sS), "gunner sheet shift: a systems-card triangle moves by the translation and the systems key (6 mm) along its own U = (0.74314, 0, -0.66913)");
-    f.expect(movesBy(sheetMovesOf(twin, label, shipped), none), "gunner sheet shift: a label-row triangle moves by the translation alone");
+    f.expect(movesBy(sheetMovesOf(twin, systems, shipped), sS), "gunner sheet shift: a systems-card triangle moves by the translation and the systems key (7 mm) along its own U = (0.74314, 0, -0.66913)");
+    f.expect(movesBy(sheetMovesOf(twin, label, shipped), sS), "gunner sheet shift: a label-row triangle (the SRV SCORPION text, the dash, the GUNNER CAMERA label) moves with SYSTEMS, by the translation and the systems key along its U");
+    {   // the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider: a vertex above it and a vertex below it must move by the same amount, or the letters and the divider tear
+        const float above[3][3] = {{0.55f, -0.45f, kRigSheetZ}, {0.65f, -0.45f, kRigSheetZ}, {0.60f, -0.4783f, kRigSheetZ}};
+        const float below[3][3] = {{0.55f, -0.4783f, kRigSheetZ}, {0.65f, -0.4783f, kRigSheetZ}, {0.60f, -0.5534f, kRigSheetZ}};
+        const SheetMoves ma = sheetMovesOf(twin, above, shipped), mb = sheetMovesOf(twin, below, shipped);
+        f.expect(movesBy(ma, sS) && movesBy(mb, sS) && std::fabs(ma.d[2][0] - mb.d[0][0]) < 2.0e-5 && std::fabs(ma.d[2][2] - mb.d[0][2]) < 2.0e-5,
+                 "gunner sheet seam: a vertex at y -0.4783 above the seam and one below it move by the same amount (the systems shift), so the letters and the divider do not tear");
+    }
     {   // the shifts follow their keys, each its own card
         double t12[3], s3[3];
         eyeShift(kRigAcrossTarget, 12, t12);
         eyeShift(kRigAcrossSystems, 3, s3);
         const st::TurretParams other = paramsOf(12, 3);
-        f.expect(movesBy(sheetMovesOf(twin, target, other), t12) && movesBy(sheetMovesOf(twin, systems, other), s3) && movesBy(sheetMovesOf(twin, label, other), none),
-                 "gunner sheet shift: the target card follows its key (12 mm), SYSTEMS its own (3 mm), and the label row neither");
+        f.expect(movesBy(sheetMovesOf(twin, target, other), t12) && movesBy(sheetMovesOf(twin, systems, other), s3) && movesBy(sheetMovesOf(twin, label, other), s3),
+                 "gunner sheet shift: the target card follows its key (12 mm), SYSTEMS and the label row below it the systems key (3 mm)");
         const st::TurretParams zero = paramsOf(0, 0);
         f.expect(movesBy(sheetMovesOf(twin, target, zero), none) && movesBy(sheetMovesOf(twin, systems, zero), none), "gunner sheet shift: a value of 0 means no shift");
-        const st::TurretParams onlyT = paramsOf(7, 0), onlyS = paramsOf(0, 6);
-        f.expect(movesBy(sheetMovesOf(twin, systems, onlyT), none) && movesBy(sheetMovesOf(twin, target, onlyS), none), "gunner sheet shift: each key moves its own card only");
+        const st::TurretParams onlyT = paramsOf(7, 0), onlyS = paramsOf(0, 7);
+        f.expect(movesBy(sheetMovesOf(twin, systems, onlyT), none) && movesBy(sheetMovesOf(twin, label, onlyT), none) && movesBy(sheetMovesOf(twin, target, onlyS), none),
+                 "gunner sheet shift: each key moves its own card only (the target key never moves the label row, the systems key never moves the target card)");
     }
     {   // the corner notches (dump 125141609001): the triangles holding the planet icon tile's upper-left vertex v112 (x -0.8330) and the last SYSTEMS header tile's upper-right vertex v292 (x 0.7856) are kept, and moved with their card
         const float t1[3][3] = {{-0.7678f, -0.3248f, 0.6266f}, {-0.8182f, -0.3248f, 0.5640f}, {-0.8330f, -0.2460f, 0.5741f}};
@@ -3016,7 +3024,7 @@ int main(int argc, char** argv) {
                 check(offScreen(-0.62f, -0.16f), "the gunner sheet sends the faint line above a card off screen");
                 check(offScreen(-0.85f, -0.36f), "the gunner sheet sends the border beside a card off screen");
                 sheetClipCases(twinOf[fam].Get(), production);   // the clip planes that cut the leftover brackets, read from the twin's streamed-out clip distances
-                sheetShiftCases(twinOf[fam].Get(), production);   // the target card's content moved 5.3 mm along its top edge; the systems card and the label row not
+                sheetShiftCases(twinOf[fam].Get(), production);   // the target card's content moved 7 mm along its top edge; the systems card and the label row below it together
             }
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
@@ -3147,7 +3155,8 @@ int main(int argc, char** argv) {
                 {"the target shift's sign", "sd = kTargetCardAcross * s3.x", "sd = -kTargetCardAcross * s3.x"},
                 {"the systems shift's sign", "sd = kSystemsCardAcross * s3.y", "sd = -kSystemsCardAcross * s3.y"},
                 {"the systems shift along the target card's direction", "kSystemsCardAcross * s3.y", "kTargetCardAcross * s3.y"},
-                {"the label row shifted with SYSTEMS", "return p.x > 0.50 && p.x < (p.y > -0.33 ? 0.79 : 0.78) && p.y > -0.51", "return p.x > 0.50 && p.x < (p.y > -0.33 ? 0.79 : 0.78) && p.y > -0.58"},
+                {"the seam restored (the label row left out of the SYSTEMS shift)", "return p.x > 0.0 && (inSystems(p) || inLabel(p));", "return p.x > 0.0 && inSystems(p);"},
+                {"the label row shifted with the target key", "else if (onSystemsSide(p0)", "else if (inLabel(p0) && inLabel(p1) && inLabel(p2)) sd = kTargetCardAcross * s3.x;\n        else if (onSystemsSide(p0)"},
                 {"the clip delta without its depth row", "dot(clipRows[7].xyz, sd)", "0.0"},
                 {"the clip planes read after the shift", "sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen)", "sheetClip((i == 0 ? p0 : (i == 1 ? p1 : p2)) + kTargetCardAcross * 0.007, cen)"},
                 {"the old target bound (the planet icon notch)", "return p.x > -0.835 && p.x < -0.47", "return p.x > -0.822 && p.x < -0.47"},

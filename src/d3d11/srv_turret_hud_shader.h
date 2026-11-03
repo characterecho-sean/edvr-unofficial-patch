@@ -241,8 +241,8 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "static const float kCardRowBottomY = -0.481;\n" \
     "static const float kLabelRowLeftX = 0.53;\n" \
     "// The cards show their content off-centre in their dark fills. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the target card (left) fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, the SYSTEMS card (right) fill top edge along U = (0.74314, 0, -0.66913), the sheet curving the other way on that side.\n" \
-    "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That makes 6.9 mm and 9.0 mm rightwards in all; the keys default to 7 and 9.\n" \
-    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. The label row, which shares the right region only in a sliver, and everything else stay. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
+    "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That makes 6.9 mm and 9.0 mm rightwards in all; the keys default to 7 and 9 (SYSTEMS since moved to 7, see experimental.srv_turret_systems_card_shift).\n" \
+    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. On the SYSTEMS side the card and the label row below it move together as one rigid piece: the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider, triangles above it are inSystems and triangles in the row y -0.4783..-0.5534 have vertices in the label region, and shifting only the first left the letters' bottoms one shift to the left of their tops (the cut-off look) and a notch in the divider (Epic dump 125141609001). So every drawn triangle on that side, inSystems or label (the dash, the SRV SCORPION text and the GUNNER CAMERA label all lie in that row), takes the SYSTEMS shift. The target card's test comes first and the label starts at x 0.12, so the target card never takes it. Everything else stays. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
     "static const float3 kTargetCardAcross = float3(0.7451, 0.0, 0.6670);\n" \
     "static const float3 kSystemsCardAcross = float3(0.74314, 0.0, -0.66913);\n" \
     "float4x4 sheetInv(float4x4 m, out float det) {\n" \
@@ -278,9 +278,14 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "bool inSystems(float3 p) {\n" \
     "    return p.x > 0.50 && p.x < (p.y > -0.33 ? 0.79 : 0.78) && p.y > -0.51 && p.y < -0.245;\n" \
     "}\n" \
+    "bool inLabel(float3 p) {\n" \
+    "    return p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \
+    "}\n" \
     "bool inFill(float3 p) {\n" \
-    "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \
-    "    return inTarget(p) || inSystems(p) || label;\n" \
+    "    return inTarget(p) || inSystems(p) || inLabel(p);\n" \
+    "}\n" \
+    "bool onSystemsSide(float3 p) {\n" \
+    "    return p.x > 0.0 && (inSystems(p) || inLabel(p));\n" \
     "}\n" \
     "bool liveLocal(float4 c, out float3 local) {\n" \
     "    float det;\n" \
@@ -312,7 +317,7 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    if (live && draw) {\n" \
     "        float3 sd = float3(0.0, 0.0, 0.0);\n" \
     "        if (inTarget(p0) && inTarget(p1) && inTarget(p2)) sd = kTargetCardAcross * s3.x;\n" \
-    "        else if (inSystems(p0) && inSystems(p1) && inSystems(p2)) sd = kSystemsCardAcross * s3.y;\n" \
+    "        else if (onSystemsSide(p0) && onSystemsSide(p1) && onSystemsSide(p2)) sd = kSystemsCardAcross * s3.y;\n" \
     "        shiftClip = float4(dot(clipRows[4].xyz, sd), dot(clipRows[5].xyz, sd), dot(clipRows[6].xyz, sd), dot(clipRows[7].xyz, sd));\n" \
     "    }\n" \
     "    const bool locked = an.w > 0.5;\n" \
