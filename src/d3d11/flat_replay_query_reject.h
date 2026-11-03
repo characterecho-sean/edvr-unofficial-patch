@@ -92,6 +92,51 @@ inline int flatQueryRejectFormatEvent(char* out, size_t size, uint32_t ordinal, 
         static_cast<unsigned long long>(ps), width, height, codes, r.active);
 }
 
+// ---- The tracker's first escape (2026-11-03; log only) --------------------------------------------------------------------------
+// The 11-03 flight (edvr_gfx_20261103_044624) rejected 193,092 of 193,092 foreground draws as UNCERTAIN_BRACKET#100 from 72 ms after a live
+// VR-to-flat switch, in 5 of 5 switched sessions with a checked draw and in none of 120+ flat-launched ones. The observer runs only in the flat
+// profile (vscreen.cpp hookedBegin/hookedEnd), so after a switch its first calls can be Ends of brackets opened before it looked. Two lines say
+// whether that is the cause: the first observed call, and the first escape with its cause. No start line = the observer never ran; a start line
+// and no escape line = the tracker stayed certain.
+// The numbers are FlatReplayQueryTracker::Cause and ::Kind (flat_replay_query_tracker.h); the tests pin the two against each other.
+inline const char* flatQueryCauseName(uint32_t c) {
+    switch (c) {
+    case 0: return "none";
+    case 1: return "null-identity";
+    case 2: return "duplicate-begin";
+    case 3: return "table-full";
+    case 4: return "kind-mismatch";
+    case 5: return "unmatched-end";
+    default: return "unknown";
+    }
+}
+inline const char* flatQueryKindName(uint32_t k) {
+    switch (k) {
+    case 0: return "end-only";
+    case 1: return "timing";
+    case 2: return "count";
+    case 3: return "unknown";
+    default: return "?";
+    }
+}
+// The first observed Begin or End on an immediate context.
+inline int flatQueryTrackerFormatStart(char* out, size_t size, const char* call, unsigned long long context, uint32_t thread) {
+    return std::snprintf(out, size,
+        "flat replay query tracker: observing from here (first call %s on context %016llX, thread %u); calls before this were not observed "
+        "(the observer runs only in the flat profile), so a bracket opened earlier ends here without a Begin",
+        call ? call : "?", context, thread);
+}
+// The first time the tracker went uncertain: why, on which call and query, and what it had seen by then.
+inline int flatQueryTrackerFormatEscape(char* out, size_t size, uint32_t cause, const char* call, uint32_t queryCode, uint32_t kind,
+                                        uint32_t thread, unsigned long long context, uint64_t begins, uint64_t ends, uint32_t open,
+                                        uint64_t msSinceFirstCall) {
+    return std::snprintf(out, size,
+        "flat replay query tracker: first escape: cause=%s call=%s query=%s#%u kind=%s thread=%u context=%016llX; seen begins=%llu ends=%llu "
+        "open=%u, %llu ms after the first observed call; uncertain now stays set for the session (only a new context clears it)",
+        flatQueryCauseName(cause), call ? call : "?", flatQueryCodeName(queryCode), queryCode, flatQueryKindName(kind), thread, context,
+        static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends), open, static_cast<unsigned long long>(msSinceFirstCall));
+}
+
 class FlatQueryRejectStats {
 public:
     // A foreground draw reached the safety test.

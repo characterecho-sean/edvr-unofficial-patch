@@ -1548,3 +1548,16 @@ and the second (05:04:15, seated, sealed) are the two draw censuses; the log rec
 - `ruled out: a particular foreground draw (7B0DC42D/0DF03E64, CFCA8FFC/8A08FF78, 88DCF116/494506A6, DFED8E1C/143AAE05) as the trigger, because the tracker
   rejects every draw it is asked about (checked equals rejected), whatever the pair.`
 - `ruled out: DLSS ghosting of the hangar ship at the first NumLock, because DLSS did not run on those frames (spatial fallback, no jitter); what Sean saw is the untreated frame.`
+- **Leading hypothesis, from the source (T1).** The observer runs only in the flat profile: vscreen.cpp `hookedBegin`/`hookedEnd` call `flatRuntimeReplayQueryBegin/End`
+  behind `if(runtimeFlatProfile())`. After a live VR-to-flat switch its first calls can be Ends of brackets the game opened in the VR phase; an End with no Begin seen
+  and a count-bearing kind sets `uncertain` (the tracker's unmatched-End rule), and it never clears. A flat launch observes from the first call, so nothing escapes.
+  This fits 5 of 5 and 0 of 120+, and the 72 ms; it is not yet shown. Others the instrument separates: T2 a duplicate Begin, T3 a full table (64 open), T4 a kind
+  mismatch, T5 a null query, T6 a Begin on a deferred context and its End on the immediate one (not observed at all today).
+- **Instrument (BUILT, NOT FLOWN, log only, no key, no behaviour change; flat_replay_query_tracker.h, flat_replay_query_reject.h, flat_runtime.cpp, pinned in
+  flat_temporal_test's flat_replay_query_reject_tests.h).** The tracker keeps the cause of its first escape and counts the Begins and Ends it saw. Two lines, once per session:
+  `flat replay query tracker: observing from here (first call End on context ..., thread N); calls before this were not observed ...` at the first Begin or End the
+  observer sees, and `flat replay query tracker: first escape: cause=unmatched-end call=End query=OCCLUSION_PREDICATE#5 kind=count thread=N context=...; seen begins=0 ends=1 open=0,
+  3 ms after the first observed call; uncertain now stays set ...` at the first escape. No start line = the observer never ran; a start line and no escape line = the tracker
+  stayed certain (expected in a flat-launched session). **T1 is confirmed by** `cause=unmatched-end` with `begins` small and `ms after the first observed call` within the first
+  frame or two of the start line after the switch, **refuted by** any other cause, or an unmatched-end late in a session that has seen many Begins. If T1 holds, the fix to
+  propose is a grace at adoption (the Ends of brackets opened before the first observed call are not escapes), not a reset of the tracker.
