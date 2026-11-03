@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges) and kDirtStrength is 8 (section 13). Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -653,6 +653,19 @@ dashes where bristles end. Targets still missed: local coherence (0.87, target 0
 band (0.39, target 0.2-0.3); the 0-4 band (0.44) is in range, and the 64+ band is far lower than legacy's (0.04). The rig keeps its
 loosened checks (band energy within 0.2, every band elongated, angle within 15 degrees, local coherence 0.3 to 0.95, p95 within
 0.06) and the bristle check (0.11, under 0.5). Generation fell from about 490 ms to about 360 ms (step 0.7 texel), on the worker thread.
+
+**Continuous dirt mask, strength 8 (2026-11-03, after the flight of 901831de, on top of the main merge 1fa92578).** Sean:
+"weird unnatural edges" (hard polygon edges on the panes) and too much dirt for a clean windshield. The hard edge was a bug in the
+mask section 11 specified: it recovered `B = liveDirt / denom - CB2[6].w` where liveDirt > 0 and 0 elsewhere, and with
+CB2[6].w = -0.2 that jumps from 0 straight to 0.2 at the boundary of every triangle whose three vertices live's vertex shader
+clamped to 0, so the zero regions had hard polygon outlines. Now `dirtWeight = liveDirt / (CB2[6].z x CB2[0].x)`, floored at 0, with
+no offset: it is B - 0.2 in effect and runs smoothly to 0 at the boundary; the shader says in a comment why the offset must not be
+added back. `kDirtStrength` goes from 16 to 8, still CHOSEN, not measured: with the offset gone the mask is about 0.7 times what it
+was, so 8 is near the 4 to 6 times that section 12 measures as matching legacy on the display. Rig (WARP, debug layer on): dirt
+under the sun for B = 0.72 is 0.5645 (wanted 0.5645) at alpha 0.02; hangar 0.1135 (0.1135); dirt with a probe 0.6777 (0.6779); ice and
+condensation overlays 0.01128 (0.01129); and a new continuity case: a mask of exactly 0 gives 0 and 1e-4 gives 0.000434
+(wanted 0.000434), in proportion to the 0.13 mask's, with no step. `hotkey_capture_test` still passes with the merge's
+four-row Visual tab (no change needed), and the full build on the merged tip passed.
 
 ## Ruled out
 

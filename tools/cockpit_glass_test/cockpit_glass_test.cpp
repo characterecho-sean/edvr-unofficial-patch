@@ -625,8 +625,9 @@ static void testShader() {
     const float kDirtMask = 0.025f, kDirtColour = 0.97f, kBaseAlpha = 0.02f, kStreakMax = 0.09f;
     const float vertexB = 0.72f;
     const float liveMask = std::fmin(std::fmax((vertexB - 0.2f) * 0.5f, 0.0f), 1.0f) * 0.5f;   // what live's vertex shader passes for B = 0.72 (CB2[6] = (.., .., 0.5, -0.2), CB2[0].x = 0.5)
-    const float kDirtStrength = 16.0f;   // chosen, not measured
-    const float albedo = kStreakMax * (kDirtMask * vertexB) * kDirtColour * kDirtStrength;
+    const float kDirtStrength = 8.0f;   // chosen, not measured
+    const float dirtWeight = liveMask / 0.25f;   // live's mask over CB2[6].z * CB2[0].x: B - 0.2 = 0.52, no offset added back
+    const float albedo = kStreakMax * (kDirtMask * dirtWeight) * kDirtColour * kDirtStrength;
     const float sun = 1000.0f;
 
     Case none;   // no mask at all
@@ -646,6 +647,16 @@ static void testShader() {
     check(closeTo(d.a, kBaseAlpha, 0.01f), "the dirt does not occlude: alpha stays the legacy base");
     check(closeTo(d.r, dirtWant, 0.02f) && closeTo(d.g, dirtWant, 0.02f) && closeTo(d.b, dirtWant, 0.02f),
           "dirt under the sun is grey: streak x (0.025 x vertex B) x 0.97, Lambert on the legacy normal over pi, divided by the alpha, scaled by the HDR write scale");
+    // Continuity: a dirt mask just above 0 gives dirt just above 0 (no step at the boundary of a zero region), and exactly 0 gives none.
+    {
+        Case tiny = dirt, zeroMask = dirt;
+        tiny.masks[1] = 1e-4f;
+        zeroMask.masks[1] = 0.0f;
+        const Pixel t = canopy.draw(tiny), z0 = canopy.draw(zeroMask);
+        const float wantTiny = d.r * (1e-4f / liveMask);
+        std::printf("continuity: mask 0 gives %g, mask 1e-4 gives %g (wanted %g, the 0.13 mask's %g scaled)\n", z0.r, t.r, wantTiny, d.r);
+        check(z0.r == 0 && t.r > 0 && closeTo(t.r, wantTiny, 0.1f), "the dirt runs smoothly to 0: a mask just above 0 gives dirt just above 0, in proportion, with no step");
+    }
     Case bare = dirt;
     bare.streaks = false;
     const Pixel nb = canopy.draw(bare);

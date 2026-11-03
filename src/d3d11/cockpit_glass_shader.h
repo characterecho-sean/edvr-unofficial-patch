@@ -183,9 +183,10 @@ static const float kCrackSpec = 0.02;          // crack glare strength (cb0[38].
 static const float kCrackGloss = 450.0;        // and its exponent (cb0[38].z)
 // The streak texture is stored normalised (its brightest texel 1, its mean 0.267); times this, the max is the legacy dirt texture's 0.09 and the mean its 0.024.
 static const float kStreakMax = 0.09;
-// CHOSEN, not measured: the dirt albedo is multiplied by this. Sean chose visible dirt over matching the legacy client, which section 12 of the doc measures at about 4 to 6 times
-// weaker than this on the display. Dirt albedo only: the smudge and crack glare and the crack colour are not scaled.
-static const float kDirtStrength = 16.0;
+// CHOSEN, not measured: the dirt albedo is multiplied by this. Sean found 16 too much for a clean windshield; with the mask's offset gone (below) the mask is also about 0.7 times
+// what it was, so 8 is near the 4 to 6 times that section 12 of the doc measures as matching legacy on the display. Dirt albedo only: the smudge and crack glare and the crack colour
+// are not scaled.
+static const float kDirtStrength = 8.0;
 // Fixed choices.
 static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
@@ -262,12 +263,13 @@ float4 main(PsIn i) : SV_Target {
     // Coverage. crackMix drives the normal; crackA (scaled by the material's occlusion scale) drives the crack colour and, intact, alpha.
     float crackMix = saturate((cb2[17].z < i.masks.x ? 1.0 : 0.0) * crackTex.w);
     float crackA = saturate(crackMix * cb2[7].z);
-    // The dirt mask is the legacy client's: 0.025 times the vertex colour's blue channel. Live's vertex shader passes saturate((B + CB2[6].w) * CB2[6].z) *
-    // CB2[0].x, so B is recovered from it; where live's clamp took it to 0 the legacy mask would be under 0.005 and is taken as 0.
+    // The dirt mask is the legacy client's 0.025 times the vertex colour's blue channel, as far as live's vertex shader allows. It passes saturate((B + CB2[6].w) * CB2[6].z) *
+    // CB2[0].x, so dividing by CB2[6].z * CB2[0].x gives max(B + CB2[6].w, 0): B minus its offset (B - 0.2 on the flown ship), which runs smoothly to 0. The offset must NOT be
+    // added back: that jumps from 0 to the offset at the boundary of every triangle whose three vertices live's clamp took to 0, and the zero regions get hard polygon outlines.
     float liveDirt = i.masks[EDVR_MASK_DIRT];
     float denom = cb2[6].z * cb2[0].x;
-    float vertexB = (liveDirt > 0.0 && denom > 0.000001) ? max(liveDirt / denom - cb2[6].w, 0.0) : 0.0;
-    float dirtMask = kLegacyDirtMask * vertexB;
+    float dirtWeight = denom > 0.000001 ? max(liveDirt / denom, 0.0) : 0.0;
+    float dirtMask = kLegacyDirtMask * dirtWeight;
     // The smudge mask: live's imperfection mask times the blemish map's y channel. The legacy client's was a vertex alpha channel (1.2 A - 0.2), which the
     // live vertex shader does not pass, so live's own is kept.
     float imp = saturate(blemish.y * i.masks[EDVR_MASK_IMP]);
