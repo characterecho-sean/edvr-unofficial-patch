@@ -35,7 +35,9 @@ Third flight (0756063a, Sean): the dirt sits where the ice forms, which is not r
 dirt and smudges on the canopy mesh's blue vertex channel and ice on its green one; on this canopy the two
 cover the same areas by eye (not measured). Where legacy put its dirt cannot be read offline (section 9).
 
-Open: where legacy's dirt was (section 9); the tuned constants (section 8).
+Legacy MEASURED by RenderDoc (section 10): premultiplied blend, alpha a 0.02 base, dirt a faint swirled
+streak texture over the whole pane (mask 0.025 x vertex B), smudge and crack glare 1,000x and 50x weaker
+than the port's guesses. Open: the shader brought to those values, and what stands in for legacy's texture.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -398,6 +400,39 @@ canopy mesh carries the same vertex colours as live's is also unknown.
 To see it: a frame capture of the legacy client (`elite-dangerous-64`, build 312425) in the cockpit, read at
 the canopy draw (PS A816DE90739BF4C0): the texture bound at t2, the vertex colour stream and cb0[3..4].
 RenderDoc is not installed on this machine. Until then, any change to where the dirt goes is a guess.
+
+## 10. The legacy canopy, measured (RenderDoc, 2026-11-03)
+
+Sean took three RenderDoc captures of the legacy client (build 312425, flat, 4800x2700, in space; not the
+Odyssey test ship's cockpit). They were read with RenderDoc 1.47's Python. The captures and everything taken
+from them (Frontier's textures among it) stay on this machine, in `%LOCALAPPDATA%\EDVR\captures\`; nothing
+from them is in this repository.
+
+- **One canopy draw per frame, always PS `A816DE90739BF4C0`** (the intact lit permutation, matched by
+  bytecode), VS `BD3029C5D0C713EF` (matched by its outputs, not its bytes). Target R11G11B10_FLOAT HDR, depth `GREATER_EQUAL` without write.
+- **The legacy blend is premultiplied: colour `ONE`, `INV_SRC_ALPHA`; alpha the same.** That settles
+  section 3's open question. The port's "divide by alpha under live's straight blend" emulates it.
+- **Alpha is a constant base, about 0.02** (PS cb0[35].y: 0.0212, 0.0211, 0.0185); the crack term adds
+  nothing because the VS crack amount cb0[0].x is 0. Dirt and smudges add light and never occlude.
+- **Placement.** Dirt mask `0.025 x vertex B` (VS cb0[3].x 0.025, cb0[4] = (0, 0, 1, 0)); the canopy's
+  vertex colour is grey (R = G = B), mean 0.72, so the mask covers the whole pane (78% of vertices above
+  0.01), strongest at the top, along the struts and the lower edge, weakest in a band down the middle.
+  Smudge mask `1.2 x vertex A - 0.2` (cb0[6] = (0, 0, 0, 1)): a different channel from the dirt, three soft
+  patches in the upper and outer canopy, zero low in the middle.
+- **The dirt texture** (t2, BC1 sRGB 512x512) is a dark grey swirled wipe-streak pattern: linear mean
+  0.024, max 0.09, repeated about 25 x 22 times over the canopy (UV x 16 x 1.5). The visible legacy dirt is
+  that streak pattern over the whole pane, faint: on a dark sky the canopy adds about 30% to the background's
+  luminance, nothing visible over bright objects.
+- **Measured constants that replace section 8's guesses:** smudge glare strength cb0[39].x 0.001, gloss
+  cb0[39].y 120; crack glare strength cb0[38].y 0.02, gloss cb0[38].z 450; dirt colour scale cb0[35].z 0.97;
+  VS ambient scale cb0[0].y 5; sun colour cb0[3] about 5.1 (legacy units).
+- The 0.025 dirt multiplier and the 0 crack amount were the same in all three captures. Whether either
+  follows game state (ship wear, damage) is not known.
+
+What differs from the port as flown (0756063a): its dirt mask is live's `saturate((B - 0.2) x 0.5) x 0.5`
+times live's blemish channel, which sits at the edges, with live's dirt colour 0.27 against legacy's 0.024
+times a mask 8x smaller; its smudge glare is 1,000 times legacy's (1.0 against 0.001) and its crack glare
+50 times; its alpha has no 0.02 base. Legacy's own streak texture is Frontier's and is not shipped.
 
 ## Ruled out
 
