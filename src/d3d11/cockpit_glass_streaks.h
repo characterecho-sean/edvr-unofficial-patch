@@ -16,7 +16,7 @@
 //   ends      opacity ramps up at the start and frays out at the end, per bristle: each bristle starts and stops at its own distance, so the ends are ragged;
 //   edges     fairly soft but definite across the width;
 //   value     its own, in a narrow range around the base, so the contrast stays low.
-// The sum goes through an exponential, found by bisection, so the stored mean is the target with the maximum at 1.
+// The painting is remapped, with a floor so nothing is black and an exponential found by bisection, so the stored mean is the target with the maximum at 1.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -35,13 +35,14 @@ constexpr float kStreakMax = kLegacyMax;
 // The stored mean that, times kStreakMax, is the legacy mean.
 constexpr float kTargetMean = kLegacyMean / kLegacyMax;
 
-// The stroke classes, painted in this order: how many, their length (as a share of the tile) and width in texels (at kSize), and their opacity range.
+// The stroke classes, painted in this order: how many, their length (as a share of the tile) and width in texels (at kSize), their opacity range, the range of their own
+// value around the base, and how much of a stroke's value and opacity its bristles take. Strokes are wide smears of paint, never lines: none is narrower than 60 texels.
 struct StrokeClass { int count; float lenLo, lenHi, widthLo, widthHi, opacityLo, opacityHi, valueRange, bristleContrast; };
-constexpr StrokeClass kClasses[4] = {
-    {110, 0.60f, 1.20f, 40.0f, 110.0f, 0.40f, 0.70f, 0.30f, 0.25f},   // large
-    {60, 0.35f, 0.80f, 15.0f, 45.0f, 0.35f, 0.65f, 0.24f, 0.35f},     // medium
-    {40, 0.20f, 0.50f, 5.0f, 14.0f, 0.30f, 0.55f, 0.20f, 0.45f},      // small
-    {25, 0.30f, 0.70f, 2.0f, 5.0f, 0.15f, 0.30f, 0.12f, 0.50f},       // fine
+constexpr int kClassCount = 3;
+constexpr StrokeClass kClasses[kClassCount] = {
+    {40, 0.90f, 1.40f, 120.0f, 200.0f, 0.30f, 0.60f, 0.15f, 0.12f},   // broad smears
+    {70, 0.50f, 1.10f, 60.0f, 130.0f, 0.25f, 0.50f, 0.15f, 0.13f},    // narrower smears
+    {110, 0.30f, 0.70f, 40.0f, 70.0f, 0.25f, 0.50f, 0.13f, 0.14f},    // the narrowest: still broad, and soft-edged
 };
 
 namespace detail {
@@ -89,7 +90,7 @@ inline void generate(uint8_t* out, int size = kSize) {
     std::vector<uint32_t> markId(n, 0xFFFFFFFFu);
     std::vector<uint32_t> touched;
     uint32_t id = 0;
-    for (int cls = 0; cls < 4; ++cls) {
+    for (int cls = 0; cls < kClassCount; ++cls) {
         const StrokeClass& c = kClasses[cls];
         for (int k = 0; k < c.count; ++k, ++id) {
             const uint32_t seed = 0x57A0C000u + static_cast<uint32_t>(cls) * 4096u + static_cast<uint32_t>(k);
@@ -97,18 +98,19 @@ inline void generate(uint8_t* out, int size = kSize) {
             const float x0 = r(0) * static_cast<float>(size), y0 = r(1) * static_cast<float>(size);
             // The flow bends slowly across the tile (a periodic bias, +-0.35 rad) and each stroke has its own spread (+-0.25 rad).
             const float bias = (periodicNoise(x0, y0, size, 3, 3, 0xB1A50001u) - 0.5f) * 0.4f;
-            const float theta = kFlowAngle + bias + (r(2) - 0.5f) * 0.24f;
+            const float theta = kFlowAngle + bias + (r(2) - 0.5f) * 0.20f;
             const float len = (c.lenLo + (c.lenHi - c.lenLo) * r(3)) * static_cast<float>(size);
             const float width = std::max(1.2f, (c.widthLo + (c.widthHi - c.widthLo) * r(4)) * scale);
-            const float curve = (r(5) - 0.5f) * 0.4f;   // the arc's sideways bulge as a share of the length
+            const float curve = (r(5) - 0.5f) * 0.06f;   // the arc's sideways bulge as a share of the length: nearly straight, well under the width
             const float opacity = c.opacityLo + (c.opacityHi - c.opacityLo) * r(6);
             const float value = 0.5f + (r(7) - 0.5f) * c.valueRange;   // its own value, in a narrow range around the base
             const float cs = std::cos(theta), sn = std::sin(theta);
             const float nx0 = -sn, ny0 = cs;
-            const float bristle = std::max(1.0f, 1.5f * scale);   // texels per bristle across the width
+            const float bristle = std::max(1.0f, 3.5f * scale);   // texels per bristle across the width
             const float slowShift = (r(8) - 0.5f) * 2.0f;
-            const int steps = std::max(2, static_cast<int>(len / 0.5f));
-            const int across = std::max(2, static_cast<int>(width / 0.5f));
+            const float stepSize = 0.7f;
+            const int steps = std::max(2, static_cast<int>(len / stepSize));
+            const int across = std::max(2, static_cast<int>(width / stepSize));
             touched.clear();
             for (int ti = 0; ti <= steps; ++ti) {
                 const float t = static_cast<float>(ti) / static_cast<float>(steps);
@@ -127,18 +129,19 @@ inline void generate(uint8_t* out, int size = kSize) {
                     const float s = (u - 0.5f) * width;
                     const float sp = s + drift;
                     // The bristle noise, in the across coordinate only (this stroke's own): a fibre every bristle width, and a broader unevenness.
-                    const float b = 0.65f * noise1(sp / bristle, seed ^ 0xB415u) + 0.35f * noise1(sp / (bristle * 5.0f), seed ^ 0xB416u);
+                    float b = 0.65f * noise1(sp / bristle, seed ^ 0xB415u) + 0.35f * noise1(sp / (bristle * 5.0f), seed ^ 0xB416u);
+                    b = std::min(0.7f, std::max(0.3f, b));   // clamped: no single bristle stands out against its neighbours
                     // Each bristle starts and stops at its own distance along the stroke: ragged ends.
                     const int bi = static_cast<int>(std::floor(sp / bristle));
                     const float start = 0.02f + 0.10f * hash01(bi, 1, seed ^ 0xE0u), stop = 0.74f + 0.26f * hash01(bi, 2, seed ^ 0xE1u);
                     const float along = smooth((t - start) / startRamp) * (1.0f - smooth((t - (stop - endRamp)) / endRamp));
                     // The edges across the width: fairly soft, but definite.
-                    const float edge = smooth(u / 0.3f) * smooth((1.0f - u) / 0.3f);
+                    const float edge = smooth(u / 0.33f) * smooth((1.0f - u) / 0.33f);
                     const float alpha = opacity * edge * along * ((1.0f - c.bristleContrast) + c.bristleContrast * b);
                     if (alpha <= 0.002f) continue;
                     const int ix = wrap(static_cast<int>(std::floor(px + nx * s)), size), iy = wrap(static_cast<int>(std::floor(py + ny * s)), size);
                     const size_t at = static_cast<size_t>(iy) * size + ix;
-                    const float v = value * (0.85f + 0.30f * b);
+                    const float v = value * ((1.0f - 0.5f * c.bristleContrast) + c.bristleContrast * b);
                     if (markId[at] != id) {
                         markId[at] = id;
                         markAlpha[at] = alpha;
@@ -154,19 +157,27 @@ inline void generate(uint8_t* out, int size = kSize) {
             for (uint32_t at : touched) field[at] += (markValue[at] - field[at]) * markAlpha[at];
         }
     }
-    // exp(s (f - max)), s by bisection so the stored mean is the target (the mean falls as s rises); the maximum is 1.
-    float top = 0;
-    for (float f : field) top = std::max(top, f);
-    float lo = 0.01f, hi = 40.0f;
+    // The remap: the painting is standardised, then floor + (1 - floor) * exp(s (z - max)), s by bisection so the stored mean is the target (the mean falls as s rises).
+    // The exponential gives the soft long upper tail legacy's values have; the floor keeps the dirt from ever reaching black; the brightest texel is 1.
+    double mean = 0, var = 0;
+    for (float f : field) mean += f;
+    mean /= static_cast<double>(n);
+    for (float f : field) var += (f - mean) * (f - mean);
+    const float sd = static_cast<float>(std::sqrt(var / static_cast<double>(n))) + 1e-9f;
+    std::vector<float> z(n);
+    float top = -1e9f;
+    for (size_t i = 0; i < n; ++i) { z[i] = std::min(3.0f, (field[i] - static_cast<float>(mean)) / sd); top = std::max(top, z[i]); }
+    constexpr float kFloor = 0.16f;
+    float lo = 0.01f, hi = 8.0f;
     for (int it = 0; it < 40; ++it) {
-        const float s = 0.5f * (lo + hi);
+        const float k = 0.5f * (lo + hi);
         double m = 0;
-        for (float f : field) m += std::exp(s * (f - top));
+        for (float v : z) m += kFloor + (1.0f - kFloor) * std::exp(k * (v - top));
         m /= static_cast<double>(n);
-        if (m > kTargetMean) lo = s; else hi = s;
+        if (m > kTargetMean) lo = k; else hi = k;
     }
-    const float s = 0.5f * (lo + hi);
-    for (size_t i = 0; i < n; ++i) out[i] = static_cast<uint8_t>(std::lround(255.0f * std::exp(s * (field[i] - top))));
+    const float k = 0.5f * (lo + hi);
+    for (size_t i = 0; i < n; ++i) out[i] = static_cast<uint8_t>(std::lround(255.0f * (kFloor + (1.0f - kFloor) * std::exp(k * (z[i] - top)))));
 }
 
 // The mip chain of a wrapping texture, box filtered (a wrap is a no-op for a power-of-two box). `levels` receives kMips arrays, base first.

@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping bristled brush strokes (section 13): spectrum targets cannot capture strokes. Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -633,6 +633,26 @@ local coherence 0.3 to 0.9) and gain a bristle check (fine-band gradient energy 
 across it: 0.15, required under 0.5). Generation takes about 490 ms in the rig and 530 ms in a standalone harness (about 10 M
 stroke samples), on the worker thread: at the edge of the 500 ms line, so the stroke counts were not cut; if it matters, the
 cost is the sampling step (0.5 texel) and could be coarsened.
+
+**Wide smears, not lines (2026-11-03, after 6f5ab11c).** Sean: "more like hair rather than paint brush strokes". The painted
+method was right and its proportions were wrong: the unit you could see was a thin, bright, curved line (255 strokes, a
+third of them under 14 texels wide, curved, with strong bristle contrast), and the numbers saw it (local coherence 0.81
+against legacy's 0.41; 0-4 band energy 0.25 against 0.42). Now there are 210 strokes in three classes, none narrower than 40
+texels (40 broad smears 120-200 texels wide and 0.9-1.4 tiles long; 70 of 60-130 texels; 110 of 40-70), nearly straight (the
+arc's sag is under 3% of the length, well under the width), their direction spread about +-6 degrees around 50 with the
+slow periodic bias kept, opacity 0.25-0.6 with a feathered falloff of a third of the width each side, a narrow value range
+(+-0.065 to +-0.075 around the base), and a faint short-wavelength bristle grain (3.5 texels, 12-14% of the value, clamped
+to 0.3-0.7 so no bristle stands out). The ragged ends stay, at low contrast. The remap is now a floor of 0.16 plus an
+exponential of the standardised painting clamped at 3 sigma (the plain exponential made a few bright cores; the percentile and
+power remaps tried first made more contrast, not less). Measured, against legacy: std 0.107 (0.093), p5 / p50 / p95 0.173 /
+0.227 / 0.494 (0.158 / 0.245 / 0.442), band energies 0.437 / 0.389 / 0.134 / 0.040 (0.418 / 0.236 / 0.161 / 0.185),
+elongation 3.3 / 7.8 / 25.0 / 10.0, stroke angle 43.9 / 54.2 / 52.1 / 50.2, global agreement 0.991, local coherence
+0.873 (0.413), bristle ratio 0.11. By eye it is now broad soft wipes with a faint grain and no individual hair; it is darker
+and straighter than legacy's, whose sweeps curve and which carries more mid-frequency grain; it still has some short dark
+dashes where bristles end. Targets still missed: local coherence (0.87, target 0.4-0.55: the wipes are very uniformly oriented), and the 4-16
+band (0.39, target 0.2-0.3); the 0-4 band (0.44) is in range, and the 64+ band is far lower than legacy's (0.04). The rig keeps its
+loosened checks (band energy within 0.2, every band elongated, angle within 15 degrees, local coherence 0.3 to 0.95, p95 within
+0.06) and the bristle check (0.11, under 0.5). Generation fell from about 490 ms to about 360 ms (step 0.7 texel), on the worker thread.
 
 ## Ruled out
 
