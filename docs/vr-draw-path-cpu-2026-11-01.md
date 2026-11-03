@@ -16,7 +16,9 @@
 - **Build 2 (designed 2026-11-02, "Build 2: the draw pair mask"):** a
   per-shader-pair mask skips DLAA subscribers that cannot want a draw
   (#152), plus `drawPathFast` in the instanced hook (#151). Temporary key:
-  `vr_draw_mask`. Awaiting review.
+  `vr_draw_mask`. Reviewed the same day ("Review of the mask design"): about
+  0.4 ms, not 0.8-1.2; two bits are wrong; too small for an ABBA flight.
+  Direction pending with the pilot.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -539,3 +541,37 @@ standing still facing one spot. Note each leg's start time.
   legs 2 and 3 by more than 0.5 ms and by more than the spread within each
   pair. Otherwise `ruled out: per-draw subscriber calls as the DLAA cost`,
   and the mask and its key come out.
+
+### Review of the mask design (2026-11-02)
+
+Independent review against the code (notes outside the repo:
+`fable-mask-review.md`). Verdict: change it, and do not fly it as a
+keep-or-remove test.
+- ruled out: the engine velocity bit, because a no-family draw after a
+  substituted family draw is the one that restores the game's VS, PS, blend,
+  t3 and MRT (`beforeDrawSlow` → `slowPath` → `restore`); skipping it leaves
+  EDVR's shaders bound. It also loses the 1-in-64 shadow probe.
+- ruled out: the temporal rigid-draw bit, because its gate is already five
+  inline compares.
+- ruled out: the 0.8-1.2 ms estimate, because it summed whole-owner deltas
+  that include work on wanted draws. Priced per bit: UI family about 0.3,
+  screen motion about 0.18, weapon motion under 0.05, the
+  `fssPanelRectDrawArgs` move 0.03; about 0.4 ms net (0.3-0.5).
+- ruled out: a four-leg ABBA judged at 0.5 ms, because R1 leg means within
+  one build-1 session spanned 2.0 ms with DLAA and the scene drifts in
+  steps; resolving 0.4 ms would take about 30 legs per arm, so a null would
+  be a false "ruled out". The judge should be the whole frame cycle, not R1
+  alone.
+- Corrections:
+  - Bake only shader-hash terms, so the mask reduces to a "may want" byte
+    stored beside the VS hash at bind (hash 0 means "may want"). That needs
+    no pair table, generation or bypass.
+  - The binding shadow keeps the game's hashes under substitution, so the
+    key-order worry was moot.
+  - UI family: the bit applies to target kind 1 only. The panel and loader
+    VS, the scope mark and the on-foot HUD always stay "may want".
+  - #151 is safe but saves nothing with DLAA.
+  - `fssPanelRectDrawArgs`: pass `args` and delete the stash.
+- Larger: `streamLoad16` 0.8 ms after the submits (in the frame, not in R1),
+  `hookedEnd` +0.19 ms with DLAA (likely EDVR's own GPU timer queries), and
+  a line-level split of `beginPanelOverride` (0.80 ms).
