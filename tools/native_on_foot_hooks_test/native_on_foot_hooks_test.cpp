@@ -19,6 +19,10 @@
 //     the real prologues (6, 6, 6, 5 and 5 bytes stolen); Show and Close are filtered on *(this); the signal is on from a buy screen's Show to its Close, a
 //     Close the hook missed, a freed object (vtable changed) and an unreadable one cannot stick it; SetState records only the SuitUIStateMachine; the kiosk
 //     alone is no buy screen; a flapping screen is capped; each wrong prologue stands one hook down; a build that is not 334925 gets one line for all five.
+//   * F212, the conversation look: one more optional hook, on a synthetic copy of the 17-byte leaf that sets the look springs' targets at its real RVA (CodeHook steals
+//     its first instruction, a movss store, eight bytes); the callback called with the leaf's own arguments (rcx, xmm1, xmm2) stores 0.0 in both targets while native on foot
+//     is active and the inputs bit for bit otherwise, never returns into the leaf, counts, and the frame thread writes the run and summary lines; a wrong byte stands the hook
+//     down with the bytes it found, a build that differs likewise, and an unload puts the leaf's bytes back.
 // This is "what would appear in the log if the new code never ran" made executable.
 //
 // --self-test runs it and prints "native on foot hooks: PASS" only when every check holds.
@@ -30,6 +34,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,6 +48,7 @@
 #include "../../src/d3d11/native_on_foot.h"   // the native flag and the camera signal the controller hook publishes (F93d)
 #include "../../src/d3d11/native_on_foot_logwin.h"
 #include "../../src/d3d11/shop_screen_core.h"   // F209: the buy screens' hooks, signal and lines
+#include "../../src/d3d11/native_on_foot_f212.h"   // F212: the conversation look's leaf, decision, counters and lines
 
 using namespace edvr;
 
@@ -2350,6 +2356,317 @@ void testShopGlue(const CtlPages& p) {
     t::reset();
 }
 
+// ================================ F212: the conversation look ================================
+// The 17-byte leaf at its real RVA in the synthetic image, called the way the game's job calls it: rcx = the facade, xmm1 = yaw, xmm2 = pitch.
+using LeafFn = void (__fastcall*)(void*, float, float);
+void leafImgInit() {
+    cimgCommit(nofoot::f212::kLeafRva, 0x40);
+    uint8_t* p = g_cimg + nofoot::f212::kLeafRva;
+    std::memset(p, 0xCC, 0x40);
+    std::memcpy(p, nofoot::f212::kLeaf, nofoot::f212::kLeafBytes);
+}
+void leafCall(void* facade, float yaw, float pitch) { reinterpret_cast<LeafFn>(g_cimg + nofoot::f212::kLeafRva)(facade, yaw, pitch); }
+// The facade the way the rig plays it: every byte 0xA5 but the two targets, which the rig sets.
+struct LookObj {
+    alignas(16) uint8_t b[0x800];
+    void init() {
+        std::memset(b, 0xA5, sizeof(b));
+        set(0u, 0u);
+    }
+    void set(uint32_t y, uint32_t p) {
+        std::memcpy(b + nofoot::f212::kOffYawTarget, &y, 4);
+        std::memcpy(b + nofoot::f212::kOffPitchTarget, &p, 4);
+    }
+    uint32_t yaw() const { uint32_t v; std::memcpy(&v, b + nofoot::f212::kOffYawTarget, 4); return v; }
+    uint32_t pitch() const { uint32_t v; std::memcpy(&v, b + nofoot::f212::kOffPitchTarget, 4); return v; }
+    // Every byte but the two targets is still 0xA5.
+    bool othersIntact() const {
+        for (size_t i = 0; i < sizeof(b); ++i)
+            if ((i < nofoot::f212::kOffYawTarget || i >= nofoot::f212::kOffYawTarget + 4) && (i < nofoot::f212::kOffPitchTarget || i >= nofoot::f212::kOffPitchTarget + 4) && b[i] != 0xA5) return false;
+        return true;
+    }
+};
+void installLookTargets(const CtlPages& p, bool badLeaf = false, bool withLeaf = true) {
+    NativeOnFootHooksTestTargets tt;
+    tt.controller = reinterpret_cast<uintptr_t>(p.g);
+    tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + avh::kAvatarFadeRva;
+    tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + avh::kFindJointRva;
+    if (withLeaf) tt.conversationLook = reinterpret_cast<uintptr_t>(g_cimg) + (badLeaf ? 0x3000000 : nofoot::f212::kLeafRva);   // a function of 0xCC bytes: not this build's leaf
+    nofoothookstest::setTargets(tt);
+    nofoothookstest::setHeadImage(reinterpret_cast<uintptr_t>(g_cimg), kCImgSize);
+}
+
+void testConversationLookGlue(const CtlPages& p) {
+    std::printf("glue: the conversation look (F212)\n");
+    namespace t = edvr::nofoothookstest;
+    namespace f212 = edvr::nofoot::f212;
+    static LookObj o;
+    const uint8_t* leafAt = nullptr;
+    auto start = [&](Rig& rig, bool bad = false) {
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        leafImgInit();
+        o.init();
+        leafAt = g_cimg + f212::kLeafRva;
+        installLookTargets(p, bad);
+        t::conversationClock(100000);
+        nativeOnFootHooksBody(true, false, "");
+        rig.boundary();   // installs
+    };
+    {   // the key off: nothing is installed, the leaf is the game's
+        Rig rig;
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        leafImgInit();
+        o.init();
+        installLookTargets(p);
+        nativeOnFootHooksBody(false, false, "rig: the key is off");
+        rig.boundary();
+        rig.boundary();
+        check(t::hookState(t::kConversationLook) == 0 && std::memcmp(g_cimg + f212::kLeafRva, f212::kLeaf, f212::kLeafBytes) == 0 && rig.cap.count("(F212)") == 0,
+              "F212 THE NATIVE KEY OFF: the conversation look's hook is not installed, the leaf's 17 bytes are untouched, nothing is said");
+        leafCall(o.b, 0.25f, -0.5f);
+        check(o.yaw() == f212::bitsOf(0.25f) && o.pitch() == f212::bitsOf(-0.5f) && o.othersIntact(), "...the synthetic leaf works unhooked: its two stores and nothing else");
+        t::reset();
+    }
+    {   // the install
+        Rig rig;
+        start(rig);
+        check(t::hookState(t::kConversationLook) == 1 && t::stolenBytes(t::kConversationLook) == 8 && t::gateOpen(t::kConversationLook),
+              "F212 THE KEY ON: the hook is armed beside the others, it stole 8 bytes (the first movss, whole) and its gate is open");
+        const std::string armed = rig.cap.nth("conversation-look hook armed:", 0);
+        check(rig.cap.count("conversation-look hook armed:") == 1 && has(armed, "(F212)") && has(armed, "EliteDangerous64.exe+0x1A8DF40") && has(armed, "stolen=8 bytes") &&
+                  has(armed, "prologue 17/17 bytes verified") && has(armed, "f3 0f 11 89 30 07 00 00 f3 0f 11 91 4c 07 00 00 c3") && has(armed, "never returns into the leaf") &&
+                  has(armed, "stores 0.0 in both"),
+              "...one armed line: the RVA, the 8 bytes stolen, 17 of 17 bytes verified, the bytes themselves, and what the callback does (F212)");
+        check(rig.cap.count("hook armed:") == 3 + 1, "...three hooks and this one: four 'hook armed:' lines in all");
+        check(leafAt[0] == 0xE9 && std::memcmp(leafAt + 5, f212::kLeaf + 5, 3) == 0 && std::memcmp(leafAt + 8, f212::kLeaf + 8, 9) == 0,
+              "...the leaf's entry is a jump now; bytes 5 to 7 of the first word and the second movss and the ret (bytes 8 to 16) are as the game has them");
+        rig.cap.clear();
+        rig.boundary();
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...nothing is installed or said twice, and with no call nothing is logged");
+    }
+    {   // calls with native on foot not active: the leaf's own result, counted as passed
+        Rig rig;
+        start(rig);
+        rig.cap.clear();
+        o.set(f212::bitsOf(9.0f), f212::bitsOf(9.0f));
+        leafCall(o.b, 0.25f, -0.5f);
+        check(o.yaw() == f212::bitsOf(0.25f) && o.pitch() == f212::bitsOf(-0.5f) && o.othersIntact(),
+              "F212 NOT ON FOOT: the hooked leaf stores yaw and pitch exactly as the leaf would, and nothing else in the object");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        leafCall(o.b, nan, -nan);
+        check(o.yaw() == f212::bitsOf(nan) && o.pitch() == f212::bitsOf(-nan) && std::isnan(f212::floatOf(o.yaw())), "...a NaN passes through unchanged");
+        uint32_t odd[2] = {0x80000000u, 0x7F800001u};   // -0.0 and a signalling NaN
+        leafCall(o.b, f212::floatOf(odd[0]), f212::floatOf(odd[1]));
+        check(o.yaw() == odd[0] && o.pitch() == odd[1], "...and so do -0.0 and a signalling NaN, bit for bit");
+        const f212::Snapshot s = f212::take(f212::g_shared);
+        check(s.passed == 3 && s.gated == 0 && s.faults == 0 && s.askYaw == 0.0f && s.askPitch == 0.0f, "...three passed calls, no gated call, no maximum taken from them");
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...and no line: nothing that is not a conversation on foot is written");
+    }
+    {   // calls with native on foot active: both stores are 0.0
+        Rig rig;
+        start(rig);
+        rig.cap.clear();
+        edvr::g_nativeOnFootActive.store(true);
+        o.set(f212::bitsOf(0.7f), f212::bitsOf(-0.7f));   // a target left over from before native on foot engaged
+        leafCall(o.b, -3.6f, -12.8f);
+        check(o.yaw() == 0u && o.pitch() == 0u && o.othersIntact(),
+              "F212 ON FOOT: both targets are +0.0 whatever the game asked (and one left over from before is cleared, not kept: a store, not a skip), nothing else in the object is touched");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        leafCall(o.b, nan, std::numeric_limits<float>::infinity());
+        check(o.yaw() == 0u && o.pitch() == 0u, "...a NaN or an infinity asked is zeroed too");
+        const f212::Snapshot s = f212::take(f212::g_shared);
+        check(s.gated == 2 && s.passed == 0 && s.askYaw == 3.6f && s.askPitch == 12.8f, "...two gated calls; the largest |yaw| and |pitch| are the finite ones asked (3.6 and 12.8, raw)");
+        edvr::g_nativeOnFootActive.store(false);
+        leafCall(o.b, 0.1f, 0.2f);
+        check(o.yaw() == f212::bitsOf(0.1f) && o.pitch() == f212::bitsOf(0.2f), "...and when native on foot ends the next call stores what the game asked");
+        // The hooked function keeps the game's calling contract: the caller's own locals (which the compiler may keep in callee-saved registers, rbx, rsi, rdi, r12-r15 and
+        // xmm6-xmm15, and on the stack) are as they were after the call.
+        volatile double keep[8] = {1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5};
+        double sum = 0;
+        for (int i = 0; i < 2000; ++i) {
+            edvr::g_nativeOnFootActive.store((i & 1) != 0);
+            leafCall(o.b, static_cast<float>(i), static_cast<float>(-i));
+            for (int k = 0; k < 8; ++k) sum += keep[k];
+        }
+        check(sum == 2000 * 40.0, "...2000 alternating gated and passed calls leave the caller's registers and stack as they were");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    {   // the frame thread's lines
+        Rig rig;
+        start(rig);
+        rig.cap.clear();
+        edvr::g_nativeOnFootActive.store(true);
+        rig.boundary();   // a first frame with the clock at 100000
+        const bool quiet = rig.cap.lines.empty();
+        for (int i = 0; i < 10; ++i) {
+            t::conversationClock(100100 + 100u * static_cast<uint64_t>(i));
+            leafCall(o.b, 0.2f - 0.01f * static_cast<float>(i), -0.0646f);
+            rig.boundary();
+        }
+        check(quiet && rig.cap.count("run 1 began:") == 1 && rig.cap.count("(F212)") == 1, "F212 THE LINES: a conversation's first gated call writes one 'run 1 began' line at the next frame, and nothing before or after it");
+        const std::string began = rig.cap.nth("run 1 began:", 0);
+        check(has(began, "conversation look (F212): run 1 began:") && has(began, "both stores are 0.0") && has(began, "|yaw| 0.20000") && has(began, "|pitch| 0.06460"),
+              "...it names the run, says both stores are 0.0 and gives the largest asked so far (raw floats)");
+        t::conversationClock(101900);
+        rig.boundary();
+        check(rig.cap.count("run 1 ended") == 0, "...900 ms after the last call the run has not ended");
+        t::conversationClock(102001);
+        rig.boundary();
+        const std::string ended = rig.cap.nth("run 1 ended after", 0);
+        check(rig.cap.count("run 1 ended after") == 1 && has(ended, "after 0.90 s: 10 gated call(s)") && has(ended, "up to |yaw| 0.20000 and |pitch| 0.06460") && has(ended, "no gated call for 1000 ms"),
+              "...1 s after the last call it writes one 'run 1 ended' line: 0.90 s, 10 gated calls, the largest |yaw| and |pitch|");
+        // The look processor hook's reads of the springs (native_on_foot.cpp does this in production; the rig calls the function it calls).
+        uint8_t rest[f212::kCompSpringsBytes] = {};
+        f212::noteSprings(f212::g_shared, rest);
+        uint8_t moving[f212::kCompSpringsBytes] = {};
+        const float v = 0.125f, g = -0.25f;
+        std::memcpy(moving + f212::kSpringYawVel, &v, 4);
+        std::memcpy(moving + f212::kSpringPitchTarget, &g, 4);
+        f212::noteSprings(f212::g_shared, moving);
+        t::conversationClock(110001);
+        rig.boundary();
+        const std::string sum = rig.cap.nth("conversation look (F212): 10.0 s:", 0);
+        check(rig.cap.count("conversation look (F212): 10.0 s:") == 1 && has(sum, "10 call(s) gated, 0 passed (session 10 gated, 0 passed, 0 store fault(s))") &&
+                  has(sum, "|yaw| 0.20000 and |pitch| 0.06460") && has(sum, "(2 read(s))") &&
+                  has(sum, "largest |velocity| yaw 0.12500 pitch 0.00000, largest |target| yaw 0.00000 pitch 0.25000"),
+              "...and the 10 s summary: the window's gated and passed calls, the session's, the asked maxima, 2 springs reads, the largest |velocity| and |target|");
+        rig.cap.clear();
+        t::conversationClock(120002);
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...a window with no call and springs at rest writes nothing");
+        // A second conversation is run 2.
+        t::conversationClock(130000);
+        leafCall(o.b, 0.4f, 0.1f);
+        rig.boundary();
+        check(rig.cap.count("run 2 began:") == 1, "...the next conversation is run 2");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    {   // the gate closes with the key: the call goes down the relay's original path (the stolen movss, then the rest of the leaf)
+        Rig rig;
+        start(rig);
+        edvr::g_nativeOnFootActive.store(true);
+        nativeOnFootHooksBody(false, false, "rig: the key is off");
+        rig.boundary();
+        rig.cap.clear();
+        check(!t::gateOpen(t::kConversationLook) && t::hookState(t::kConversationLook) == 1, "F212 THE KEY OFF AGAIN: the gate closes (the hook stays installed)");
+        leafCall(o.b, 0.6f, -0.4f);
+        check(o.yaw() == f212::bitsOf(0.6f) && o.pitch() == f212::bitsOf(-0.4f) && o.othersIntact(),
+              "...the call runs the leaf's own instructions through the trampoline (even with native on foot flagged active): both stores are the game's, nothing is zeroed");
+        const f212::Snapshot s = f212::take(f212::g_shared);
+        check(s.gated == 0 && s.passed == 0, "...and the callback was not reached (nothing counted)");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    {   // the stores are under SEH: a facade that cannot be written is a counted fault, not a crash
+        Rig rig;
+        start(rig);
+        edvr::g_nativeOnFootActive.store(true);
+        leafCall(nullptr, 0.1f, 0.1f);
+        leafCall(reinterpret_cast<void*>(static_cast<uintptr_t>(0x10)), 0.1f, 0.1f);
+        const f212::Snapshot s = f212::take(f212::g_shared);
+        check(s.gated == 2 && s.faults == 2, "F212 A FACADE THAT CANNOT BE WRITTEN: two bad pointers are two gated calls and two counted faults; the game's thread goes on");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    {   // a wrong byte stands the hook down, with the bytes it found
+        Rig rig;
+        start(rig, true);
+        const std::string down = rig.cap.nth("conversation-look hook stood down:", 0);
+        check(t::hookState(t::kConversationLook) == 2 && rig.cap.count("conversation-look hook stood down:") == 1 && has(down, "the game build differs") &&
+                  has(down, "found cc cc cc cc cc cc cc cc cc cc cc cc cc cc cc cc cc") && has(down, "expected f3 0f 11 89 30 07 00 00 f3 0f 11 91 4c 07 00 00 c3") &&
+                  has(down, "nothing was patched") && has(down, "(F212)") && has(down, "EliteDangerous64.exe+0x1A8DF40"),
+              "F212 A WRONG LEAF: the hook stands down with ONE line: the 17 bytes found and the 17 expected, nothing patched, and what that costs (F212)");
+        check(g_cimg[0x3000000] == 0xCC && t::hookState(t::kController) == 1 && t::hookState(t::kFade) == 1 && t::hookState(t::kFind) == 1 && !t::gateOpen(t::kConversationLook),
+              "...the bytes there are untouched, the other three hooks are armed, this gate is shut");
+        o.init();
+        edvr::g_nativeOnFootActive.store(true);
+        leafCall(o.b, 0.3f, 0.3f);
+        check(o.yaw() == f212::bitsOf(0.3f) && o.pitch() == f212::bitsOf(0.3f), "...and the game's leaf runs as it did");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    {   // one differing bit in any of the 17 bytes
+        bool all = true;
+        for (size_t at = 0; at < f212::kLeafBytes; ++at) {
+            Rig rig;
+            t::reset();
+            edvr::g_nativeOnFootActive.store(false);
+            cimgInit();
+            leafImgInit();
+            g_cimg[f212::kLeafRva + at] ^= 0x01;
+            const uint8_t first = g_cimg[f212::kLeafRva];
+            installLookTargets(p);
+            nativeOnFootHooksBody(true, false, "");
+            rig.boundary();
+            all = all && t::hookState(t::kConversationLook) == 2 && rig.cap.count("conversation-look hook stood down:") == 1 && g_cimg[f212::kLeafRva] == first && g_cimg[f212::kLeafRva] != 0xE9;
+        }
+        check(all, "F212 EVERY BYTE IS CHECKED: a single flipped bit at any of the 17 positions stands the hook down with one line and patches nothing");
+        t::reset();
+    }
+    {   // a build that is not 334925: the PE identity differs, so the hook is refused with its reason, nothing touched
+        Rig rig;
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        leafImgInit();
+        installLookTargets(p, false, false);
+        t::conversationTryReal(true);
+        const uint8_t before = g_cimg[f212::kLeafRva];
+        nativeOnFootHooksBody(true, false, "");
+        rig.boundary();
+        const std::string down = rig.cap.nth("conversation-look hook stood down:", 0);
+        check(t::hookState(t::kConversationLook) == 2 && has(down, "the game build differs") && has(down, "EliteDangerous64.exe+0x1A8DF40 was not touched") && has(down, "(F212)") &&
+                  g_cimg[f212::kLeafRva] == before,
+              "F212 A BUILD THAT IS NOT 334925: the hook is refused with the build as the reason and the address it did not touch; nothing is patched");
+        t::reset();
+    }
+    {   // an unload: the gate closes, and the leaf's own bytes come back
+        Rig rig;
+        start(rig);
+        check(leafAt[0] == 0xE9, "F212 UNLOAD: (before) the entry is a jump");
+        t::shutdown();
+        check(!t::gateOpen(t::kConversationLook), "...the shutdown closes the gate: a call after it goes down the original path");
+        edvr::g_nativeOnFootActive.store(true);
+        o.init();
+        leafCall(o.b, 0.5f, 0.5f);
+        check(o.yaw() == f212::bitsOf(0.5f) && o.pitch() == f212::bitsOf(0.5f), "...and it stores the game's values, even with native on foot flagged active");
+        edvr::g_nativeOnFootActive.store(false);
+        t::reset();
+        check(std::memcmp(g_cimg + f212::kLeafRva, f212::kLeaf, f212::kLeafBytes) == 0, "...and the uninstall puts all 17 of the leaf's bytes back");
+    }
+    {   // two threads: the game's thread calling the leaf while the frame thread runs its boundaries
+        Rig rig;
+        start(rig);
+        edvr::g_nativeOnFootActive.store(true);
+        static LookObj other;
+        other.init();
+        std::atomic<bool> go{false};
+        std::atomic<int> done{0};
+        constexpr int kCalls = 20000;
+        std::thread worker([&] {
+            while (!go.load()) {}
+            for (int i = 0; i < kCalls; ++i) leafCall(other.b, 0.001f * static_cast<float>(i % 100), -0.002f * static_cast<float>(i % 50));
+            done.store(1);
+        });
+        go.store(true);
+        int boundaries = 0;
+        while (!done.load()) {
+            rig.boundary();
+            ++boundaries;
+        }
+        worker.join();
+        rig.boundary();
+        const f212::Snapshot s = f212::take(f212::g_shared);
+        check(s.gated == kCalls && s.passed == 0 && other.yaw() == 0u && other.pitch() == 0u && boundaries > 0,
+              "F212 TWO THREADS: 20000 calls from the game's thread while the frame thread ticks are all counted, all gated, and every one stored 0");
+        edvr::g_nativeOnFootActive.store(false);
+    }
+    t::reset();
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     namespace t = edvr::nofoothookstest;
@@ -2370,6 +2687,7 @@ void testGlue() {
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
     testShopGlue(p);   // F209
+    testConversationLookGlue(p);   // F212
     t::reset();
     check(std::memcmp(p.g, p.good.data(), 5) == 0 && std::memcmp(g_cimg + avh::kAvatarFadeRva, avh::kAvatarFadePrologue, 5) == 0 &&
               std::memcmp(g_cimg + avh::kFindJointRva, avh::kFindJointPrologue, 5) == 0,
