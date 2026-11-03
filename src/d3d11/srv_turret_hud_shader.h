@@ -57,6 +57,7 @@
 //   G  vs B932058F26B76691 + ps 65861AC394D51526                           RADAR_LOCALKEY_COLOUR xyz, SV_POSITION
 //   H  vs 5559BD94B6852E83 + ps EA02FAC2BD6C643C or E95634B0F61D218F        M_LIGHTINGPOSITION xyz, M_TEXCOORD xy, SV_POSITION (the Scorpion's hologram: the near quad of ps EA02FAC2, and the target hologram sphere)
 //   I  vs 5DAD41AA66757CE3                                      the gunner camera's curved sheet, 2016 indices only   TEXCOORD0 xyzw, SV_POSITION
+//   K  vs A888D51024D9798E + ps 9107E72CB016CC02               the gunner sheet with Disable GUI effects off, 2016 indices only   TEXCOORD0 xyzw, TEXCOORD2 xyz, TEXCOORD4 xyz, TEXCOORD5 xyz, TEXCOORD6 xy, SV_POSITION
 //   J  vs 81216C77F90DEDD6 + ps A2965EC2931A39C8 or B4786E0A0B199285    hologram panels, Disable GUI effects off   TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy, SV_POSITION
 namespace edvr {
 
@@ -222,97 +223,110 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
 // could not be read leaves both distances at 1, so nothing is clipped. The target card's left edge is not a line of
 // constant x: it leans in mesh space (dump 163557956001), so that card's plane is the edge's own plane, moved left
 // by kBracketCutM. A vertical cut at x -0.769 sliced the card's upper-left corner and left the bar's lower part.
+// The sheet shaders (I and K) share one geometry shader body: everything from the end of the Vertex struct on. Only the Vertex members differ, so the two cannot drift.
+#define EDVR_SRV_TURRET_GS_SHEET_BODY \
+    "};\n" \
+    "cbuffer SheetClip : register(b1) { float4 clipRows[8]; };\n" \
+    "cbuffer SheetCam : register(b2) { float4 camBlock[276]; };\n" \
+    "struct Moved { Vertex v; float4 pre : TURRETPRE; float2 clip : SV_ClipDistance0; };\n" \
+    "// Dump 163557956001, mesh metres. The target card's fill (vs C4B4B334B26E81A9) has its left-edge vertices exactly coplanar (residuals under 0.01 mm), from (-0.7272, -0.4806, 0.5783) at the bottom to (-0.7708, -0.3115, 0.6125) at the top.\n" \
+    "// The unit normal into the card is kTargetCardNormal and the edge plane is dot(n, p) = -kTargetCardEdgeOffset, so dot(n, p) + kTargetCardEdgeOffset is the signed distance, metres, right of the fill's left edge.\n" \
+    "static const float3 kTargetCardNormal = float3(0.63015, 0.00544, 0.77645);\n" \
+    "static const float kTargetCardEdgeOffset = 0.01184;\n" \
+    "// Tuned in flight on 2026-11-02: the cut sits 3 mm left of the target card's dark panel edge. It removes the bracket bar and keeps the card's border.\n" \
+    "static const float kBracketCutM = 0.003;\n" \
+    "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; the plane sits 2 mm above it.\n" \
+    "static const float kTargetCardTopY = -0.309;\n" \
+    "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n" \
+    "static const float kCardRowBottomY = -0.481;\n" \
+    "static const float kLabelRowLeftX = 0.53;\n" \
+    "float4x4 sheetInv(float4x4 m, out float det) {\n" \
+    "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n" \
+    "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n" \
+    "    const float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2], a23 = m[2][3];\n" \
+    "    const float a30 = m[3][0], a31 = m[3][1], a32 = m[3][2], a33 = m[3][3];\n" \
+    "    const float b00 = a00 * a11 - a01 * a10;\n" \
+    "    const float b01 = a00 * a12 - a02 * a10;\n" \
+    "    const float b02 = a00 * a13 - a03 * a10;\n" \
+    "    const float b03 = a01 * a12 - a02 * a11;\n" \
+    "    const float b04 = a01 * a13 - a03 * a11;\n" \
+    "    const float b05 = a02 * a13 - a03 * a12;\n" \
+    "    const float b06 = a20 * a31 - a21 * a30;\n" \
+    "    const float b07 = a20 * a32 - a22 * a30;\n" \
+    "    const float b08 = a20 * a33 - a23 * a30;\n" \
+    "    const float b09 = a21 * a32 - a22 * a31;\n" \
+    "    const float b10 = a21 * a33 - a23 * a31;\n" \
+    "    const float b11 = a22 * a33 - a23 * a32;\n" \
+    "    det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;\n" \
+    "    const float invDet = 1.0 / det;\n" \
+    "    float4x4 r;\n" \
+    "    r[0] = float4( a11 * b11 - a12 * b10 + a13 * b09, -a01 * b11 + a02 * b10 - a03 * b09,  a31 * b05 - a32 * b04 + a33 * b03, -a21 * b05 + a22 * b04 - a23 * b03) * invDet;\n" \
+    "    r[1] = float4(-a10 * b11 + a12 * b08 - a13 * b07,  a00 * b11 - a02 * b08 + a03 * b07, -a30 * b05 + a32 * b02 - a33 * b01,  a20 * b05 - a22 * b02 + a23 * b01) * invDet;\n" \
+    "    r[2] = float4( a10 * b10 - a11 * b08 + a13 * b06, -a00 * b10 + a01 * b08 - a03 * b06,  a30 * b04 - a31 * b02 + a33 * b00, -a20 * b04 + a21 * b02 - a23 * b00) * invDet;\n" \
+    "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n" \
+    "    return r;\n" \
+    "}\n" \
+    "bool inFill(float3 p) {\n" \
+    "    const bool left = p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
+    "    const bool right = p.x > 0.50 && p.x < 0.78 && p.y > -0.51 && p.y < -0.245;\n" \
+    "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \
+    "    return left || right || label;\n" \
+    "}\n" \
+    "bool liveLocal(float4 c, out float3 local) {\n" \
+    "    float det;\n" \
+    "    const float4x4 G = sheetInv(float4x4(clipRows[4], clipRows[5], clipRows[6], clipRows[7]), det);\n" \
+    "    const float4 h = mul(G, c);\n" \
+    "    if (abs(det) < 1e-8 || abs(h.w) < 1e-6) { local = 0; return false; }\n" \
+    "    local = h.xyz / h.w + camBlock[275].xyz;\n" \
+    "    return true;\n" \
+    "}\n" \
+    "float2 sheetClip(float3 p, float3 cen) {\n" \
+    "    if (cen.x < 0.0) return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);\n" \
+    "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) return float2(p.x - kLabelRowLeftX, 1.0);\n" \
+    "    return float2(1.0, 1.0);\n" \
+    "}\n" \
+    "[maxvertexcount(3)]\n" \
+    "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n" \
+    "    float4 c0 = v[0].pos, c1 = v[1].pos, c2 = v[2].pos;\n" \
+    "    bool draw = true;\n" \
+    "    bool live = false;\n" \
+    "    float3 p0 = float3(0.0, 0.0, 0.0), p1 = float3(0.0, 0.0, 0.0), p2 = float3(0.0, 0.0, 0.0);\n" \
+    "    if (dot(clipRows[4], clipRows[4]) + dot(clipRows[7], clipRows[7]) > 1e-8) {\n" \
+    "        if (liveLocal(c0, p0) && liveLocal(c1, p1) && liveLocal(c2, p2)) {\n" \
+    "            live = true;\n" \
+    "            draw = inFill(p0) && inFill(p1) && inFill(p2);\n" \
+    "        }\n" \
+    "    }\n" \
+    "    const float3 cen = (p0 + p1 + p2) / 3.0;\n" \
+    "    const bool locked = an.w > 0.5;\n" \
+    "    const float3 lk = locked ? tr.xyz - turretLockCentre(c0, c1, c2) : float3(0.0, 0.0, 0.0);\n" \
+    "    [unroll] for (int i = 0; i < 3; ++i) {\n" \
+    "        const float4 corner = i == 0 ? c0 : (i == 1 ? c1 : c2);\n" \
+    "        Moved o;\n" \
+    "        o.v = v[i];\n" \
+    "        o.pre = v[i].pos;\n" \
+    "        o.clip = live ? sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen) : float2(1.0, 1.0);\n" \
+    "        float3 d;\n" \
+    "        const float4 moved = turretMove(corner, d);\n" \
+    "        o.v.pos = draw ? (locked ? turretLock(corner, lk, d) : moved) : float4(2.0, 2.0, 0.0, 1.0);\n" \
+    "        stream.Append(o);\n" \
+    "    }\n" \
+    "    stream.RestartStrip();\n" \
+    "}\n"
 constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    float4 t0 : TEXCOORD0;\n"
     "    float4 pos : SV_Position;\n"
-    "};\n"
-    "cbuffer SheetClip : register(b1) { float4 clipRows[8]; };\n"
-    "cbuffer SheetCam : register(b2) { float4 camBlock[276]; };\n"
-    "struct Moved { Vertex v; float4 pre : TURRETPRE; float2 clip : SV_ClipDistance0; };\n"
-    "// Dump 163557956001, mesh metres. The target card's fill (vs C4B4B334B26E81A9) has its left-edge vertices exactly coplanar (residuals under 0.01 mm), from (-0.7272, -0.4806, 0.5783) at the bottom to (-0.7708, -0.3115, 0.6125) at the top.\n"
-    "// The unit normal into the card is kTargetCardNormal and the edge plane is dot(n, p) = -kTargetCardEdgeOffset, so dot(n, p) + kTargetCardEdgeOffset is the signed distance, metres, right of the fill's left edge.\n"
-    "static const float3 kTargetCardNormal = float3(0.63015, 0.00544, 0.77645);\n"
-    "static const float kTargetCardEdgeOffset = 0.01184;\n"
-    "// Tuned in flight on 2026-11-02: the cut sits 3 mm left of the target card's dark panel edge. It removes the bracket bar and keeps the card's border.\n"
-    "static const float kBracketCutM = 0.003;\n"
-    "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; the plane sits 2 mm above it.\n"
-    "static const float kTargetCardTopY = -0.309;\n"
-    "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n"
-    "static const float kCardRowBottomY = -0.481;\n"
-    "static const float kLabelRowLeftX = 0.53;\n"
-    "float4x4 sheetInv(float4x4 m, out float det) {\n"
-    "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n"
-    "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n"
-    "    const float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2], a23 = m[2][3];\n"
-    "    const float a30 = m[3][0], a31 = m[3][1], a32 = m[3][2], a33 = m[3][3];\n"
-    "    const float b00 = a00 * a11 - a01 * a10;\n"
-    "    const float b01 = a00 * a12 - a02 * a10;\n"
-    "    const float b02 = a00 * a13 - a03 * a10;\n"
-    "    const float b03 = a01 * a12 - a02 * a11;\n"
-    "    const float b04 = a01 * a13 - a03 * a11;\n"
-    "    const float b05 = a02 * a13 - a03 * a12;\n"
-    "    const float b06 = a20 * a31 - a21 * a30;\n"
-    "    const float b07 = a20 * a32 - a22 * a30;\n"
-    "    const float b08 = a20 * a33 - a23 * a30;\n"
-    "    const float b09 = a21 * a32 - a22 * a31;\n"
-    "    const float b10 = a21 * a33 - a23 * a31;\n"
-    "    const float b11 = a22 * a33 - a23 * a32;\n"
-    "    det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;\n"
-    "    const float invDet = 1.0 / det;\n"
-    "    float4x4 r;\n"
-    "    r[0] = float4( a11 * b11 - a12 * b10 + a13 * b09, -a01 * b11 + a02 * b10 - a03 * b09,  a31 * b05 - a32 * b04 + a33 * b03, -a21 * b05 + a22 * b04 - a23 * b03) * invDet;\n"
-    "    r[1] = float4(-a10 * b11 + a12 * b08 - a13 * b07,  a00 * b11 - a02 * b08 + a03 * b07, -a30 * b05 + a32 * b02 - a33 * b01,  a20 * b05 - a22 * b02 + a23 * b01) * invDet;\n"
-    "    r[2] = float4( a10 * b10 - a11 * b08 + a13 * b06, -a00 * b10 + a01 * b08 - a03 * b06,  a30 * b04 - a31 * b02 + a33 * b00, -a20 * b04 + a21 * b02 - a23 * b00) * invDet;\n"
-    "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n"
-    "    return r;\n"
-    "}\n"
-    "bool inFill(float3 p) {\n"
-    "    const bool left = p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n"
-    "    const bool right = p.x > 0.50 && p.x < 0.78 && p.y > -0.51 && p.y < -0.245;\n"
-    "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n"
-    "    return left || right || label;\n"
-    "}\n"
-    "bool liveLocal(float4 c, out float3 local) {\n"
-    "    float det;\n"
-    "    const float4x4 G = sheetInv(float4x4(clipRows[4], clipRows[5], clipRows[6], clipRows[7]), det);\n"
-    "    const float4 h = mul(G, c);\n"
-    "    if (abs(det) < 1e-8 || abs(h.w) < 1e-6) { local = 0; return false; }\n"
-    "    local = h.xyz / h.w + camBlock[275].xyz;\n"
-    "    return true;\n"
-    "}\n"
-    "float2 sheetClip(float3 p, float3 cen) {\n"
-    "    if (cen.x < 0.0) return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);\n"
-    "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) return float2(p.x - kLabelRowLeftX, 1.0);\n"
-    "    return float2(1.0, 1.0);\n"
-    "}\n"
-    "[maxvertexcount(3)]\n"
-    "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n"
-    "    float4 c0 = v[0].pos, c1 = v[1].pos, c2 = v[2].pos;\n"
-    "    bool draw = true;\n"
-    "    bool live = false;\n"
-    "    float3 p0 = float3(0.0, 0.0, 0.0), p1 = float3(0.0, 0.0, 0.0), p2 = float3(0.0, 0.0, 0.0);\n"
-    "    if (dot(clipRows[4], clipRows[4]) + dot(clipRows[7], clipRows[7]) > 1e-8) {\n"
-    "        if (liveLocal(c0, p0) && liveLocal(c1, p1) && liveLocal(c2, p2)) {\n"
-    "            live = true;\n"
-    "            draw = inFill(p0) && inFill(p1) && inFill(p2);\n"
-    "        }\n"
-    "    }\n"
-    "    const float3 cen = (p0 + p1 + p2) / 3.0;\n"
-    "    const bool locked = an.w > 0.5;\n"
-    "    const float3 lk = locked ? tr.xyz - turretLockCentre(c0, c1, c2) : float3(0.0, 0.0, 0.0);\n"
-    "    [unroll] for (int i = 0; i < 3; ++i) {\n"
-    "        const float4 corner = i == 0 ? c0 : (i == 1 ? c1 : c2);\n"
-    "        Moved o;\n"
-    "        o.v = v[i];\n"
-    "        o.pre = v[i].pos;\n"
-    "        o.clip = live ? sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen) : float2(1.0, 1.0);\n"
-    "        float3 d;\n"
-    "        const float4 moved = turretMove(corner, d);\n"
-    "        o.v.pos = draw ? (locked ? turretLock(corner, lk, d) : moved) : float4(2.0, 2.0, 0.0, 1.0);\n"
-    "        stream.Append(o);\n"
-    "    }\n"
-    "    stream.RestartStrip();\n"
-    "}\n";
+    EDVR_SRV_TURRET_GS_SHEET_BODY;
+
+// The gunner sheet with Elite's Disable GUI effects off (vs A888D51024D9798E with ps 9107E72CB016CC02, issue 179): the same mesh and the same clip rows as the sheet above, in the output signature of the dump vs_A888D51024D9798E.dxbc.
+constexpr char kSrvTurretHudGsK[] = EDVR_SRV_TURRET_GS_HEAD
+    "    float4 t0 : TEXCOORD0;\n"
+    "    float3 t2 : TEXCOORD2;\n"
+    "    float3 t4 : TEXCOORD4;\n"
+    "    float3 t5 : TEXCOORD5;\n"
+    "    float2 t6 : TEXCOORD6;\n"
+    "    float4 pos : SV_Position;\n"
+    EDVR_SRV_TURRET_GS_SHEET_BODY;
 
 // The hologram panels with Elite's Disable GUI effects off (vs 81216C77F90DEDD6, issue 179): the signature of the dump vs_81216C77F90DEDD6.dxbc, moved as A is.
 constexpr char kSrvTurretHudGsJ[] = EDVR_SRV_TURRET_GS_HEAD
@@ -329,4 +343,5 @@ constexpr char kSrvTurretHudGsJ[] = EDVR_SRV_TURRET_GS_HEAD
 #undef EDVR_SRV_TURRET_GS_TAIL_A
 #undef EDVR_SRV_TURRET_GS_TAIL_B
 #undef EDVR_SRV_TURRET_GS_TAIL_C
+#undef EDVR_SRV_TURRET_GS_SHEET_BODY
 }  // namespace edvr

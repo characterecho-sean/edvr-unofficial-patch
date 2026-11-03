@@ -1,9 +1,9 @@
-// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's ten pass-through geometry shaders
-// (kSrvTurretHudGsABytecode to kSrvTurretHudGsJBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
+// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's eleven pass-through geometry shaders
+// (kSrvTurretHudGsABytecode to kSrvTurretHudGsKBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
 // binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the eleven families' vertex and pixel shaders. A family is a
 // shader pair (srv_turret_math.h kFamilies: the hologram families 1989E6D3 and 2CECEC30 and the Disable-GUI-effects-off panels 81216C77 with either of its pixel shaders, the radar-named billboards DF3503CD, 44DDCDEB, 9B34C331, 9611A454 and B932058F, the target
 // hologram sphere 5559BD94 with either of its pixel shaders; the flight HUD's vectors B7790CBF are not a family); there is one geometry shader for each distinct vertex-shader OUTPUT
-// SIGNATURE (kSignatures, ten). The families are in two GROUPS, each with its own key: the weapon panels (the four hologram pairs) and the radar (the other seven). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
+// SIGNATURE (kSignatures, eleven). The families are in two GROUPS, each with its own key: the weapon panels (the four hologram pairs) and the radar (the other seven). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
 // included; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the pixel stand-ins read what the game's
 // pixel shaders read (some also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them, nor are the 5334-index shells (at gigametres) or the
 // glare sprite (a constant clip w of 1).
@@ -789,6 +789,11 @@ static void mathCases() {
                       st::gunnerSignature(st::kGunnerCardsVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 6) < 0 &&
                       st::gunnerSignature(0xE508648660A352B2ull, 'X', 6) < 0,
                   "only the 288-index cards and the 2016-index sheet are the gunner panel; the Escape menu, the small quad and the reticle are not");
+            check(st::gunnerSignature(st::kGunnerSheetAltVs, 'X', 2016) == st::kGunnerSheetAltSignature && st::gunnerSignature(st::kGunnerSheetAltVs, 'I', 2016) == st::kGunnerSheetAltSignature &&
+                      st::gunnerSignature(st::kGunnerSheetAltVs, 'X', 6) < 0 && st::gunnerSignature(st::kGunnerSheetAltVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetAltVs, 'X', 288) < 0 &&
+                      st::gunnerSignature(st::kGunnerSheetAltVs, 'D', 2016) < 0 && st::gunnerSignature(st::kGunnerSheetAltVs, 'X', 2017) < 0 && st::kGunnerSheetAltVs == 0xA888D51024D9798Eull &&
+                      st::isGunnerSheetSignature(st::kGunnerSheetSignature) && st::isGunnerSheetSignature(st::kGunnerSheetAltSignature) && !st::isGunnerSheetSignature(st::kGunnerCardsSignature) && !st::isGunnerSheetSignature(-1),
+                  "with Disable GUI effects off the sheet is vs A888D510 at 2016 indices of kind I or X and nothing else of that menu panel shader (its 6-index quads, the 360 and 288 counts, a plain draw) is the gunner panel");
         }
         check(st::paramsForGroup(e, P, 999, 0, 0, out) && out == st::pushParamsFor(e, 2.0f) && st::paramsForGroup(e, P, 0, 999, 0, out) && out == st::paramsFor(e, 2.0f), "a key past its range is held to 200 cm");
         {   // the radar group carries its own translation: the same push, the same frame, a different T
@@ -845,7 +850,7 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
     // the families: the pairs, their records, and that the reticle's sprite and the excluded families are not among them
-    check(st::kFamilyCount == 11 && st::kSignatureCount == 10, "eleven families (shader pairs) over ten output signatures, the gunner sheet ninth and the Disable-GUI-effects-off panels' tenth");
+    check(st::kFamilyCount == 11 && st::kSignatureCount == 11, "eleven families (shader pairs) over eleven output signatures, the gunner sheet ninth, the Disable-GUI-effects-off panels' tenth and that mode's gunner sheet eleventh");
     struct Pair {
         uint64_t vs, ps;
         const char* name;
@@ -878,7 +883,7 @@ static void mathCases() {
     {   // the flight HUD's vectors (vs B7790CBFC6554097, ps 8DEF46452FA459F5; clip w -658 to +3029 m in the flight of 9fdad3a1) are no family, no signature, and no name in the tables
         bool gone = st::familyOf(0xB7790CBFC6554097ull, 0x8DEF46452FA459F5ull) == -1 && !st::isFamilyVs(0xB7790CBFC6554097ull);
         for (uint32_t i = 0; i < st::kFamilyCount; ++i) gone = gone && std::strcmp(st::kFamilies[i].name, "B7790CBF") != 0 && st::kFamilies[i].vs != 0xB7790CBFC6554097ull && st::kFamilies[i].sig < st::kSignatureCount;
-        for (uint32_t s = 0; s < st::kSignatureCount; ++s) gone = gone && std::strcmp(st::kSignatures[s].name, "B7790CBF") != 0 && st::kSignatures[s].count <= (s == 9 ? 6u : 4u);
+        for (uint32_t s = 0; s < st::kSignatureCount; ++s) gone = gone && std::strcmp(st::kSignatures[s].name, "B7790CBF") != 0 && st::kSignatures[s].count <= (s >= 9 ? 6u : 4u);
         check(gone, "the flight HUD's vectors (B7790CBF) are out of the pass: no family, no signature, no pixel-shader pairing");
     }
     {   // the groups: every family has one, the two hologram families are the panels, the rest the radar
@@ -896,14 +901,14 @@ static void mathCases() {
         check(ok, "every family has a group: 1989E6D3, 2CECEC30 and the two 81216C77 pairs are the panels, the other seven (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the sphere's two) the radar");
     }
     {   // the stream-output records: every family's equals its signature's
-        const uint32_t expectBytes[10] = {60, 56, 40, 68, 60, 52, 44, 52, 48, 92}, expectPos[10] = {7, 6, 2, 9, 7, 5, 3, 5, 4, 15};
+        const uint32_t expectBytes[11] = {60, 56, 40, 68, 60, 52, 44, 52, 48, 92, 92}, expectPos[11] = {7, 6, 2, 9, 7, 5, 3, 5, 4, 15, 15};
         bool ok = true;
-        for (uint32_t s = 0; s < 10; ++s)
+        for (uint32_t s = 0; s < 11; ++s)
             ok = ok && (st::sigFloats(s) + st::kPreFloats) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 + 16 == expectBytes[s];
         for (uint32_t i = 0; i < 11; ++i)
             ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig] &&
                  st::kFamilies[i].preFloat == st::sigFloats(st::kFamilies[i].sig);
-        check(ok, "the stream-output records: each signature's floats in order, the clip position last, then the shader's `pre` (60, 56, 40, 68, 60, 52, 44, 52, 48 and 92 bytes), and each family's are its signature's");
+        check(ok, "the stream-output records: each signature's floats in order, the clip position last, then the shader's `pre` (60, 56, 40, 68, 60, 52, 44, 52, 48, 92 and 92 bytes), and each family's are its signature's");
     }
     {   // the topologies: lists and strips, nothing else
         static_assert(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST == 4 && D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP == 5, "the topology constants srv_turret_math.h carries are D3D11's");
@@ -1466,7 +1471,7 @@ struct SigBytes {
 #define EDVR_RIG_SIG_BYTES(L) {edvr::kSrvTurretHudGs##L##Bytecode, sizeof(edvr::kSrvTurretHudGs##L##Bytecode), edvr::kSrvTurretHudGs##L}
 static const SigBytes kBytes[st::kSignatureCount] = {EDVR_RIG_SIG_BYTES(A), EDVR_RIG_SIG_BYTES(B), EDVR_RIG_SIG_BYTES(C), EDVR_RIG_SIG_BYTES(D), EDVR_RIG_SIG_BYTES(E),
                                                      EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I),
-                                                     EDVR_RIG_SIG_BYTES(J)};
+                                                     EDVR_RIG_SIG_BYTES(J), EDVR_RIG_SIG_BYTES(K)};
 #undef EDVR_RIG_SIG_BYTES
 
 static void linkageCases(int fam, ID3D11GeometryShader* gs) {
@@ -1479,7 +1484,7 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
     vsr->GetDesc(&vd);
     psr->GetDesc(&pd);
     gsr->GetDesc(&gd);
-    const bool sheetFam = fam == st::kGunnerSheetSignature;   // the gunner sheet's output also ends with SV_ClipDistance0 (two distances)
+    const bool sheetFam = st::isGunnerSheetSignature(fam);   // the gunner sheet's output also ends with SV_ClipDistance0 (two distances)
     check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count + (sheetFam ? 2u : 1u),
           "the signature's elements, the same number in the vertex shader's output and the geometry shader's input, and one more (`pre`) in its output, two more on the gunner sheet");
     for (UINT i = 0; i < S.count; ++i) {
@@ -2496,7 +2501,7 @@ static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
 // `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with the moved clip position at Family::posFloat and the game's at Family::preFloat.
 // The gunner sheet's shader writes one more element after `pre`, SV_ClipDistance0 (two floats); its twin streams that out too, as the record's last two floats.
 static constexpr uint32_t kSheetClipFloats = 2;
-static uint32_t twinExtraFloats(uint32_t sig) { return sig == uint32_t(st::kGunnerSheetSignature) ? kSheetClipFloats : 0u; }
+static uint32_t twinExtraFloats(uint32_t sig) { return st::isGunnerSheetSignature(int(sig)) ? kSheetClipFloats : 0u; }
 static UINT soDeclarationForTwin(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[st::kMaxSigElements]) {
     const st::Signature& s = st::kSignatures[sig];
     for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
@@ -2659,7 +2664,7 @@ struct SheetClips {
     float c[3][2] = {};     // the clip distances of the three vertices
 };
 static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3], bool withView) {
-    check(g_fam == int(st::kGunnerSheetSignature), "the sheet's clip cases run on the gunner sheet's signature");
+    check(st::isGunnerSheetSignature(g_fam), "the sheet's clip cases run on a gunner sheet signature (I or K)");
     const Cam cam;
     std::vector<float> clipRows(8 * 4, 0.0f);
     clipRows[4 * 4 + 0] = cam.p00;
@@ -2684,7 +2689,7 @@ static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3]
     }
     (void)render(v, cam, twin, defaultParams(), 64, 64, o);
     SheetClips r;
-    const uint32_t stride = st::sigFloats(uint32_t(st::kGunnerSheetSignature)) + st::kPreFloats + kSheetClipFloats, at = stride - kSheetClipFloats;
+    const uint32_t stride = st::sigFloats(uint32_t(g_fam)) + st::kPreFloats + kSheetClipFloats, at = stride - kSheetClipFloats;
     r.wrote = s.so.NumPrimitivesWritten == 1 && s.records.size() >= 3 * stride;
     for (int i = 0; r.wrote && i < 3; ++i)
         for (int k = 0; k < 2; ++k) r.c[i][k] = s.records[size_t(i) * stride + at + k];
@@ -2829,12 +2834,17 @@ int main(int argc, char** argv) {
             twinOf[fam] = twinFromCode(int(fam), kBytes[fam].data, kBytes[fam].size);
         }
 
+        {   // the two sheet shaders share one body: what follows the Vertex members is the same text
+            const std::string ti = kBytes[st::kGunnerSheetSignature].text, tk = kBytes[st::kGunnerSheetAltSignature].text;
+            const size_t bi = ti.find("cbuffer SheetClip"), bk = tk.find("cbuffer SheetClip");
+            check(bi != std::string::npos && bk != std::string::npos && ti.substr(bi) == tk.substr(bk), "the Disable-GUI-effects-off sheet shader (K) and the sheet shader (I) have the same body after their Vertex members");
+        }
         constantsCases();
         Fails production;
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
             linkageCases(int(fam), gsOf[fam].Get());
-            if (fam == uint32_t(st::kGunnerSheetSignature)) {
+            if (st::isGunnerSheetSignature(int(fam))) {
                 const Cam cam;
                 auto countWith = [&](Pt p) {
                     std::vector<Vtx> v(3, vtxOf(p, 0, 0));
@@ -2869,7 +2879,8 @@ int main(int argc, char** argv) {
                     o.clipCb = clipBuf.Get();
                     o.camCb = camBuf.Get();
                     (void)render(v, cam, twinOf[fam].Get(), defaultParams(), 64, 64, o);
-                    return s.records.size() > 5 && std::fabs(s.records[4] - 2.0f) < 0.01f && std::fabs(s.records[5] - 2.0f) < 0.01f;
+                    const size_t at = st::sigPosFloat(fam);   // where the moved clip position starts in this signature's record
+                    return s.records.size() > at + 1 && std::fabs(s.records[at] - 2.0f) < 0.01f && std::fabs(s.records[at + 1] - 2.0f) < 0.01f;
                 };
                 check(!offScreen(-0.62f, -0.36f), "the gunner sheet draws a triangle inside a card");
                 check(!offScreen(-0.80f, -0.40f), "the gunner sheet draws the planet icon on the info card");
@@ -2979,9 +2990,9 @@ int main(int argc, char** argv) {
                 check(fails.n > 0, what);
             }
         }
-        {   // the gunner sheet's clip planes: an edit of each rule must be caught by the clip cases (the move mutants above cover the sheet's move; these cover its clip planes)
-            g_fam = int(st::kGunnerSheetSignature);
-            const std::string text = kBytes[st::kGunnerSheetSignature].text;
+        for (const int sheetSig : {st::kGunnerSheetSignature, st::kGunnerSheetAltSignature}) {   // each gunner sheet's clip planes (I, and K with Disable GUI effects off): an edit of each rule must be caught by the clip cases (the move mutants above cover the sheet's move; these cover its clip planes)
+            g_fam = sheetSig;
+            const std::string text = kBytes[sheetSig].text;
             const Mutant clipMutants[] = {
                 {"the left plane's distance dropped", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);", "return float2(1.0, kTargetCardTopY - p.y);"},
                 {"the top plane's distance dropped", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, 1.0);"},
@@ -2999,11 +3010,11 @@ int main(int argc, char** argv) {
             for (const Mutant& m : clipMutants) {
                 const std::string mutated = replaceAll(text, m.from, m.to);
                 check(mutated != text, "a mutant differs from the production text");
-                const auto mg = twinFromText(int(st::kGunnerSheetSignature), mutated);
+                const auto mg = twinFromText(sheetSig, mutated);
                 Fails fails;
                 sheetClipCases(mg.Get(), fails);
                 char what[200];
-                std::snprintf(what, sizeof(what), "the mutant \"%s\" of the gunner sheet's shader is caught by the clip cases", m.name);
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of gunner sheet signature %d's shader is caught by the clip cases", m.name, sheetSig);
                 check(fails.n > 0, what);
             }
         }
@@ -3029,7 +3040,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of ten signatures, five more in signature H, twelve in the gunner sheet's clip planes and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eleven signatures, five more in signature H, twelve in each gunner sheet's clip planes and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

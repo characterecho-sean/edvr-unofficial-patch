@@ -142,6 +142,7 @@ const SigShader kShader[kSigN] = {
     EDVR_SRV_TURRET_SHADER(D, "44DDCDEB"), EDVR_SRV_TURRET_SHADER(E, "9B34C331"), EDVR_SRV_TURRET_SHADER(F, "9611A454"),
     EDVR_SRV_TURRET_SHADER(G, "B932058F"), EDVR_SRV_TURRET_SHADER(H, "5559BD94"),
     EDVR_SRV_TURRET_SHADER(I, "5DAD41AA"), EDVR_SRV_TURRET_SHADER(J, "81216C77"),
+    EDVR_SRV_TURRET_SHADER(K, "A888D510"),
 };
 #undef EDVR_SRV_TURRET_SHADER
 ID3D11GeometryShader* g_gs[kSigN] = {};
@@ -1119,7 +1120,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     return true;
 }
 
-// The gunner camera's curved panel: the 2016-index sheet (vs 5DAD41AA) and the 288-index cards (vs C4B4B334). Every other index count of those shaders, including the Escape menu's 360, is left to the game. The move is the turret-forward translation in tNear, at the game's own depth. The cards-up key is added only on the 288-index draws.
+// The gunner camera's curved panel: the 2016-index sheet (vs 5DAD41AA, or vs A888D510 with Disable GUI effects off) and the 288-index cards (vs C4B4B334). Every other index count of those shaders, including the Escape menu's 360, is left to the game. The move is the turret-forward translation in tNear, at the game's own depth. The cards-up key is added only on the 288-index draws.
 bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint32_t indexCount, int eye) {
     const int sig = st::gunnerSignature(vs, kind, indexCount);
     const bool cards = sig == st::kGunnerCardsSignature;
@@ -1157,7 +1158,7 @@ bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint
     // The sheet's own view: VS b0 rows 4..7 are the clip matrix and VS b1 row 275 is the world-rebase origin.
     // Bound into the geometry shader, they recover the mesh's local metres. A draw whose view cannot be read is still moved; its faint frame stays.
     st::ExtraCb clip, cam;
-    const bool sheet = sig == st::kGunnerSheetSignature;
+    const bool sheet = st::isGunnerSheetSignature(sig);
     const bool view = sheet && st::readGameCb(ctx, 0, clip, false) && st::readGameCb(ctx, 1, cam, false) && st::cbShowsRegister(clip, 7) && st::cbShowsRegister(cam, 275);
     if (sheet && !view && !g_sheetViewNoted) {
         g_sheetViewNoted = true;

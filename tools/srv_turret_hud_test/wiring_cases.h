@@ -200,7 +200,9 @@ static bool wiredModule(const std::string& t) {
     // lists and strips are carried, one signature's shader missing leaves the others' families bound
     const bool strips = found(t.find("!st::topologyCarried(static_cast<int>(topology))")) && found(t.find("bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {")) &&
                         found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
-    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && bracketKeyGone && found(settings) && found(edge) &&
+    // the gunner sheet with Disable GUI effects off (vs A888D510, signature K) has its geometry shader in the table and is told from the menu panel by the same gate as the other sheet
+    const bool sheetK = found(t.find("EDVR_SRV_TURRET_SHADER(K, \"A888D510\")")) && found(t.find("const bool sheet = st::isGunnerSheetSignature(sig);"));
+    return sheetK && found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && bracketKeyGone && found(settings) && found(edge) &&
            found(camera) && found(cleared) && found(line) && found(lineTail) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
 }
 // journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
@@ -557,6 +559,8 @@ static void wiringCases() {
           "control: a pass the height keys alone cannot open trips the pin");
     check(!wiredModule(replaced(module, "!st::topologyCarried(static_cast<int>(topology))", "topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST")), "control: lists only (a strip refused) trips the pin");
     check(!wiredModule(replaced(module, "return sig < kSigN && g_gs[sig] != nullptr;", "return g_gs[0] != nullptr && g_gs[sig] != nullptr;")), "control: every family stood down by one signature's missing shader trips the pin");
+    check(!wiredModule(replaced(module, "EDVR_SRV_TURRET_SHADER(K, \"A888D510\")", "EDVR_SRV_TURRET_SHADER(I, \"A888D510\")")), "control: the Disable-GUI-effects-off sheet without its own shader trips the pin");
+    check(!wiredModule(replaced(module, "const bool sheet = st::isGunnerSheetSignature(sig);", "const bool sheet = sig == st::kGunnerSheetSignature;")), "control: the Disable-GUI-effects-off sheet left without its view constants trips the pin");
     check(wiredLatch(journal, journalH), "journal_watch: the Scorpion latch is fed the tail's bytes once, reset with the file, published, and each change is said with its event");
     check(!wiredLatch(replaced(journal, "    s.vehicle.feed(data, len, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });\n", ""), journalH), "control: a latch that is never fed trips the pin");
     check(!wiredLatch(replaced(journal, "scanRange(s, stitched, stitchedLen);\n    scanRange(s, data, len);\n    // Issue 140", "scanRange(s, stitched, stitchedLen);\n    s.vehicle.feed(stitched, stitchedLen, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });\n    scanRange(s, data, len);\n    // Issue 140"), journalH),

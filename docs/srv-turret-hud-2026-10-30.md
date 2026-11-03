@@ -58,7 +58,7 @@
 - **Sheet brackets (2026-11-02):** SV_ClipDistance0 cuts the SYSTEMS dash at x 0.53 (flown right)
   and the target card's leaning edge plane at 3 mm (`kBracketCutM`). Sean tuned that dial in flight
   ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
-- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (vs 81216C77 families, Disable GUI effects off; built 2026-11-03, NOT FLOWN).
+- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet is vs A888D510, added as signature K, NOT FLOWN).
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1980,3 +1980,12 @@ A report (issue #179) said the weapon panel splits in the turret view when Elite
 ### 2026-11-03: defaults changed from Sean's flight
 
 experimental.srv_turret_systems_near now ships at 80 (was 70) and experimental.srv_turret_gunner_up at 35 (was 0), the values Sean flew; no other default changed, and the gunner sheet's decline rule (systems near and gunner up both at or below 0) is as it was. Changed in the module's reads, srv_turret_math.h, edvr.ini and the rig's pins.
+
+### 2026-11-03: the flight of 5982a506 with Disable GUI effects off; the gunner sheet is vs A888D510 (built, not flown)
+
+Result. The 81216C77 families work: 9000 draws per 10 s line through the shader, and the weapon panels sit correctly. The gunner frame was still broken: the card fills (vs `C4B4B334`, 288 indices) moved, as empty black boxes, while the card contents and the orange border stayed where the game puts them.
+
+- **Cause.** With Disable GUI effects off the 2016-index sheet is not drawn by vs `5DAD41AA66757CE3` but by vs `A888D51024D9798E` with ps `9107E72CB016CC02`, so no sheet geometry shader ran and the border and contents were never cut or moved. The flight's dump (stamp `125154858001`, `drawstate`) has 18 draws of vs A888D510 at 2016 indices (kind X, ps 9107E72C) and 18 at 6 indices (ps `015EF934`, the menu panel quads); no 5DAD41AA draw. A888D510 is also the menu panel's vertex shader, so the 2016-index count and the turret gates are what tell the sheet from the rest.
+- **Check.** The two disassemblies (`vs_A888D51024D9798E.dxbc`, `vs_5DAD41AA66757CE3.dxbc`) agree on the position: the same unpack of v1..v3, the same t33 instance record and t38 skinning loop on the position, the same quaternion rotation, scale and `- cb1[275]`, and the clip rows are dp4 of the position against cb0[4..7] in both (A888D510's CB0 is [12], its rows 9 to 11 feed TEXCOORD4 and TEXCOORD5 only). So the sheet shader's inversion of the clip rows and cb1[275] gives the same mesh metres, and `inFill`, the clip planes and the border cut apply unchanged. The dump's constant buffers carry the rows (cb0[4..7] a projection, cb1[275] the rebase origin). The vertex data of these draws was not captured (no VB or IB payload), so the check that the same card-fill triangles land inside `inFill` could not be made on this dump; it is the flight's to answer.
+- **Fix.** Signature K (`A888D510`: TEXCOORD0 xyzw, TEXCOORD2 xyz, TEXCOORD4 xyz, TEXCOORD5 xyz, TEXCOORD6 xy, SV_POSITION at o5), geometry shader K with the same body as I (one macro in `srv_turret_hud_shader.h`, so they cannot drift). `gunnerSignature` takes vs A888D510 at 2016 indices, kind I or X, under the same gates as 5DAD41AA (the gunner path runs only while the Scorpion's turret view wants draws); `isGunnerSheetSignature` carries the sheet's view-constant binding to K. The UI layer re-issues the game's own shaders inside the same scope as for the 81216C77 families. The rig runs K's move, strip, linkage and clip cases and mutants like I's, pins that I and K share their body, and the wiring pins list K.
+- **NOT FLOWN:** the next flight is the turret with Disable GUI effects off, looking at the card fills (they should stay with their contents), the border (gone) and the sheet's contents (moved with the weapon panel). The 10 s line counts K's draws in no family (the sheet is not a family); the log's `srv turret gunner:` line names the first one.

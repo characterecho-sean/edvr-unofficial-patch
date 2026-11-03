@@ -4175,8 +4175,8 @@ if errorlevel 1 ( echo [edvr] ERROR: supercruise bars test build failed & exit /
 "%OBJ%\supercruisebars\supercruise_bars_test.exe" --self-test || exit /b 1
 exit /b 0
 
-REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the ten pass-through geometry shaders (kSrvTurretHudGsABytecode to
-REM kSrvTurretHudGsJBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
+REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the eleven pass-through geometry shaders (kSrvTurretHudGsABytecode to
+REM kSrvTurretHudGsKBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
 REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the eleven families' shader pairs (the four hologram
 REM families, five radar-named billboard families and the target hologram sphere with either pixel shader) with their output signatures and clip rows: the 3D move about an anchor (every vertex
 REM translated forward, then pushed deeper or pulled nearer along its ray from the anchor), read vertex by vertex through the stream-output twin against a CPU reference in doubles and against the

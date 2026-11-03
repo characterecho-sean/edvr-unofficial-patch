@@ -173,7 +173,7 @@ struct Signature {
     SigElement el[kMaxSigElements];
     bool psReadsPosition;        // the family's pixel shader also reads SV_POSITION.xy
 };
-inline constexpr uint32_t kSignatureCount = 10;
+inline constexpr uint32_t kSignatureCount = 11;
 inline constexpr Signature kSignatures[kSignatureCount] = {
     {"1989E6D3", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 6, 3}, {"SV_Position", 0, 4}}, false},
     {"2CECEC30", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 7, 2}, {"SV_Position", 0, 4}}, true},
@@ -185,6 +185,7 @@ inline constexpr Signature kSignatures[kSignatureCount] = {
     {"5559BD94", 3, {{"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3}, {"__USER_VERTEX_M_TEXCOORD", 0, 2}, {"SV_Position", 0, 4}}, true},
     {"5DAD41AA", 2, {{"TEXCOORD", 0, 4}, {"SV_Position", 0, 4}}, false},
     {"81216C77", 6, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 4, 3}, {"TEXCOORD", 6, 3}, {"TEXCOORD", 7, 3}, {"TEXCOORD", 8, 2}, {"SV_Position", 0, 4}}, false},
+    {"A888D510", 6, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 2, 3}, {"TEXCOORD", 4, 3}, {"TEXCOORD", 5, 3}, {"TEXCOORD", 6, 2}, {"SV_Position", 0, 4}}, false},
 };
 // The floats of one vertex as the vertex shader writes it (the signature), and where the clip position, the last element, starts in it. The geometry shader writes the signature and then one
 // more element, `pre` (kPreSemantic, 4 floats): the clip position as the game made it, before the move. The pixel shaders do not read it and nothing in the module reads it back.
@@ -671,19 +672,26 @@ inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm
 // The Escape menu is the 360-index draws of those shaders and is not this. The centre reticle is vs E5086486 and is not this. Positive centimetres move the whole panel toward the camera
 // along the turret, the same axis as the HUD-forward key. The sheet is then unwrapped off its left-right curve onto one plane just in front of the launcher, so a
 // horizontal line on that curve stays the game's. The curved sheet is not reshaped. experimental.srv_turret_cards_up raises only the two cards.
+// With Elite's "Disable GUI effects" OFF the same 2016-index sheet is drawn by vs A888D51024D9798E (ps 9107E72CB016CC02), the menu panel's vertex shader (issue 179). The dumps (vs_A888D51024D9798E.dxbc
+// and vs_5DAD41AA66757CE3.dxbc) show the same unpack of the packed vertex, the same instance record and the same clip rows (cb0[4..7] against the position minus cb1[275]), so the sheet's
+// geometry shader inverts them alike; the 2016-index count and the turret gates are what tell it from the menu panel's other draws (6 indices in the dump).
 inline constexpr uint64_t kGunnerSheetVs = 0x5DAD41AA66757CE3ull;
+inline constexpr uint64_t kGunnerSheetAltVs = 0xA888D51024D9798Eull;
 inline constexpr uint64_t kGunnerCardsVs = 0xC4B4B334B26E81A9ull;
 inline constexpr uint32_t kGunnerSheetIndices = 2016;
 inline constexpr uint32_t kGunnerCardsIndices = 288;
 inline constexpr int kGunnerCardsSignature = 1;
 inline constexpr int kGunnerSheetSignature = 8;
-static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature == 8 && kGunnerSheetSignature < static_cast<int>(kSignatureCount) && kSignatures[kGunnerCardsSignature].el[1].index == 7 &&
-                  kSignatures[kGunnerSheetSignature].count == 2,
-              "the gunner cards use the hologram signature B, and the sheet is signature 8 (I)");
+inline constexpr int kGunnerSheetAltSignature = 10;   // the sheet with Disable GUI effects off (K): the same geometry shader body as signature 8 (I)
+static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature == 8 && kGunnerSheetAltSignature + 1 == static_cast<int>(kSignatureCount) && kSignatures[kGunnerCardsSignature].el[1].index == 7 &&
+                  kSignatures[kGunnerSheetSignature].count == 2 && kSignatures[kGunnerSheetAltSignature].count == 6,
+              "the gunner cards use the hologram signature B, and the sheet is signature 8 (I) or, with Disable GUI effects off, the last (K)");
+constexpr bool isGunnerSheetSignature(int sig) { return sig == kGunnerSheetSignature || sig == kGunnerSheetAltSignature; }
 inline int gunnerSignature(uint64_t vs, char kind, uint32_t indexCount) {
     if (kind != 'I' && kind != 'X') return -1;
     if (vs == kGunnerCardsVs && indexCount == kGunnerCardsIndices) return kGunnerCardsSignature;
     if (vs == kGunnerSheetVs && indexCount == kGunnerSheetIndices) return kGunnerSheetSignature;
+    if (vs == kGunnerSheetAltVs && indexCount == kGunnerSheetIndices) return kGunnerSheetAltSignature;
     return -1;
 }
 inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g == Group::kPanels ? hudForwardCm : radarForwardCm; }
