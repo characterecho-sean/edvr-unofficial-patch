@@ -280,8 +280,13 @@ struct FlatUiMapAaTally {
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
 // drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite),
 // and since 2026-10-10 the System Map's two (the map canvas and the map sprites, flatUiMapFamilyOf: asked only while a map
-// is open). The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the space dust)
-// are not asked: they are scene geometry, upscaled with the world in flat as they always were.
+// is open). Since 2026-11-03 the supercruise bars, the supercruise space dust and the normal-space dust are asked too: they are
+// scene geometry that the flat anti-aliasing's temporal history smears (a user report: the bars' 1 px lines and the dust's streaks
+// move about their own width a frame, so successive frames never overlap and the history has nothing to accumulate), and a layer
+// drawn after the upscale has no history to smear. The VR layer takes them for density as well (the bars, for their width); in
+// flat the take is for the history alone, so the density rule is the looser uiLayerSceneLinesFit (a layer at least as large as
+// the render). Their flat recipes (flat_projection_recipes.h) give the adapter the camera rows it reads the jitter from. The
+// ORBIT LINES stay out: they are not asked for in flat (their width patch is VR's), and are upscaled with the world as they always were.
 //
 // The ship's weapons fire and the shield strike's refraction ride the weapons half of the layer, in flat as in VR (2026-10-16): the weapons fire (1F17, 939D, 5C1D) is
 // additive light, so a pair left in the scene for want of camera rows only stays as smeared as it was, and the layer sums with it; the refraction (820E) is one
@@ -294,7 +299,13 @@ struct FlatUiMapAaTally {
 // refused each frame. A family is taken whole or not at all, so the holograms stay in the game's frame, as before the port.
 inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
-           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple ||
+           f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust || f == UiLayerFamily::kNormalSpaceDust;
+}
+// The three scene families (2026-11-03) the adapter keeps per-family reasons for beside the maps': the supercruise bars, the supercruise
+// space dust and the normal-space dust. Their window slot (flat_ui_layer.cpp Window::sceneRefused / sceneDeclined), or -1 for any other family.
+inline int flatUiSceneSlotOf(UiLayerFamily f) {
+    return f == UiLayerFamily::kSupercruiseBars ? 0 : f == UiLayerFamily::kSpaceDust ? 1 : f == UiLayerFamily::kNormalSpaceDust ? 2 : -1;
 }
 // Whether the half of the shared layer that governs the family is live: the weapons half (a flat AA mode on) for the families drawn into the weapons layer
 // (ui_layer_math.h uiLayerFamilyUsesWeaponsLayer, the one list: the weapons fire and the VR scope's gunsight mark), the ripple's own half for kShieldRipple, fix.ui_quality's for

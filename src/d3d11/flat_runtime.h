@@ -150,6 +150,11 @@ struct FlatRuntimeDrawScope {
     // (uiComposite).
     bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
     uint64_t uiVs=0,uiPs=0;
+    // The supercruise bars (2026-11-03, supercruise_bars.h): the decided draw is the bars family (uiBars; uiBarsVertices is its count), so its issue into the
+    // layer goes through the private strip shader. Prepare runs before the layer's Begin, the strip's Begin after a true one (uiBarsBound), its End before
+    // the layer's End (endActualDraw, and the destructor when that never ran), as vscreen.cpp has them for VR.
+    bool uiBars=false,uiBarsBound=false;
+    uint32_t uiBarsVertices=0;
     // The HUD's bloom (flat_ui_layer.h flatUiGlowWanted): this is the HDR route's trigger draw and it writes a half-size target of H, the bloom
     // chain's first level. Begin binds H' = H + the HUD layer's light at `glowSlot` for the game's issue (glowOriginal holds the game's view then),
     // End puts the game's view back.

@@ -175,7 +175,8 @@ static UiBlendRt blendOf(const Row& r) {
 
 // ---------------------------------------------------------------- the family rule as it stood on main, frozen
 // uiLayerFamilyFor at b22f241f (the tree this work started from), with a selector for which of the three new families a copy knows: 0 none (main),
-// 1 the orbit lines and the bars, 2 all three (which must equal the production rule on every row: the control that the copy is a copy).
+// 1 the orbit lines and the bars, 2 all three (which must equal the production rule on every row: the control that the copy is a copy). The normal-space dust's pair
+// (2026-11-03) rides with set 2: this rig's census holds no such row, so nothing it pins moves, and the copy stays a copy of the production rule.
 static UiLayerFamily frozenFamilyFor(const UiFamilyFacts& f, int set) {
     UiLayerFamily out = UiLayerFamily::kNone;
     if (f.targetKind == 0) {
@@ -186,6 +187,7 @@ static UiLayerFamily frozenFamilyFor(const UiFamilyFacts& f, int set) {
               : (set >= 1 && f.vs == kUiVsOrbitLines && f.ps == kUiPsOrbitLines)           ? UiLayerFamily::kOrbitLines
               : (set >= 1 && f.vs == kUiVsSupercruiseBars && f.ps == kUiPsSupercruiseBars) ? UiLayerFamily::kSupercruiseBars
               : (set >= 2 && f.vs == kUiVsSpaceDust && f.ps == kUiPsSpaceDust)             ? UiLayerFamily::kSpaceDust
+              : (set >= 2 && f.vs == kVsNormalSpaceDust && f.ps == kPsNormalSpaceDust)     ? UiLayerFamily::kNormalSpaceDust
               : (uiHoloGenericHash(f.vs) ||
                  (f.vs == kHoloTargetSphere && (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
                   ? UiLayerFamily::kHoloGeneric : UiLayerFamily::kNone;

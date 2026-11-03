@@ -699,6 +699,10 @@ enum class UiLayerFamily : uint8_t {
                     // in 1 instance with the readout atlas bound, named only while the scope lens is armed for the frame (UiFamilyFacts.scopeMark). A3 (section 10): taken out of the scene
                     // into the eye's additive weapons layer, with the weapons fire (uiLayerFamilyUsesWeaponsLayer), whose tonemap-difference composite lays it over the picture after the
                     // lens, so the mark keeps its own size and the brightness the game's additive blend gave it. The weapons fire's half governs it. Last in the enum.
+    kNormalSpaceDust,  // the normal-space dust (vs E904D334BC8B11EA with ps 095030F27D2C362A: supercruise_lines.h), the specks near a planet or a station: 512 additive
+                       // quads (a 3072-vertex Draw) into the lit HDR scene target, taken into the HDR layer as they are, the way the supercruise space dust is (the
+                       // vertex shader builds each speck's size itself, so nothing about the draw changes but where it lands). Not a scene LINE: exempt from the density
+                       // rule. Governed by fix.ui_quality, like the rest of the layer's scene draws. Appended after kScopeMark (2026-11-03) so no older family's number moves.
     kCount
 };
 
@@ -723,13 +727,14 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kWeaponsFire: return "weapons fire";
         case UiLayerFamily::kShieldRipple: return "shield ripple";
         case UiLayerFamily::kScopeMark: return "scope mark";
+        case UiLayerFamily::kNormalSpaceDust: return "normal-space dust";
         default: return "none";
     }
 }
 
 // The families the crisp take draws into the eye's HDR layer when they are drawn into the lit HDR scene target (the
-// cockpit's holo panels, the flight HUD, the target sprite, the eight holograms, and the three supercruise draws: the
-// orbit lines, the bars and the space dust). The ONE list: ui_layer.cpp's decision and the rigs' routing model both ask it.
+// cockpit's holo panels, the flight HUD, the target sprite, the eight holograms, the three supercruise draws: the
+// orbit lines, the bars and the space dust, and the normal-space dust). The ONE list: ui_layer.cpp's decision and the rigs' routing model both ask it.
 // The two map families (kMapCanvas, kMapSprite) are in it too: the flat layer asks for them only while a map is open
 // (flat_ui_layer_math.h), and no VR family rule names them, so the VR take never reaches them.
 inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
@@ -737,7 +742,8 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
-           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark;
+           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark ||
+           f == UiLayerFamily::kNormalSpaceDust;
 }
 
 // The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
@@ -766,6 +772,16 @@ inline bool uiLayerFamilyIsSceneLines(UiLayerFamily f) {
 // axes (a layer that is wider in one only is not a density gain the strip's width arithmetic is made for).
 inline bool uiLayerWiderThanRender(uint32_t layerW, uint32_t layerH, uint32_t renderW, uint32_t renderH) {
     return renderW != 0 && renderH != 0 && layerW > renderW && layerH > renderH;
+}
+
+// The density rule's test, per profile (2026-11-03). VR keeps the strict rule above: the lines are taken for DENSITY, so a layer that is not wider than the
+// render has nothing to give them. In FLAT the take is for the HISTORY, not the density: the upscaler's temporal history smears a 1 px line or a streak that
+// moves its own width a frame, and a layer drawn after the upscale has no history to smear, whatever its density. So a layer AT LEAST as large as the render on
+// both axes is enough (DLAA at UI quality 100 has render == display, the layer the display's size); only a layer narrower than the render (Elite's supersampling
+// above the UI quality) still refuses kNoDensityGain. The bars' strip shader is exact at ratio 1 (supercruise_bars_binding.h tentHalfWidth clamps to 1 texel).
+inline bool uiLayerSceneLinesFit(uint32_t layerW, uint32_t layerH, uint32_t renderW, uint32_t renderH, bool flat) {
+    if (!flat) return uiLayerWiderThanRender(layerW, layerH, renderW, renderH);
+    return renderW != 0 && renderH != 0 && layerW >= renderW && layerH >= renderH;
 }
 
 // After the UI: whether a later owner draw that WRITES an eye target the UI
@@ -1066,6 +1082,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
               : (f.vs == kUiVsOrbitLines && f.ps == kUiPsOrbitLines) ? UiLayerFamily::kOrbitLines
               : (f.vs == kUiVsSupercruiseBars && f.ps == kUiPsSupercruiseBars) ? UiLayerFamily::kSupercruiseBars
               : (f.vs == kUiVsSpaceDust && f.ps == kUiPsSpaceDust) ? UiLayerFamily::kSpaceDust
+              : (f.vs == kVsNormalSpaceDust && f.ps == kPsNormalSpaceDust) ? UiLayerFamily::kNormalSpaceDust
               : weaponPairIndex(f.vs, f.ps) >= 0 ? UiLayerFamily::kWeaponsFire
               : shieldRefractPair(f.vs, f.ps) ? UiLayerFamily::kShieldRipple
               : (uiHoloGenericHash(f.vs) ||
@@ -1246,7 +1263,8 @@ enum class UiLayerDecision : uint8_t {
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
     kNoDensityGain,  // an orbit-line or supercruise-bar draw (scene geometry the layer takes
-                     // for density alone) while the layer is not wider than the render: the
+                     // for density alone) while the layer does not fit the render
+                     // (uiLayerSceneLinesFit: not wider in VR, narrower in flat): the
                      // layer has nothing to give it and it stays in the scene
     kMrt,            // more than one render target bound, or PS UAVs
     kDepthStencilTest,  // tests depth or stencil against a depth target the
@@ -1446,8 +1464,8 @@ struct UiLayerDrawFacts {
     UiBlendShape blend = UiBlendShape::kRefused;
     bool layerReady = true;       // the eye's layer exists at the wanted size
     // The orbit lines and the supercruise bars (uiLayerFamilyIsSceneLines) are scene geometry the layer takes for DENSITY: a
-    // layer that is not wider than the render (uiLayerWiderThanRender) has nothing to give them. True for every other
-    // family, and by default, so a family that is not a scene line is decided exactly as it always was.
+    // layer that does not fit the render (uiLayerSceneLinesFit: VR wants it wider, flat at least as large) has nothing to give
+    // them. True for every other family, and by default, so a family that is not a scene line is decided exactly as it always was.
     bool layerWider = true;
     // The family's own private pass exists (the supercruise bars' geometry shader and its state: supercruise_bars.h). True by
     // default and for every family but that one.
@@ -1455,8 +1473,8 @@ struct UiLayerDrawFacts {
     // The HDR HUD take is armed (with fix.ui_quality) and this is one of the
     // cockpit HUD families (the holo panels, the flight HUD, the target
     // sprite, and the crisp take's eight hologram families as kHoloGeneric --
-    // and the three supercruise draws, the orbit lines, the bars and the space
-    // dust: uiLayerFamilyTakesHdr says which)
+    // and the supercruise draws, the orbit lines, the bars and the space
+    // dust, and the normal-space dust: uiLayerFamilyTakesHdr says which)
     // drawn into the
     // lit HDR (pre-tonemap) eye target: the draw goes to the HDR layer, and
     // the tonemap re-issue brings it back over the finished eye. Every other

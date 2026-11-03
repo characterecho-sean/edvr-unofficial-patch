@@ -284,10 +284,23 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     // indexable-temp and resinfo cases are array lighting and atlas-dimension
     // queries. CB0[9..11] local pre-transforms before the 270..273 columns
     // are covered by the ce715126 block's local-transform note.
+    // 2026-11-03: the supercruise space dust (vs 9BFC7FD2 with ps DBF17257) and the supercruise bars (vs A47A3315 with ps 869FFF43)
+    // join the pairs of this block so the flat UI layer can read their jitter from camera rows (flat_ui_layer.cpp takes them: they
+    // blur under the temporal history otherwise). The generic classifier refused both (the dust: vs forward-columns, ps consumer
+    // multi-row-temp; the bars: vs unclassified, slice-not-clean), so the draws carried no rows and the adapter would have left every
+    // one in the scene as no-camera-rows. Vetted from the shader dumps (edvr_logs\shaders\ps_DBF1725726018F52.dxbc and
+    // ps_869FFF43E875906E.dxbc, read with tools\dxbc_disasm.py): the vertex shaders are the same bytecode (the same hash) as the
+    // pairs reciped on the same lines, so the projection rows are the ones already established (cb1 270..273 for the dust, cb0
+    // 4..7 for the bars). PS 869FFF43 is `o0.xyz = v0.xyz * cb1[90].y; o0.w = v0.w`: colour only. PS DBF17257 reads the cb2
+    // material rows, t0 and t1 at varying coordinates, and cb1[61].z and cb1[90].y only -- no SV_Position input, never cb1
+    // 270..273, no depth output; its multi-row-temp is the material blend of the cb2 rows, as for the other reviewed
+    // multi-row-temp companions of this block.
     if (result.count == 0) switch (vs) {
-    case 0x9BFC7FD232328391ull: if (ps == 0xCB7AF179DF4E6A60ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x9BFC7FD232328391ull:
+        if (ps == 0xCB7AF179DF4E6A60ull || ps == 0xDBF1725726018F52ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     case 0x2BB766C168B450A2ull: if (ps == 0x4888F2B05460FA9Bull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
-    case 0xA47A3315FFF5E2E4ull: if (ps == 0xC67370DE72E4422Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xA47A3315FFF5E2E4ull:
+        if (ps == 0xC67370DE72E4422Cull || ps == 0x869FFF43E875906Eull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x99B41C87E45319E6ull:
         // The decal projective-depth family, exactly as 0A298DE7/D8FCE3CE:
         // the PS divides an exported view-position varying for the depth UV,

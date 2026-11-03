@@ -486,7 +486,7 @@ struct Eye {
     Ptr<ID3D11ShaderResourceView> copySrv;
     uint32_t copyW = 0, copyH = 0;
     DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
-    // The flat profile's HUD edge smoothing: SMAA 1x on the layer at the layer's size, its output read in the layer's place (ui_layer_smaa.h).
+    // The HUD edge smoothing (fix.hud_antialiasing, both profiles): SMAA 1x on the layer at the layer's size, its output read in the layer's place (ui_layer_smaa.h).
     // Made at the first composite that asks, released with the layer and when the ask stops.
     UiLayerSmaa smaa;
 };
@@ -684,6 +684,12 @@ struct Window {
     uint64_t multiplies = 0, writeBacks = 0, dsTested = 0, seeds = 0, seedFailures = 0;
     uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0, compositesInPlace = 0;
     uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0;
+    // The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03): each eye's composite counted by what it read -- the SMAA output, the raw layer because
+    // the key was off, the raw layer because the passes could not be had -- the key as the last composite saw it, and the layer's size then. VR's logTotals prints
+    // them; the flat profile keeps its own (flat_ui_layer.cpp) and skips logTotals.
+    uint64_t hudSmoothed = 0, hudRawKeyOff = 0, hudRawFault = 0;
+    bool hudKeyOn = false;
+    uint32_t hudW = 0, hudH = 0;
     // afterWrites' own breakdown: taken into the layer after the UI (kept
     // over it), left as a post pass (an eye-sized input), or refused at
     // issue (decide-time, via decided[kAfterUi][...], plus begin-time below).
@@ -2561,13 +2567,17 @@ ID3D11ComputeShader* g_csInPlace = nullptr;
 bool g_loadChecked[2] = {}, g_loadOk[2] = {};
 unsigned g_inPlaceDeclinedNoted = 0;   // bit per reason, said once
 bool g_inPlaceNoted = false;
-// The flat profile's HUD edge smoothing (ui_layer.h, uiLayerFlatSetEdgeSmoothing): the adapter's ask for the next composite, taken and cleared on entry to
-// uiLayerComposite, and what that composite did with it. The VR profiles never set the ask.
+// The HUD layer's edge smoothing (ui_layer.h, uiLayerFlatSetEdgeSmoothing): the flat adapter's ask for the next composite, taken and cleared on entry to
+// uiLayerComposite, and what that composite did with it. The VR profile never sets the ask; its own key is g_hudSmoothVr below.
 struct FlatEdgeSmoothing {
     bool ask = false;
     UiLayerEdgeSmoothingResult result;
 };
 FlatEdgeSmoothing g_flatEdge;
+// VR's half of fix.hud_antialiasing (2026-11-03: one key for both profiles, off by default, live): read by uiLayerConfigure, on every reconfigure, and used only
+// while the profile is not flat (the flat adapter reads the same key itself, a frame at a time, and asks per composite through g_flatEdge). uiLayerComposite smooths
+// an eye's HUD layer when either asks.
+bool g_hudSmoothVr = false;
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
@@ -2651,18 +2661,20 @@ ID3D11UnorderedAccessView* inPlaceUavFor(Eye& e, ID3D11Device* dev, ID3D11Textur
 }
 
 // The layer's SMAA resources for this composite, or null: a creation that failed is said once per size (the stand-down line) and the composite reads the raw
-// layer; a creation that succeeded says so once (the ready line).
-UiLayerSmaa* edgeSmoothingFor(Eye& e, ID3D11Device* dev) {
+// layer; a creation that succeeded says so once (the ready line). Two profiles run it (2026-11-03): the flat lines keep their wording ("flat ui layer smaa:"), and
+// VR's name the eye ("ui layer smaa (left eye):"), each eye having its own resources.
+UiLayerSmaa* edgeSmoothingFor(Eye& e, uint32_t eye, ID3D11Device* dev) {
     UiLayerSmaaFail fail;
+    const char* who = runtimeFlatProfile() ? "flat ui layer smaa" : eye == 0 ? "ui layer smaa (left eye)" : "ui layer smaa (right eye)";
     switch (uiLayerSmaaEnsure(e.smaa, dev, e.w, e.h, &fail)) {
         case UiLayerSmaaState::kMade:
-            Log::get().note("flat ui layer smaa: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", e.w, e.h,
+            Log::get().note("%s: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", who, e.w, e.h,
                             uiLayerMB(uiLayerBytes(e.w, e.h, 10)));
             return &e.smaa;
         case UiLayerSmaaState::kReady:
             return &e.smaa;
         case UiLayerSmaaState::kFailed:
-            Log::get().note("flat ui layer smaa: stood down at %ux%u -- %s hr=0x%08X", e.w, e.h, fail.what ? fail.what : "a creation failed",
+            Log::get().note("%s: stood down at %ux%u -- %s hr=0x%08X", who, e.w, e.h, fail.what ? fail.what : "a creation failed",
                             static_cast<unsigned>(fail.hr));
             return nullptr;
         case UiLayerSmaaState::kStoodDown:
@@ -2813,11 +2825,11 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                         eye == 0 ? "left" : "right", rw, rh, viewName(view),
                         uiLayerMB(uiLayerBytes(rw, rh)));
     }
-    // The flat profile's HUD edge smoothing: the SMAA resources for the layer's size are made here and the passes run inside the timed span below. Not asked
-    // for, nothing is kept.
+    // The HUD layer's edge smoothing (fix.hud_antialiasing; both profiles since 2026-11-03): the SMAA resources for the layer's size are made here (per eye) and the
+    // passes run inside the timed span below, so VR's "ui quality: layer" price line includes their cost. Not asked for, nothing is kept.
     UiLayerSmaa* smaa = nullptr;
     if (smooth)
-        smaa = edgeSmoothingFor(e, dev.Get());
+        smaa = edgeSmoothingFor(e, eye, dev.Get());
     else if (e.smaa.ready())
         e.smaa.releaseTargets();
 
@@ -2904,6 +2916,15 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     g_flatEdge.result.outcome = !smooth ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
     g_flatEdge.result.w = e.w;
     g_flatEdge.result.h = e.h;
+    // VR's window (the flat profile counts the same outcome in its own, from uiLayerFlatEdgeSmoothingResult): both eyes' composites.
+    if (!runtimeFlatProfile()) {
+        if (!smooth) ++g_win.hudRawKeyOff;
+        else if (smoothed) ++g_win.hudSmoothed;
+        else ++g_win.hudRawFault;
+        g_win.hudKeyOn = smooth;
+        g_win.hudW = e.w;
+        g_win.hudH = e.h;
+    }
     if (inPlaceUav) {
         ++g_win.compositesInPlace;
         if (!g_inPlaceNoted) {
@@ -3491,6 +3512,16 @@ void logTotals(double seconds) {
     // printed with zeros like the other two so that a log without the line is a build that never ran it, and a window in which no
     // dust reached the decision reads "0 in the HDR layer, 0 left in the scene" -- which is not what a decline looks like.
     Log::get().note("ui quality: space dust: %s.", sceneLineLayerText(UiLayerFamily::kSpaceDust, frames).c_str());
+    // The normal-space dust, the specks near a planet or a station (2026-11-03), is the same kind of account: taken as the game draws it, printed with zeros.
+    Log::get().note("ui quality: normal-space dust: %s.", sceneLineLayerText(UiLayerFamily::kNormalSpaceDust, frames).c_str());
+    // The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03), whenever the window composited the layer: the composites (both eyes) that read the SMAA output,
+    // those that read the raw layer because the key was off, those that fell back to it because the passes could not be had, the key as the last composite read it and the
+    // layer's size then. A window with composites and all three counts zero says the composite never reached the smoothing. The passes run inside the composite's timed
+    // span, so the "ui quality: layer" price line below includes their cost.
+    if (g_win.composites || g_win.hudSmoothed || g_win.hudRawKeyOff || g_win.hudRawFault)
+        Log::get().note("ui quality: hud smaa: key=%s smoothed=%llu raw-key-off=%llu raw-fault=%llu size=%ux%u", g_win.hudKeyOn ? "on" : "off",
+                        static_cast<unsigned long long>(g_win.hudSmoothed), static_cast<unsigned long long>(g_win.hudRawKeyOff),
+                        static_cast<unsigned long long>(g_win.hudRawFault), g_win.hudW, g_win.hudH);
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
@@ -3749,6 +3780,10 @@ void uiLayerConfigure(Config& cfg) {
                         text.c_str(), newSpelling, uiQualityLabel(target), newSpelling);
     }
     const bool temporalVr = temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false);
+    // VR's half of the HUD edge smoothing (fix.hud_antialiasing, off by default, live; 2026-11-03): read on every configure and used by uiLayerComposite only while the
+    // profile is not flat (the flat adapter reads the key itself, a frame at a time). The layer's composite runs only while fix.ui_quality is not off and a temporal
+    // mode is on, so the key does nothing before then.
+    g_hudSmoothVr = !runtimeFlatProfile() && cfg.getBool("fix.hud_antialiasing", false);
     // The flat profile reads its mode around the gate (fix.temporal_aa reads off there): its half of the layer -- the cockpit
     // HUD families through the mono adapter, flat_ui_layer.cpp -- and its panel factor arm with the flat anti-aliasing.
     const bool flatAa = runtimeFlatProfile() && temporalModeEnabledFor(cfg.requestedTemporalMode(), true);
@@ -4141,12 +4176,14 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
             // The orbit lines and the supercruise bars are scene geometry the layer takes for DENSITY: the layer the door will
             // hand on (its size, from the door's frame and the target) against the render this draw is made at. Not asked of
-            // any other family, which keeps its default and so its decision exactly as it was.
+            // any other family, which keeps its default and so its decision exactly as it was. In VR the layer must be wider
+            // than the render; in flat the take is for the upscaler's history, so a layer at least as large is enough
+            // (uiLayerSceneLinesFit, 2026-11-03).
             if (uiLayerFamilyIsSceneLines(family)) {
                 const UiLayerSize ls = uiLayerSize(g_eye[f.eye].door.fullW, g_eye[f.eye].door.fullH, layerTarget());
                 sceneLayerW = ls.w;
                 sceneLayerH = ls.h;
-                f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);
+                f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, g_tc.info.a, g_tc.info.b, runtimeFlatProfile());
             }
             // The crisp take's publication deadline (review crisp-hud-phase3-
             // 2026-09-28, the missing ship/target mesh holograms): the game's
@@ -6671,7 +6708,7 @@ constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
     // The flat adapter's ask for this composite (uiLayerFlatSetEdgeSmoothing), taken whatever happens below so it never carries to another call.
-    const bool smooth = g_flatEdge.ask;
+    const bool smooth = g_flatEdge.ask || (!runtimeFlatProfile() && g_hudSmoothVr);  // VR: the key's, both eyes
     g_flatEdge.ask = false;
     g_flatEdge.result = UiLayerEdgeSmoothingResult{};
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;

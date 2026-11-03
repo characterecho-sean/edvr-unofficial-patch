@@ -7074,7 +7074,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
             };
-            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
+            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; uiBars = flatUiLayerDecidedBars(); uiBarsVertices = count; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
             else if (ask == FlatUiLayerAsk::kRefused) { if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
@@ -7845,8 +7845,13 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
     // fix.ui_quality's flat layer (flat_ui_layer.h), right before the game's issue: a taken HUD draw is bound into the
     // layer (false: it goes to H as always), and the output copy gets this frame's HUD composited over what it reads.
     if(uiTake) {
+        // The supercruise bars: the game's own viewport is read BEFORE the layer's Begin remaps it to the layer's (the strip's tent is one render pixel).
+        if(uiBars)flatUiLayerBarsPrepare(ctx);
         uiTaken=flatUiLayerBegin(ctx);
         flatUiLayerNoteIssue(uiVs,uiPs,uiTaken);
+        // ... and the strip shader binds inside the layer's bracket, with the remapped viewport bound. A false Begin leaves the game's state as it was: the draw
+        // goes into the layer as the plain lines the game drew (the module counts it).
+        if(uiTaken&&uiBars)uiBarsBound=flatUiLayerBarsBegin(ctx,uiBarsVertices);
     }
     if(uiComposite) {
         auto& s=state();
@@ -8143,6 +8148,8 @@ void FlatRuntimeDrawScope::endActualDraw() {
     if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardReturn(state(),forwardIssue);
     if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.
+    // The bars' strip shader, constants and rasterizer state first (the game's geometry stage back), then the layer's own restore.
+    if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
@@ -8194,6 +8201,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return;
     // A taken HUD draw whose End never ran (the hook did not reach endActualDraw): the game's state back from the layer.
+    if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
     FlatComputeInternalScope guard;

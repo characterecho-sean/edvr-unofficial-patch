@@ -67,6 +67,14 @@ void flatUiLayerEnd(ID3D11DeviceContext* ctx);
 // Begin's answer for the decided draw (the last kDecided from flatUiLayerDecide, whose family it is), into the window's
 // per-family counts (taken, or refused at issue). Called only for a decided draw.
 void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken);
+// The supercruise bars' private strip pass (supercruise_bars.h), in the flat issue path as vscreen.cpp has it in VR's (2026-11-03). Whether the last
+// kDecided draw is the bars; its Prepare reads the game's viewport and so runs BEFORE flatUiLayerBegin (which remaps it to the layer's); its Begin binds
+// the strip shader inside the layer's bracket and runs only after a true flatUiLayerBegin; its End puts the game's geometry stage, constant slot and
+// rasterizer state back BEFORE flatUiLayerEnd. Each runs inside the flat runtime's internal scope, as flatUiLayerBegin does.
+bool flatUiLayerDecidedBars();
+void flatUiLayerBarsPrepare(ID3D11DeviceContext* ctx);
+bool flatUiLayerBarsBegin(ID3D11DeviceContext* ctx, uint32_t vertices);   // false: the draw goes into the layer as the game's plain lines
+void flatUiLayerBarsEnd(ID3D11DeviceContext* ctx);
 // A decided draw that writes depth or stencil: its colourless re-issue into the game's buffer (uiLayerWriteBackBegin/End).
 bool flatUiLayerWriteBackBegin(ID3D11DeviceContext* ctx);
 void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx);

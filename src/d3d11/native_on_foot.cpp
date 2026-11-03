@@ -112,6 +112,7 @@
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
+#include "native_on_foot_f212.h"   // F212: the conversation look; the processor hook reads the springs it feeds
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
@@ -7603,6 +7604,13 @@ void f109ProcSplit(uintptr_t c, float dt, const F109Pend& p, float dy, float dp)
     }
 }
 
+// F212: the springs the conversation look's leaf feeds (native_on_foot_hooks.cpp holds the hook, native_on_foot_f212.h the counters and the summary line). One guarded read of the
+// block from comp+0x780 (both springs' velocity, current and target) after the player's own processor call, only while native on foot is active. Counts into atomics; no log line.
+void f212SampleSprings(uintptr_t c) noexcept {
+    uint8_t block[nofoot::f212::kCompSpringsBytes] = {};
+    if (guardedRead(c + nofoot::f212::kCompSpringsOff, block, sizeof(block))) nofoot::f212::noteSprings(nofoot::f212::g_shared, block);
+}
+
 // The processor hook (game thread). It runs once per humanoid component, and F129 tells the calls apart before it lets the update's ask meet one:
 //  - what the call is: bytes A (comp+0x678), O (comp+0x7A9), D (comp+0x7D4), M (comp+0x4D8), the component's sink [comp+0x2E0] and the pair (comp+0x624 / +0x628) are
 //    read before the call and a sentinel is written into the pair; the original runs; a pair still holding the sentinel is a SKIP (nothing stored: the old pair is put
@@ -7689,6 +7697,7 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
         g_f129Ctr.lastPath.store(cl.path, std::memory_order_relaxed);
         if (order == f129::kOrderOk) g_f129Ctr.add(f129::kOrderOkN);
         else if (order == f129::kOrderFlipped) g_f129Ctr.add(f129::kOrderFlippedN);
+        if (nativeOnFootActive()) f212SampleSprings(c);   // F212: the springs the conversation look feeds, the player's own component only
     }
     // The ring record, with whether the call took an ask.
     f129::Rec rec;

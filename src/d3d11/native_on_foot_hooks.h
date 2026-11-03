@@ -156,6 +156,10 @@ struct NativeOnFootShopRead {
     uint32_t signalChanges = 0;
 };
 bool nativeOnFootShopRead(NativeOnFootShopRead* out) noexcept;
+// F212: the conversation look (native_on_foot_f212.h). One more optional, build-gated hook, on the 17-byte leaf that sets the look springs' two targets (EliteDangerous64.exe+0x1A8DF40,
+// the look component facade's slot +0xE8, called by ConversationCameraComponent's job with the angle errors toward the NPC): while native on foot is active the callback stores 0.0 in both
+// targets instead, so the game cannot turn the commander's look toward an NPC; otherwise it stores what the game asked. No function here: the callback counts into native_on_foot_f212.h's
+// shared counters, the look processor hook in native_on_foot.cpp adds the springs' readings, and the frame boundary writes the lines.
 // F95c: the commander's head kept in the shadows (native_on_foot_f95c.h). The avatar visibility job's hook (native_on_foot.cpp, every call) calls Begin before the
 // game's call and End after it: for the local third-person AMC, while the head hide writes, Begin reads the job context's views and gives the head parts the
 // game's shadow-only class for the call; End puts the game's classes back and leaves a ticket the fade hook's head hide takes (it then keeps the head's shadow
@@ -250,10 +254,12 @@ using NativeOnFootHooksSinkFn = void (*)(void* ctx, const char* line);
 struct NativeOnFootHooksTestTargets {
     uintptr_t controller = 0, avatarFade = 0, findJoint = 0;
     uintptr_t shopShow = 0, shopClose = 0, shopSetState = 0, kioskStart = 0, kioskStop = 0;   // F209: the shop hooks are tried only for the ones given here (or all, shopTryReal)
+    uintptr_t conversationLook = 0;   // F212: the conversation look's hook is tried only when a target is given here
 };
 namespace nofoothookstest {
 constexpr int kController = 0, kFade = 1, kFind = 2;   // the hooks, in the order stolenBytes, hookState and gateOpen take them
 constexpr int kShopShow = 3, kShopClose = 4, kShopSetState = 5, kKioskStart = 6, kKioskStop = 7;   // F209
+constexpr int kConversationLook = 8;   // F212
 void setTargets(const NativeOnFootHooksTestTargets& targets);
 void setFadeGlobal(int32_t* mode, float* amount);   // the synthetic dither-fade global and its amount float (null: the build's real addresses)
 void setHeadImage(uintptr_t base, size_t size);     // the rig's synthetic game image for the skeleton reads' arming (base 0: the real module)
@@ -279,6 +285,8 @@ uint64_t amcLocal();               // the local AMC pointer last matched
 void shopImageBase(uintptr_t base);   // F209: the rig's game image base for the buy screens' vtable compares (the vtables are base + RVA); 0: the armed hook's target minus its RVA
 void shopTryReal(bool on);            // F209: try the shop hooks against the real module too (the build-identity refusal); off: only those with a target
 void shopClock(uint64_t nowMs);       // F209: the shop lines' clock (ms); 0 restores the system clock
+void conversationClock(uint64_t nowMs);   // F212: the conversation look's clock (ms) for its calls and lines; 0 restores the system clock
+void conversationTryReal(bool on);         // F212: try the conversation look's hook against the real module too (the build-identity refusal); off: only with a target
 void reset();                      // every hook uninstalled, every latch and counter cleared
 }  // namespace nofoothookstest
 #endif

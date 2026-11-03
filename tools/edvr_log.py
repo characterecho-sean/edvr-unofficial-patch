@@ -12330,6 +12330,63 @@ def _hj_shop(rows, ctx):
     return ("OK", text)
 
 
+H_F212 = "conversation look (F212)"
+F212_TALK_STATES = ("Mission Giver", "Service Giver", "StartConversation")   # SuitUIStateMachine states (F209 logs them) in which the conversation camera runs
+
+
+def _hj_f212(rows, ctx):
+    """F212: the conversation look (native_on_foot_f212.h). The hook on the leaf that sets the look springs' targets (armed or stood down), a line when gated calls begin and when they
+    end (the run's calls, duration and the largest |yaw| and |pitch| the game asked), and a 10 s summary of a window with any call or any spring above zero (calls gated and passed, and
+    the springs the look processor read for the local component while native on foot was active). A conversation state in F209's lines (Mission Giver, Service Giver, StartConversation)
+    with native on foot begun and no gated call is NEVER APPLIED: the hook stood down, or was armed and the leaf never ran with native on foot active. The springs' targets read above zero
+    in a window that had gated calls (another writer), or a store that faulted, are PARTIAL. Armed with no conversation at all is IDLE."""
+    if not any(rows.get(k) for k in ("hook", "began", "ended", "sum")):
+        return None
+    hooks, began, ended, sums = rows.get("hook", []), rows.get("began", []), rows.get("ended", []), rows.get("sum", [])
+    armed = [r for r in hooks if r["st"] == "armed"]
+    stood = [r for r in hooks if r["st"] == "stood down"]
+    talks = [r["to"] for r in _hrows(ctx, H_SHOP, "state") if r["to"] in F212_TALK_STATES]
+    onfoot = bool(_hrows(ctx, "boarding reset (F115)", "began"))
+    gated = max([_hsum(ended, "calls")] + [int(r["sg"]) for r in sums])
+    applied = bool(began) or gated > 0
+    parts = []
+    if hooks:
+        parts.append("hook %s" % ("armed" if armed else "stood down (%s)" % (stood[-1].get("why") or "no reason given").strip()))
+    if began or ended:
+        text = "%d run(s) begun, %d ended" % (len(began), len(ended))
+        if ended:
+            text += " (longest %.1f s, %d gated call(s), the game asked for up to |yaw| %s and |pitch| %s, raw floats)" % (
+                max(float(r["s"]) for r in ended), _hsum(ended, "calls"), max(ended, key=lambda r: float(r["yaw"]))["yaw"], max(ended, key=lambda r: float(r["pitch"]))["pitch"])
+        parts.append(text)
+    parts.append("%d gated call(s), %d passed in the 10 s lines" % (gated, max([int(r["sp"]) for r in sums] + [0])))
+    if talks:
+        parts.append("%d conversation state(s) in F209's lines (%s)" % (len(talks), ", ".join(sorted(set(talks)))))
+    if sums:
+        reads = _hsum(sums, "reads")
+        parts.append("springs read %d time(s) in the 10 s lines: largest |velocity| yaw %.5f pitch %.5f, |target| yaw %.5f pitch %.5f" % (
+            reads, max(float(r["vy"]) for r in sums), max(float(r["vp"]) for r in sums), max(float(r["ty"]) for r in sums), max(float(r["tp"]) for r in sums)))
+    text = "; ".join(parts)
+    if talks and onfoot and not applied:
+        if stood and not armed:
+            return ("NEVER APPLIED", text + "; the hook stood down and a conversation state was logged with native on foot begun: the game's conversation look was not held")
+        return ("NEVER APPLIED", text + "; a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held")
+    problems = []
+    moved = [r for r in sums if int(r["g"]) > 0 and (float(r["ty"]) > 0.0 or float(r["tp"]) > 0.0)]
+    if moved:
+        problems.append("%d 10 s window(s) with gated calls read a spring target above zero (up to yaw %.5f pitch %.5f): something else sets the targets" % (
+            len(moved), max(float(r["ty"]) for r in moved), max(float(r["tp"]) for r in moved)))
+    faults = max([int(r["f"]) for r in sums] + [0])
+    if faults:
+        problems.append("%d store(s) into the facade faulted" % faults)
+    if stood and not armed:
+        problems.append("the hook stood down: the game's conversation look is not held")
+    if problems:
+        return ("PARTIAL", text + "; " + "; ".join(problems))
+    if not applied and not sums:
+        return ("IDLE", text + "; no conversation call in the window (nothing to hold)")
+    return ("OK", text)
+
+
 def _hj_f115_pair(edges, secs):
     """[(edge, read-back or None)]: each edge with the first read-back not yet taken that comes at or after it and before the next edge (by the log's clock; in the
     log's order when a line has no stamp)."""
@@ -17113,9 +17170,18 @@ HEALTH_RULES = (
         ("capped", r"shop screens \(F209\): (?P<n>\d+) event lines in the last 10 s were not written"),
         ("lost", r"shop screens \(F209\): (?P<n>\d+) shop event\(s\) were not recorded"),
     ), _hj_shop),
+    _hrule(H_F212, ("F212",), ("(F212)",), (
+        ("hook", r"avatar hooks: (?P<hook>conversation-look) hook (?P<st>armed|stood down)(?:: (?P<why>.*?)(?:\. the conversation look \(F212\) is not held.*)?)?$"),
+        ("began", r"conversation look \(F212\): run (?P<n>\d+) began: .*\|yaw\| (?P<yaw>[\d.]+) and \|pitch\| (?P<pitch>[\d.]+) asked in its first frames"),
+        ("ended", r"conversation look \(F212\): run (?P<n>\d+) ended after (?P<s>[\d.]+) s: (?P<calls>\d+) gated call\(s\), the game asked for up to \|yaw\| (?P<yaw>[\d.]+) and "
+                  r"\|pitch\| (?P<pitch>[\d.]+) \(raw floats, unit unknown\); no gated call for (?P<gap>\d+) ms"),
+        ("sum", r"conversation look \(F212\): (?P<s>[\d.]+) s: (?P<g>\d+) call\(s\) gated, (?P<p>\d+) passed \(session (?P<sg>\d+) gated, (?P<sp>\d+) passed, (?P<f>\d+) store fault\(s\)\); "
+                r"the game asked for up to \|yaw\| (?P<ay>[\d.]+) and \|pitch\| (?P<ap>[\d.]+); look processor, local component, native on foot active \((?P<reads>\d+) read\(s\)\): "
+                r"largest \|velocity\| yaw (?P<vy>[\d.]+) pitch (?P<vp>[\d.]+), largest \|target\| yaw (?P<ty>[\d.]+) pitch (?P<tp>[\d.]+)"),
+    ), _hj_f212),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
-        ("_", r"native on foot \(F115\): native stereo on foot began at frame \d+"),
+        ("began", r"native on foot \(F115\): native stereo on foot began at frame (?P<frame>\d+)"),   # F212 reads it: native on foot was active
         ("edge", r"boarding reset \(F115\): the on-foot camera ended at frame (?P<frame>\d+) \((?P<src>the cockpit's own panels drew with native stereo still on "
                  r"foot|native stereo on foot ended); the stock panel shader drew (?P<stock>\d+) times on foot this stretch\); undone at once: the eye alignment "
                  r"(?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(the hold's raise (?P<hold>%s) cm, the neck reference's raise (?P<neck>%s) cm\), the look's seated yaw "
@@ -18694,6 +18760,7 @@ def self_test_health():
         f205src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f205.h"))   # F205: the ADS view circle's press, runtime and override lines
         c1src = read_text(c1_path)
         shopsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "shop_screen_core.h"))   # F209: the buy screens' event, signal and one-second lines
+        f212src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f212.h"))   # F212: the conversation look's run and summary lines
         probesrc = read_text(probe_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -19112,6 +19179,15 @@ def self_test_health():
             fmts[key] = health_c_format(shopsrc, needle)
         if fmts[key] is None:
             raise AssertionError("shop_screen_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R212(needle, *vals):
+        """F212's lines (formatBegan, formatEnded, formatSummary in native_on_foot_f212.h), from their own format literals."""
+        key = "f212:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f212src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f212.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def RH(needle, *vals):
@@ -21412,6 +21488,52 @@ def self_test_health():
         check("F209: a signal that went on more often than it went off may have stuck", [neck(), SHOW209, ON209, AWAY_LEFT_SHOP, OFF209, ON209, ON209, AWAY_END_SHOP, neck()], 0, [("PARTIAL", S209)],
               has=["the signal went on 3 times and off 1: it may have stuck"], lacks=["UNPARSED"])
         check("F209: a line that drifted from its pattern is unparsed", [neck(), "shop screens (F209): the buy screen is somewhere else"], 4, [("UNPARSED", S209)])
+
+        # ---- the conversation look (F212): the leaf that sets the look springs' targets is held at 0 while native on foot is active ----
+        S212 = "conversation look (F212)"
+        TAG212 = "conversation look (F212):"
+        ONFOOT212 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        TALK212 = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "OnFoot", "Mission Giver", 7)
+        TALK212B = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "Mission Giver", "Service Giver", 7)
+        HOOK_UP212 = RH("hook armed: EliteDangerous64.exe+0x%llX", "avatar hooks:", "conversation-look", 0x1A8DF40,
+                        "look springs' target setter (the look component facade's slot +0xE8, a 17-byte leaf)", 0x7FF600001000, 8, 17, 17, 0x7FF700000000,
+                        RHT("the conversation look (F212): the leaf that sets the look springs' two targets"))
+        HOOK_DOWN212 = RH("hook stood down: %s. %s", "avatar hooks:", "conversation-look",
+                          "the game build differs (the 17 bytes at EliteDangerous64.exe+0x1A8DF40 are not build 334925's look springs' target setter: found cc cc, expected f3 0f); nothing was patched",
+                          RHT("the conversation look (F212) is not held"))
+        BEGAN212 = R212("run %u began:", TAG212, 1, 0.2, 0.0646)
+        ENDED212 = R212("run %u ended after", TAG212, 1, 5.93, 541, 0.2, 0.0646, 1000)
+        ENDED212B = R212("run %u ended after", TAG212, 2, 1.2, 100, 0.9, 0.1, 1000)
+        SUM212 = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 0, 0.2, 0.0646, 541, 0.0, 0.0, 0.0, 0.0)
+        SUM212_MOVED = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 0, 0.2, 0.0646, 541, 0.3, 0.1, 0.12, 0.0)
+        SUM212_FAULT = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 2, 0.2, 0.0646, 541, 0.0, 0.0, 0.0, 0.0)
+        SUM212_SPRINGS = R212("call(s) gated", TAG212, 10.0, 0, 0, 0, 0, 0, 0.0, 0.0, 450, 0.3, 0.0, 0.2, 0.0)
+        check("F212: a mission giver's conversation, the leaf gated for the run, the springs at rest: OK", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212, neck()], 0,
+              [("OK", S212)], has=["hook armed", "1 run(s) begun, 1 ended (longest 5.9 s, 541 gated call(s), the game asked for up to |yaw| 0.20000 and |pitch| 0.06460, raw floats)",
+                                   "541 gated call(s), 0 passed in the 10 s lines", "1 conversation state(s) in F209's lines (Mission Giver)",
+                                   "springs read 541 time(s) in the 10 s lines: largest |velocity| yaw 0.00000 pitch 0.00000, |target| yaw 0.00000 pitch 0.00000"],
+              lacks=["UNPARSED", "PARTIAL", "NEVER APPLIED"])
+        check("F212: two runs and a second state are counted", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, TALK212B, BEGAN212, ENDED212B, neck()], 0, [("OK", S212)],
+              has=["2 run(s) begun, 2 ended (longest 5.9 s, 641 gated call(s)", "2 conversation state(s) in F209's lines (Mission Giver, Service Giver)"], lacks=["UNPARSED"])
+        check("F212: a conversation state with native on foot begun, the hook armed and no gated call is NEVER APPLIED", [neck(), ONFOOT212, HOOK_UP212, TALK212, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["0 gated call(s)", "a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held"],
+              lacks=["UNPARSED"])
+        check("F212: the springs moved and the leaf never fired: NEVER APPLIED, with what the springs read", [neck(), ONFOOT212, HOOK_UP212, TALK212, SUM212_SPRINGS, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["springs read 450 time(s) in the 10 s lines: largest |velocity| yaw 0.30000 pitch 0.00000, |target| yaw 0.20000 pitch 0.00000"], lacks=["UNPARSED"])
+        check("F212: the hook stood down and a conversation state was logged: NEVER APPLIED, naming the reason", [neck(), ONFOOT212, HOOK_DOWN212, TALK212, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["hook stood down (the game build differs (the 17 bytes at EliteDangerous64.exe+0x1A8DF40 are not build 334925's look springs' target setter: found cc cc, expected f3 0f); nothing was patched)",
+                                              "the hook stood down and a conversation state was logged with native on foot begun: the game's conversation look was not held"], lacks=["UNPARSED"])
+        check("F212: the hook stood down with no conversation is PARTIAL (the look is not held)", [neck(), HOOK_DOWN212, neck()], 0, [("PARTIAL", S212)],
+              has=["the hook stood down: the game's conversation look is not held"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: armed, with no conversation and no call, is IDLE", [neck(), ONFOOT212, HOOK_UP212, neck()], 0, [("IDLE", S212)], has=["no conversation call in the window (nothing to hold)"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a conversation state with native on foot never begun (flat, or the log's start cut off) is not NEVER APPLIED", [neck(), HOOK_UP212, TALK212, neck()], 0, [("IDLE", S212)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a spring target above zero in a window that had gated calls is PARTIAL (something else sets the targets)", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212_MOVED, neck()], 0,
+              [("PARTIAL", S212)], has=["1 10 s window(s) with gated calls read a spring target above zero (up to yaw 0.12000 pitch 0.00000): something else sets the targets"], lacks=["UNPARSED"])
+        check("F212: a store into the facade that faulted is PARTIAL", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212_FAULT, neck()], 0, [("PARTIAL", S212)],
+              has=["2 store(s) into the facade faulted"], lacks=["UNPARSED"])
+        check("F212: a line that drifted from its pattern is unparsed", [neck(), "conversation look (F212): the leaf is somewhere else"], 4, [("UNPARSED", S212)])
 
         # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
         B115 = "boarding reset (F115)"
