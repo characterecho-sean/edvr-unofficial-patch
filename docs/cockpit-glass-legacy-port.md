@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-The ambient is now legacy's measured 5 x (probe(N) + probe(-N)) (section 11), after a flight whose A/B looked the same.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 is WRONG: legacy's cube was black (section 12). Replay and display measurements: section 12. Next: the dirt strength, Sean's call.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -526,7 +526,42 @@ with the probe 0.2939 (wanted 0.2941) against 0.09766 for the sun alone.
 stay on the canopy and the ice looks as the game draws it; `ice-overlays` counts about one a frame while ice
 shows; the streak pattern's look and scale against the legacy client's; frame time with the overlay on.
 
+## 12. The port replayed in Odyssey's own frames (2026-11-03)
+
+Four RenderDoc captures of Odyssey (build 334925, Steam, flat, 3840x2160; EDVR did not load under RenderDoc, so
+stock shaders drew), and the display images of the legacy captures. RenderDoc's `BuildTargetShader` and
+`ReplaceResource` ran EDVR's shader in place of the stock one. Captures and results stay in
+`%LOCALAPPDATA%\EDVR\captures\`. Each result is one frame per capture. The replay had no streak texture: a flat
+0.2667, or an invented high-frequency stand-in, so no picture shows EDVR's real streaks.
+
+- **Stock Odyssey draws nothing on the intact canopy in these frames**: zero pixels change. CB2[17].w is 0.95
+  here, against 0.8787 in the probe flight, and k = 1 - saturate(CB2[17].w x 1.0526) is 0. So the value varies,
+  and at 0.95 Odyssey's dirt is off. What drives it is not known.
+- **Legacy's ambient was zero.** The legacy VS's cube (t0) is a 1x1 black texture and its ambient output is 0 in
+  all three legacy captures (all in space; a station was not captured). Section 10's "VS ambient scale 5" only
+  ever multiplied black, so `kLegacyAmbientScale` in section 11 is not a measured value. Legacy's dirt in these
+  frames is lit by the sun alone.
+- **The mask is not the limit.** Odyssey's canopy vertex colour is grey like legacy's, mean 0.52 against 0.72,
+  with the same layout (dark mid-pane, bright at the struts and edges). 34% of the visible pane has a recovered
+  mask of 0 (vertex blue below 0.2 is lost in `masks.y`). Dirt albedo is about 0.56x legacy's.
+- **Legacy's dirt on the display is one or two levels out of 255** over dark sky: median 0.67, p90 1.33 to
+  1.67, p99 2.33 to 2.67, max 6 to 7, from replaying each legacy frame without the canopy. These frames have the
+  star ahead, so the sun's Lambert term with legacy's inward normal is probably low; a frame with the sun to the
+  side or behind may show more, and none was captured. Sean's memory of visibly dirty legacy glass is not
+  explained by these three frames.
+- **To match legacy on the display** (ambient x1, single probe sample, dirt albedo x F): the two sunlit Odyssey
+  captures agree at F about 4 to 6 on p90 and 2 to 4 on p99. At F = 16 the p90 is about 5 levels and p99 10 to 25;
+  at F = 32 about 10 and 22 to 45, plainly visible in the replay. The hangar capture cannot calibrate it: 2%
+  alpha darkening of a bright interior already exceeds legacy's levels.
+- Legacy's black level on the display is visibly lifted and warmer than Odyssey's in these frames. That is not
+  the canopy draw, and it may be part of the remembered look. Not investigated.
+
 ## Ruled out
+
+- ruled out: porting legacy's ambient scale of 5, because legacy's VS cube is black in all three captures
+  (section 12); the scale multiplied zero.
+- ruled out: the dirt mask as why the port looks clean, because Odyssey's canopy vertex colours are grey with
+  the same layout as legacy's and only about a third of the pane is zero (section 12).
 
 - ruled out: swapping the legacy bytecode in, because it reads cb0 where
   live binds CB1/CB2, its texture slots differ, and its input signature
