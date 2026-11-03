@@ -20,7 +20,7 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): fourteen. Baked from the 2026-11-02 Frontier flight:
+- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight:
   camera back 80, HUD forward 0, radar forward 0, panels back 0, systems near 70,
   weapon panel up 10, gunner up 0, cards up 0. Screen limit is game, radar anchor
   is off, depth is game. `srv_turret_hud_up` raises the weapon panel.
@@ -39,7 +39,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The fourteen `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The thirteen `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
@@ -55,10 +55,10 @@
   at their defaults, camera mode): the 10 s `srv turret hud: panels:` line
   (`edvr_log.py --grep "srv turret hud"`) and `srv turret radar camera: 10 s:`
   (slot calls and radar slots: radar slots above 0 with moves).
-- **Sheet brackets (2026-11-02, built, NOT FLOWN):** the sheet's shader clips the leftover
-  brackets (SV_ClipDistance0). SYSTEMS dash: x 0.53, flown right. Target card: its leaning
-  edge plane moved left by `srv_turret_bracket_cut` (mm, default 18), TEMPORARY: bake and remove when tuned.
-- **Open:** the flight of the stripped build and of the clip; the two height keys; the proposals above.
+- **Sheet brackets (2026-11-02):** SV_ClipDistance0 cuts the SYSTEMS dash at x 0.53 (flown right)
+  and the target card's leaning edge plane at 3 mm (`kBracketCutM`). Sean tuned that dial in flight
+  ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
+- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1964,3 +1964,7 @@ Sean flew 6b131d5c on Frontier (dump `163557956001`). The SYSTEMS side is right:
 - **The dial.** `experimental.srv_turret_bracket_cut` (integer millimetres, 0 to 40, default 18) is cutM: how far left of the target card's dark panel edge the cut sits. TEMPORARY. Sean cannot pin the offset from screenshots to better than about 3 mm and the gap between the bar and the dark border is about 4 mm, so the value is for him to tune in a flight; when it is, bake it and remove the key (Scope control). It is read like the other experimental keys (getter, settings line "bracket cut %d mm", `edvr_log.py` parse), travels in the Turret constant buffer's fourth spare register (`s3.x`, `TurretParams::cutM`, metres, refused outside 0 to 40 mm) and only the sheet's shader reads it.
 - **Gate.** WARP cases on the sheet's shader: with 18 mm a left-region point 10 mm left of the edge keeps clip.x above 0 and one 25 mm left gets clip.x below 0; a triangle across s = -18 mm has its zero crossing there (interpolated along the triangle); 30 mm moves the crossing; 0 puts it at the edge itself; the fill's own left-edge vertices (bottom, middle, top) all have clip.x at the cut, which the old vertical plane failed at the top. The old x = -0.769 cases are gone. Mutants: the dial dropped, its sign, its register component, the normal flipped, the offset dropped, and x alone.
 - **Not flown.** What to look for: the bar and its lower part left of the CRANFIELD NUTRITION card are gone and the card's upper-left corner is whole. If the bar's sliver remains, lower the key; if the card's own border is clipped, raise it. The `srv turret settings:` line names the value in force.
+
+### 2026-11-02: the dial tuned to 3 mm, baked, and the key removed
+
+Sean flew bb545c8b and tuned `experimental.srv_turret_bracket_cut`: "3 mm works". As agreed with him before the flight, the value is now the behaviour: the sheet's shader has `kBracketCutM = 0.003` (3 mm left of the target card's dark panel edge; it removes the bar and keeps the border) and no longer reads the constant buffer's fourth register, which is unused padding again. The key is removed with his approval: its getter, the "bracket cut" part of the settings line, the `edvr.ini` entry and its ui row (the block is thirteen settings again), the `gunnerParamsFor` argument and the cut's range check in `paramsUsable`. `tools\edvr_log.py` still parses a settings line that has the part, so bb545c8b's logs read. The wiring pins now say the key is gone (not read in the module, not in `edvr.ini`), and the rig's dial cases are fixed-constant cases: 1 mm left of the edge is kept, 5 mm left is cut, the zero crossing is at 3 mm, and the fill's own edge vertices sit at clip.x = +3 mm. The dial is off the TEMPORARY list. The other eight signatures' bytecode is unchanged. The baked build is not flown.
