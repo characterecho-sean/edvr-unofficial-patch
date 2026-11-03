@@ -192,10 +192,10 @@ public:
         hr(rig.dev->CreateRenderTargetView(target.Get(), nullptr, &rtv), "rtv");
         td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         hr(rig.dev->CreateTexture2D(&td, nullptr, &staging), "staging");
-        // t6: no crack (all zero). t9: the blemish map's x channel full, y empty.
+        // t6: no crack (all zero). t9: the blemish map's x (dirt) and y (imperfection) channels full.
         crack = texture1x1(0, 0, 0, 0);
         crackFull = texture1x1(128, 128, 0, 255);
-        blemish = texture1x1(255, 0, 0, 0);
+        blemish = texture1x1(255, 255, 0, 0);
     }
 
     Pixel draw(const Case& c) {
@@ -376,11 +376,10 @@ private:
 
 static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-4f; }
 
-// The legacy model on the live shader's no-crack lit normal, for a vertex normal (0,0,1) and tangent (1,0,0) in a view basis that is the identity.
+// The legacy model's lit normal on flat glass, for a vertex normal (0,0,1) in a view basis that is the identity: the glass is lit from inside, so it is -N.
 static float expectedNdl(const Case& c) {
-    // N = (0,0,1), T = (1,0,0), B = N x T = (0,1,0). Weights (0.5, 0.5, 1): nIn = 0.5 T - 0.5 N + 1 B.
-    const float n[3] = {0.5f, 1.0f, -0.5f};
-    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    const float n[3] = {0.0f, 0.0f, -1.0f};
+    const float len = 1.0f;
     const float dot = -(n[0] * c.sunDir[0] + n[1] * c.sunDir[1] + n[2] * c.sunDir[2]) / len;
     return dot < 0 ? 0 : (dot > 1 ? 1 : dot);
 }
@@ -398,7 +397,7 @@ static void testShader() {
     dirt.sunDir[2] = 1.0f;   // the light travels along +z, so its direction toward the light is -z
     dirt.sunDir[1] = -0.5f; dirt.sunDir[2] = 1.0f;
     const Pixel d = canopy.draw(dirt);
-    const float cover = 0.2f;   // k = 1 - saturate(0 * 1.0526) = 1; coverage = 1 * 0.2
+    const float cover = 0.2f;   // k = 1 - saturate(0 * 1.0526) = 1; alpha = k * dirt = 0.2
     const float ndl = expectedNdl(dirt);
     const float radiance = ndl * 1000.0f * (cover * 1.0f * 0.5f);
     const float want = radiance / cover / 256.0f;
@@ -458,6 +457,37 @@ static void testShader() {
     tinted.tint = 0.5f;
     const Pixel ti = canopy.draw(tinted);
     check(closeTo(ti.a, 0.6f, 0.01f) && closeTo(ti.r, ndl * 1000.0f * 0.1f / 0.6f / 256.0f, 0.02f), "the tint alpha adds to the coverage and the colour is divided by the alpha written");
+
+    // k = 1 - saturate(CB2[17].w * 1.0526) scales ALPHA ONLY. CB2[17].w = 0.8787 is the flown ship's 0.075. The dirt colour and the smudge glare keep the
+    // legacy value (the radiance, alpha times the colour written, is the same as with k = 1) and only the alpha, and so the colour written, changes.
+    const float kShip = 0.075f;
+    Case dirtK = dirt;
+    dirtK.k = 0.8787f;
+    const Pixel dk = canopy.draw(dirtK);
+    std::printf("dirt with k = 0.075: got (%g %g %g %g), wanted rgb %g alpha %g\n", dk.r, dk.g, dk.b, dk.a, ndl * 1000.0f * 0.1f / (kShip * 0.2f) / 256.0f, kShip * 0.2f);
+    check(closeTo(dk.a, kShip * 0.2f, 0.02f) && closeTo(dk.r, ndl * 1000.0f * 0.1f / (kShip * 0.2f) / 256.0f, 0.03f),
+          "with k = 0.075 the alpha is k times the dirt and the colour is the full legacy dirt radiance divided by it");
+    check(closeTo(dk.a * dk.r, d.a * d.r, 0.03f), "the dirt radiance the blend adds (alpha times colour) does not depend on k");
+    // The smudge glare: imperfection mask 0.5, the light straight ahead of the pixel (so dot(L, V) is 1), the gloss 24: strength 0.5 * (24 + 6) / 32 * 1000.
+    Case smudge;
+    smudge.masks[2] = 0.5f;
+    smudge.sunColour[0] = smudge.sunColour[1] = smudge.sunColour[2] = 1000.0f;
+    smudge.sunDir[2] = -1.0f;
+    const float smudgeRadiance = 0.5f * 30.0f / 32.0f * 1000.0f;
+    const Pixel sm1 = canopy.draw(smudge);
+    smudge.k = 0.8787f;
+    const Pixel sm2 = canopy.draw(smudge);
+    std::printf("smudge glare: k=1 got (%g %g) alpha %g, k=0.075 got (%g %g) alpha %g, radiance wanted %g\n", sm1.r, sm1.g, sm1.a, sm2.r, sm2.g, sm2.a, smudgeRadiance);
+    check(closeTo(sm1.a * sm1.r * 256.0f, smudgeRadiance, 0.03f), "the smudge glare is the legacy lobe at full strength (k = 1)");
+    check(closeTo(sm2.a, kShip * 0.5f, 0.02f) && closeTo(sm2.a * sm2.r * 256.0f, smudgeRadiance, 0.03f),
+          "with k = 0.075 the smudge glare is still the full legacy value; only the alpha is k times the mask");
+    // A pixel whose alpha is below the floor but which has glare is drawn at the floor, not dropped.
+    Case faint = smudge;
+    faint.masks[2] = 0.01f;
+    const Pixel fa = canopy.draw(faint);
+    const float faintRadiance = 0.01f * 30.0f / 32.0f * 1000.0f;
+    std::printf("faint smudge: got (%g %g %g %g), alpha floor %g, radiance wanted %g\n", fa.r, fa.g, fa.b, fa.a, 1.0f / 1024.0f, faintRadiance);
+    check(closeTo(fa.a, 1.0f / 1024.0f, 0.02f) && closeTo(fa.a * fa.r * 256.0f, faintRadiance, 0.03f), "glare under an alpha below the floor is written at the floor and keeps its radiance");
 
     const unsigned problems = canopy.rig.problems();
     std::printf("D3D debug layer: %s\n", canopy.rig.debugLayer ? "on" : "not installed here (the signature check in temporal_shader_build still holds the link)");

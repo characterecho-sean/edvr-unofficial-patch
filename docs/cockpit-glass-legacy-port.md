@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **BUILT, NOT FLOWN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
+State 2026-11-03: **BUILT, FLOWN ONCE (swap works, look too faint), CORRECTED, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
 quality-3 canopy shader `4E4FF61E8A08FC7E`, at bind time. What was built, the constants chosen and what the
@@ -26,8 +26,11 @@ Decisions (Sean, 2026-11-03), all applied in section 8: an approximation of the 
 constant dirt colour stands in for the legacy RGB dirt texture (no legacy-client capture needed); the canopy
 keeps live's reflection-probe lighting as its ambient, so it stays lit in a hangar.
 
-Open: the flight (section 8); whether live's no-crack normal weights (0.5, 0.5, 1.0) are a game quirk worth
-correcting (section 8, finding 2); the tuned constants (section 8).
+Flown once (3ae212ae, Steam, flat): the swap ran (binds = canopy-seen, about 3,050 per 30 s) and little
+differed, because the shader scaled dirt colour and glare by live's alpha-only factor k (0.075) and lit by
+live's tilted normal. Fixed in the next commit (section 8, "After the first flight"); it needs a second flight.
+
+Open: the second flight; the tuned constants (section 8).
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -284,11 +287,10 @@ light, the normal-independent glare lobe `pow(saturate(L . V), gloss) * (gloss +
 the albedo's lighting, and the colour arithmetic (the dirt colour weighted by the dirt coverage, crack colour in
 a crack). Ambient comes from the probes, sampled once at mip 7 along N_in, not from legacy's VS cube.
 
-**The blend.** Straight alpha, so the colour written is the coverage-weighted legacy colour divided by the alpha
-written; the blend then applies coverage once. Alpha is the legacy formula (crack term, scaled, plus the tint
+**The blend.** Straight alpha, so the colour written is the legacy radiance divided by the alpha written; the
+blend then adds that radiance once (see "After the first flight" for the masks that drive it). Alpha is the legacy formula (crack term, scaled, plus the tint
 alpha) plus the dirt and imperfection coverage. Legacy alpha ignored those two (its blend took the colour as
-it was), and under straight alpha that would hide the dirt entirely. Below an alpha of 1/1024 the shader returns
-transparent black without lighting.
+it was), and under straight alpha that would hide the dirt entirely.
 
 **Constants chosen, not measured** (the legacy client's values were not recoverable from its archive, which
 holds the shaders and not the materials' cb0 values):
@@ -309,8 +311,8 @@ holds the shaders and not the materials' cb0 values):
    times a crack-id difference, so on an intact canopy live lights the glass by the sun's GGX alone and the
    probes are not read. The legacy ambient from the probes is therefore new work on the intact glass, not
    work live already does there; the cost is one cluster lookup and one probe sample (a few probes in a
-   cluster at most) per covered pixel, and the shader skips pixels below the 1/1024 alpha.
-2. **Live's no-crack normal weights are (0.5, 0.5, 1.0)** on (tangent, normal, bitangent), not (0, 1, 0): the
+   cluster at most) per pixel that has any mask (after the first flight the early out is on the unscaled masks).
+2. **Live's no-crack normal weights are (0.5, 0.5, 1.0)** (not ported after the first flight) on (tangent, normal, bitangent), not (0, 1, 0): the
    lerp between "no crack" and the crack normal starts from the flat normal map's encoded value. So the intact
    glass is lit by a normal tilted about 66 degrees off the surface normal. Ported as it is, as asked. If a
    flight shows the lighting depending oddly on which way the tangent runs, this is the first place to look:
@@ -319,6 +321,28 @@ holds the shaders and not the materials' cb0 values):
    (times `masks.z`). The decode note's "x with `v0.z`" has them the other way round; the instruction order in
    the PS (the `mul_sat` swizzle `v0.zzzy`, then the dirt roughness on the x-derived term) gives this.
 4. Legacy's second directional light has no source in live (t1 holds one light), so the port has one.
+
+**After the first flight (2026-11-03, 3ae212ae).** The swap ran and the picture hardly changed. Two causes, both
+in the shader:
+
+- **k scaled the colour.** `k = 1 - saturate(CB2[17].w * 1.0526)` (0.075 on the flown ship) is in live's coverage
+  and nowhere else; the legacy client had no such factor. The port had put it into the dirt colour and the
+  smudge glare, 13 times too weak. Now the unscaled masks (`dirt = saturate(blemish.x * masks.y)`,
+  `imp = saturate(blemish.y * masks.z)`) drive the albedo and the glare, and k scales alpha only
+  (`crackA + k * (dirt + imp)`, as live has it). The colour written is still the radiance divided by alpha, so
+  the blend adds the legacy radiance once. A pixel is returned transparent only when its alpha and its unscaled
+  `crackA + dirt + imp` are both under 1/1024; a pixel with radiance and a smaller alpha is written at alpha 1/1024.
+  More pixels are shaded than before (the masks are no longer cut by k), so the cost is now to be measured.
+- **The lit normal is legacy's.** `w = lerp((0, 1, 0), (nx, nz, ny), crackMix)`, `nIn = w.x T - w.y N + w.z B`: -N
+  on flat glass, bent by a crack. Live's start value (0.5, 0.5, 1.0) tilted the intact glass about 66 degrees and is
+  no longer used (finding 2).
+
+The rig's legacy model was changed to the same spec. New numbers (WARP, debug layer on): dirt under the sun 1.9531
+(wanted 1.9531), alpha 0.2; the same dirt with k = 0.075 gives alpha 0.015 and colour 26.02 (wanted 26.04), so
+alpha times colour is unchanged; a smudge (imperfection mask 0.5) under the light straight ahead gives radiance
+468.75 at k = 1 (alpha 0.5, colour 3.662) and at k = 0.075 (alpha 0.0375, colour 48.78); a smudge of 0.01 at
+k = 0.075 has alpha 0.00075, below the floor, and is written at alpha 1/1024 with its radiance (colour 37.47,
+wanted 9.375 / 256 / (1/1024)).
 
 **What the flight must check** (flat first, Steam; then the headset):
 

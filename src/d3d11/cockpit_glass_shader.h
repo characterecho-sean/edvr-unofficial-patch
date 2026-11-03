@@ -14,14 +14,15 @@
 //   s0  the quality sampler (anisotropic wrap), s1 point/clamp for the shadow gathers, s2 the probe cube sampler
 // Nothing else is bound or created. What was taken from the live shader and what was chosen is written out in section 8 of the doc.
 //
-// COVERAGE is the live masks as they are: the crack (vertex mask against its threshold, times the crack texture's alpha), the dirt and the
-// imperfection (vertex masks times the blemish map's x and y channels, scaled by 1 - saturate(CB2[17].w * 1.0526)). The blemish map is sampled once, as
-// the legacy client did, where live blends three hexagonally tiled taps.
+// MASKS are the live masks: the crack (vertex mask against its threshold, times the crack texture's alpha), the dirt and the imperfection (vertex masks
+// times the blemish map's x and y channels). They drive the colour and the glare unscaled, as in the legacy client. The factor 1 - saturate(CB2[17].w *
+// 1.0526) (0.075 on the flown ship) scales ALPHA ONLY, as in live. The blemish map is sampled once, as the legacy client did, where live blends three
+// hexagonally tiled taps. The lit normal is the legacy client's: flat glass faces inward (-N), a crack bends it.
 //
-// THE BLEND. The canopy draws with straight alpha (SRC_ALPHA, INV_SRC_ALPHA; the probe flight, section 7 of the doc), so the colour written here
-// is NOT already weighted by coverage: it is the coverage-weighted legacy colour divided by the alpha written, and the blend applies coverage once.
-// Alpha is the legacy formula (the crack term and the tint alpha) plus the dirt and imperfection coverage; without those two a straight-alpha blend
-// of the legacy output would hide the dirt entirely, since the legacy client's alpha ignored them (its blend took the colour as it was).
+// THE BLEND. The canopy draws with straight alpha (SRC_ALPHA, INV_SRC_ALPHA; the probe flight, section 7 of the doc), so the colour written here is the
+// legacy radiance divided by the alpha written, and the blend adds that radiance once. Alpha is the legacy formula (the crack term and the tint alpha) plus
+// the dirt and imperfection coverage; without those two a straight-alpha blend of the legacy output would hide the dirt entirely, since the legacy client's
+// alpha ignored them (its blend took the colour as it was). A pixel with radiance but an alpha below kMinCoverage is written at alpha kMinCoverage.
 //
 // TUNED, NOT MEASURED: the five constants at the top of the second text (section 8 of the doc). The legacy client's values were not recoverable.
 #pragma once
@@ -172,7 +173,7 @@ static const float kAmbientScale = 1.0;        // the probe ambient, in the ligh
 // Fixed choices.
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
 static const uint kMaxProbes = 16;             // the live loop stops when the weights reach 1; this bounds a cluster that never does
-static const float kMinCoverage = 1.0 / 1024.0;  // below this alpha the blend changes nothing visible: skip the lighting
+static const float kMinCoverage = 1.0 / 1024.0;  // the smallest alpha written; a pixel with no alpha and no colour either returns transparent black unlit
 
 // The ambient: the game's clustered reflection probes, looked up as the live shader does (the pixel's cluster from its tile and depth, the probes in it
 // weighted by their volumes, summed until the weights reach 1), but sampled once, at the roughest mip, along the normal. That is the stand-in for the
@@ -240,22 +241,28 @@ float4 main(PsIn i) : SV_Target {
     float4 crackTex = CrackNormalAlpha.Sample(QualitySampler, uv);
     float2 blemish = Blemish.Sample(QualitySampler, uv).xy;
 
-    // Coverage. crackMix drives the normal; crackA (scaled by the material's occlusion scale) drives colour and alpha.
+    // Coverage. crackMix drives the normal; crackA (scaled by the material's occlusion scale) drives colour and alpha. dirt and imp are the masks as the
+    // legacy client had them, unscaled, and drive the colour and the glare. k (live's layer cutoff, 0.075 on the flown ship) scales ALPHA ONLY, as in live,
+    // where it appears in the coverage and nowhere else; the legacy client had no such factor.
     float crackMix = saturate((cb2[17].z < i.masks.x ? 1.0 : 0.0) * crackTex.w);
     float crackA = saturate(crackMix * cb2[7].z);
     float k = 1.0 - saturate(cb2[17].w * 1.052632);
-    float covDirt = k * saturate(blemish.x * i.masks.y);
-    float covImp = k * saturate(blemish.y * i.masks.z);
-    float coverage = min(1.0, crackA + covDirt + covImp);
+    float dirt = saturate(blemish.x * i.masks.y);
+    float imp = saturate(blemish.y * i.masks.z);
+    float coverage = min(1.0, crackA + k * (dirt + imp));
     float tint = cb1[56].x;
     float alpha = coverage + tint * (1.0 - coverage);
-    if (alpha < kMinCoverage) return float4(0, 0, 0, 0);
+    // Nothing to draw: no alpha and no colour either. A pixel with glare or dirt colour but a tiny alpha is still drawn, at alpha kMinCoverage (below).
+    if (alpha < kMinCoverage && crackA + dirt + imp < kMinCoverage) return float4(0, 0, 0, 0);
+    alpha = max(alpha, kMinCoverage);
 
-    // The lit normal. The crack texture bends it inside a crack; the no-crack weights are the live shader's own (0.5, 0.5, 1.0), and the glass is lit from
-    // inside, so the vertex-normal share points the other way (live's N_in).
+    // The lit normal: the legacy client's. Flat glass has the tangent-space normal (0, 0, 1); a crack bends it to the decoded crack normal. The glass is lit
+    // from inside, so the vertex-normal share points the other way (Nw = x T + y B - z N). In this slot order (T, N, B) that is w = lerp((0, 1, 0), (nx, nz,
+    // ny), crackMix), then x T - y N + z B. (Live's own lerp starts from the encoded flat value (0.5, 0.5, 1.0), which tilts intact glass by about 66 degrees;
+    // that is not ported.)
     float2 nxy = crackTex.xy * 2.007874 - 0.999985;
     float nz = sqrt(max(1.0 - dot(nxy, nxy), 0.0));
-    float3 w = crackMix * (float3(crackTex.x * 2.007874, nz, crackTex.y * 2.007874) + float3(-1.499985, -0.5, -1.999985)) + float3(0.5, 0.5, 1.0);
+    float3 w = lerp(float3(0.0, 1.0, 0.0), float3(nxy.x, nz, nxy.y), crackMix);
     float3 nIn = w.x * T - w.y * N + w.z * B;
     nIn = normalize(float3(dot(nIn, cb1[277].xyz), dot(nIn, cb1[278].xyz), dot(nIn, cb1[279].xyz)));
     float3 pv = float3(dot(cb1[277].xyz, i.lightingPosition), dot(cb1[278].xyz, i.lightingPosition), dot(cb1[279].xyz, i.lightingPosition));
@@ -270,15 +277,15 @@ float4 main(PsIn i) : SV_Target {
     float shadow = 1.0;
     if (lightColour.x + lightColour.y + lightColour.z > 0.001) shadow = sunShadow(i.lightingPosition);
     float ndl = saturate(dot(nIn, -lightDir));
-    float specAmt = lerp(covImp * kImperfectionSpec, kCrackSpec * cb1[56].y, crackA);
+    float specAmt = lerp(imp * kImperfectionSpec, kCrackSpec * cb1[56].y, crackA);
     float gloss = lerp(kImperfectionGloss, kCrackGloss, crackA);
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
-    float3 albedo = lerp(covDirt * cb1[56].y * cb2[11].xyz, cb2[8].yzw * cb1[56].y, crackA);
+    float3 albedo = lerp(dirt * cb1[56].y * cb2[11].xyz, cb2[8].yzw * cb1[56].y, crackA);
     float3 ambient = probeAmbient(pv, nIn, i.position.xy) * kAmbientScale;
     float3 radiance = (ndl * shadow * lightColour + ambient) * albedo + specAmt * glare * shadow * lightColour;
 
-    // Straight alpha: radiance is already weighted by coverage, so divide by the alpha written and the blend weights it once.
-    float3 rgb = radiance / max(alpha, 0.0001);
+    // Straight alpha: radiance is the legacy colour, weighted by the legacy masks. Divide by the alpha written and the blend adds it once.
+    float3 rgb = radiance / alpha;
     if (any(isnan(rgb))) rgb = 0;
     return float4(min(rgb * cb1[90].y, 60000.0), alpha);
 }
