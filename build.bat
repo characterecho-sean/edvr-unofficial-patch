@@ -4026,7 +4026,8 @@ REM Build gate for the depth writer probe (src\d3d11\depth_writer_probe.*), the 
 REM advanced.pixel_probe: a WARP device, a 256x256 R32G8X24 depth and scissor-clipped depth-only draws drive the module directly. Asserts
 REM the map names the LAST draw that changed each pixel (an earlier owner is replaced, a repeat of the same depth changes nothing), a
 REM read-only draw is not followed, the files and the log carry the owners, the game's compute state is put back, a view that is no eye's
-REM depth is counted and not followed, an array depth is declined once, and an unarmed probe does nothing.
+REM depth is counted and not followed, an array depth is declined once, an unarmed probe does nothing, and the probe's own dispatch, copies
+REM and compute binds reach the (spied) context vtable with the internal-work flags up while the game's own calls do not (the control).
 if not exist "%OBJ%\depthwriter" mkdir "%OBJ%\depthwriter"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^

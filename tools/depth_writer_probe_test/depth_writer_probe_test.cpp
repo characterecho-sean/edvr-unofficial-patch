@@ -35,10 +35,58 @@ void Log::note(const char* fmt, ...) {
 }
 }  // namespace edvr
 
+// The two internal-work flags the probe's context calls must raise (the real definitions sit in flat_compute_readback.cpp and
+// vr_world_route.cpp, which this rig does not link).
+namespace edvr {
+thread_local bool g_flatComputeInternal = false;
+thread_local bool g_vrWorldInternal = false;
+}  // namespace edvr
+
 using namespace edvr;
 using Microsoft::WRL::ComPtr;
 
 namespace {
+
+// A spy on the immediate context's vtable: the hooked slots the probe's compute work goes through in the game (exposure_fix.cpp
+// hookedDispatch and the CS state hooks, vscreen.cpp CopyResource), recording which internal flags are up at each call. The game's
+// state hooks step aside for g_flatComputeInternal and the dispatch thunk for g_vrWorldInternal; a call with the flag down would be
+// taken for the game's (the exposure fix, the census, the GPU pass profiler).
+constexpr size_t kSlotDispatch = 41, kSlotCopyResource = 47, kSlotCSSetUAVs = 68, kSlotCSSetShader = 69;
+struct SpyCount { int calls = 0, flatUp = 0, worldUp = 0; };
+SpyCount g_spyDispatch, g_spyCopy, g_spyUavs, g_spyShader;
+void* g_spyOrig[4] = {};
+
+void note(SpyCount& c) { ++c.calls; if (g_flatComputeInternal) ++c.flatUp; if (g_vrWorldInternal) ++c.worldUp; }
+void STDMETHODCALLTYPE spyDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    note(g_spyDispatch);
+    reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT)>(g_spyOrig[0])(self, x, y, z);
+}
+void STDMETHODCALLTYPE spyCopy(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
+    note(g_spyCopy);
+    reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*)>(g_spyOrig[1])(self, dst, src);
+}
+void STDMETHODCALLTYPE spyUavs(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11UnorderedAccessView* const* uavs, const UINT* counts) {
+    note(g_spyUavs);
+    reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*)>(g_spyOrig[2])(self, start, n, uavs, counts);
+}
+void STDMETHODCALLTYPE spyShader(ID3D11DeviceContext* self, ID3D11ComputeShader* cs, ID3D11ClassInstance* const* inst, UINT n) {
+    note(g_spyShader);
+    reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11ComputeShader*, ID3D11ClassInstance* const*, UINT)>(g_spyOrig[3])(self, cs, inst, n);
+}
+
+void patchSlot(void** vt, size_t slot, void* fn, void** orig) {
+    DWORD old = 0;
+    VirtualProtect(&vt[slot], sizeof(void*), PAGE_READWRITE, &old);
+    if (fn) { *orig = vt[slot]; vt[slot] = fn; } else vt[slot] = *orig;
+    VirtualProtect(&vt[slot], sizeof(void*), old, &old);
+}
+void spyInstall(ID3D11DeviceContext* ctx, bool on) {
+    void** vt = *reinterpret_cast<void***>(ctx);
+    patchSlot(vt, kSlotDispatch, on ? reinterpret_cast<void*>(&spyDispatch) : nullptr, &g_spyOrig[0]);
+    patchSlot(vt, kSlotCopyResource, on ? reinterpret_cast<void*>(&spyCopy) : nullptr, &g_spyOrig[1]);
+    patchSlot(vt, kSlotCSSetUAVs, on ? reinterpret_cast<void*>(&spyUavs) : nullptr, &g_spyOrig[2]);
+    patchSlot(vt, kSlotCSSetShader, on ? reinterpret_cast<void*>(&spyShader) : nullptr, &g_spyOrig[3]);
+}
 
 int g_checks = 0, g_failures = 0;
 void check(bool ok, const char* what) {
@@ -209,6 +257,25 @@ void caseMap(const std::wstring& dir) {
     }
     check(!depthWriterWantsDraws(), "an unarmed probe wants no draws");
     g_log.clear();
+    // The control: the game's own compute calls (no scope up) reach the spy with both flags down, so the checks below can tell.
+    spyInstall(rig.ctx.Get(), true);
+    g_spyDispatch = g_spyCopy = g_spyUavs = g_spyShader = SpyCount{};
+    {
+        ComPtr<ID3D11Texture2D> other;
+        D3D11_TEXTURE2D_DESC kd{};
+        kd.Width = 4; kd.Height = 4; kd.MipLevels = 1; kd.ArraySize = 1; kd.Format = DXGI_FORMAT_R8_UNORM;
+        kd.SampleDesc.Count = 1; kd.Usage = D3D11_USAGE_DEFAULT; kd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr(rig.dev->CreateTexture2D(&kd, nullptr, &other), "create a copy target for the spy control");
+        rig.ctx->CopyResource(other.Get(), keepTex.Get());
+        rig.ctx->CSSetShader(nullptr, nullptr, 0);
+        rig.ctx->CSSetUnorderedAccessViews(0, 0, nullptr, nullptr);
+        rig.ctx->Dispatch(0, 0, 0);
+    }
+    check(g_spyDispatch.calls == 1 && g_spyCopy.calls == 1 && g_spyUavs.calls == 1 && g_spyShader.calls == 1 &&
+          g_spyDispatch.flatUp + g_spyDispatch.worldUp + g_spyCopy.flatUp + g_spyCopy.worldUp + g_spyUavs.flatUp + g_spyUavs.worldUp +
+          g_spyShader.flatUp + g_spyShader.worldUp == 0,
+          "control: the game's own dispatch, copy and compute binds reach the hooked slots with no internal flag up");
+    g_spyDispatch = g_spyCopy = g_spyUavs = g_spyShader = SpyCount{};
     const D3D11_RECT left{0, 0, 128, 256}, mid{64, 0, 192, 256}, right{192, 0, 256, 256};
     probedFrame(rig, L"T001", [&] {
         check(depthWriterWantsDraws(), "the armed frame wants draws");
@@ -228,6 +295,15 @@ void caseMap(const std::wstring& dir) {
         rig.draw(D3D11_RECT{192, 0, 256, 128}, 0.8f, true, 0xAAAA000000000006ull);
         rig.ctx->OMSetRenderTargets(0, none, rig.dsv.Get());
     });
+    spyInstall(rig.ctx.Get(), false);
+    // the probe's own dispatch, copies and compute binds ran under VrWorldInternalScope: g_flatComputeInternal for the state hooks and
+    // g_vrWorldInternal for the dispatch thunk, every call, and the flags are down again when it returns
+    check(g_spyDispatch.calls == 5 && g_spyDispatch.flatUp == g_spyDispatch.calls && g_spyDispatch.worldUp == g_spyDispatch.calls,
+          "the probe's dispatches (one per followed draw) run with both internal flags up");
+    check(g_spyShader.calls == 10 && g_spyShader.flatUp == g_spyShader.calls && g_spyUavs.calls == 10 && g_spyUavs.flatUp == g_spyUavs.calls,
+          "the probe's compute shader and UAV binds, and their restores, run with the compute-internal flag up");
+    check(g_spyCopy.calls > 0 && g_spyCopy.flatUp == g_spyCopy.calls, "the probe's copies run with the compute-internal flag up");
+    check(!g_flatComputeInternal && !g_vrWorldInternal, "the internal flags are down again after the probe returns");
     check(!depthWriterWantsDraws(), "the probe stands down after the frame");
     check(logHas("5 depth-writing draws followed"), "the summary counts the followed draws (4 through the resolver's view, 1 through another view of the same texture)");
     const std::wstring base = dir + L"\\depthwriter_T001";
