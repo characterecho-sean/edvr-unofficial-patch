@@ -251,6 +251,10 @@ bool supercruiseBarsReady(ID3D11DeviceContext*, const char** why) {
     return false;
 }
 void supercruiseBarsLog(const char*) {}
+// ... and the flat adapter's bracket around it (flat_ui_layer.cpp, linked by flat_weapon_admission_test): never reached for the same reason.
+void supercruiseBarsPrepare(ID3D11DeviceContext*) {}
+bool supercruiseBarsBegin(ID3D11DeviceContext*, uint32_t) { return false; }
+void supercruiseBarsEnd(ID3D11DeviceContext*) {}
 void uiSurfacesSetTarget(float) {}
 void uiSurfacesFrameBoundary() {}
 void uiSurfacesLogAtlas() {}
@@ -798,6 +802,35 @@ void testJitterCancel(Rig& r) {
     }
     g_stubs.jx = g_stubs.jy = 0.0f;
     r.ctx->UpdateSubresource(r.rectCb.Get(), 0, nullptr, base, 0, 0);
+}
+
+// The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03: one key for both profiles, off by default, read live at every configure). This rig runs the
+// VR profile, which never sets the flat adapter's ask, so a composite that read the SMAA output can only have been asked by the key: with it off (the shipped state)
+// the composite reads the raw layer, with it on it reads the smoothed one, and off again it reads the raw one. The layer's size is reported either way.
+void testHudSmoothVr(Rig& r) {
+    check(!runtimeFlatProfile(), "this rig is the VR profile (the flat adapter's ask is never made here)");
+    const uint32_t whole[4] = {0, 0, kDoorW, kDoorH};
+    const float uv[4] = {0, 0, 1, 1};
+    auto& cfg = Config::get();
+    const auto round = [&](const char* key, UiLayerEdgeSmoothing expect, const char* what) {
+        cfg.set("fix.hud_antialiasing", key);
+        uiLayerConfigure(cfg);
+        g_stubs.mayTake = true;
+        const uint64_t seq = nextArmed(r);
+        bindGame(r, 0);
+        const Drawn d = drawScreen(r);
+        check(d.reissued, "a screen frame is re-issued into the layer");
+        ID3D11Texture2D* out = uiLayerComposite(seq, 0, r.frame[0].tex.Get(), whole, uv);
+        check(out != nullptr, "the composite runs");
+        if (out) out->Release();
+        const UiLayerEdgeSmoothingResult edge = uiLayerFlatEdgeSmoothingResult();
+        check(edge.outcome == expect && edge.w && edge.h, what);
+    };
+    round("off", UiLayerEdgeSmoothing::kRaw, "VR, fix.hud_antialiasing off (shipped): the composite reads the raw layer");
+    round("on", UiLayerEdgeSmoothing::kSmoothed, "VR, fix.hud_antialiasing on: the composite reads the SMAA output of the layer (live: the next configure takes it)");
+    round("off", UiLayerEdgeSmoothing::kRaw, "VR, fix.hud_antialiasing off again: the composite reads the raw layer");
+    cfg.set("fix.hud_antialiasing", "off");
+    uiLayerConfigure(cfg);
 }
 
 // A refusal: the game's draw still landed, nothing was taken, the game's state is untouched, the route was not told,
@@ -1851,6 +1884,7 @@ int main(int argc, char** argv) {
     testKeyOff(r);
     testReissue(r);
     testJitterCancel(r);
+    testHudSmoothVr(r);
     testRefusals(r);
     testCurvedScreen(r);
     testBeginWithoutOuterScope(r);

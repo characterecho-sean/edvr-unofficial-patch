@@ -48,12 +48,32 @@ static bool wiredVscreenBars(const std::string& t) {
     // Begin only for a draw the layer bracketed AND decided to take as the bars
     return found(t.substr(begin, 120).find("layered && barsDecided"));
 }
+// flat_runtime.cpp (2026-11-03): the flat issue path brackets the bars as vscreen.cpp does. The decision remembers the bars (and the draw's vertex count);
+// Prepare comes before the layer's Begin, the strip's Begin after a true layer Begin; End comes before the layer's End, in endActualDraw and in the destructor.
+static bool wiredFlatBars(const std::string& t) {
+    const size_t decide = t.find("uiBars = flatUiLayerDecidedBars(); uiBarsVertices = count;");
+    const size_t begin = t.find("void FlatRuntimeDrawScope::beginActualDraw(");
+    const size_t prepare = found(begin) ? t.find("if(uiBars)flatUiLayerBarsPrepare(ctx);", begin) : std::string::npos;
+    const size_t layerBegin = found(prepare) ? t.find("uiTaken=flatUiLayerBegin(ctx);", prepare) : std::string::npos;
+    const size_t barsBegin = found(layerBegin) ? t.find("if(uiTaken&&uiBars)uiBarsBound=flatUiLayerBarsBegin(ctx,uiBarsVertices);", layerBegin) : std::string::npos;
+    const size_t end = t.find("void FlatRuntimeDrawScope::endActualDraw()");
+    const size_t barsEnd = found(end) ? t.find("if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}", end) : std::string::npos;
+    const size_t layerEnd = found(end) ? t.find("if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}", end) : std::string::npos;
+    const size_t dtor = t.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()");
+    const size_t dBarsEnd = found(dtor) ? t.find("if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}", dtor) : std::string::npos;
+    const size_t dLayerEnd = found(dtor) ? t.find("if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}", dtor) : std::string::npos;
+    if (!found(decide) || !found(begin) || !found(prepare) || !found(layerBegin) || !found(barsBegin) || !found(end) || !found(barsEnd) || !found(layerEnd) || !found(dtor) ||
+        !found(dBarsEnd) || !found(dLayerEnd))
+        return false;
+    // the decision is before the issue's Begin; Prepare (the game's viewport) before the layer's Begin, the strip's Begin after it; End before the layer's End in both places
+    return decide < begin && prepare < layerBegin && layerBegin < barsBegin && barsEnd < layerEnd && dBarsEnd < dLayerEnd && end < dtor;
+}
 static bool wiredGatherer(const std::string& t) {
     const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {");
     if (!found(fn)) return false;
-    const size_t read = t.find("if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))", fn);
+    const size_t read = t.find("if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust))", fn);
     const size_t ps = t.find("f.ps = bindingShaderHash(BindSlot::Ps);", fn);
-    return found(read) && found(ps) && ps > read && ps - read < 250;
+    return found(read) && found(ps) && ps > read && ps - read < 300;
 }
 static bool wiredBoundary(const std::string& t) {
     const size_t layerTick = t.find("tkUiLayer.run(");
@@ -69,7 +89,10 @@ static bool wiredLayerLog(const std::string& t) {
     const size_t orbit = t.find("    orbitalWidthLog(sceneLineLayerText(UiLayerFamily::kOrbitLines, frames).c_str());");
     const size_t bars = t.find("    supercruiseBarsLog(sceneLineLayerText(UiLayerFamily::kSupercruiseBars, frames).c_str());");
     const size_t dust = t.find("    Log::get().note(\"ui quality: space dust: %s.\", sceneLineLayerText(UiLayerFamily::kSpaceDust, frames).c_str());");
-    return found(orbit) && found(bars) && found(dust) && bars > orbit && bars - orbit < 300 && dust > bars && dust - bars < 700 && found(t.find("#include \"supercruise_bars.h\""));
+    // 2026-11-03: the normal-space dust's line follows the space dust's (zeros print, so a log without it is a build that never ran it)
+    const size_t normal = t.find("    Log::get().note(\"ui quality: normal-space dust: %s.\", sceneLineLayerText(UiLayerFamily::kNormalSpaceDust, frames).c_str());");
+    return found(orbit) && found(bars) && found(dust) && bars > orbit && bars - orbit < 300 && dust > bars && dust - bars < 700 && found(normal) && normal > dust && normal - dust < 600 &&
+           found(t.find("#include \"supercruise_bars.h\""));
 }
 static bool wiredProbe(const std::string& t) {
     const size_t cond = t.find("if (instances >= kLedgerAuxMin || d.vs==kOrbitalLineVs || d.vs==kUiVsSupercruiseBars || d.vs==kUiVsSpaceDust) auxCapture(ctx, d.vs, count, instances);");
@@ -134,11 +157,25 @@ static void wiringCases() {
     check(!wiredVscreenBars(replaced(vscreen, "barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;", "barsFamily = uiFamily == UiLayerFamily::kOrbitLines;")),
           "control: a flag made from the wrong family trips the pin");
 
+    const std::string flatRuntime = readText("src/d3d11/flat_runtime.cpp");
+    check(flatRuntime.size() > 100000, "flat_runtime.cpp is read from the repo root");
+    check(wiredFlatBars(flatRuntime), "flat_runtime.cpp: the decision remembers the bars, Prepare before the layer's Begin, the strip's Begin after a true one, End before the layer's End (endActualDraw and the destructor)");
+    check(!wiredFlatBars(without(flatRuntime, "if(uiBars)flatUiLayerBarsPrepare(ctx);")), "control: no flat Prepare trips the pin");
+    check(!wiredFlatBars(without(flatRuntime, "if(uiTaken&&uiBars)uiBarsBound=flatUiLayerBarsBegin(ctx,uiBarsVertices);")), "control: no flat strip Begin trips the pin");
+    check(!wiredFlatBars(without(flatRuntime, "if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}")), "control: no strip End in endActualDraw trips the pin");
+    check(!wiredFlatBars(without(flatRuntime, "if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}")), "control: no strip End in the destructor trips the pin");
+    check(!wiredFlatBars(replaced(replaced(flatRuntime, "    if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}\n", ""), "    if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}\n",
+                                      "    if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}\n    if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}\n")),
+          "control: a strip End after the layer's own End trips the pin");
+    check(!wiredFlatBars(replaced(flatRuntime, "uiBars = flatUiLayerDecidedBars(); uiBarsVertices = count;", "")), "control: a decision that never remembers the bars trips the pin");
+
     check(wiredGatherer(vscreen), "vscreen.cpp: the family rule's gatherer reads the pixel shader for the two line vertex shaders (the pair is the key)");
-    check(!wiredGatherer(replaced(vscreen, "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust", "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSpaceDust")),
+    check(!wiredGatherer(replaced(vscreen, "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust", "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust")),
           "control: a gatherer that never reads the bars' pixel shader trips the pin");
-    check(!wiredGatherer(replaced(vscreen, "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust", "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars")),
+    check(!wiredGatherer(replaced(vscreen, "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust", "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kVsNormalSpaceDust")),
           "control: ...nor the space dust's");
+    check(!wiredGatherer(replaced(vscreen, "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust", "f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust")),
+          "control: ...nor the normal-space dust's (2026-11-03: without its pixel shader the pair never names the family and the dust stays in the scene)");
     check(wiredBoundary(vscreen), "vscreen.cpp: the boundary tick follows the layer's, and the shutdown follows the layer's");
     check(!wiredBoundary(without(vscreen, "tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });")), "control: no boundary tick trips the pin");
     check(!wiredBoundary(without(vscreen, "    supercruiseBarsShutdown();\n")), "control: no shutdown trips the pin");
@@ -146,6 +183,7 @@ static void wiringCases() {
     check(wiredLayerLog(layer), "ui_layer.cpp: the bars' 30 s line follows the orbit lines' and carries the layer's half");
     check(!wiredLayerLog(without(layer, "    supercruiseBarsLog(sceneLineLayerText(UiLayerFamily::kSupercruiseBars, frames).c_str());")), "control: no bars log call trips the pin");
     check(!wiredLayerLog(without(layer, "    Log::get().note(\"ui quality: space dust: %s.\", sceneLineLayerText(UiLayerFamily::kSpaceDust, frames).c_str());")), "control: no space-dust line trips the pin");
+    check(!wiredLayerLog(without(layer, "    Log::get().note(\"ui quality: normal-space dust: %s.\", sceneLineLayerText(UiLayerFamily::kNormalSpaceDust, frames).c_str());")), "control: no normal-space-dust line trips the pin");
 
     check(wiredProbe(probe), "object_probe.cpp: the aux vertex capture watches the bars' draw whatever its instance count, with a cap that holds its 140 vertices and a line naming the offset");
     check(!wiredProbe(replaced(probe, "|| d.vs==kUiVsSupercruiseBars || d.vs==kUiVsSpaceDust) auxCapture", "|| d.vs==kUiVsSpaceDust) auxCapture")), "control: a capture that does not watch the bars trips the pin");

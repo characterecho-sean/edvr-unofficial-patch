@@ -364,8 +364,9 @@ static void ruleTests() {
     check(static_cast<int>(UiLayerFamily::kWeaponsFire) == static_cast<int>(UiLayerFamily::kOnFootHud) + 1 &&
               static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
               static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
-              static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the scope mark last (no older number moved)");
+              static_cast<int>(UiLayerFamily::kNormalSpaceDust) == static_cast<int>(UiLayerFamily::kScopeMark) + 1 &&
+              static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03) last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -674,7 +675,8 @@ static UiBlendRt blendOf(const Row& r) {
     return b;
 }
 
-// The family rule as it stood before this arc (uiLayerFamilyFor at 139a6ff2, the tree this work started from), frozen: no weapons-fire pair.
+// The family rule as it stood before this arc (uiLayerFamilyFor at 139a6ff2, the tree this work started from), frozen: no weapons-fire pair. The normal-space dust's pair
+// (2026-11-03) is in the frozen model too: it is not this arc's change, so the census below still shows exactly the weapons rows and the refraction rows changing.
 static UiLayerFamily frozenFamilyFor(const UiFamilyFacts& f) {
     UiLayerFamily out = UiLayerFamily::kNone;
     if (f.targetKind == 0) {
@@ -685,6 +687,7 @@ static UiLayerFamily frozenFamilyFor(const UiFamilyFacts& f) {
               : (f.vs == kUiVsOrbitLines && f.ps == kUiPsOrbitLines)           ? UiLayerFamily::kOrbitLines
               : (f.vs == kUiVsSupercruiseBars && f.ps == kUiPsSupercruiseBars) ? UiLayerFamily::kSupercruiseBars
               : (f.vs == kUiVsSpaceDust && f.ps == kUiPsSpaceDust)             ? UiLayerFamily::kSpaceDust
+              : (f.vs == kVsNormalSpaceDust && f.ps == kPsNormalSpaceDust)     ? UiLayerFamily::kNormalSpaceDust
               : (uiHoloGenericHash(f.vs) || (f.vs == kHoloTargetSphere && (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
                   ? UiLayerFamily::kHoloGeneric : UiLayerFamily::kNone;
     } else if (f.excluded) {
@@ -757,9 +760,9 @@ static Verdict verdictOf(const Census& c, const Row& r, bool production, const T
 
 static bool isWeaponRow(const Row& r) { return weaponPairIndex(r.vs, r.ps) >= 0; }
 
-static void censusTests(const char* path, unsigned weaponRows, unsigned partnerRows) {
+static void censusTests(const char* path, unsigned weaponRows, unsigned partnerRows, unsigned normalDustRows) {
     const Census c = loadCensus(path);
-    unsigned weapons = 0, partners = 0, changed = 0, same = 0;
+    unsigned weapons = 0, partners = 0, normalDust = 0, changed = 0, same = 0;
     std::map<UiLayerFamily, unsigned> otherTaken;
     for (const Row& r : c.rows) {
         const Verdict was = verdictOf(c, r, false), now = verdictOf(c, r, true);
@@ -776,12 +779,19 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
             ++changed;
         } else {
             check(now.family == was.family && now.decision == was.decision, "every other row is decided exactly as before");
+            // 2026-11-03: the census's normal-space dust rows (E904/0950: a 3072-vertex additive SRC_ALPHA/ONE draw, depth GEQUAL no write, stencil EQUAL) are the
+            // family and are redirected into the HDR layer under the key's default (the layer's depth and stencil seeded: dsReproducible).
+            if (r.vs == kVsNormalSpaceDust && r.ps == kPsNormalSpaceDust) {
+                ++normalDust;
+                check(now.family == UiLayerFamily::kNormalSpaceDust && now.decision == UiLayerDecision::kRedirect, "a normal-space dust row is the family and is redirected into the HDR layer");
+            }
             ++same;
             if (now.decision == UiLayerDecision::kRedirect) ++otherTaken[now.family];
         }
     }
     check(weapons == weaponRows, "the census frame holds the weapons rows the log counted");
     check(partners == partnerRows, "...and the shield's refraction rows");
+    check(normalDust == normalDustRows, "...and the normal-space dust rows");
     check(changed == weapons + partners && same + changed == c.rows.size(), "exactly the weapons rows and the shield-refraction rows change decision");
 
     // One-token mutants of the first weapons row: each is refused for the right reason, or is no longer the family.
@@ -984,9 +994,11 @@ static bool wiredFlat(const std::string& adapter, const std::string& runtimeH, c
 static void flatTests() {
     // The family rule.
     check(flatUiLayerTakesFamily(UiLayerFamily::kWeaponsFire) && flatUiLayerTakesFamily(UiLayerFamily::kShieldRipple), "the flat adapter takes the weapons fire and the shield ripple");
-    check(flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) && !flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric) && !flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) &&
-              !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust),
-          "...and still only the cockpit HUD families besides (not the holograms, not the scene lines)");
+    check(flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) && !flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric) && !flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines),
+          "...and still the cockpit HUD families besides (not the holograms, not the orbit lines)");
+    // 2026-11-03: the supercruise bars and the two dusts joined them (they blur under the flat anti-aliasing's history; ui_quality_test pins the rest).
+    check(flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) && flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust),
+          "...and, since 2026-11-03, the supercruise bars and the two dusts");
     // The pairs name their family through the shared rule the flat adapter uses.
     check(flatUiFamilyOf(kUiVsWeaponBeams, kUiPsWeaponBeams) == UiLayerFamily::kWeaponsFire && flatUiFamilyOf(kUiVsMulticannon, kUiPsMulticannon) == UiLayerFamily::kWeaponsFire &&
               flatUiFamilyOf(kUiVsShieldStrike, kUiPsShieldStrike) == UiLayerFamily::kWeaponsFire,
@@ -1015,7 +1027,7 @@ static void flatTests() {
         if (std::strcmp(kFlatPageRows[i].key, "hud_antialiasing") == 0) hud = static_cast<int>(i);
     }
     check(quality >= 0 && hud == quality + 1,
-          "...the flat page has HUD Anti-Aliasing directly under UI quality (VR's page, which has no such row, has UI quality: menuTests)");
+          "...the flat page has HUD Anti-Aliasing directly under UI quality (VR's Performance page has both rows since 2026-11-03: menuTests)");
     const std::string adapter = readFile("src/d3d11/flat_ui_layer.cpp"), runtimeH = readFile("src/d3d11/flat_runtime.h"), keys = readFile("src/common/flat_profile_keys.h");
     check(adapter.size() > 10000 && runtimeH.size() > 1000 && keys.size() > 500, "the flat sources are readable from the repo root");
     check(wiredFlat(adapter, runtimeH, keys), "flat: the adapter asks the half that governs the family, the tone bracket runs its steps, the door is told the picture is resolved, the key is allow-listed");
@@ -1052,6 +1064,11 @@ static void menuTests() {
         for (int i = 0; i < count; ++i)
             if (kMenuRows[i].tier == MenuTier::Fix && std::strcmp(kMenuRows[i].page, "performance") == 0 && i == quality) onPage = true;
         check(onPage, "UI quality is on VR's Performance page");
+        // 2026-11-03: the HUD Anti-Aliasing row (the key the VR layer reads too) is on VR's Performance page as well, token `menu performance`, directly under UI quality.
+        bool hudOnPage = false;
+        for (int i = 0; i < count; ++i)
+            if (kMenuRows[i].tier == MenuTier::Fix && std::strcmp(kMenuRows[i].page, "performance") == 0 && i == hud) hudOnPage = true;
+        check(hudOnPage, "HUD Anti-Aliasing is on VR's Performance page too");
     }
 
     const std::string menu = readFile("src/d3d11/menu.cpp");
@@ -1900,9 +1917,9 @@ int main(int argc, char** argv) {
         scopeMarkTests();
         keyTests();
         planTests();
-        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c1_f0.txt", 2, 0);
-        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c3_f0.txt", 4, 2);
-        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c4_f0.txt", 4, 0);
+        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c1_f0.txt", 2, 0, 2);
+        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c3_f0.txt", 4, 2, 2);
+        censusTests("tools/sharp_weapons_test/fixtures/census_070029_c4_f0.txt", 4, 0, 2);
         wiringTests();
         flatTests();
         menuTests();

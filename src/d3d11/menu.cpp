@@ -481,11 +481,11 @@ bool sharpenRowDisabled() {
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
 }
 
-// fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24; the flat panel only: its `menu flat_performance` page is one VR's menu builds none of). It smooths
-// the HUD layer, which is live only while fix.ui_quality is not off AND the flat anti-aliasing is on (flat_ui_layer.cpp), so with either off the row stays on the
-// page, dimmed, and stops responding. UI quality is read as the layer reads it (uiQualityParse, the shipped 100 for a missing line) and the anti-aliasing as
-// the flat profile reads it, live, every time the page is drawn or a row is touched. The hint and the refused step name
-// the cause that applies: UI quality first when it is off, else the anti-aliasing.
+// fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24 on the flat panel; on VR's Performance page too since 2026-11-03). It smooths the UI layer, which is
+// live only while fix.ui_quality is not off AND the profile's own anti-aliasing is on (flat_ui_layer.cpp for flat, ui_layer.cpp's uiLayerConfigure for VR), so with
+// either off the row stays on the page, dimmed, and stops responding. UI quality is read as the layer reads it (uiQualityParse, the shipped 100 for a missing line)
+// and the anti-aliasing as the running profile reads it (flat: the flat mode, requestedTemporalMode; VR: fix.temporal_aa), live, every time the page is drawn or a
+// row is touched. The hint and the refused step name the cause that applies: UI quality first when it is off, else the anti-aliasing.
 bool isHudAntiAliasingRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "hud_antialiasing") == 0;
 }
@@ -496,7 +496,8 @@ bool hudAntiAliasingUiQualityOn() {
 }
 
 bool hudAntiAliasingModeOn() {
-    return temporalModeEnabledFor(Config::get().requestedTemporalMode(), true);
+    return runtimeFlatProfile() ? temporalModeEnabledFor(Config::get().requestedTemporalMode(), true)
+                                : temporalModeEnabledFor(Config::get().getString("fix.temporal_aa", "off"), false);
 }
 
 bool hudAntiAliasingRowDisabled() {

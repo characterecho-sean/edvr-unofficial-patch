@@ -4122,10 +4122,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;
     f.vs = bindingShaderHash(BindSlot::Vs);
     f.nativeOnFoot = nativeOnFootSharpHudWanted();   // F26: the on-foot HUD family is named only while the sharp on-foot HUD is on, on foot
-    // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
-    // shader PAIR (ui_layer_math.h: the bars' and the dust's vertex shaders are also seen with another pixel shader). Ordinary
-    // HDR draws need no extra hash read.
-    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
+    // The target sphere needs exact PS admission for its depth-address remap, and the supercruise draws and the normal-space dust
+    // are named by their shader PAIR (ui_layer_math.h: the bars' and the supercruise dust's vertex shaders are also seen with another
+    // pixel shader). Ordinary HDR draws need no extra hash read.
+    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
     // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
     else if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))

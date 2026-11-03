@@ -130,8 +130,13 @@ inline int flatProjectionRecipeTests() {
         {0xDF3503CD07F9B10Cull,0x02CC981DF36257C3ull,2,FlatProjectionPatchLayout::ForwardColumns,6},
         {0x66DE2CADB1F4AE6Bull,0x235567BE2840B3EDull,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0x66DE2CADB1F4AE6Bull,0x818212B5F404C002ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        // 2026-11-03: the supercruise space dust and bars pairs the flat UI layer takes (their vertex shaders' other pixel shaders are
+        // the 9BFC7FD2/CB7AF179 and A47A3315/C67370DE pairs above): colour-only pixel shaders by the dumps' disassembly, the same
+        // vertex shaders (the same hashes), so the same clip spans.
+        {0x9BFC7FD232328391ull,0xDBF1725726018F52ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xA47A3315FFF5E2E4ull,0x869FFF43E875906Eull,0,FlatProjectionPatchLayout::ForwardDp4,4},
     };
-    expect(sizeof(latest)/sizeof(latest[0])==46,"latest supported ordinary pair census size");
+    expect(sizeof(latest)/sizeof(latest[0])==48,"latest supported ordinary pair census size");
     FlatProjectionJitter jitter{};
     expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
     for (const auto& pair : latest) {

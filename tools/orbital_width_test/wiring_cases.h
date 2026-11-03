@@ -154,7 +154,7 @@ static bool wiredLayerTakeLayer(const std::string& t) {
     const size_t crisp = t.find("f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView && uiLayerFamilyTakesHdr(family);", fn);
     const size_t guard = t.find("if (uiLayerFamilyIsSceneLines(family)) {", fn);
     const size_t size = t.find("const UiLayerSize ls = uiLayerSize(g_eye[f.eye].door.fullW, g_eye[f.eye].door.fullH, layerTarget());", fn);
-    const size_t wider = t.find("f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", fn);
+    const size_t wider = t.find("f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, g_tc.info.a, g_tc.info.b, runtimeFlatProfile());", fn);
     const size_t armed = t.find("f.armed = uiLayerArmed(g_eye[f.eye].door, seq);", fn);
     const size_t decide = t.find("UiLayerDecision d = uiLayerDecide(f);", fn);
     const size_t ready = t.find("f.familyReady = supercruiseBarsReady(ctx, &familyWhy);", fn);
@@ -248,9 +248,9 @@ static void wiringCases() {
           "control: a crisp set that is not the one list (the lines left out) trips the pin");
     check(!wiredLayerTakeLayer(replaced(layer, "if (uiLayerFamilyIsSceneLines(family)) {", "{")),
           "control: a density fact asked of every family (the cockpit HUD would be declined too) trips the pin");
-    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", "f.layerWider = true;")),
+    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, g_tc.info.a, g_tc.info.b, runtimeFlatProfile());", "f.layerWider = true;")),
           "control: a density fact that is always true (the take never declines) trips the pin");
-    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, ls.w, ls.h);")),
+    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, g_tc.info.a, g_tc.info.b, runtimeFlatProfile());", "f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, ls.w, ls.h, false);")),
           "control: a density fact measured against the layer itself trips the pin");
     check(!wiredLayerTakeLayer(replaced(layer, "f.familyReady = supercruiseBarsReady(ctx, &familyWhy);", "f.familyReady = true;")),
           "control: a bars decision that never asks the private pass trips the pin");
