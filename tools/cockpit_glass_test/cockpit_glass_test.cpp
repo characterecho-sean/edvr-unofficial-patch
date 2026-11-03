@@ -7,7 +7,7 @@
 //   - a cascade whose moment map puts an occluder between the light and the pixel: dark; one with the occluder behind the pixel: lit as without a cascade;
 //   - the reflection probe ambient with the sun off (a hangar), a lit crack, the glare lobes at the measured values, the tint alpha, no streak texture (no dirt);
 //   - the ice and condensation overlays: the same dirt light, premultiplied, alpha written 0, from their own vertex shaders' mask orders and texture slots.
-// Run with --dump <file> to write the generated streak texture as raw bytes (256 x 256). Output under obj\ and System32's d3d11.
+// Run with --dump <file> to write the generated streak texture as raw bytes (512 x 512). Output under obj\ and System32's d3d11.
 #include "../../src/d3d11/cockpit_glass_core.h"
 #include "../../src/d3d11/cockpit_glass_streaks.h"
 #include "temporal_shader_bytecode.h"
@@ -21,7 +21,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <chrono>
+#include <complex>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -395,6 +397,113 @@ static const float kInvPi = 0.318310f;   // live's factor on the direct light, w
 
 static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-6f; }
 
+// A radix-2 FFT, for the band energies (the texture is a power of two a side).
+static void fft1(std::vector<std::complex<double>>& v, bool) {
+    const size_t n = v.size();
+    for (size_t i = 1, j = 0; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(v[i], v[j]);
+    }
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const double ang = -2.0 * 3.14159265358979323846 / static_cast<double>(len);
+        const std::complex<double> wl(std::cos(ang), std::sin(ang));
+        for (size_t i = 0; i < n; i += len) {
+            std::complex<double> w(1);
+            for (size_t k = 0; k < len / 2; ++k, w *= wl) {
+                const std::complex<double> u = v[i + k], t = v[i + k + len / 2] * w;
+                v[i + k] = u + t;
+                v[i + k + len / 2] = u - t;
+            }
+        }
+    }
+}
+
+struct StreakStats {
+    double std = 0, p5 = 0, p50 = 0, p95 = 0;
+    double band[4] = {0, 0, 0, 0};   // spectral energy by cycles per tile: 0-4, 4-16, 16-64, 64 and up
+    double local = 0, global = 0;    // fibre coherence: local, and how well the regions' directions agree
+};
+
+// The figures section 13 of the doc compares (tools-side, on the stored bytes normalised to the texture's max): the same definitions as the analysis script used on the
+// legacy texture's statistics.
+static StreakStats streakStats(const std::vector<uint8_t>& bytes, int n) {
+    StreakStats st;
+    std::vector<double> a(bytes.size());
+    double mx = 0, mean = 0;
+    for (size_t i = 0; i < a.size(); ++i) { a[i] = bytes[i]; mx = a[i] > mx ? a[i] : mx; }
+    for (double& v : a) { v /= mx; mean += v; }
+    mean /= static_cast<double>(a.size());
+    for (double v : a) st.std += (v - mean) * (v - mean);
+    st.std = std::sqrt(st.std / static_cast<double>(a.size()));
+    std::vector<double> sorted = a;
+    std::sort(sorted.begin(), sorted.end());
+    st.p5 = sorted[sorted.size() * 5 / 100];
+    st.p50 = sorted[sorted.size() / 2];
+    st.p95 = sorted[sorted.size() * 95 / 100];
+    // Band energy.
+    std::vector<std::complex<double>> grid(a.size());
+    for (size_t i = 0; i < a.size(); ++i) grid[i] = a[i] - mean;
+    std::vector<std::complex<double>> line(n);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) line[x] = grid[static_cast<size_t>(y) * n + x];
+        fft1(line, false);
+        for (int x = 0; x < n; ++x) grid[static_cast<size_t>(y) * n + x] = line[x];
+    }
+    for (int x = 0; x < n; ++x) {
+        for (int y = 0; y < n; ++y) line[y] = grid[static_cast<size_t>(y) * n + x];
+        fft1(line, false);
+        for (int y = 0; y < n; ++y) grid[static_cast<size_t>(y) * n + x] = line[y];
+    }
+    double total = 0;
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const double fy = y < n / 2 ? y : y - n, fx = x < n / 2 ? x : x - n;
+            const double r = std::sqrt(fx * fx + fy * fy), e = std::norm(grid[static_cast<size_t>(y) * n + x]);
+            total += e;
+            st.band[r <= 4 ? 0 : r <= 16 ? 1 : r <= 64 ? 2 : 3] += e;
+        }
+    for (double& b : st.band) b /= total;
+    // Structure tensor on a window of n / 16 texels (at least 8), wrapping.
+    const int w = std::max(8, n / 16);
+    auto box = [&](const std::vector<double>& f) {
+        std::vector<double> tmp(f.size()), out(f.size());
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x) {
+                double sum = 0;
+                for (int k = 0; k < w; ++k) sum += f[static_cast<size_t>(y) * n + (x + k) % n];
+                tmp[static_cast<size_t>(y) * n + x] = sum / w;
+            }
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x) {
+                double sum = 0;
+                for (int k = 0; k < w; ++k) sum += tmp[static_cast<size_t>((y + k) % n) * n + x];
+                out[static_cast<size_t>(y) * n + x] = sum / w;
+            }
+        return out;
+    };
+    std::vector<double> gxx(a.size()), gyy(a.size()), gxy(a.size());
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const double gx = (a[static_cast<size_t>(y) * n + (x + 1) % n] - a[static_cast<size_t>(y) * n + (x + n - 1) % n]) / 2;
+            const double gy = (a[static_cast<size_t>((y + 1) % n) * n + x] - a[static_cast<size_t>((y + n - 1) % n) * n + x]) / 2;
+            gxx[static_cast<size_t>(y) * n + x] = gx * gx; gyy[static_cast<size_t>(y) * n + x] = gy * gy; gxy[static_cast<size_t>(y) * n + x] = gx * gy;
+        }
+    const std::vector<double> jxx = box(gxx), jyy = box(gyy), jxy = box(gxy);
+    std::complex<double> acc(0);
+    double localSum = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const double theta = 0.5 * std::atan2(2 * jxy[i], jxx[i] - jyy[i]);
+        const double loc = std::sqrt((jxx[i] - jyy[i]) * (jxx[i] - jyy[i]) + 4 * jxy[i] * jxy[i]) / (jxx[i] + jyy[i] + 1e-12);
+        acc += std::polar(loc, 2 * theta);
+        localSum += loc;
+    }
+    st.local = localSum / static_cast<double>(a.size());
+    st.global = std::abs(acc) / static_cast<double>(a.size()) / std::max(st.local, 1e-12);
+    return st;
+}
+
 // ---- the streak generator ----------------------------------------------------------------------------------------------
 static void testStreaks(const char* dumpPath) {
     namespace gs = edvr::glass_streaks;
@@ -413,24 +522,32 @@ static void testStreaks(const char* dumpPath) {
     check(std::fabs(mean - gs::kTargetMean) < 0.005, "the stored mean is the legacy mean over the legacy max (0.024 / 0.09)");
     check(std::fabs(mean * gs::kStreakMax - gs::kLegacyMean) < 0.0005 && gs::kStreakMax == gs::kLegacyMax, "times the shader's scale, the linear mean is the legacy 0.024 and the max the legacy 0.09");
     auto at = [&](int x, int y) { return static_cast<double>(a[static_cast<size_t>(((y % n) + n) % n) * n + ((x % n) + n) % n]) / 255.0; };
-    double sd = 0, interior = 0, seam = 0;
-    for (uint8_t v : a) sd += (v / 255.0 - mean) * (v / 255.0 - mean);
-    sd = std::sqrt(sd / static_cast<double>(a.size()));
+    double interior = 0, seam = 0;
     for (int y = 0; y < n; ++y)
         for (int x = 0; x < n - 1; ++x) interior += std::fabs(at(x, y) - at(x + 1, y));
-    for (int x = 0; x < n; ++x) interior += std::fabs(at(x, 0) - at(x, 1));   // a few rows too, so both axes weigh
-    interior /= static_cast<double>(n) * (n - 1) + n;
+    for (int y = 0; y < n - 1; ++y)
+        for (int x = 0; x < n; ++x) interior += std::fabs(at(x, y) - at(x, y + 1));
+    interior /= 2.0 * static_cast<double>(n) * (n - 1);
     for (int y = 0; y < n; ++y) seam += std::fabs(at(0, y) - at(n - 1, y));
     for (int x = 0; x < n; ++x) seam += std::fabs(at(x, 0) - at(x, n - 1));
     seam /= 2.0 * n;
-    std::printf("streaks: %dx%d generated in %.1f ms, stored mean %.4f, stddev %.3f, neighbour difference %.4f (%.2f of the stddev), seam difference %.4f\n", n, n, ms, mean, sd, interior,
-                interior / sd, seam);
-    check(sd > 0.15, "the texture has contrast (not flat)");
-    check(interior / sd < 0.8, "neighbouring texels are correlated (white noise reads about 1.3): the pattern is fibres, not noise");
     check(seam <= 1.2 * interior, "it tiles: the difference across the wrap is no larger than between neighbours inside");
+    // The character: the figures of the legacy dirt texture that section 13 of the doc measured (summary statistics only; the generator never saw its pixels).
+    const StreakStats st = streakStats(a, n);
+    std::printf("streaks: %dx%d generated in %.1f ms, stored mean %.4f; std %.3f, p5 %.3f p50 %.3f p95 %.3f; energy by cycles per tile 0-4 %.3f 4-16 %.3f 16-64 %.3f 64+ %.3f; "
+                "coherence local %.3f global %.3f; neighbour difference %.4f, seam difference %.4f\n",
+                n, n, ms, mean, st.std, st.p5, st.p50, st.p95, st.band[0], st.band[1], st.band[2], st.band[3], st.local, st.global, interior, seam);
+    check(std::fabs(st.std - 0.093) < 0.015, "the contrast is the legacy texture's (std about 0.093 of the max)");
+    check(std::fabs(st.p5 - 0.158) < 0.025 && std::fabs(st.p50 - 0.245) < 0.025 && std::fabs(st.p95 - 0.442) < 0.04, "the percentiles are the legacy texture's (p5 0.158, p50 0.245, p95 0.442): a floor, no black holes");
+    const double legacyBand[4] = {0.418, 0.236, 0.161, 0.185};
+    bool bands = true;
+    for (int i = 0; i < 4; ++i) bands = bands && std::fabs(st.band[i] - legacyBand[i]) < 0.06;
+    check(bands, "the energy by band is the legacy texture's (0.418, 0.236, 0.161, 0.185) within 0.06");
+    check(st.global >= 0.85, "the strokes run one way: global direction agreement at least 0.85");
+    check(st.local > 0.3 && st.local < 0.55, "the local coherence is about the legacy texture's 0.41");
     std::vector<std::vector<uint8_t>> mips;
     gs::buildMips(a.data(), n, mips);
-    check(static_cast<int>(mips.size()) == gs::kMips && mips.back().size() == 1, "the chain has 9 levels, 256 down to 1");
+    check(static_cast<int>(mips.size()) == gs::kMips && mips.back().size() == 1, "the chain has 10 levels, 512 down to 1");
     bool means = true;
     for (const auto& m : mips) {
         double mm = 0;
@@ -458,7 +575,8 @@ static void testShader() {
     const float kDirtMask = 0.025f, kDirtColour = 0.97f, kBaseAlpha = 0.02f, kStreakMax = 0.09f;
     const float vertexB = 0.72f;
     const float liveMask = std::fmin(std::fmax((vertexB - 0.2f) * 0.5f, 0.0f), 1.0f) * 0.5f;   // what live's vertex shader passes for B = 0.72 (CB2[6] = (.., .., 0.5, -0.2), CB2[0].x = 0.5)
-    const float albedo = kStreakMax * (kDirtMask * vertexB) * kDirtColour;
+    const float kDirtStrength = 16.0f;   // chosen, not measured
+    const float albedo = kStreakMax * (kDirtMask * vertexB) * kDirtColour * kDirtStrength;
     const float sun = 1000.0f;
 
     Case none;   // no mask at all
@@ -500,9 +618,9 @@ static void testShader() {
     check(s.r < 0.1f * c0.r, "an occluder between the light and the pixel darkens the dirt");
     check(closeTo(l.r, c0.r, 0.02f), "an occluder behind the pixel leaves the dirt as lit as no cascade");
 
-    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = legacy's 5 x (cube(N) + cube(-N)) x the read scale 256 = 640, times the albedo,
+    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = the cube(N) x the read scale 256 = 64, times the albedo,
     // not scaled by 1/pi.
-    const float ambient = 5.0f * (0.25f + 0.25f) * 256.0f;
+    const float ambient = 0.25f * 256.0f;
     Case hangar = dirt;
     hangar.sunColour[0] = hangar.sunColour[1] = hangar.sunColour[2] = 1e-13f;
     hangar.probe = true;

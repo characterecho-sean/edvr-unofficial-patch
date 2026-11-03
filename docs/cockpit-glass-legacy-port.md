@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 is WRONG: legacy's cube was black (section 12). Replay and display measurements: section 12. Next: the dirt strength, Sean's call.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13). Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -455,9 +455,9 @@ imperfection mask (`masks.z`) times the blemish map's y channel: the legacy smud
 channel (`1.2 A - 0.2`), which live's vertex shader does not pass. The 1/pi on the direct light, the probe
 ambient and the legacy normal are unchanged (the ambient scale changed after the next flight, below).
 
-**The streak texture** (`src\d3d11\cockpit_glass_streaks.h`). An original pattern, not traced from the legacy
+**The streak texture** (`src\d3d11\cockpit_glass_streaks.h`; reworked in section 13, 512 x 512 and soft: this is the first version). An original pattern, not traced from the legacy
 texture (only its two statistics were used, mean 0.024 and max 0.09): white noise smeared along a slowly turning
-flow field (line integral convolution, +-18 texels, a triangular kernel) into long thin curved fibres, contrast
+flow field (line integral convolution, a triangular kernel) into long thin curved fibres, contrast
 stretched, broad patches of low-frequency noise deciding where the wipe went, and a power curve found by
 bisection so the stored mean is 0.2667 of the max. Every field is periodic in the size, so it wraps with no seam.
 256 x 256, R8_UNORM, stored normalised (brightest texel 255), the mip chain built on the CPU; the shader scales
@@ -511,7 +511,7 @@ while ice or condensation shows. Both are to be measured on the flight.
 smudge glare 0.12238 (0.12240) at alpha 0.02; ice and condensation overlays 0.001953 with alpha written 0, equal to
 the intact variant's alpha times colour; no streak texture: no dirt.
 
-**Ambient ported (2026-11-03, after the flight of bd441ccd).** That flight ran everything (streaks bound, binds
+**Ambient ported (2026-11-03, after the flight of bd441ccd). WITHDRAWN the same day (see "Dirt strength" below): legacy's cube was black, so the 5 multiplied zero.** That flight ran everything (streaks bound, binds
 and ice-overlays about 3,050 per 30 s) and A/B looked about the same. Legacy's ambient was measured and not yet
 ported: its vertex shader computes `cube(N) + cube(-N)` at mip 30 (the 1x1 average) times VS cb0[0].y, which the
 captures read as 5 (section 10). The port had sampled the probe once along the normal and scaled it by 1.0,
@@ -521,6 +521,16 @@ sample doubles. Legacy applied exposure through this scale, so the value may be 
 capture; it is legacy's own number, not a tuned one. No chosen constant is left in the shader. Rig (WARP): a
 0.25 grey cube gives an ambient of 640 (5 x 0.5 x 256); hangar rgb 0.1964 (wanted 0.1964); dirt under the sun
 with the probe 0.2939 (wanted 0.2941) against 0.09766 for the sun alone.
+
+**Dirt strength (2026-11-03, after the flight of 268b292c).** Two changes, in every variant. (1) The x5 ambient is
+withdrawn: one probe sample along the normal at the roughest mip, scale 1.0, times CB1[90].z, as before 268b292c;
+`kLegacyAmbientScale` is gone. The ambient is the albedo times the probe's radiance; legacy's own ambient was zero in
+space. (2) The dirt albedo is multiplied by `kDirtStrength = 16.0`, CHOSEN, not measured: Sean chose visible dirt over
+matching legacy, which section 12 measures at about 4 to 6 times weaker on the display. Dirt albedo only; the smudge
+and crack glare and the crack colour are unchanged. Constants now: measured (0.025, 0.97, 0.02, 0.001 / 120,
+0.02 / 450, streak max 0.09); chosen (kDirtStrength 16, ambient scale 1.0 and mip 7, probe cap 16). Rig (WARP): dirt
+under the sun 1.5625 (wanted 1.5631) at alpha 0.02; hangar 0.3142 (wanted 0.3143); dirt with a probe 1.8770
+(wanted 1.8774); ice and condensation overlays 0.03125 with alpha 0.
 
 **What the flight must check** (after section 8's list): the log lines above; with ice forming, the dirt streaks
 stay on the canopy and the ice looks as the game draws it; `ice-overlays` counts about one a frame while ice
@@ -555,6 +565,34 @@ stock shaders drew), and the display images of the legacy captures. RenderDoc's 
   alpha darkening of a bright interior already exceeds legacy's levels.
 - Legacy's black level on the display is visibly lifted and warmer than Odyssey's in these frames. That is not
   the canopy draw, and it may be part of the remembered look. Not investigated.
+
+## 13. The streak texture reworked (2026-11-03)
+
+Sean saw that EDVR's streaks were the wrong character, and the numbers agreed. Summary statistics of the legacy
+dirt texture (t2, linearised) against the first EDVR texture, all normalised to each texture's max, measured with
+the same script (`streak_stats.py`: spectrum by cycles per tile, structure tensor on a window of 1/16 of the size):
+
+| | legacy | first EDVR (256) | reworked (512) |
+|---|---|---|---|
+| std | 0.093 | 0.220 | 0.088 |
+| p5 / p50 / p95 | 0.158 / 0.245 / 0.442 | 0.039 / 0.169 / 0.753 | 0.149 / 0.251 / 0.431 |
+| energy, cycles per tile 0-4 / 4-16 / 16-64 / 64+ | 0.418 / 0.236 / 0.161 / 0.185 | 0.228 / 0.076 / 0.268 / 0.428 | 0.391 / 0.218 / 0.211 / 0.179 |
+| coherence, local / global direction agreement | 0.413 / 0.972 | 0.489 / 0.111 | 0.466 / 0.968 |
+
+The first texture was bright hairlines curling every way over dark holes; legacy's is a soft broad wipe: low
+contrast strokes running one way with a gentle bend, faint fibres on top, no black holes. `cockpit_glass_streaks.h`
+is rewritten, still EDVR's own value noise, deterministic and tileable, and set only from those summary figures
+(never from the legacy pixels): a flow that is mostly uniform along x with a slow periodic bend (the stroke
+centreline displaced by a two-cell periodic noise of x), four standardised layers added by variance share (very low
+frequency blotches 0.36, soft stroke bands 0.04 and 0.16 at two scales, short line-integrated fibres 0.18, isotropic
+grain 0.30), and an exponential of the sum, so values are positive with a soft upper tail and nothing is black; the
+exponent is found by bisection so the stored mean stays 0.2667 of the max (the shader's 0.09 peak and the legacy
+0.024 mean still hold). Size 512 x 512, 10 mips; generation 97 ms in the rig (about 190 ms in a standalone
+harness), on the worker thread, logged. The tile scale is unchanged (the on-screen repeat was measured equal to
+legacy's, 6.26 against 6.27 repeats per screen width). The rig now asserts the targets: std within 0.015, the
+percentiles, each band within 0.06, global agreement at least 0.85, local coherence between 0.3 and 0.55,
+deterministic, tileable, the mip chain. Pictures: `%LOCALAPPDATA%\EDVR\captures\edvr-streaks.png` and the 2 x 2
+tiling.
 
 ## Ruled out
 
