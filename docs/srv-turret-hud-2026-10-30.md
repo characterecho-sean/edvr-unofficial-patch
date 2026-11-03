@@ -20,9 +20,9 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight:
-  camera back 80, HUD forward 0, radar forward 0, panels back 0, systems near 70,
-  weapon panel up 10, gunner up 0, cards up 0. Screen limit is game, radar anchor
+- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight,
+  systems near and gunner up from 2026-11-03: camera back 80, HUD forward 0, radar
+  forward 0, panels back 0, systems near 80, weapon panel up 10, gunner up 35, cards up 0. Screen limit is game, radar anchor
   is off, depth is game. `srv_turret_hud_up` raises the weapon panel.
   `srv_turret_gunner_up` raises the whole gunner frame. `srv_turret_cards_up`
   raises only the target card and SYSTEMS. The sheet draws the card contents
@@ -1976,3 +1976,7 @@ A report (issue #179) said the weapon panel splits in the turret view when Elite
 - **Cause.** The shader dump (s_81216C77F90DEDD6.dxbc, ps A2965EC2931A39C8 and B4786E0A0B199285) shows the same inputs, constant buffers and clip rows (dp4 against cb0[4..7]) as vs 1989E6D3, with the output TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy and SV_POSITION at o5. Both pixel shaders read TEXCOORD0, 4, 6, 7 and 8 and not SV_POSITION. The module had no signature for it (the KNOWN GAP comment in srv_turret_math.h).
 - **Fix.** Signature 9 (81216C77, geometry shader J in srv_turret_hud_shader.h) and the families 81216C77.A2965EC2 and 81216C77.B4786E0A, appended as families 9 and 10 in the panels group, treated as 1989E6D3 is (the same move, TEXCOORD6 left unmoved). The gunner sheet stays signature 8; its assert no longer says it is the last. The variant list, the 	emporal_shader_build contract row (89 fixed shaders), the 10 s line's amilies[...] list (it prints the table, so it grew by two names), edvr_log.py's fixtures and the rig follow. In 	ools\srv_turret_hud_test the signature, the two pairs, the panels count (4) and the 92-byte record are pinned, and the shader J runs the shared move cases and the mutants like the others; the flight-HUD guard's bound of four elements per signature allows six for this one.
 - **NOT FLOWN:** the next flight is the turret with Disable GUI effects off. Read the 10 s srv turret hud: panels: line: 81216C77.A2965EC2 or 81216C77.B4786E0A should count draws, and 1989E6D3 should read 0 there.
+
+### 2026-11-03: defaults changed from Sean's flight
+
+experimental.srv_turret_systems_near now ships at 80 (was 70) and experimental.srv_turret_gunner_up at 35 (was 0), the values Sean flew; no other default changed, and the gunner sheet's decline rule (systems near and gunner up both at or below 0) is as it was. Changed in the module's reads, srv_turret_math.h, edvr.ini and the rig's pins.

@@ -43,8 +43,8 @@ namespace st = srv_turret;
 namespace {
 
 static_assert(st::kBackDefaultCm == 80 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kRadarForwardMaxCm == 150 &&
-                  st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 70 && st::kSystemsNearMaxCm == 200 &&
-                  st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 0 && st::kGunnerUpMaxCm == 100 &&
+                  st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 &&
+                  st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 &&
                   st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
               "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
@@ -206,9 +206,9 @@ void readKeys() {
     const int panels = cfg.getIntInRange("experimental.srv_turret_panels_back", 0, 0, 200);
     const int radar = cfg.getIntInRange("experimental.srv_turret_radar_back", 0, 0, 200);
     const int gap = cfg.getIntInRange("experimental.srv_turret_hud_gap", 0, 0, 200);
-    const int systemsNear = cfg.getIntInRange("experimental.srv_turret_systems_near", 70, 0, 200);
+    const int systemsNear = cfg.getIntInRange("experimental.srv_turret_systems_near", 80, 0, 200);
     const int hudUp = cfg.getIntInRange("experimental.srv_turret_hud_up", 10, 0, 100);
-    const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 0, 0, 100);
+    const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 35, 0, 100);
     const int cardsUp = cfg.getIntInRange("experimental.srv_turret_cards_up", 0, 0, 100);
     const std::string depthText = cfg.getString("experimental.srv_turret_hud_depth", "game");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());

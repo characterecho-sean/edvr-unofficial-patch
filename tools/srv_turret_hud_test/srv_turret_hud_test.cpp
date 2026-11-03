@@ -914,9 +914,9 @@ static void mathCases() {
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
     check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
-              st::kSystemsNearDefaultCm == 70 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 0 && st::kGunnerUpMaxCm == 100 &&
+              st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 &&
               st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
-          "the keys' defaults, the 2026-11-02 flight: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, gap 0, systems near 70, weapon panel up 10, gunner up 0");
+          "the keys' defaults, the 2026-11-02 and 2026-11-03 flights: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, gap 0, systems near 80, weapon panel up 10, gunner up 35");
 }
 
 // ---------------------------------------------------------------- the move, through the stream-output twin of the production shader and of each mutant
@@ -2449,9 +2449,9 @@ static void constantsCases() {
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 && st::kSystemsNearDefaultCm == 70 &&
-              st::kHudUpDefaultCm == 10 && st::kGunnerUpDefaultCm == 0,
-          "the keys' defaults: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, no gap, systems near 70, weapon panel up 10, gunner up 0");
+    check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 && st::kSystemsNearDefaultCm == 80 &&
+              st::kHudUpDefaultCm == 10 && st::kGunnerUpDefaultCm == 35,
+          "the keys' defaults: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, no gap, systems near 80, weapon panel up 10, gunner up 35");
 }
 
 // ---------------------------------------------------------------- triangle strips (some of the HUD's strokes are drawn as one)

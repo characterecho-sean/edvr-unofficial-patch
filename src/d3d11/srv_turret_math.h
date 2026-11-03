@@ -53,7 +53,7 @@
 //                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
-//   experimental.srv_turret_systems_near centimetres, 0..200, default 0: meant for the vehicle power and systems panel. What it writes now is a second radial window on the two hologram
+//   experimental.srv_turret_systems_near centimetres, 0..200, default 80: meant for the vehicle power and systems panel. What it writes now is a second radial window on the two hologram
 //                               families, vertices further than 1 m from the anchor and no further than 4 m, this much nearer along the ray. A flight at 40 cm did not move the panel. The Escape menu
 //                               is a different mesh and is not bound: translating it locked the headset view. The weapon panels inside 1 m stay on panels_back. The reticle, past 4 m, stays. A pull
 //                               reaches a vertex only when it is further than the pull plus 10 cm (and further than 1 m). 0 leaves the game's own depth.
@@ -93,9 +93,9 @@ inline constexpr int kForwardDefaultCm = 0, kForwardMaxCm = 150;   // experiment
 inline constexpr int kRadarForwardDefaultCm = 0, kRadarForwardMaxCm = 150;   // experimental.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
 inline constexpr int kPanelsDefaultCm = 0, kRadarDefaultCm = 0, kPushMaxCm = 200;   // experimental.srv_turret_panels_back and experimental.srv_turret_radar_back
-inline constexpr int kSystemsNearDefaultCm = 70, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 70 is the distance kept on 2026-11-02.
+inline constexpr int kSystemsNearDefaultCm = 80, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 80 is the distance kept on 2026-11-03.
 inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
-inline constexpr int kGunnerUpDefaultCm = 0, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards
+inline constexpr int kGunnerUpDefaultCm = 35, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards. 35 is the raise kept on 2026-11-03.
 inline constexpr int kCardsUpDefaultCm = 0, kCardsUpMaxCm = 100;   // experimental.srv_turret_cards_up: centimetres up, along the seat, for the target card and SYSTEMS only
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).

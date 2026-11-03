@@ -119,9 +119,9 @@ static bool wiredModule(const std::string& t) {
     const size_t panels = t.find("cfg.getIntInRange(\"experimental.srv_turret_panels_back\", 0, 0, 200)");
     const size_t radar = t.find("cfg.getIntInRange(\"experimental.srv_turret_radar_back\", 0, 0, 200)");
     const size_t gap = t.find("cfg.getIntInRange(\"experimental.srv_turret_hud_gap\", 0, 0, 200)");
-    const size_t systems = t.find("cfg.getIntInRange(\"experimental.srv_turret_systems_near\", 70, 0, 200)");
+    const size_t systems = t.find("cfg.getIntInRange(\"experimental.srv_turret_systems_near\", 80, 0, 200)");
     const size_t hudUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_hud_up\", 10, 0, 100)");
-    const size_t gunnerUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_gunner_up\", 0, 0, 100)");
+    const size_t gunnerUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_gunner_up\", 35, 0, 100)");
     const size_t cardsUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_cards_up\", 0, 0, 100)");
     // the sheet's bracket cut was a TEMPORARY key (tuned in flight to 3 mm on 2026-11-02, then baked into the shader as kBracketCutM and the key removed): nothing reads it or keeps its value
     const bool bracketKeyGone = !found(t.find("srv_turret_bracket_cut")) && !found(t.find("g_bracketCutMm")) && !found(t.find("bracket cut %d"));
@@ -277,7 +277,7 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const size_t nextSection = ini.find("\n[", experimental + 1), end = found(nextSection) ? nextSection : ini.size();
     const size_t back = ini.find("\nsrv_turret_camera_back = 80\n"), forward = ini.find("\nsrv_turret_hud_forward = 0\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 0\n"),
                  panels = ini.find("\nsrv_turret_panels_back = 0\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n"),
-                 systems = ini.find("\nsrv_turret_systems_near = 70\n"), hudUp = ini.find("\nsrv_turret_hud_up = 10\n"), gunnerUp = ini.find("\nsrv_turret_gunner_up = 0\n"), cardsUp = ini.find("\nsrv_turret_cards_up = 0\n"),
+                 systems = ini.find("\nsrv_turret_systems_near = 80\n"), hudUp = ini.find("\nsrv_turret_hud_up = 10\n"), gunnerUp = ini.find("\nsrv_turret_gunner_up = 35\n"), cardsUp = ini.find("\nsrv_turret_cards_up = 0\n"),
                  depth = ini.find("\nsrv_turret_hud_depth = game\n"), scissor = ini.find("\nsrv_turret_hud_scissor = game\n");
     if (!found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(systems) || !found(hudUp) || !found(gunnerUp) || !found(cardsUp) || !found(depth) || !found(scissor)) return false;
     const bool inExperimental = back > experimental && back < end && forward > experimental && forward < end && radarForward > experimental && radarForward < end && panels > experimental && panels < end &&
@@ -288,9 +288,9 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
                  panelsUi = ini.rfind("# ui: SRV turret panels back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live\n", panels),
                  radarUi = ini.rfind("# ui: SRV turret radar back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live\n", radar),
                  gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live\n", gap),
-                 systemsUi = ini.rfind("# ui: SRV turret systems near | range 0..200 | step 5 | unit cm | zero exact | recommended 70 | live\n", systems),
+                 systemsUi = ini.rfind("# ui: SRV turret systems near | range 0..200 | step 5 | unit cm | zero exact | recommended 80 | live\n", systems),
                  hudUpUi = ini.rfind("# ui: SRV turret weapon panel up | range 0..100 | step 5 | unit cm | zero exact | recommended 10 | live\n", hudUp),
-                 gunnerUpUi = ini.rfind("# ui: SRV turret gunner panel up | range 0..100 | step 5 | unit cm | zero exact | recommended 0 | live\n", gunnerUp),
+                 gunnerUpUi = ini.rfind("# ui: SRV turret gunner panel up | range 0..100 | step 5 | unit cm | zero exact | recommended 35 | live\n", gunnerUp),
                  cardsUpUi = ini.rfind("# ui: SRV turret cards up | range 0..100 | step 5 | unit cm | zero exact | recommended 0 | live\n", cardsUp),
                  depthUi = ini.rfind("# ui: SRV turret HUD depth | choices front, game, real | recommended game | live\n", depth),
                  scissorUi = ini.rfind("# ui: SRV turret HUD screen limit | choices open, game | recommended game | live\n", scissor);
@@ -522,9 +522,9 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "if (needScene && !st::readGameCb(ctx, st::kGameCbSlot, scene)) {", "if (false) {")), "control: the vertex constants never read trip the pin");
     check(!wiredModule(replaced(module, ", st::directSetGs, needScene ? &scene : nullptr)", ")")), "control: the vertex constants read but never bound trip the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_radar_forward\", 0, 0, 150", "\"experimental.srv_turret_radar_forward\", 0, 0, 100")), "control: a drifted range of the radar-forward key trips the pin");
-    check(!wiredModule(replaced(module, "\"experimental.srv_turret_systems_near\", 70, 0, 200", "\"experimental.srv_turret_systems_near\", 40, 0, 200")), "control: a drifted default of the systems-near key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_systems_near\", 80, 0, 200", "\"experimental.srv_turret_systems_near\", 40, 0, 200")), "control: a drifted default of the systems-near key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_hud_up\", 10, 0, 100", "\"experimental.srv_turret_hud_up\", 20, 0, 100")), "control: a drifted default of the weapon-panel height key trips the pin");
-    check(!wiredModule(replaced(module, "\"experimental.srv_turret_gunner_up\", 0, 0, 100", "\"experimental.srv_turret_gunner_up\", 20, 0, 100")), "control: a drifted default of the gunner-panel height key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_gunner_up\", 35, 0, 100", "\"experimental.srv_turret_gunner_up\", 20, 0, 100")), "control: a drifted default of the gunner-panel height key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_cards_up\", 0, 0, 100", "\"experimental.srv_turret_cards_up\", 20, 0, 100")), "control: a drifted default of the cards-up key trips the pin");
     check(!wiredModule(module + "\n    const int bracketCut = cfg.getIntInRange(\"experimental.srv_turret_bracket_cut\", 3, 0, 40);\n"), "control: the removed bracket cut key read again trips the pin");
     check(!wiredModule(module + "\nstd::atomic<int> g_bracketCutMm{3};\n"), "control: a kept bracket cut value trips the pin");
@@ -591,9 +591,9 @@ static void wiringCases() {
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 0\n", "\nsrv_turret_hud_forward = 60\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_radar_forward = 0\n", "\nsrv_turret_radar_forward = 60\n"), flatKeys), "control: a drifted shipped default of the radar-forward key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 80\n", "\nsrv_turret_camera_back = 0\n"), flatKeys), "control: a drifted shipped default of the camera key trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_systems_near = 70\n", "\nsrv_turret_systems_near = 40\n"), flatKeys), "control: a drifted shipped default of the systems-near key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_systems_near = 80\n", "\nsrv_turret_systems_near = 40\n"), flatKeys), "control: a drifted shipped default of the systems-near key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_up = 10\n", "\nsrv_turret_hud_up = 20\n"), flatKeys), "control: a drifted shipped default of the weapon-panel height key trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_gunner_up = 0\n", "\nsrv_turret_gunner_up = 20\n"), flatKeys), "control: a drifted shipped default of the gunner-panel height key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_gunner_up = 35\n", "\nsrv_turret_gunner_up = 20\n"), flatKeys), "control: a drifted shipped default of the gunner-panel height key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_cards_up = 0\n", "\nsrv_turret_cards_up = 20\n"), flatKeys), "control: a drifted shipped default of the cards-up key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_cards_up = 0\n", "\nsrv_turret_cards_up = 0\nsrv_turret_bracket_cut = 3\n"), flatKeys), "control: the removed bracket cut key back in edvr.ini trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = game\n", "\nsrv_turret_hud_depth = front\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
