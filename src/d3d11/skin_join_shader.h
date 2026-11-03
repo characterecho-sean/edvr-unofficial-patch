@@ -31,7 +31,7 @@
 // The numbers below must equal skin_join.h's; skin_join_gpu_test reads them back out of this text and compares.
 namespace edvr {
 constexpr char kSkinJoinCsHlsl[] = R"HLSL(
-#define SJ_MAX_ROWS 65536u
+#define SJ_MAX_ROWS 180224u
 #define SJ_CLEAR_GROUPS 64u
 #define SJ_MAX_ENTRIES 1024u
 #define SJ_MAX_JOBS 8192u

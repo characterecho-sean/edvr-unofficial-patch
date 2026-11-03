@@ -392,7 +392,7 @@ unsigned defineOf(const char* name) {
 void caseNumbers() {
     check(defineOf("SJ_MAX_ROWS") == kMaxRows && defineOf("SJ_MAX_ENTRIES") == kMaxEntries && defineOf("SJ_MAX_JOBS") == kMaxJobs, "G1.a the table limits in the HLSL are the header's");
     check(defineOf("SJ_CLEAR_GROUPS") == kClearGroups && kClearGroups * 256u * (kMaxRows / (kClearGroups * 256u)) == kMaxRows,
-          "G1.g the clear pass's group count in the HLSL is the header's, and its stride (groups x 256) divides the rows: 64 groups x 256 threads x 4 rows each");
+          "G1.g the clear pass's group count in the HLSL is the header's, and its stride (groups x 256) divides the rows: 64 groups x 256 threads x 11 rows each");
     // The join kernel no longer clears the tables itself (the pass before it does): a second clear in the kernel would be correct and a performance bug (one group of
     // 256 threads, 256 dependent iterations, half the join's cost in the F16 flight), so it is held by the kernel's text, not by its results: no whole-table loop in it.
     {
