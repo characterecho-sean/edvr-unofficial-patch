@@ -30,6 +30,18 @@
   screen motion's draw calls to 0) and nothing rose more than 0.2 ms. The
   marker fix's Unmap copy is the next target: 0.80 ms a frame, reading
   about 230 KB of write-combined memory per eye per frame.
+- **Post-build-2 review (2026-11-03, "Review of build 2's flight and next
+  targets"):** two tracks: (A) next EDVR-internal CPU cuts (`streamUnmapCopy`
+  0.80 ms via tight instance windows, `hookedPSSetShaderResources` 0.90 ms,
+  `hookedMap`/`hookedUnmap` 1.08 ms, `flushIaObserved` 0.49 ms, and the F100
+  tee's eye-0 slow-path trap); and (B) engine and hook-chain draw reductions
+  (shadow-cascade small-prop filter and sub-pixel clutter floor in
+  `FUN_1442B3FC0`, concourse keep-cell in `optimized_station`, layer-A
+  weathering decal fade gate, and bypassing 3Dmigoto on `t33` scene draws).
+  Checked the same day ("Check of that review"). Kept: the marker copy, the
+  bind and map hooks, and the layer-A fade gate. Ruled out or unproven: the
+  tee trap's size, the shadow-cascade premise, the sub-pixel floor (already
+  ruled out), and the EDHM bypass (the maintainer's call).
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -661,3 +673,243 @@ the 2026-11-01 DLAA concourse windows. Figures in ms a frame, old to new:
 - Next target, by size: the marker fix's Unmap copy (0.70-0.80 ms). Then
   `hookedPSSetShaderResources` (0.90 self), `hookedMap` and `hookedUnmap`
   (0.58, 0.50), and `flushIaObserved` (0.49).
+
+## Review of build 2's flight and next targets (2026-11-03)
+
+Post-build-2 review of `277fae1f` and the 2026-11-03 profile (`profile-b2\table.md`).
+The VS "may-want" byte hit the top of its 0.3-0.5 ms estimate (~0.6 ms off its
+direct targets at a 0.023 ms bind-time cost), and the F87c timer settled the
+`streamLoad16` question: `streamUnmapCopy` alone accounts for the 0.70-0.80 ms
+post-submit cost (one copy per eye per frame, ~230 KB per eye at 0.65 GB/s from
+write-combined memory).
+
+With EDVR leaf down to 4.97 ms in R1 while the full concourse cycle remains
+36.0 ms (26.2 ms R1 + 9.8 ms between the first eye submit and the next frame's
+start), further gains split into two tracks: (A) the remaining ~3.2 ms of
+EDVR-internal leaf work exposed by build 2's profile, and (B) engine and
+hook-chain draw reductions that cut time across the game exe (11.12 ms R1 +
+~5 ms post-submit), EDHM/3Dmigoto (~2.4-2.8 ms), D3D11/driver (~5.9 ms) and
+EDVR together.
+
+### Track A: EDVR-internal CPU targets (for build 3)
+
+1. **`streamUnmapCopy` (0.70-0.80 ms -> < 0.02 ms) — stop copying 460 KB of
+   write-combined memory for ~12 marker draws (`src\d3d11\native_on_foot.cpp`,
+   `src\d3d11\native_on_foot_f87.h`):**
+   - **Why it is 230 KB per eye today:** in `native_on_foot_f87.h:247-249`,
+     `kF85Entries = 8192` (64 KB) and `kWinEntries = 4096` (32 KB x 6 windows =
+     192 KB). Even with `escalated == 0`, `streamUnmapCopy` unconditionally
+     copies the 64 KB `f85` prefix (`0..8192`) plus every 32 KB window ever
+     touched by `noteMarkerDraw(eye, startInstance)`. Worse, `noteMarkerDraw`
+     buckets `startInstance` into 4,096-entry blocks and `winUsed` is sticky,
+     so a handful of marker draws causes 5-6 windows (192-230 KB per eye,
+     460 KB total) to be read out of GPU write-combined memory on every frame's
+     per-eye stream Unmap.
+   - **What actually reads the copy:** `markerDraw` (`VS == B10B032BDFD46700`,
+     ~6-12 draws per eye) reads a single 8-byte entry (`streamEntryX(eye,
+     startInstance)`) per marker draw — under 200 bytes per frame total, a
+     ~2,000x over-copy.
+   - **Fix options:**
+     - *Tight micro-windows + expiry:* shrink `kWinEntries` from 4096 (32 KB)
+       to 64 or 128 entries (512 B - 1 KB) around the actual `startInstance`
+       values seen in recent frames, expire windows not hit in the last N
+       frames, and gate the 64 KB `f85` prefix copy so it runs only when the
+       F85 diagnostic / escalation path actually needs it. That drops the WC
+       read from ~460 KB to ~3-6 KB (< 0.01 ms).
+     - *Post-submit Unmap check:* verify why `streamUnmapCopy` appears
+       post-submit in the profile — if an Unmap of `g_stream.res` occurs after
+       an eye's marker pass has already finished (or in R5 after both submits),
+       verify whether the next frame's `WRITE_DISCARD` overwrites it before
+       `markerDraw` reads it, or if `streamUnmapCopy` is capturing the last
+       Unmap of the eye pass.
+
+2. **The F100 marker tee's Eye-0 slow-path trap (`src\d3d11\native_on_foot.cpp:35700`
+   and `34075`):**
+   - In `nativeOnFootMarkerProbeDraw` and `f44::draw`, `teeFastFrame` only arms
+     when **both** `st.worldOk[0] == frame && st.worldOk[1] == frame`.
+   - Because Elite renders in blocked eye passes (~17,000 offscreen draws, then
+     ~7,000 Eye 0 draws, then ~7,000 Eye 1 draws), `worldOk[1]` is never equal
+     to `frame` during the offscreen pass or during Eye 0's entire pass. Thus
+     the first ~24,000 `DrawIndexedInstanced` calls of every frame fall through
+     `nativeOnFootMarkerTee` into `nativeOnFootMarkerProbeDraw` -> `f44::draw`
+     -> `worldDraw`, running `hudIssuerIndex` (16-entry scan) and `rowSourceVs`
+     on every draw. (In AA-off, where `worldOk` waits for
+     `captureEyeSceneDepthForMarkers` on non-instanced `EB529BFAD4918EC9`
+     draws, this also explains why the tee fast-path rate was only 36-46% and
+     `f44::draw` was 0.79 ms in the 2026-11-01 AA-off profile.)
+   - **Fix:** add a `kVsMarkerTee` bit to build 2's VS "may-want" byte at
+     `VSSetShader`, set only for the ~22 vertex shaders that `f44::draw` and
+     `worldDraw` actually inspect (`kHudIssuers`, `kMarkerCompositeVs`,
+     `engine_velocity_family`, `EB529BFAD4918EC9`, `8BC3FFBCA98BCD4C`,
+     `2684F02B9B0BB0DE`). Also allow `worldDraw` to fast-skip once the
+     *current* eye's `worldOk[eye]` is already set for `frame`.
+
+3. **The newly exposed bind/map hooks (`2.47 ms` combined in `profile-b2`):**
+   - `hookedPSSetShaderResources` (**0.90 ms self**), `hookedMap` (**0.58 ms**)
+     + `hookedUnmap` (**0.50 ms**), and `flushIaObserved` (**0.49 ms**) now
+     account for half of EDVR's remaining 4.97 ms leaf time.
+   - `flushIaObserved` (`0.49 ms`): IA state is dirtied on every VB/IB/layout
+     bind across ~33k draws, but only a small subset of draws (panel/HUD/probe
+     shaders) ever reads `iaObserved`. Deferring `flushIaObserved` until after
+     the VS "may-want" mask check (or only flushing for draws that inspect IA
+     bindings) avoids flushing IA state on ordinary scene and shadow draws.
+   - `hookedMap` / `hookedUnmap` (`1.08 ms` excluding `streamUnmapCopy`): the
+     game calls `Map`/`Unmap` thousands of times per frame on dynamic CBs and
+     streams. Adding a 1-check fast reject for untracked `ID3D11Resource*`
+     pointers before entering the multi-feature map/unmap dispatch will trim
+     this directly.
+   - `hookedPSSetShaderResources` (`0.90 ms self`): inspect the per-slot loop
+     in `vscreen.cpp` / `binding_shadow` to see how much of the 0.90 ms is
+     `AddRef`/`Release` or hash/identity maintenance on slots that no active
+     subscriber reads.
+
+4. **Gate holders (`13 of 28`) and `#151` (`drawPathFast`) in VR:**
+   - Build 2's log shows 13 holders active in the concourse (`remlok, holo,
+     ui_depth, sun_glare, object_probe, particle, backdrop, scrim,
+     loader_panel, wake_pulse, night_vision, depth_probe, footprint`). Because
+     several of these are permanently subscribed in `drawGateSubscribed`
+     (`vscreen.cpp:1784`), `#151` (`drawPathFast` in `hookedDrawIndexedInstanced`)
+     cannot fire in VR even with F7 AA off unless ordinary scene vertex shaders
+     bypass the gate via the VS mask byte when AA is off, or unless probe/state
+     holders (`object_probe`, `depth_probe`, `footprint`, `loader_panel`,
+     `wake_pulse`, `backdrop`) unsubscribe when idle.
+
+5. **GPU timing queries (`75 Ends/frame`, 65 untagged "other"):**
+   - 75 `ID3D11Query` `Begin`/`End` pairs per frame (~150 D3D11 calls plus
+     `GetData` readbacks) explained the `+0.19 ms` `hookedEnd` rise under DLAA.
+     Gate the 65 untagged timing queries off when GPU pass timing / diagnostics
+     are not actively requested.
+
+6. **Desk check on the R5 / post-R1 gap (9.8 ms between R1 26.2 ms and cycle
+   36.0 ms):**
+   - Extract the per-function table for the post-R1 / R5 region from the
+     2026-11-03 100 s capture (`profile-b2`) to see how the ~9.8 ms between the
+     first eye submit and the next frame start splits across Eye 1 tail, game
+     post-submit work, and EDVR post-submit work.
+
+### Track B: Engine & hook-chain draw call reductions (bigger FPS levers)
+
+Because ~33,000 draws and >100,000 bind/map calls per frame drive the 11.12 ms
+game R1 leaf, ~5 ms game post-submit, ~5.9 ms D3D11/driver/kernel, and ~2.4 ms
+EDHM costs (~0.5-0.8 us/draw across all modules), cutting unneeded draw calls
+at the engine or proxy boundary is the only way to save 5-10 ms and push VR
+concourse/settlement frame rates from ~28 fps into the 40+ fps range:
+
+1. **Filter tiny clutter out of offscreen shadow cascades in `FUN_1442B3FC0`
+   (`~5,000-10,000` offscreen draws/frame):**
+   - About half of all `DrawIndexedInstanced` calls (~15,000-17,700/frame;
+     build 2's log shows 7M offscreen `8BC3..` draws per 1800-frame window =
+     ~3,900/frame on `8BC3..` alone) are offscreen shadow cascade and auxiliary
+     views, and 45% of `X` draws have `IndexCount <= 64`.
+   - In the view loop `FUN_1442B4420` (`docs\stereo-cpu-sharing-2026-10-16.md`),
+     Eye A is bit 1 (`0x2`) and Eye B is bit 22 (`0x400000`); shadow cascades
+     are other bits in `param_3`. In the part test `FUN_1442B3FC0`
+     (`kPartTestRva = 0x42B3FC0`), skipping tiny clutter parts (e.g. world
+     radius `r < 0.20 m`) when the active view is a shadow cascade prevents the
+     part from entering Stage 4-6 submission, EDHM, EDVR, D3D11, and the GPU.
+
+2. **Sub-pixel clutter floor in `FUN_1442B3FC0` (screen-size test only, capped
+   by world radius):**
+   - The retired LOD governor (`fix.settlement_detail`,
+     `docs\design-settlement-lod-bias-2026-09-22.md`) scaled `ctx+0x30` (`s`),
+     which multiplied the asset LOD table test `A*(d - r)*s + B <= t0` and
+     dropped 4.2 m parts (`0.74 deg`) that had small `t0` values.
+   - `FUN_1442B3FC0` has a separate pure screen-size test (`0.5*(A*d + B) <= r`)
+     before the `t0` table loop. Enforcing a 2-3 pixel minimum projected
+     diameter strictly on small props (`r < 0.35 m`, leaving `t0` untouched so
+     large structures never pop) leverages the engine's 8.08x submission
+     multiplier (`docs\engine-render-pipeline.md`: 2 eyes x LOD ranges x
+     material layers): each culled sub-pixel part saves ~8 D3D11 draw calls.
+
+3. **Extend `fix.optimized_stations` to an on-foot concourse keep-cell
+   (`src\d3d11\optimized_station.cpp`):**
+   - `fix.optimized_stations` currently releases completely on foot
+     (`docs\optimized-station-2026-10-12.md`) because the ship-hangar box
+     clipped the lift and concourse. While standing in the enclosed concourse,
+     the engine still evaluates and submits exterior station superstructure,
+     docking bay rings, and hangar pads. Using the node-name cache and rig
+     hooks in `optimized_station.cpp` (or the engine's portal callback
+     `FUN_14288D1C0` in `FUN_1442B4420`), we can veto exterior/hangar station
+     rigs when the player is inside the concourse shell.
+
+4. **Gate `t33` layer-A weathering decals (`vh = 8056C9D5F22007F9`) at their
+   pixel-shader alpha-zero fade distance (`~550-1,100` draws/frame, zero visual
+   change):**
+   - As documented in `docs\engine-render-pipeline.md` (Stage 4), layer A is a
+     world-space-projected deferred normal/roughness detail pass on `t33`
+     surfaces that lacks an engine LOD gate and submits ~550 draws/frame at all
+     ranges even though its pixel shader (`8B5AA6A7E4042AF3` /
+     `D617226453887353`) fades its alpha to `0.0` at medium/far distance.
+     Dropping layer-A draws beyond their fade-out distance saves 550-1,100
+     draws/frame with zero visual difference.
+
+5. **Bypass 3Dmigoto (EDHM, `~2.4-2.8 ms/frame`) on `t33` world/shadow mesh
+   draws:**
+   - EDHM intercepts every D3D11 draw and bind call to check its
+     `[ShaderOverride]` tables, even though EDHM only overrides ship cockpit
+     HUD, radar, and lighting shaders. Forwarding the ~5 `t33` scene/shadow
+     vertex shaders (`EB529BFAD4918EC9`, `8BC3FFBCA98BCD4C`, `2684F02B9B0BB0DE`,
+     `8056C9D5F22007F9`, `C2208C16..`, ~85% of all concourse/settlement draws)
+     directly to system `d3d11.dll`'s `DrawIndexedInstanced` would save
+     ~1.5-2.0 ms/frame on rigs with EDHM installed.
+
+### Check of that review (2026-11-03)
+
+The review's claims, checked against the code, the build-2 log and the
+earlier engine docs.
+- **A1, the marker copy:**
+  - Confirmed. `kF85Entries` 8192 plus 6 history windows of `kWinEntries`
+    4096, at 8 bytes an entry, is 224 KB per eye. The log reads 229 KB a
+    copy.
+  - Not addressed in the review: why the windows are wide. They are the F85
+    window plus the history clusters, because the marker's entries move
+    6-14k between layouts (F87c). A window that misses is a marker flicker.
+  - So the fix is a design question about coverage, not a constant change.
+    It is the strongest item.
+- **A2, the tee "eye-0 trap":**
+  - The code condition is as stated (`teeFastFrame` needs both
+    `worldOk`). The size is wrong.
+  - Build 2's #155 counters (11:26-11:27, 10 s lines) show the fast path on
+    86% of tee calls (3,495,602 of 4,063,615).
+  - What holds the rest: census frames 272k, world 0 141k, world 1 65k,
+    check 60k.
+  - The slow path's scanned draws cost about 25 ms per 10 s, about
+    0.08 ms a frame.
+  - ruled out: the tee's eye-0 hold as a large cost, because the fast path
+    already takes 86% of calls and the world terms hold about 5%.
+- **A3, the bind and map hooks:** unverified; reasonable desk targets. Which
+  draws read `iaObserved`, and which resources Map and Unmap track, are the
+  first questions.
+- **A5, the timing queries:** unverified which of the 65 untagged queries
+  feed live features (the frame driver, DLAA, temporal pass). Turning any of
+  them off is a removal, so the maintainer is asked first.
+- **A6, the post-R1 split:** a desk task on the existing 100 s capture.
+- **B1, shadow-cascade clutter:**
+  - The premise conflicts with `engine-render-pipeline.md`. The ledger found
+    exactly 3 render targets (2 eyes and 1 offscreen) and no shadow or depth
+    pass.
+  - Offscreen draws are not established as shadow cascades. This needs
+    evidence before any design.
+- **B2, a sub-pixel floor:** already dead. `design-settlement-lod-bias`:
+  "ruled out: the screen-size half of FUN_1442B3FC0 as the settlement lever,
+  because at 8 pixels it removes 613 of 18,267 pool eye draws (0.21 ms)". A
+  2-3 pixel floor removes fewer.
+- **B3, a concourse keep-cell:**
+  - A behaviour change to a feature released on foot because its box
+    clipped the lift and the concourse.
+  - It needs a census showing exterior station draws while in the
+    concourse first.
+- **B4, a layer-A fade gate:**
+  - A recorded open design input (`engine-render-pipeline.md`, "gate A by
+    its own fade distance", about 550 draws a frame, a product decision).
+  - Valid. It needs the fade distance read from the PS, and the suppression
+    discipline of that doc's 2026-09-21 entry.
+- **B5, bypassing EDHM:**
+  - Calling the system context under EDHM's 3Dmigoto for some draws skips
+    its per-draw work on those shaders. That can desynchronise what it
+    tracks, and silently drops any user override that targets them.
+  - "EDHM only overrides cockpit HUD" is unverified.
+  - High risk to a third-party mod; maintainer's call, not a performance
+    item.
+- **Numbers:** the review's "~33,000 draws a frame" does not match build 2's
+  `draw mask:` count, about 18,300 draws a frame on the full path.
