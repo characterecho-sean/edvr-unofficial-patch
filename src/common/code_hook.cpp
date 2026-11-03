@@ -60,11 +60,20 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
     // Prefixes. Only the operand-size prefix and REX are expected in a
     // prologue; a segment, lock or rep prefix means this is not the sort of
     // instruction being decoded and the answer is 0.
-    if (i < available && code[i] == 0x66) ++i;
+    // F212: a scalar-single move (movss, F3 0F 10 / 0F 11) is the one F3-prefixed form understood, and only that: the prefix is taken here, and the opcode switch below
+    // answers 0 for it unless it is followed by 0F 10 or 0F 11. A leaf that opens with a movss store (the look springs' target setter, 0x1A8DF40 in build 334925) is
+    // otherwise unhookable.
+    bool scalarSingle = false;
+    if (i < available && code[i] == 0xF3) {
+        scalarSingle = true;
+        ++i;
+    }
+    if (!scalarSingle && i < available && code[i] == 0x66) ++i;
     if (i < available && isRexPrefix(code[i])) ++i;
     if (i >= available) return 0;
 
     const uint8_t op = code[i++];
+    if (scalarSingle && !(op == 0x0F && i < available && (code[i] == 0x10 || code[i] == 0x11))) return 0;
     switch (op) {
         // push/pop r64 -- the classic prologue register saves.
         case 0x50: case 0x51: case 0x52: case 0x53:
@@ -147,10 +156,11 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
                 i += extra;
                 return i <= available ? i : 0;
             }
-            // movups xmm, xmm/m128 (0F 10) and its store (0F 11), with no F2/F3 prefix: a plain unaligned move with a ModRM operand and
-            // no immediate, which is how MSVC opens a leaf that copies a matrix (the SRV radar's placement setter, 0x38563A0 in build
-            // 334925, begins `sub rsp,48h; movups xmm0,[rdx]`). Moved as is unless rip-relative, which is measured like every other
-            // ModRM form. Every other SSE form is still refused.
+            // movups xmm, xmm/m128 (0F 10) and its store (0F 11): a plain unaligned move with a ModRM operand and no immediate, which is
+            // how MSVC opens a leaf that copies a matrix (the SRV radar's placement setter, 0x38563A0 in build 334925, begins
+            // `sub rsp,48h; movups xmm0,[rdx]`); with the F3 prefix (taken above) the same two opcodes are movss, which is how a leaf that
+            // stores a float opens (F212: 0x1A8DF40). Moved as is unless rip-relative, which is measured like every other ModRM form.
+            // Every other SSE form is still refused.
             if (i < available && (code[i] == 0x10 || code[i] == 0x11)) {
                 ++i;
                 if (i >= available) return 0;
@@ -166,8 +176,8 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
 
         default:
             // Everything unlisted, which includes E8 (call), E9/EB (jmp),
-            // 7x (jcc rel8), C3 (ret) and every SSE form but movups (0F 10 /
-            // 0F 11 above). A prologue that begins with any of them is one
+            // 7x (jcc rel8), C3 (ret) and every SSE form but movups and movss
+            // (0F 10 / 0F 11 above). A prologue that begins with any of them is one
             // this class will not touch.
             return 0;
     }

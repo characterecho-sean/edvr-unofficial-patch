@@ -34,6 +34,7 @@
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f210_checks.h"    // F210: the full-detail scope's circle centre on a Quest 3's eyes (the d3d11 half; the pixels are openxr_stereo_test's)
 #include "f209_checks.h"    // F209: the Pioneer Supplies buy screens found by the game's own open flag; F107 holds the camera away while one is open
+#include "f212_checks.h"    // F212: the conversation look (the leaf that sets the look springs' targets stores 0 on foot; the runs, the summary, the wiring)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
 #include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
@@ -7536,6 +7537,8 @@ int wmain(int argc, wchar_t** argv) {
     f107test::run107(check);
     // F209: the buy screens' flag: the signal from Show and Close, the once-a-frame re-check, F107's rule at any distance, normal play unchanged, the lines and their cap, the wiring.
     f209test::run209(check);
+    // F212: the conversation look: the leaf's bytes and offsets, the decision (gated stores 0, passed stores the inputs bit for bit), the counters, the runs and windows, the lines, the wiring.
+    f212test::run212(check);
     // F210: the circle's centre is the sight's tangent whatever the eye's frustum and aspect (the Quest 3's), through the rows, the narrowed left eye, jitter and the wire.
     f210test::run210(check);
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the

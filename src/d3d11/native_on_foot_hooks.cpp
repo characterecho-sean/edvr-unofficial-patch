@@ -8,6 +8,8 @@
 //   FindJoint     findJointHooked: the game's FindJoint, then the capture of the local avatar's skeleton pair. Nothing is written.
 //   shop screens  F209: shopOpenClose (the base UI interaction's Show and Close), shopSetStateHooked, shopKiosk (the armoury kiosk's start and stop): the originals
 //                 run untouched, the suit and weapon buy screens' open byte is read before and after, and what they saw goes to atomics and a ring for the frame thread.
+//   conversation F212  conversationLookHooked: the leaf that sets the look springs' two targets is replaced; while native on foot is active it stores 0.0 in both, else what the
+//                 game asked (native_on_foot_f212.h says what and why). It never returns into the leaf. The frame thread writes the run and summary lines (convLookTick).
 //   frame thread  nativeOnFootHooksFrameBoundary, the Present boundary: installs the hooks when native on foot wants them, opens their gates, holds
 //                 the avatar dither-fade global for native stereo's body, re-reads the remembered buy screens (shopFrameTick), and is the only code here that logs.
 // Every hook thread takes no lock it can wait on (a try-flag keeps a second concurrent caller out where one matters), allocates nothing and
@@ -22,6 +24,7 @@
 #include "avatar_hooks_core.h"
 #include "avatar_skeleton_core.h"
 #include "shop_screen_core.h"   // F209: the Pioneer Supplies buy screens' hooks, signal and lines
+#include "native_on_foot_f212.h"   // F212: the conversation look's leaf, its decision, counters and lines
 #include "native_on_foot.h"   // nativeOnFootActive, nativeOnFootCameraExternal and the pose freeze's hand-off (pfz)
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
 #include "native_on_foot_f180.h"   // F180b: the spine straighten's plan (the spine and the neck as held joints)
@@ -48,7 +51,8 @@ namespace {
 
 // ---- the three hooks ------------------------------------------------------------------------------------------------------------
 // F209 adds five optional ones for the Pioneer Supplies buy screens: the base class's Show and Close, the UI state machine's SetState and the armoury kiosk's start and stop.
-enum Hk : int { kHkCtl = 0, kHkFade, kHkFind, kHkShow, kHkClose, kHkSetState, kHkKioskStart, kHkKioskStop, kHkCount };
+// F212 adds one more: the leaf that sets the look springs' targets (the conversation look).
+enum Hk : int { kHkCtl = 0, kHkFade, kHkFind, kHkShow, kHkClose, kHkSetState, kHkKioskStart, kHkKioskStop, kHkLook, kHkCount };
 constexpr bool isShopHook(int id) { return id >= kHkShow && id <= kHkKioskStop; }
 struct HookSpec {
     const char* label;      // the log's name for it
@@ -73,6 +77,8 @@ const HookSpec kSpec[kHkCount] = {
      shop::kKioskStartPrologueBytes},
     {"shop-kiosk-stop", "ArmouryVendorActivity OnStop (clears +0x1F8)", "avatar-hooks-shop-kiosk-stop", shop::kKioskStopRva, shop::kKioskStopPrologue,
      shop::kKioskStopPrologueBytes},
+    {"conversation-look", "look springs' target setter (the look component facade's slot +0xE8, a 17-byte leaf)", "avatar-hooks-conversation-look", nofoot::f212::kLeafRva,
+     nofoot::f212::kLeaf, nofoot::f212::kLeafBytes},
 };
 
 // ---- state shared between the threads --------------------------------------------------------------------------------------
@@ -200,6 +206,8 @@ float* g_testFadeAmount = nullptr;
 uintptr_t g_testShopBase = 0;             // F209: the rig's image base for the buy screens' vtable compares (0: the armed hook's target minus its RVA)
 bool g_testShopReal = false;              // F209: try the shop hooks against the real module too (the rig's identity-refusal case); otherwise only those with a test target
 uint64_t g_testShopNow = 0;               // F209: the rig's clock (ms) for the shop lines (0: the system clock)
+uint64_t g_testConvNow = 0;               // F212: the rig's clock (ms) for the conversation look's calls and lines (0: the system clock)
+bool g_testLookReal = false;              // F212: try the conversation look's hook against the real module too (the rig's identity-refusal case); otherwise only with a test target
 #endif
 
 // ---- guarded access to the game's memory (nothing with a destructor lives in a function that has a __try) ------------------
@@ -435,6 +443,32 @@ __declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void*
         }
     }
     return result;
+}
+
+// ---- F212: the conversation look (native_on_foot_f212.h says what and why) ------------------------------------------------------------------------
+// ConversationCameraComponent's job calls the facade interface's slot +0xE8 every frame of a conversation with the two angle errors toward the NPC; the slot is a 17-byte leaf
+// that stores them as the look springs' targets, and the springs turn the commander's look like a mouse turn. The callback below is that leaf's replacement: the leaf's own
+// arguments (rcx = the facade, xmm1 = yaw, xmm2 = pitch), the leaf's own two stores (or two zeros), and it never returns into the leaf. It runs on the game's thread that runs the
+// conversation job; it counts into atomics and writes no log line. The relay JUMPS here, so the return address on entry is the game's caller; rax and the flags are the relay's.
+uint64_t convNowMs() noexcept {
+#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
+    if (g_testConvNow) return g_testConvNow;
+#endif
+    return GetTickCount64();
+}
+__declspec(noinline) bool sehStoreLookTargets(uintptr_t iface, uint32_t yawBits, uint32_t pitchBits) noexcept {
+    __try {
+        *reinterpret_cast<volatile uint32_t*>(iface + nofoot::f212::kOffYawTarget) = yawBits;
+        *reinterpret_cast<volatile uint32_t*>(iface + nofoot::f212::kOffPitchTarget) = pitchBits;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) void __fastcall conversationLookHooked(void* iface, float yaw, float pitch) noexcept {
+    const nofoot::f212::Stores st = nofoot::f212::decide(nativeOnFootActive(), yaw, pitch);
+    const bool ok = sehStoreLookTargets(reinterpret_cast<uintptr_t>(iface), st.yawBits, st.pitchBits);
+    nofoot::f212::noteCall(nofoot::f212::g_shared, st, yaw, pitch, ok, convNowMs());
 }
 
 // ---- F209: the Pioneer Supplies buy screens (shop_screen_core.h says what and why) -----------------------------------------------------------
@@ -2571,6 +2605,16 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
 int g_identity = 0;   // 0 not checked, 1 ok, 2 differs
 char g_identityWhy[200] = {};
 
+// F212: n bytes copied from the game, or false when a read faults.
+__declspec(noinline) bool sehCopyBytes(uintptr_t at, uint8_t* out, size_t n) noexcept {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(at), n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // Resolve the target, verify the build and the prologue. On failure `why` says why in one sentence and nothing was patched.
 bool resolveAndVerify(int id, uintptr_t* target, char* why, size_t whyCap) {
     const HookSpec& spec = kSpec[id];
@@ -2597,6 +2641,17 @@ bool resolveAndVerify(int id, uintptr_t* target, char* why, size_t whyCap) {
         t = base + spec.rva;
     }
     if (!sehCheckBytes(t, spec.prologue, spec.prologueBytes)) {
+        if (id == kHkLook) {   // F212: a leaf is the whole function, so the refusal says which bytes were there and which were expected
+            uint8_t seen[nofoot::f212::kLeafBytes] = {};
+            char found[3 * nofoot::f212::kLeafBytes + 4] = {}, want[3 * nofoot::f212::kLeafBytes + 4] = {};
+            if (sehCopyBytes(t, seen, sizeof(seen))) nofoot::f212::hexBytes(found, sizeof(found), seen, sizeof(seen));
+            else std::snprintf(found, sizeof(found), "unreadable");
+            nofoot::f212::hexBytes(want, sizeof(want), nofoot::f212::kLeaf, nofoot::f212::kLeafBytes);
+            std::snprintf(why, whyCap,
+                          "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's %s: found %s, expected %s); nothing was patched",
+                          spec.prologueBytes, static_cast<unsigned long long>(spec.rva), spec.what, found, want);
+            return false;
+        }
         std::snprintf(why, whyCap,
                       "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's %s prologue); nothing was patched",
                       spec.prologueBytes, static_cast<unsigned long long>(spec.rva), spec.what);
@@ -2616,6 +2671,7 @@ const void* callbackFor(int id) {
         case kHkSetState: return reinterpret_cast<const void*>(&shopSetStateHooked);
         case kHkKioskStart: return reinterpret_cast<const void*>(&shopKioskStartHooked);
         case kHkKioskStop: return reinterpret_cast<const void*>(&shopKioskStopHooked);
+        case kHkLook: return reinterpret_cast<const void*>(&conversationLookHooked);
         default: return nullptr;
     }
 }
@@ -2673,6 +2729,18 @@ const char* armedRole(int id) {
         case kHkKioskStop:
             return "shop screens instrument (F209): the original runs and its result is returned unchanged; the kiosk session's byte +0x1F8 is read before and after; nothing is "
                    "written";
+        case kHkLook: {
+            // The verified bytes are in the line itself (this is the one hook whose whole function is its prologue).
+            static char text[512];
+            char bytes[3 * nofoot::f212::kLeafBytes + 4] = {};
+            nofoot::f212::hexBytes(bytes, sizeof(bytes), nofoot::f212::kLeaf, nofoot::f212::kLeafBytes);
+            std::snprintf(text, sizeof(text),
+                          "the conversation look (F212): the leaf that sets the look springs' two targets is replaced; while native on foot is active the callback stores 0.0 in both "
+                          "(the game's own no-turn state) and counts the call, otherwise it stores what the game asked, as the leaf did; it never returns into the leaf; the whole "
+                          "function's bytes verified: %s",
+                          bytes);
+            return text;
+        }
         default:
             return "the original runs untouched and the mode byte is read after it, for native on foot's camera signal; nothing is written";
     }
@@ -2689,6 +2757,7 @@ const char* downConsequence(int id) {
         case kHkSetState: return "the shop state changes (F209) are not logged.";
         case kHkKioskStart:
         case kHkKioskStop: return "the armoury kiosk's start and stop (F209) are not logged.";
+        case kHkLook: return "the conversation look (F212) is not held: the game's conversation may turn the commander's look toward the NPC, as before.";
         default: return "native on foot's body changes stay on in every camera (the game's third-person camera is not told apart).";
     }
 }
@@ -2742,6 +2811,9 @@ void updateGates() {
     // F209: the five shop hooks are open while the native key is on (they are rare calls: a UI screen opening or closing, a state machine changing state). A closed gate loses no signal:
     // the frame thread re-reads every remembered object each frame whatever the gates say.
     for (int id = kHkShow; id <= kHkKioskStop; ++id) g_gate[id].store(armed(id) && capture ? 1u : 0u, std::memory_order_release);
+    // F212: the conversation look's callback is open while the native key is on; it decides gated or passed itself, by nativeOnFootActive() at each call. A closed gate sends the
+    // call down the relay's original path: the stolen instruction, then the rest of the leaf, which is what the game ran before.
+    g_gate[kHkLook].store(armed(kHkLook) && capture ? 1u : 0u, std::memory_order_release);
 }
 
 // ---- F209: the frame thread's half of the buy screens --------------------------------------------------------------------------------------------
@@ -2842,6 +2914,37 @@ void shopFrameTick(const avh::Sink& sink) {
         f.signalLogged = on;
         shop::formatSignal(line, sizeof(line), s, on, f.seq);
         shopWrite(f, sink, now, line);
+    }
+}
+
+// ---- F212: the frame thread's half of the conversation look ----------------------------------------------------------------------------------------
+nofoot::f212::Tracker g_convTracker;   // frame thread only
+
+// The rigs install the hook only when they gave it a target; production tries it.
+bool convLookWanted() {
+#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
+    return g_testLookReal || g_testTargets[kHkLook] != 0;
+#else
+    return true;
+#endif
+}
+// Once a frame: the counters the game's thread left (the callback's, and the look processor hook's reads of the springs), as the run edges and the 10 s summary.
+void convLookTick(const avh::Sink& sink) {
+    if (!armed(kHkLook)) return;
+    const nofoot::f212::Snapshot snap = nofoot::f212::take(nofoot::f212::g_shared);
+    const nofoot::f212::Out o = g_convTracker.step(convNowMs(), snap);
+    char line[avh::kLineBytes];
+    if (o.began) {
+        nofoot::f212::formatBegan(line, sizeof(line), o);
+        say(sink, "%s", line);
+    }
+    if (o.ended) {
+        nofoot::f212::formatEnded(line, sizeof(line), o);
+        say(sink, "%s", line);
+    }
+    if (o.summary) {
+        nofoot::f212::formatSummary(line, sizeof(line), o);
+        say(sink, "%s", line);
     }
 }
 
@@ -3048,6 +3151,7 @@ void boundaryAt(const avh::Sink& sink) {
         // Optional: a stand-down leaves the body changes on in every camera (native_on_foot.cpp says so once).
         if (g_hooks[kHkCtl].state == kHookStateNotTried) tryHook(kHkCtl, sink);
         tryShopHooks(sink);   // F209: optional; a stand-down leaves F107 on its distance test alone
+        if (g_hooks[kHkLook].state == kHookStateNotTried && convLookWanted()) tryHook(kHkLook, sink);   // F212: optional; a stand-down leaves the game's conversation look as it was
         checkPartNames(sink);
         skeletonArm(fs, sink);
     }
@@ -3057,6 +3161,7 @@ void boundaryAt(const avh::Sink& sink) {
         nativeFadeTick(nativeBody && !external, external ? "the game's third-person camera (F93d)" : g_nativeReason, sink);
     }
     shopFrameTick(sink);   // F209
+    convLookTick(sink);    // F212
     updateGates();
 }
 avh::Sink g_frameSink{&logSink, nullptr};   // the production wrapper's lines (the rig points it at a capture)
@@ -3087,6 +3192,8 @@ void nativeOnFootHooksShutdown() {
     // An unload (FreeLibrary): the dither-fade global goes back to -1 if EDVR still holds it at 0. A process exit does not come here, and
     // needs nothing: the global dies with the process.
     nativeFadeTick(false, "the game is shutting down", avh::Sink{&logSink, nullptr});
+    // F212: a call after this goes down the relay's original path (the callback is in the code about to be unloaded); the destructor puts the leaf's own bytes back.
+    g_gate[kHkLook].store(0, std::memory_order_release);
 }
 
 bool avatarHooksBuildKnown(uintptr_t* baseOut, char* why, size_t whyCap) {
@@ -3733,6 +3840,7 @@ void setTargets(const NativeOnFootHooksTestTargets& t) {
     g_testTargets[kHkSetState] = t.shopSetState;
     g_testTargets[kHkKioskStart] = t.kioskStart;
     g_testTargets[kHkKioskStop] = t.kioskStop;
+    g_testTargets[kHkLook] = t.conversationLook;   // F212
 }
 void setFadeGlobal(int32_t* mode, float* amount) {
     g_testFadeMode = mode;
@@ -3768,6 +3876,8 @@ uint64_t amcLocal() { return g_amcLocal.load(); }
 void shopImageBase(uintptr_t base) { g_testShopBase = base; }
 void shopTryReal(bool on) { g_testShopReal = on; }
 void shopClock(uint64_t nowMs) { g_testShopNow = nowMs; }
+void conversationClock(uint64_t nowMs) { g_testConvNow = nowMs; }   // F212
+void conversationTryReal(bool on) { g_testLookReal = on; }          // F212
 void reset() {
     for (HookEntry& entry : g_hooks) {
         entry.hook.uninstall();
@@ -3861,6 +3971,12 @@ void reset() {
         g_testShopBase = 0;
         g_testShopReal = false;
         g_testShopNow = 0;
+    }
+    {   // F212: the conversation look's counters, tracker and clock start from nothing
+        nofoot::f212::g_shared.reset();
+        g_convTracker = nofoot::f212::Tracker();
+        g_testConvNow = 0;
+        g_testLookReal = false;
     }
     g_ctlCalls.store(0);
     g_skelTargets = avh::HeadTargets();
