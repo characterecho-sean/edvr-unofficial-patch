@@ -288,7 +288,7 @@ The SRV turret view (experimental.srv_turret_camera_back, experimental.srv_turre
 ("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
 vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
 (a Scarab, a training scenario) the log says "srv turret view: not the Scorpion at frame ...", which is never a failure: with nothing else from the turret in the window the rule is IDLE
-("nothing applied, by design"), and beside a Scorpion visit the count goes into the detail. The pass covers nine hologram families in eight signatures, each signature with a geometry
+("nothing applied, by design"), and beside a Scorpion visit the count goes into the detail. The pass covers eleven hologram families in ten signatures, each signature with a geometry
 shader, each family with a first-draw line, in two groups (the weapon panels and the radar) each pushed back by its own key; the 10 s line
 gives each group's window (a push-back is a negative gap: deeper) and counts the matched draws per family. It
 judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force, the HUD half being on when any of the
@@ -10426,8 +10426,8 @@ H_SRV_TURRET_HUD = (r"srv turret hud: (?:panels: " + H_SRV_TURRET_GROUP.format(p
 # shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
 H_SRV_TURRET_GS = (r"srv turret hud: precompiled geometry shader (?P<name>.+?) (?P<outcome>created|creation FAILED; standing down|creation faulted/refused; standing down) "
                    r"\(0x(?P<hr>[0-9A-Fa-f]{8}), (?P<ms>[\d.]+) ms\)\.$")
-# Nine hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0: the first eight
-# hex digits of the vertex shader, and for the two that share one the pixel shader's as well) in eight signatures (kSignatures, named by the first family's vertex shader), each signature
+# Eleven hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0, 81216C77.A2965EC2, 81216C77.B4786E0A: the first eight
+# hex digits of the vertex shader, and for the four that share one the pixel shader's as well) in ten signatures with the gunner sheet's (kSignatures, named by the first family's vertex shader), each signature
 # with its own geometry shader; the first-draw and state lines name the family. The flight HUD's vectors (B7790CBF) are no longer in the pass.
 # the anchor the move is made about (srv_turret.cpp cacheGeometry): the head's seated position, latched when the view comes on, a camera key changes, the head jumps (a recentre) or has
 # stayed more than 35 cm from it for 90 frames ("head away": the safety net, e.g. after a frozen pose)
@@ -16633,7 +16633,7 @@ def _hj_srv_turret(rows, ctx):
     HUD keys all at 0 are that half off by key, IDLE, and so is the camera key at 0. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws bound, or draws refused for the
     geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges the camera half on nothing (a key it
     cannot see) and the HUD half on the 10 s line's own windows. No line at all is nothing to judge (None).
-    The pass covers nine hologram families in eight signatures, each signature with its own geometry shader (a creation line apiece: any one failing is NEVER APPLIED), each family
+    The pass covers eleven hologram families in ten signatures, each signature with its own geometry shader (a creation line apiece: any one failing is NEVER APPLIED), each family
     with its first-draw line, in two groups (the weapon panels, the radar) each with its own push-back. The Scorpion only: a "not the Scorpion" line (the turret view bit
     is on in an SRV the journal does not call the Scorpion, a Scarab or a training scenario) is turret activity but never a failure; with nothing else from the turret in the window the rule
     is IDLE ("nothing applied, by design"), and beside a Scorpion visit its count goes into the detail. The vehicle latch's lines ("srv turret: the vehicle is ...") are state like the
@@ -24464,11 +24464,11 @@ def self_test_health():
                 return RT(stsrc, "srv turret camera: back %.2f m published", back, serial)
             return RT(stsrc, "srv turret camera: back cleared", serial)
 
-        # The nine hologram families the pass covers (srv_turret_math.h kFamilies: the first eight hex digits of each vertex shader, and the pixel shader's too for the two that share one) and the
-        # eight signatures they fall into (kSignatures, named by the first family's vertex shader), each with a geometry shader. The first-draw and state lines name the family.
-        # The first two are the weapon panels' group, the other seven the radar's. The flight HUD's vectors (B7790CBF) are no longer in the pass.
-        STF = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94.EA02FAC2", "5559BD94.E95634B0")
-        STS = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94")
+        # The eleven hologram families the pass covers (srv_turret_math.h kFamilies: the first eight hex digits of each vertex shader, and the pixel shader's too for the four that share one) and the
+        # ten signatures they and the gunner sheet fall into (kSignatures, named by the first family's vertex shader), each with a geometry shader. The first-draw and state lines name the family.
+        # The first two and the last two are the weapon panels' group, the other seven the radar's. The flight HUD's vectors (B7790CBF) are no longer in the pass.
+        STF = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94.EA02FAC2", "5559BD94.E95634B0", "81216C77.A2965EC2", "81216C77.B4786E0A")
+        STS = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94", "5DAD41AA", "81216C77")
 
         # journal_watch.cpp: the vehicle latch's line, and srv_turret.cpp's line for a turret view in an SRV the journal does not call the Scorpion
         jwsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "journal_watch.cpp"))
@@ -24519,7 +24519,7 @@ def self_test_health():
             return RT(stsrc, "srv turret hud: family %s draws with the scissor test on", family, rects, *first, *target, "opened to the whole target" if opened else "kept as the game set it")
 
         def st_flight(back=60, forward=70, panels=110, radar=110, gap=0, hud=True, cam=True, rforward=70):
-            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the eight signatures' geometry shaders, the first draws of two families, a 10 s line, the view off,
+            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the ten signatures' geometry shaders, the first draws of two families, a 10 s line, the view off,
             the camera cleared."""
             out = [(1, st_set(back, forward, panels, radar, gap, rforward)), (2, st_view())]
             if cam:
@@ -24609,14 +24609,14 @@ def self_test_health():
               [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
               [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
-        # the nine families in eight signatures: the 10 s line's two comma lists, one geometry shader and twin per signature, the families that never reached the window
+        # the eleven families in ten signatures: the 10 s line's two comma lists, one geometry shader and twin per signature, the families that never reached the window
         old_sec = st_sec().rsplit(" families[", 1)[0] + " families[1989E6D3,2CECEC30]=300,180"
         flight_sec = lambda *secs: st_ok + [(1, st_set()), (2, st_view()), (3, st_cam())] + st_gs_all() + [(5, st_first())] + list(secs) + [(40, st_view(False))]
-        check("srv turret families: the 10 s line of the nine families is read, and the families that drew are listed in its order", st_ok + st_flight(), 0, [("OK", ST)],
+        check("srv turret families: the 10 s line of the eleven families is read, and the families that drew are listed in its order", st_ok + st_flight(), 0, [("OK", ST)],
               has=["hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "no family drew"])
         check("srv turret families: the draws are summed per family over the 10 s lines, the dotted sphere families among them",
-              flight_sec((12, st_sec(fams=(300, 180, 0, 0, 0, 0, 0, 40, 0))), (22, st_sec(fams=(100, 0, 0, 0, 0, 0, 0, 0, 60)))), 0, [("OK", ST)],
-              has=["families 1989E6D3 400, 2CECEC30 180, 5559BD94.EA02FAC2 40, 5559BD94.E95634B0 60, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "B7790CBF"])
+              flight_sec((12, st_sec(fams=(300, 180, 0, 0, 0, 0, 0, 40, 0, 50, 0))), (22, st_sec(fams=(100, 0, 0, 0, 0, 0, 0, 0, 60, 0, 30)))), 0, [("OK", ST)],
+              has=["families 1989E6D3 400, 2CECEC30 180, 5559BD94.EA02FAC2 40, 5559BD94.E95634B0 60, 81216C77.A2965EC2 50, 81216C77.B4786E0A 30, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "B7790CBF"])
         check("srv turret families: a 10 s line in which no family drew says so", flight_sec((12, st_sec(fams=(0,)))), 0, [("OK", ST)],
               has=["hud bound 480 of 480 draws (L 240, R 240), no family drew, first draw of family"], lacks=["UNPARSED", "families 1989E6D3"])
         check("srv turret families: an old 10 s line with two family names still parses", flight_sec((12, old_sec)), 0, [("OK", ST)],

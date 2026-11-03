@@ -57,6 +57,7 @@
 //   G  vs B932058F26B76691 + ps 65861AC394D51526                           RADAR_LOCALKEY_COLOUR xyz, SV_POSITION
 //   H  vs 5559BD94B6852E83 + ps EA02FAC2BD6C643C or E95634B0F61D218F        M_LIGHTINGPOSITION xyz, M_TEXCOORD xy, SV_POSITION (the Scorpion's hologram: the near quad of ps EA02FAC2, and the target hologram sphere)
 //   I  vs 5DAD41AA66757CE3                                      the gunner camera's curved sheet, 2016 indices only   TEXCOORD0 xyzw, SV_POSITION
+//   J  vs 81216C77F90DEDD6 + ps A2965EC2931A39C8 or B4786E0A0B199285    hologram panels, Disable GUI effects off   TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy, SV_POSITION
 namespace edvr {
 
 // The shader text: EDVR_SRV_TURRET_GS_HEAD (the constant buffer and the opening of the `Vertex` struct), the members, EDVR_SRV_TURRET_GS_TAIL (the struct's end and the pass-through).
@@ -313,6 +314,15 @@ constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
     "    stream.RestartStrip();\n"
     "}\n";
 
+// The hologram panels with Elite's Disable GUI effects off (vs 81216C77F90DEDD6, issue 179): the signature of the dump vs_81216C77F90DEDD6.dxbc, moved as A is.
+constexpr char kSrvTurretHudGsJ[] = EDVR_SRV_TURRET_GS_HEAD
+    "    float4 t0 : TEXCOORD0;\n"
+    "    float3 t4 : TEXCOORD4;\n"
+    "    float3 t6 : TEXCOORD6;\n"
+    "    float3 t7 : TEXCOORD7;\n"
+    "    float2 t8 : TEXCOORD8;\n"
+    "    float4 pos : SV_Position;"
+    EDVR_SRV_TURRET_GS_TAIL;
 
 #undef EDVR_SRV_TURRET_GS_HEAD
 #undef EDVR_SRV_TURRET_GS_TAIL

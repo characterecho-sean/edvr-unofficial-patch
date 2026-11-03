@@ -4175,9 +4175,9 @@ if errorlevel 1 ( echo [edvr] ERROR: supercruise bars test build failed & exit /
 "%OBJ%\supercruisebars\supercruise_bars_test.exe" --self-test || exit /b 1
 exit /b 0
 
-REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the eight pass-through geometry shaders (kSrvTurretHudGsABytecode to
-REM kSrvTurretHudGsHBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
-REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the nine families' shader pairs (the two hologram
+REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the ten pass-through geometry shaders (kSrvTurretHudGsABytecode to
+REM kSrvTurretHudGsJBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
+REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the eleven families' shader pairs (the four hologram
 REM families, five radar-named billboard families and the target hologram sphere with either pixel shader) with their output signatures and clip rows: the 3D move about an anchor (every vertex
 REM translated forward, then pushed deeper or pulled nearer along its ray from the anchor), read vertex by vertex through the stream-output twin against a CPU reference in doubles and against the
 REM geometry itself (anchor at the eye, anchor off the eye, asymmetric tangents, the window, a pull, the translation alone and with the push, a vertex 15 cm from the anchor, the panels' and the radar's groups translated by their own keys in one frame, the three depth modes, the Scorpion hologram's lighting position moved by the camera's axes from a stand-in vertex constant buffer bound whole and ranged, the disc probe's register copy, the scissor opened to the whole target and the game's rectangles put back, the radar disc's quad in the seated frame from clip positions for a moved and turned head, the unmoved-draw list), the pictures against the

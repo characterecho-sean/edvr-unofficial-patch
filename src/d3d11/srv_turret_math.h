@@ -69,8 +69,10 @@
 // the same draw's vertex constants are the camera's RIGHT, UP and FORWARD unit vectors in world axes (they match the projection rows), so the shader adds the eye-space displacement of the
 // move (right * dX + up * dY + forward * dZ) to the interpolant. The module binds the draw's own VS constant buffer at slot 1 to GS slot 1 for that signature (srv_turret_hud_binding.h).
 //
-// KNOWN GAP. With Elite's "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6 (ps A2965EC2931A39C8), a different output signature (SV_Position at o5).
-// There is no bytecode for it in the dumps, so it is not covered yet.
+// THE HOLO PANELS WITH "DISABLE GUI EFFECTS" OFF are vs 81216C77F90DEDD6 with ps A2965EC2931A39C8 or B4786E0A0B199285 instead of vs 1989E6D3 (issue 179). The dumped bytecode
+// (vs_81216C77F90DEDD6.dxbc) writes TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy and SV_POSITION at o5 from the same inputs, constant buffers and clip rows as
+// vs 1989E6D3, and neither pixel shader reads SV_POSITION. They are signature 9 and the two families 81216C77.A2965EC2 and 81216C77.B4786E0A, in the panels group and moved as 1989E6D3 is
+// (TEXCOORD6 is not touched).
 //
 // IN THIS FILE, in order: the keys and their limits; Part 1 (the Scorpion-only gate and the camera's seated z); Part 2 (the families, their output signatures and groups); the radar's anchor
 // moved in the game (the setter's offset, the placement rule, the direction along the turret) and the radar's own camera (the slot rule, the camera move); THE MOVE (the shader's constants
@@ -171,7 +173,7 @@ struct Signature {
     SigElement el[kMaxSigElements];
     bool psReadsPosition;        // the family's pixel shader also reads SV_POSITION.xy
 };
-inline constexpr uint32_t kSignatureCount = 9;
+inline constexpr uint32_t kSignatureCount = 10;
 inline constexpr Signature kSignatures[kSignatureCount] = {
     {"1989E6D3", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 6, 3}, {"SV_Position", 0, 4}}, false},
     {"2CECEC30", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 7, 2}, {"SV_Position", 0, 4}}, true},
@@ -182,6 +184,7 @@ inline constexpr Signature kSignatures[kSignatureCount] = {
     {"B932058F", 2, {{"__USER_RADAR_LOCALKEY_COLOUR", 0, 3}, {"SV_Position", 0, 4}}, false},
     {"5559BD94", 3, {{"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3}, {"__USER_VERTEX_M_TEXCOORD", 0, 2}, {"SV_Position", 0, 4}}, true},
     {"5DAD41AA", 2, {{"TEXCOORD", 0, 4}, {"SV_Position", 0, 4}}, false},
+    {"81216C77", 6, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 4, 3}, {"TEXCOORD", 6, 3}, {"TEXCOORD", 7, 3}, {"TEXCOORD", 8, 2}, {"SV_Position", 0, 4}}, false},
 };
 // The floats of one vertex as the vertex shader writes it (the signature), and where the clip position, the last element, starts in it. The geometry shader writes the signature and then one
 // more element, `pre` (kPreSemantic, 4 floats): the clip position as the game made it, before the move. The pixel shaders do not read it and nothing in the module reads it back.
@@ -212,7 +215,7 @@ struct Family {
 constexpr Family makeFamily(uint64_t vs, uint64_t ps, const char* name, uint32_t sig, Group group) {
     return Family{vs, ps, name, sig, (sigFloats(sig) + kPreFloats) * 4, sigPosFloat(sig), sigFloats(sig), group};
 }
-inline constexpr uint32_t kFamilyCount = 9;
+inline constexpr uint32_t kFamilyCount = 11;
 inline constexpr Family kFamilies[kFamilyCount] = {
     makeFamily(0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull, "1989E6D3", 0, Group::kPanels),
     makeFamily(0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "2CECEC30", 1, Group::kPanels),
@@ -223,6 +226,8 @@ inline constexpr Family kFamilies[kFamilyCount] = {
     makeFamily(0xB932058F26B76691ull, 0x65861AC394D51526ull, "B932058F", 6, Group::kRadar),
     makeFamily(0x5559BD94B6852E83ull, 0xEA02FAC2BD6C643Cull, "5559BD94.EA02FAC2", 7, Group::kRadar),
     makeFamily(0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7, Group::kRadar),
+    makeFamily(0x81216C77F90DEDD6ull, 0xA2965EC2931A39C8ull, "81216C77.A2965EC2", 9, Group::kPanels),
+    makeFamily(0x81216C77F90DEDD6ull, 0xB4786E0A0B199285ull, "81216C77.B4786E0A", 9, Group::kPanels),
 };
 // The geometry stage's limits the signatures must stay inside: 32 input registers, and 1024 scalars of output a draw (maxvertexcount 3 times a vertex's floats).
 constexpr bool signaturesFit() {
@@ -239,8 +244,11 @@ static_assert(signaturesFit(), "every signature ends in a 4-component SV_Positio
 static_assert(kFamilies[0].strideBytes == 60 && kFamilies[0].posFloat == 7 && kFamilies[0].preFloat == 11 && kFamilies[1].strideBytes == 56 && kFamilies[1].posFloat == 6 &&
                   kFamilies[1].preFloat == 10 && kFamilies[8].strideBytes == 52 && kFamilies[8].posFloat == 5 && kFamilies[8].preFloat == 9,
               "the geometry shader's output records: (4 + 3 + 4 + 4), (4 + 2 + 4 + 4) and the target hologram sphere's (3 + 2 + 4 + 4) floats");
-static_assert(kFamilies[0].group == Group::kPanels && kFamilies[1].group == Group::kPanels && kFamilies[2].group == Group::kRadar && kFamilies[8].group == Group::kRadar,
-              "the two hologram families are the panels, every other family is the radar");
+static_assert(kFamilies[9].strideBytes == 92 && kFamilies[9].posFloat == 15 && kFamilies[9].preFloat == 19 && kFamilies[10].strideBytes == 92 && kFamilies[10].posFloat == 15 && kFamilies[10].preFloat == 19,
+              "the Disable-GUI-effects-off panels' output record: (4 + 3 + 3 + 3 + 2 + 4 + 4) floats");
+static_assert(kFamilies[0].group == Group::kPanels && kFamilies[1].group == Group::kPanels && kFamilies[2].group == Group::kRadar && kFamilies[8].group == Group::kRadar &&
+                  kFamilies[9].group == Group::kPanels && kFamilies[10].group == Group::kPanels,
+              "the hologram families (1989E6D3, 2CECEC30 and the two 81216C77 pairs) are the panels, every other family is the radar");
 // The family of a draw's shader pair, or -1: both halves of the pair must match.
 inline int familyOf(uint64_t vs, uint64_t ps) {
     for (uint32_t i = 0; i < kFamilyCount; ++i)
@@ -669,8 +677,9 @@ inline constexpr uint32_t kGunnerSheetIndices = 2016;
 inline constexpr uint32_t kGunnerCardsIndices = 288;
 inline constexpr int kGunnerCardsSignature = 1;
 inline constexpr int kGunnerSheetSignature = 8;
-static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature + 1 == kSignatureCount && kSignatures[kGunnerCardsSignature].el[1].index == 7 && kSignatures[kGunnerSheetSignature].count == 2,
-              "the gunner cards use the hologram signature B, and the sheet is the last signature");
+static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature == 8 && kGunnerSheetSignature < static_cast<int>(kSignatureCount) && kSignatures[kGunnerCardsSignature].el[1].index == 7 &&
+                  kSignatures[kGunnerSheetSignature].count == 2,
+              "the gunner cards use the hologram signature B, and the sheet is signature 8 (I)");
 inline int gunnerSignature(uint64_t vs, char kind, uint32_t indexCount) {
     if (kind != 'I' && kind != 'X') return -1;
     if (vs == kGunnerCardsVs && indexCount == kGunnerCardsIndices) return kGunnerCardsSignature;

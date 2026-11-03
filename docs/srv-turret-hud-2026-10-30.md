@@ -58,7 +58,7 @@
 - **Sheet brackets (2026-11-02):** SV_ClipDistance0 cuts the SYSTEMS dash at x 0.53 (flown right)
   and the target card's leaning edge plane at 3 mm (`kBracketCutM`). Sean tuned that dial in flight
   ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
-- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above.
+- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (vs 81216C77 families, Disable GUI effects off; built 2026-11-03, NOT FLOWN).
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1968,3 +1968,11 @@ Sean flew 6b131d5c on Frontier (dump `163557956001`). The SYSTEMS side is right:
 ### 2026-11-02: the dial tuned to 3 mm, baked, and the key removed
 
 Sean flew bb545c8b and tuned `experimental.srv_turret_bracket_cut`: "3 mm works". As agreed with him before the flight, the value is now the behaviour: the sheet's shader has `kBracketCutM = 0.003` (3 mm left of the target card's dark panel edge; it removes the bar and keeps the border) and no longer reads the constant buffer's fourth register, which is unused padding again. The key is removed with his approval: its getter, the "bracket cut" part of the settings line, the `edvr.ini` entry and its ui row (the block is thirteen settings again), the `gunnerParamsFor` argument and the cut's range check in `paramsUsable`. `tools\edvr_log.py` still parses a settings line that has the part, so bb545c8b's logs read. The wiring pins now say the key is gone (not read in the module, not in `edvr.ini`), and the rig's dial cases are fixed-constant cases: 1 mm left of the edge is kept, 5 mm left is cut, the zero crossing is at 3 mm, and the fill's own edge vertices sit at clip.x = +3 mm. The dial is off the TEMPORARY list. The other eight signatures' bytecode is unchanged. The baked build is not flown.
+
+### 2026-11-03: the holo panels with Disable GUI effects off are covered (built, not flown)
+
+A report (issue #179) said the weapon panel splits in the turret view when Elite's Disable GUI effects is off. The game then draws the hologram panels with vs 81216C77F90DEDD6 instead of vs 1989E6D3B405FDE0, and no family covered it, so those panels stayed where the game put them while the rest of the HUD moved.
+
+- **Cause.** The shader dump (s_81216C77F90DEDD6.dxbc, ps A2965EC2931A39C8 and B4786E0A0B199285) shows the same inputs, constant buffers and clip rows (dp4 against cb0[4..7]) as vs 1989E6D3, with the output TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy and SV_POSITION at o5. Both pixel shaders read TEXCOORD0, 4, 6, 7 and 8 and not SV_POSITION. The module had no signature for it (the KNOWN GAP comment in srv_turret_math.h).
+- **Fix.** Signature 9 (81216C77, geometry shader J in srv_turret_hud_shader.h) and the families 81216C77.A2965EC2 and 81216C77.B4786E0A, appended as families 9 and 10 in the panels group, treated as 1989E6D3 is (the same move, TEXCOORD6 left unmoved). The gunner sheet stays signature 8; its assert no longer says it is the last. The variant list, the 	emporal_shader_build contract row (89 fixed shaders), the 10 s line's amilies[...] list (it prints the table, so it grew by two names), edvr_log.py's fixtures and the rig follow. In 	ools\srv_turret_hud_test the signature, the two pairs, the panels count (4) and the 92-byte record are pinned, and the shader J runs the shared move cases and the mutants like the others; the flight-HUD guard's bound of four elements per signature allows six for this one.
+- **NOT FLOWN:** the next flight is the turret with Disable GUI effects off. Read the 10 s srv turret hud: panels: line: 81216C77.A2965EC2 or 81216C77.B4786E0A should count draws, and 1989E6D3 should read 0 there.

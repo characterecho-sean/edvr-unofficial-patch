@@ -1,9 +1,9 @@
-// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's eight pass-through geometry shaders
-// (kSrvTurretHudGsABytecode to kSrvTurretHudGsHBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
-// binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the nine families' vertex and pixel shaders. A family is a
-// shader pair (srv_turret_math.h kFamilies: the two hologram families 1989E6D3 and 2CECEC30, the radar-named billboards DF3503CD, 44DDCDEB, 9B34C331, 9611A454 and B932058F, the target
+// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's ten pass-through geometry shaders
+// (kSrvTurretHudGsABytecode to kSrvTurretHudGsJBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
+// binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the eleven families' vertex and pixel shaders. A family is a
+// shader pair (srv_turret_math.h kFamilies: the hologram families 1989E6D3 and 2CECEC30 and the Disable-GUI-effects-off panels 81216C77 with either of its pixel shaders, the radar-named billboards DF3503CD, 44DDCDEB, 9B34C331, 9611A454 and B932058F, the target
 // hologram sphere 5559BD94 with either of its pixel shaders; the flight HUD's vectors B7790CBF are not a family); there is one geometry shader for each distinct vertex-shader OUTPUT
-// SIGNATURE (kSignatures, eight). The families are in two GROUPS, each with its own key: the weapon panels (the two hologram families) and the radar (the other seven). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
+// SIGNATURE (kSignatures, ten). The families are in two GROUPS, each with its own key: the weapon panels (the four hologram pairs) and the radar (the other seven). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
 // included; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the pixel stand-ins read what the game's
 // pixel shaders read (some also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them, nor are the 5334-index shells (at gigametres) or the
 // glare sprite (a constant clip w of 1).
@@ -845,29 +845,31 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
     // the families: the pairs, their records, and that the reticle's sprite and the excluded families are not among them
-    check(st::kFamilyCount == 9 && st::kSignatureCount == 9, "nine families (shader pairs) over nine output signatures, the last the gunner sheet");
+    check(st::kFamilyCount == 11 && st::kSignatureCount == 10, "eleven families (shader pairs) over ten output signatures, the gunner sheet ninth and the Disable-GUI-effects-off panels' tenth");
     struct Pair {
         uint64_t vs, ps;
         const char* name;
         uint32_t sig;
     };
-    const Pair pairs[9] = {
+    const Pair pairs[11] = {
         {0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull, "1989E6D3", 0},         {0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "2CECEC30", 1},
         {0xDF3503CD07F9B10Cull, 0x8C08EB252B0F6095ull, "DF3503CD", 2},         {0x44DDCDEBAEA137D8ull, 0xCB53257EFE8B1696ull, "44DDCDEB", 3},
         {0x9B34C331902DC1EDull, 0x3B3433E4FEBBC37Bull, "9B34C331", 4},         {0x9611A454527F7FEBull, 0x1E1C49DC51C0E509ull, "9611A454", 5},
         {0xB932058F26B76691ull, 0x65861AC394D51526ull, "B932058F", 6},         {0x5559BD94B6852E83ull, 0xEA02FAC2BD6C643Cull, "5559BD94.EA02FAC2", 7},
         {0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7},
+        {0x81216C77F90DEDD6ull, 0xA2965EC2931A39C8ull, "81216C77.A2965EC2", 9},  {0x81216C77F90DEDD6ull, 0xB4786E0A0B199285ull, "81216C77.B4786E0A", 9},
     };
     bool pairsOk = true, crossOk = true;
-    for (uint32_t i = 0; i < 9; ++i) {
+    for (uint32_t i = 0; i < 11; ++i) {
         pairsOk = pairsOk && st::kFamilies[i].vs == pairs[i].vs && st::kFamilies[i].ps == pairs[i].ps && !std::strcmp(st::kFamilies[i].name, pairs[i].name) &&
                   st::kFamilies[i].sig == pairs[i].sig && st::familyOf(pairs[i].vs, pairs[i].ps) == int(i) && st::isFamilyVs(pairs[i].vs);
-        for (uint32_t j = 0; j < 9; ++j)
+        for (uint32_t j = 0; j < 11; ++j)
             if (i != j && pairs[i].vs != pairs[j].vs) crossOk = crossOk && st::familyOf(pairs[i].vs, pairs[j].ps) == -1;
     }
-    check(pairsOk, "the nine families: the shader pairs of the dumps, in the table's order, each found by BOTH of its shaders, its vertex shader found by isFamilyVs");
-    check(crossOk && st::familyOf(pairs[7].vs, pairs[8].ps) == 8 && st::familyOf(pairs[8].vs, pairs[7].ps) == 7 && st::familyOf(0, 0) == -1,
-          "a draw is a family's only when BOTH shaders of the pair match (a vertex shader with another family's pixel shader is none; the sphere's two pixel shaders are two families)");
+    check(pairsOk, "the eleven families: the shader pairs of the dumps, in the table's order, each found by BOTH of its shaders, its vertex shader found by isFamilyVs");
+    check(crossOk && st::familyOf(pairs[7].vs, pairs[8].ps) == 8 && st::familyOf(pairs[8].vs, pairs[7].ps) == 7 && st::familyOf(pairs[9].vs, pairs[10].ps) == 10 &&
+              st::familyOf(pairs[10].vs, pairs[9].ps) == 9 && st::familyOf(pairs[9].vs, pairs[0].ps) == -1 && st::familyOf(pairs[0].vs, pairs[9].ps) == -1 && st::familyOf(0, 0) == -1,
+          "a draw is a family's only when BOTH shaders of the pair match (a vertex shader with another family's pixel shader is none; the sphere's two pixel shaders are two families, and the Disable-GUI-effects-off panels' two)");
     check(st::familyOf(0xE508648660A352B2ull, 0x63ABD86359B57D01ull) == -1 && !st::isFamilyVs(0xE508648660A352B2ull),
           "the reticle's sprite (vs E508648660A352B2, ps 63ABD86359B57D01) is not a family: it is at about 500 m and is left alone");
     check(!st::isFamilyVs(0xB12F7A618E1BDE98ull) && !st::isFamilyVs(0x203DF51758AADC4Dull) && !st::isFamilyVs(0x94D5C556DFD6D705ull) && st::familyOf(0xB12F7A618E1BDE98ull, 0x42AC0CACC9CDF72Bull) == -1 &&
@@ -876,7 +878,7 @@ static void mathCases() {
     {   // the flight HUD's vectors (vs B7790CBFC6554097, ps 8DEF46452FA459F5; clip w -658 to +3029 m in the flight of 9fdad3a1) are no family, no signature, and no name in the tables
         bool gone = st::familyOf(0xB7790CBFC6554097ull, 0x8DEF46452FA459F5ull) == -1 && !st::isFamilyVs(0xB7790CBFC6554097ull);
         for (uint32_t i = 0; i < st::kFamilyCount; ++i) gone = gone && std::strcmp(st::kFamilies[i].name, "B7790CBF") != 0 && st::kFamilies[i].vs != 0xB7790CBFC6554097ull && st::kFamilies[i].sig < st::kSignatureCount;
-        for (uint32_t s = 0; s < st::kSignatureCount; ++s) gone = gone && std::strcmp(st::kSignatures[s].name, "B7790CBF") != 0 && st::kSignatures[s].count <= 4;
+        for (uint32_t s = 0; s < st::kSignatureCount; ++s) gone = gone && std::strcmp(st::kSignatures[s].name, "B7790CBF") != 0 && st::kSignatures[s].count <= (s == 9 ? 6u : 4u);
         check(gone, "the flight HUD's vectors (B7790CBF) are out of the pass: no family, no signature, no pixel-shader pairing");
     }
     {   // the groups: every family has one, the two hologram families are the panels, the rest the radar
@@ -887,20 +889,21 @@ static void mathCases() {
             ok = ok && (g == st::Group::kPanels || g == st::Group::kRadar);
             panels += g == st::Group::kPanels ? 1 : 0;
             radar += g == st::Group::kRadar ? 1 : 0;
-            ok = ok && ((i < 2) == (g == st::Group::kPanels)) && !std::strcmp(st::kFamilies[i].name, pairs[i].name);
+            ok = ok && ((i < 2 || i >= 9) == (g == st::Group::kPanels)) && !std::strcmp(st::kFamilies[i].name, pairs[i].name);
         }
-        ok = ok && panels == 2 && radar == 7 && st::kGroupCount == 2 && st::kFamilies[0].vs == 0x1989E6D3B405FDE0ull && st::kFamilies[1].vs == 0x2CECEC3065EF0D4Aull;
-        check(ok, "every family has a group: 1989E6D3 and 2CECEC30 are the panels, the other seven (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the sphere's two) the radar");
+        ok = ok && panels == 4 && radar == 7 && st::kGroupCount == 2 && st::kFamilies[0].vs == 0x1989E6D3B405FDE0ull && st::kFamilies[1].vs == 0x2CECEC3065EF0D4Aull &&
+             st::kFamilies[9].vs == 0x81216C77F90DEDD6ull && st::kFamilies[10].vs == 0x81216C77F90DEDD6ull;
+        check(ok, "every family has a group: 1989E6D3, 2CECEC30 and the two 81216C77 pairs are the panels, the other seven (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the sphere's two) the radar");
     }
     {   // the stream-output records: every family's equals its signature's
-        const uint32_t expectBytes[8] = {60, 56, 40, 68, 60, 52, 44, 52}, expectPos[8] = {7, 6, 2, 9, 7, 5, 3, 5};
+        const uint32_t expectBytes[10] = {60, 56, 40, 68, 60, 52, 44, 52, 48, 92}, expectPos[10] = {7, 6, 2, 9, 7, 5, 3, 5, 4, 15};
         bool ok = true;
-        for (uint32_t s = 0; s < 8; ++s)
+        for (uint32_t s = 0; s < 10; ++s)
             ok = ok && (st::sigFloats(s) + st::kPreFloats) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 + 16 == expectBytes[s];
-        for (uint32_t i = 0; i < 9; ++i)
+        for (uint32_t i = 0; i < 11; ++i)
             ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig] &&
                  st::kFamilies[i].preFloat == st::sigFloats(st::kFamilies[i].sig);
-        check(ok, "the stream-output records: each signature's floats in order, the clip position last, then the shader's `pre` (60, 56, 40, 68, 60, 52, 44 and 52 bytes), and each family's are its signature's");
+        check(ok, "the stream-output records: each signature's floats in order, the clip position last, then the shader's `pre` (60, 56, 40, 68, 60, 52, 44, 52, 48 and 92 bytes), and each family's are its signature's");
     }
     {   // the topologies: lists and strips, nothing else
         static_assert(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST == 4 && D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP == 5, "the topology constants srv_turret_math.h carries are D3D11's");
@@ -1462,7 +1465,8 @@ struct SigBytes {
 };
 #define EDVR_RIG_SIG_BYTES(L) {edvr::kSrvTurretHudGs##L##Bytecode, sizeof(edvr::kSrvTurretHudGs##L##Bytecode), edvr::kSrvTurretHudGs##L}
 static const SigBytes kBytes[st::kSignatureCount] = {EDVR_RIG_SIG_BYTES(A), EDVR_RIG_SIG_BYTES(B), EDVR_RIG_SIG_BYTES(C), EDVR_RIG_SIG_BYTES(D), EDVR_RIG_SIG_BYTES(E),
-                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I)};
+                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I),
+                                                     EDVR_RIG_SIG_BYTES(J)};
 #undef EDVR_RIG_SIG_BYTES
 
 static void linkageCases(int fam, ID3D11GeometryShader* gs) {
@@ -1829,7 +1833,7 @@ static void radarAnchorCases() {
     check(!ring.find(10) && ring.find(11) && ring.find(14), "a full ring forgets its oldest frame first");
     check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
     check(st::radarAnchorLeavesFamily(7) && st::radarAnchorLeavesFamily(8) && !st::radarAnchorLeavesFamily(0) && !st::radarAnchorLeavesFamily(2) && !st::radarAnchorLeavesFamily(6) &&
-              !st::radarAnchorLeavesFamily(-1) && !st::radarAnchorLeavesFamily(9) && !std::strcmp(st::kFamilies[7].name, "5559BD94.EA02FAC2") && !std::strcmp(st::kFamilies[8].name, "5559BD94.E95634B0"),
+              !st::radarAnchorLeavesFamily(-1) && !st::radarAnchorLeavesFamily(9) && !st::radarAnchorLeavesFamily(10) && !st::radarAnchorLeavesFamily(11) &&!std::strcmp(st::kFamilies[7].name, "5559BD94.EA02FAC2") && !std::strcmp(st::kFamilies[8].name, "5559BD94.E95634B0"),
           "the native move leaves the two 5559BD94 billboard families to the game and no other");
 }
 
@@ -3025,7 +3029,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of nine signatures, five more in signature H, twelve in the gunner sheet's clip planes and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of ten signatures, five more in signature H, twelve in the gunner sheet's clip planes and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

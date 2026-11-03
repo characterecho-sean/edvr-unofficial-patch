@@ -21,7 +21,7 @@
 //   * the radar anchor (experimental.srv_turret_radar_anchor, srv_radar_anchor.cpp): the ninth key, its publish, the billboards it leaves to the game, the setter hook's pins, its compile-list entry and its
 //     exact-build audit entry (wiredAnchor); camera mode's slot hook and the radar picture's writers (wiredSlotCamera, wiredWriters); the camera rows the Unmap tee hands the module (wiredAnchorCpuRows).
 //   * the first scope's state note: the issues counted at the game's issue and the re-issues, each family's first scope saying its state (wiredStateNote).
-//   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the eight variants are registered as gs_5_0, each with its contract row.
+//   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the ten variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
 // Each pin has controls: an edited copy of the real text must trip it.
 #pragma once
@@ -306,7 +306,7 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
 // the shader tables and build.bat.
 static bool wiredTables(const std::string& shaderBuild, const std::string& variants) {
     bool all = true;
-    for (const char letter : std::string("ABCDEFGHI")) {
+    for (const char letter : std::string("ABCDEFGHIJ")) {
         const std::string row = std::string("{\"kSrvTurretHudGs") + letter + "Bytecode\",\"srv turret hud pass-through " + letter + "\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGs" + letter +
                                 ",\"gs_5_0\"}";
         const std::string contract = std::string("{\"kSrvTurretHudGs") + letter + "Bytecode\", \"srv turret hud pass-through " + letter + "\", edvr::kSrvTurretHudGs" + letter + "}";
