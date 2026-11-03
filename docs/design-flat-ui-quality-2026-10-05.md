@@ -57,7 +57,7 @@
   Anti-Aliasing", flat Performance tab under UI quality, default off; "flat ui layer smaa:" lines). Seen working at 2560x1440 (15:43);
   nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost.
 - **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them.
-- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; the orbit lines followed (built, not flown), last entry.
+- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; the orbit lines followed (FLOWN OK, 894343b1), last entry.
 - **Next on Epic:** SS 0.5 on the shipped build (copy route, eced5813's admission change), 100% at SS 1.0, then all three maps.
 
 ## Purpose
@@ -1209,7 +1209,7 @@ or a station) with them, in both editions.
   of 2672` (3 refused: `not-hdr-target=1 tone-unproven=2`, at a transition). `no-camera-rows` and `other-shift` never appeared: the two new recipes give
   the rows and the rows carry the frame's phase. `flat ui layer smaa: key=on smoothed=2669 raw-fault=0 size=3840x2160`.
 
-## 2026-11-03: the orbit lines in the flat UI layer (built, not flown)
+## 2026-11-03: the orbit lines in the flat UI layer (FLOWN OK)
 
 Sean asked for the orbit lines to go the way of the bars and the dust. Flat draws them with VR's pair (vs C7FA0C0F / ps 6EEF165A) into the
 3840x2160 R11G11B10 scene target, depth and stencil tested as in VR, and the generic classifier refused the pair (log `edvr_gfx_20261103_044624`,
@@ -1228,3 +1228,8 @@ Sean asked for the orbit lines to go the way of the bars and the dust. Flat draw
 - **Flight check** (flat, supercruise with orbit lines showing): `orbit-lines taken` above zero, `no-camera-rows` and `depth-stencil-test` at 0, the
   lines steady when the view turns. `depth-stencil-test` climbing means the seed refused this depth target; `no-density-gain` means the layer is
   smaller than the render.
+- **Flight (Frontier, 2026-11-03, log `edvr_gfx_20261103_093139`, build v0.22.0-rc.6-1-g894343b1, flat, 3840x2160, HUD Anti-Aliasing on):** Sean:
+  "seems to work". First take at 09:33:24 (frame 9049). The two supercruise windows read `orbit-lines asked=1414 decided=1306 taken=1306 refused=108`
+  and `asked=2792 decided=2699 taken=2699 refused=93`, every refusal `not-hdr-target`: about three draws a second of the same pair go to a target
+  that is not the scene's HDR one, are left to the game as before, and are outside the history anyway. `no-camera-rows`, `other-shift` and
+  `depth-stencil-test` never appeared. `flat ui layer smaa: key=on smoothed=2699 raw-fault=0`.
