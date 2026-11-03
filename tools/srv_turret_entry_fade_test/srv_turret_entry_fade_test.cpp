@@ -9,9 +9,13 @@
 //   in [0, 1] and is exactly 0 outside a run; staying on never re-triggers, a new edge does, one during a fade-in cuts the run short and starts again at 1.
 //   THE LINES: the run line, the skipped line, the trace header and a full trace line fit the log's 1200-character line, carry the frames and the signal, say FIRED only when the cap fired,
 //   and none contains a phrase tools/edvr_log.py's turret rule reads.
+//   THE EARLY EDGE (srv_turret_sheet_latch.h): the gunner sheet's draw raises the view before Status.json does; Status.json taking over is no edge and says how long it lagged; a latch with no
+//   sheet draw for a second expires; a non-Scorpion never raises it; the off edge stays Status-driven (a sheet that stops does not turn a Status-on view off, a Status off edge with the sheet
+//   still drawing latches again); and the entry fade's hold starts on the early edge.
 //   THE WIRING: the module is called every frame after alignTick and before the mix, its level is a term of FadeMix's max, the move's publish is told to it, the luma probe's frame-by-frame mode
 //   and the Status.json cadence are asked for, and the new source is in the build.
 #include "../../src/d3d11/srv_turret_entry_fade.h"
+#include "../../src/d3d11/srv_turret_sheet_latch.h"
 
 #include <cmath>
 #include <cstdio>
@@ -22,6 +26,7 @@
 #include <string>
 
 namespace ef = edvr::srv_turret::entryfade;
+namespace sl = edvr::srv_turret::sheetlatch;
 
 static unsigned g_checks = 0;
 static void check(bool ok, const char* what) {
@@ -250,7 +255,119 @@ static void machineCases() {
     static_assert(ef::kSettleMarginMs < ef::kNoSignalMs, "the unconfirmed margin is the longer");
     static_assert(ef::kCapMs <= 1100.0, "the whole run is held to about a second");
     static_assert(ef::kMaxSamples == ef::kMaxTraceLines * ef::kSamplesPerLine, "the trace cap is lines times samples");
+    static_assert(ef::kLeadMs == 1000.0, "the luma window starts a second before the edge, to show the game's own fade against the early edge");
+    // A run's window (lead + cap + tail) at 120 Hz is all kept, and the buffer (kPairs, 384 in srv_turret_entry_fade.cpp) holds that window plus the report delay at 144 Hz.
+    static_assert((ef::kLeadMs + ef::kCapMs + ef::kTailMs) / (1000.0 / 120.0) <= ef::kMaxSamples, "a run's trace at 120 Hz is kept whole by the sample cap");
+    static_assert((ef::kLeadMs + ef::kCapMs + ef::kReportAfterMs) / (1000.0 / 144.0) <= 384.0, "the rolling buffer holds a run's window plus the report delay at 144 Hz");
     check(true, "the constants hold their relations (static)");
+}
+
+// ---- the early edge ------------------------------------------------------------------------------------------------------------------------------------------------------------
+static sl::Result latchStep(sl::Latch& l, uint64_t now, bool status, bool scorpion, uint64_t seen) {
+    sl::Input in;
+    in.nowMs = now;
+    in.statusOn = status;
+    in.scorpion = scorpion;
+    in.sheetSeenMs = seen;
+    return l.step(in);
+}
+
+static void latchCases() {
+    {   // the sheet raises the view before Status.json, once; Status.json taking over is not an edge and says the lag
+        sl::Latch l;
+        sl::Result r = latchStep(l, 1000, false, true, 0);
+        check(!r.on && r.event == sl::Event::kNone, "no sheet draw and Status.json off: the view is off");
+        r = latchStep(l, 1100, false, true, 1090);
+        check(r.on && r.event == sl::Event::kRaised, "a sheet draw 10 ms ago with Status.json off raises the view");
+        r = latchStep(l, 1111, false, true, 1105);
+        check(r.on && r.event == sl::Event::kNone, "... and the next frame is on with no second raise");
+        r = latchStep(l, 1300, true, true, 1295);
+        check(r.on && r.event == sl::Event::kStatusAgreed && r.lagMs == 200, "Status.json reporting the turret takes over: still on, no edge, the lag behind the raise said (200 ms)");
+        r = latchStep(l, 1311, true, true, 1305);
+        check(r.on && r.event == sl::Event::kNone && !l.latched(), "... and then it is Status.json alone");
+    }
+    {   // a Status.json edge with no sheet (and no latch): no agreed event
+        sl::Latch l;
+        sl::Result r = latchStep(l, 5000, true, true, 0);
+        check(r.on && r.event == sl::Event::kNone, "Status.json on with the sheet never seen: on, and no agreed event (the latch never ran)");
+    }
+    {   // the latch expires after a second without a sheet draw while Status.json stays off
+        sl::Latch l;
+        latchStep(l, 1000, false, true, 990);
+        sl::Result r = latchStep(l, 1990, false, true, 990);
+        check(r.on && r.event == sl::Event::kNone, "a sheet draw 1000 ms ago is still fresh: the latch holds");
+        r = latchStep(l, 1991, false, true, 990);
+        check(!r.on && r.event == sl::Event::kExpired && r.lagMs == 991, "no sheet draw for more than 1000 ms with Status.json off: the latch expires (a false positive turns off again), the hold said");
+        r = latchStep(l, 2100, false, true, 990);
+        check(!r.on && r.event == sl::Event::kNone, "... and stays off on the stale sighting");
+        r = latchStep(l, 2200, false, true, 2195);
+        check(r.on && r.event == sl::Event::kRaised, "... a fresh sheet draw raises it again");
+    }
+    {   // a sheet that keeps drawing keeps the latch past a second
+        sl::Latch l;
+        uint64_t seen = 1000;
+        bool on = true;
+        for (uint64_t now = 1000; now < 4000; now += 11) {
+            seen = now - 5;
+            on = latchStep(l, now, false, true, seen).on && on;
+        }
+        check(on, "a sheet drawn every frame holds the latch for three seconds with Status.json off");
+    }
+    {   // a non-Scorpion SRV never raises it, whatever the sheet does, and Status.json's bit alone does not make the Scarab's view the Scorpion's
+        sl::Latch l;
+        sl::Result r = latchStep(l, 1000, false, false, 995);
+        check(!r.on && r.event == sl::Event::kNone, "a non-Scorpion SRV with a fresh sheet draw is never raised");
+        r = latchStep(l, 1100, true, false, 1095);
+        check(!r.on && r.event == sl::Event::kNone, "... and Status.json's bit in a non-Scorpion SRV is not the Scorpion's view");
+    }
+    {   // the journal stops calling the Scorpion while latched
+        sl::Latch l;
+        latchStep(l, 1000, false, true, 995);
+        sl::Result r = latchStep(l, 1100, false, false, 1095);
+        check(!r.on && r.event == sl::Event::kDropped && r.lagMs == 100, "the Scorpion unknown while latched drops the latch (said)");
+    }
+    {   // the off edge stays Status-driven
+        sl::Latch l;
+        latchStep(l, 1000, false, true, 995);
+        latchStep(l, 1200, true, true, 1195);   // Status.json agrees
+        // the sheet stops drawing while Status.json still says on: the view stays on
+        bool on = true;
+        for (uint64_t now = 1300; now < 5000; now += 50) on = latchStep(l, now, true, true, 1195).on && on;
+        check(on, "a sheet that stopped drawing does not turn the view off while Status.json says on");
+        // Status.json off with the sheet still drawing: the view stays on by the latch, with no edge
+        sl::Result r = latchStep(l, 5100, false, true, 5090);
+        check(r.on && r.event == sl::Event::kRaised, "a Status.json off edge while the sheet is still drawing latches again (no off edge)");
+        // Status.json off with the sheet stopped: off at once
+        sl::Latch m;
+        latchStep(m, 1000, true, true, 0);
+        r = latchStep(m, 1100, false, true, 0);
+        check(!r.on && r.event == sl::Event::kNone, "a Status.json off edge with no sheet in the last second turns the view off at once");
+        r = latchStep(m, 1200, false, true, 700);   // a sheet seen 500 ms ago, before the exit: fresh
+        check(r.on && r.event == sl::Event::kRaised, "... but a sheet draw seen within the last second raises it (the 1000 ms rule is the whole rule)");
+    }
+    {   // the entry fade's hold starts on the early edge: the machine is fed the latch's `on`
+        sl::Latch l;
+        ef::Machine m;
+        ef::Events ev;
+        bool started = false;
+        double at = 0.0;
+        for (int f = 0; f < 40; ++f) {
+            const double now = 1000.0 + 11.1 * f;
+            const bool status = f >= 30;   // Status.json lags the sheet by 20 frames
+            const uint64_t seen = f >= 10 ? static_cast<uint64_t>(now) - 3 : 0;
+            ef::Input in;
+            in.nowMs = now;
+            in.frame = 100 + f;
+            in.on = latchStep(l, static_cast<uint64_t>(now), status, true, seen).on;
+            in.moving = true;
+            m.step(in, ev);
+            if (ev.started && !started) {
+                started = true;
+                at = now;
+            }
+        }
+        check(started && at < 1000.0 + 11.1 * 11, "the hold starts on the early edge (frame 10), not on Status.json's (frame 30)");
+    }
 }
 
 static bool noReadPhrase(const char* line) {
@@ -333,7 +450,7 @@ static void lineCases() {
     check(has(line, "entry 3 luma: no readings") && noReadPhrase(line), "a window with no readings is said");
     n = ef::formatCapLine(line, sizeof(line));
     check(has(line, "12 entries reported") && n > 0, "the session cap says so once it is reached");
-    check(ef::kMaxReports * (1 + ef::kMaxTraceLines) <= 80, "the instrument's lines a session are bounded (entries times a run line and its trace lines)");
+    check(ef::kMaxReports * (1 + ef::kMaxTraceLines) <= 100, "the instrument's lines a session are bounded (entries times a run line and its trace lines)");
 }
 
 static void wiringCases() {
@@ -349,7 +466,22 @@ static void wiringCases() {
     const size_t note = st.find("void srvTurretNotePublished(");
     check(note != std::string::npos && st.find("srvTurretEntryFadeNoteMove(serial)", note) != std::string::npos && has(st, "bool srvTurretViewOn() { return g_on; }"),
           "srv_turret.cpp tells the entry fade the serial of the camera move and says whether the view is on");
+    check(has(st, "g_sheetLatch.step(latchIn)") && has(st, "latchIn.statusOn = turret;") && has(st, "latchIn.scorpion = scorpion;") && has(st, "const bool on = latch.on;") &&
+              has(st, "srv turret view: Status.json agreed %llu ms after the sheet") && has(st, "(the gunner sheet drew; Status.json not yet)") && has(st, "the gunner sheet latch expired after"),
+          "the frame tick takes `on` from the latch fed Status.json's bit and the Scorpion, and says the raise, the agreement and the expiry");
+    check(has(st, "if (st::isGunnerSheetSignature(sig) && (eye == 0 || eye == 1)) detail::g_srvTurretSheetSeenMs.store(GetTickCount64(), std::memory_order_relaxed);") &&
+              has(st, "const bool watching = scorpion && (journalSeatKind() & 4u) != 0 && !on;") && has(st, "const bool gate = wanted || watching;"),
+          "the sheet's draw is timed on the draw path, and the draw gate is open while the Scorpion's view is off");
+    const std::string vsc = readText("src/d3d11/vscreen.cpp");
+    const size_t gun = vsc.find("return srvTurretGunnerBegin(self, vs, kind, indexCount, srvTurretDrawEye(s));");
+    const size_t watchOnly = vsc.find("if (srvTurretWatchOnly()) return false;");
+    const size_t famVs = vsc.find("if (!srv_turret::isFamilyVs(vs)) return false;");
+    check(gun != std::string::npos && watchOnly != std::string::npos && famVs != std::string::npos && gun < watchOnly && watchOnly < famVs,
+          "vscreen.cpp reaches the gunner sheet first, then leaves every other draw to the game while only the sheet is watched, before the HUD families");
+    const std::string math = readText("src/d3d11/srv_turret_math.h");
+    check(has(math, "if (indexCount != kGunnerSheetIndices && indexCount != kGunnerCardsIndices) return -1;"), "gunnerSignature tests the index count before the shader's hash");
     const std::string mod = readText("src/d3d11/srv_turret_entry_fade.cpp");
+    check(has(mod, "constexpr size_t kPairs = 384;"), "the luma window keeps 384 pairs (a 1000 ms lead, the run and the report delay at 144 Hz)");
     check(has(mod, "lumaProbeBurst(inSrv)") && has(mod, "journalWatchSetEagerStatusSrv(inSrv)") && has(mod, "np.inputVersion >= 3") && has(mod, "ef::formatSkipped") && has(mod, "ef::formatRun"),
           "the module asks for the frame-by-frame luma and the 100 ms Status.json in the Scorpion, reads the applied word only from input version 3, and writes both the run and the skipped line");
     check(has(mod, "if (!vr) {") && has(mod, "g_machine.reset();"), "the module stands down outside VR (the comfort fade is the runtime's)");
@@ -372,6 +504,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     machineCases();
+    latchCases();
     lineCases();
     wiringCases();
     std::printf("PASS srv_turret_entry_fade_test --self-test: %u checks\n", g_checks);

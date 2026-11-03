@@ -12,7 +12,8 @@
 //
 // THE EDGE. The turret-view bit comes from Status.json, which the game writes some time after it switches (a drawn tool's name took 288 to 686 ms in the F98 flight) and the
 // watcher reads at most every 500 ms (100 ms in an SRV, journalWatchSetEagerStatusSrv). So the edge can come after the game's own fade has ended; whether it does is what the
-// instrument's luma trace answers. The hold starts at the edge either way.
+// instrument's luma trace answers. The hold starts at the edge either way. It did come after the game's fade ended (Sean's dump 144324256001 of 2026-11-03), so the edge is no longer
+// Status.json's alone: the gunner sheet's first draw raises it earlier (srv_turret_sheet_latch.h, srvTurretViewOn), and the lead below shows the game's own fade against that edge.
 //
 // THE SETTLE SIGNAL. alignTick publishes the move under a serial (f89AlignPublish); the runtime reports, with each frame's pose, the serial of the alignment that pose carries
 // (EdvrNativeNowPose::eyeAlignApplied: the serial + 1, 0 when the runtime does not report). Once that is the move's serial + 1 the runtime has applied it, and the game's camera
@@ -45,12 +46,12 @@ constexpr double kFadeInMs = 200.0;
 constexpr double kCapMs = 1000.0;
 // The instrument: the luma window starts this long before the edge, and the report is written this long after the run ends (the readbacks land one to three frames late), and the
 // trace reaches this far past the run's end.
-constexpr double kLeadMs = 300.0;
+constexpr double kLeadMs = 1000.0;   // was 300; the trace shows the game's own fade against the early edge
 constexpr double kTailMs = 100.0;
 constexpr double kReportAfterMs = 250.0;
 // The log's hard cap: this many entries a session are reported, each with at most kMaxTraceLines trace lines of kSamplesPerLine samples.
 constexpr uint32_t kMaxReports = 12;
-constexpr uint32_t kMaxTraceLines = 5;
+constexpr uint32_t kMaxTraceLines = 7;   // a run of lead 1000 + cap 1000 + tail 100 ms is 190 pairs at 90 Hz and 252 at 120 Hz: 280 samples keep them all up to 120 Hz, thinned above
 constexpr uint32_t kSamplesPerLine = 40;   // about 19 characters each: a line stays inside the log's 1200
 constexpr uint32_t kMaxSamples = kMaxTraceLines * kSamplesPerLine;
 

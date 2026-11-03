@@ -235,8 +235,8 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "static const float kTargetCardEdgeOffset = 0.01184;\n" \
     "// Tuned in flight on 2026-11-02: the cut sits 3 mm left of the target card's dark panel edge. It removes the bracket bar and keeps the card's border.\n" \
     "static const float kBracketCutM = 0.003;\n" \
-    "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; the plane sits 2 mm above it.\n" \
-    "static const float kTargetCardTopY = -0.309;\n" \
+    "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; Triangles (106,111,112) and (112,113,106), kept for the notch, also hold a piece of the bracket's top hook just below y -0.309, which drew as a bright orange dash above the card's upper-left. From Sean's screenshot of 2026-11-03 (about 0.56 mm a pixel, so good to a pixel or two, 1 mm): the brown card art's top is near y -0.315 and the dash's bottom near y -0.3105. The plane sits between the hook piece and the art, not 2 mm above the fill.\n" \
+    "static const float kTargetCardTopY = -0.3125;\n" \
     "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n" \
     "static const float kCardRowBottomY = -0.481;\n" \
     "static const float kLabelRowLeftX = 0.53;\n" \
@@ -271,12 +271,12 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n" \
     "    return r;\n" \
     "}\n" \
-    "// The region bounds cover each card and its header row. The target side starts at x -0.835 and the SYSTEMS side ends at x 0.79: the header tiles lean outward going up, so the upper-left vertex of the planet icon tile (v112, x -0.8330) and the upper-right vertex of the last SYSTEMS header tile (v292, x 0.7856) lay outside the old bounds -0.822 and 0.78, and the triangles holding them (two on the target side, one on SYSTEMS) were dropped, leaving a 14 by 10 mm notch at the target fill upper-left corner and a 10 mm chamfer at the SYSTEMS fill upper-right corner. Dump 125141609001. Nothing else lies in the widened strips, and the clip planes still cut what is left of the target edge plane.\n" \
+    "// The region bounds cover each card and its header row. The target side starts at x -0.835 and the SYSTEMS side ends at x 0.79: the header tiles lean outward going up, so the upper-left vertex of the planet icon tile (v112, x -0.8330) and the upper-right vertex of the last SYSTEMS header tile (v292, x 0.7856) lay outside the old bounds -0.822 and 0.78, and the triangles holding them (two on the target side, one on SYSTEMS) were dropped, leaving a 14 by 10 mm notch at the target fill upper-left corner and a 10 mm chamfer at the SYSTEMS fill upper-right corner. Dump 125141609001. The 0.79 bound holds only for the header row (y above -0.33): below it the bound stays 0.78, because the wider bound also kept triangle (9,301,302), the bracket's bottom-right corner at (0.7805,-0.4783), an orange right angle at the card's lower right. Nothing else lies in the widened strips, and the clip planes still cut what is left of the target edge plane.\n" \
     "bool inTarget(float3 p) {\n" \
     "    return p.x > -0.835 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
     "}\n" \
     "bool inSystems(float3 p) {\n" \
-    "    return p.x > 0.50 && p.x < 0.79 && p.y > -0.51 && p.y < -0.245;\n" \
+    "    return p.x > 0.50 && p.x < (p.y > -0.33 ? 0.79 : 0.78) && p.y > -0.51 && p.y < -0.245;\n" \
     "}\n" \
     "bool inFill(float3 p) {\n" \
     "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \

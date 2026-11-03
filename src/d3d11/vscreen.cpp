@@ -4229,6 +4229,7 @@ __declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* s
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
     if (srv_turret::gunnerSignature(vs, kind, indexCount) >= 0)
         return srvTurretGunnerBegin(self, vs, kind, indexCount, srvTurretDrawEye(s));
+    if (srvTurretWatchOnly()) return false;   // the turret view is off and only the gunner sheet is watched for (the early edge, srv_turret_sheet_latch.h): the HUD families are the game's
     if (!srv_turret::isFamilyVs(vs)) return false;
     const int family = srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps));
     if (family < 0) return false;

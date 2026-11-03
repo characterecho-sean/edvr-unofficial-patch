@@ -10404,7 +10404,12 @@ H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
                         r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)?(?:, target card shift (?P<tcshift>\d+) mm)?(?:, systems card shift (?P<scshift>\d+) mm)?(?:, bracket cut (?P<bracketcut>\d+) mm)? \(live; ")
-H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
+# An "on" edge the gunner sheet's draw raised before Status.json said so (the early edge, srv_turret_sheet_latch.h) carries the tail " (the gunner sheet drew; Status.json not yet)": the group "early".
+H_SRV_TURRET_VIEW = (r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)"
+                     r"(?P<early> \(the gunner sheet drew; Status\.json not yet\))?$")
+# The early edge's other lines: Status.json caught up (its lag behind the sheet), and the latch ending without it.
+H_SRV_TURRET_AGREED = r"srv turret view: Status\.json agreed (?P<lag>\d+) ms after the sheet$"
+H_SRV_TURRET_LATCH_END = r"srv turret view: the gunner sheet latch (?P<how>expired|dropped) after (?P<held>\d+) ms: .+$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
 H_SRV_TURRET_IGNORED = (r"srv turret view: not the Scorpion at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\): the turret view is on "
@@ -17750,6 +17755,8 @@ HEALTH_RULES = (
         ("setting", H_SRV_TURRET_SETTING),
         ("vehicle", H_SRV_TURRET_VEHICLE),
         ("view", H_SRV_TURRET_VIEW),
+        ("agreed", H_SRV_TURRET_AGREED),
+        ("latch_end", H_SRV_TURRET_LATCH_END),
         ("ignored", H_SRV_TURRET_IGNORED),
         ("published", H_SRV_TURRET_PUBLISHED),
         ("cleared", H_SRV_TURRET_CLEARED),
@@ -24457,7 +24464,16 @@ def self_test_health():
             return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up, target_shift, systems_shift)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
-            return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
+            return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat, "")
+
+        def st_view_early(frame=4100, flags=0x0, seat=0x4):   # the early edge: raised by the gunner sheet, Status.json not yet
+            return RT(stsrc, "srv turret view: %s at frame %u", "on", frame, flags, seat, " (the gunner sheet drew; Status.json not yet)")
+
+        def st_agreed(lag=187):
+            return RT(stsrc, "srv turret view: Status.json agreed %llu ms after the sheet", lag)
+
+        def st_latch_end(held=1043):
+            return RT(stsrc, "srv turret view: the gunner sheet latch expired after %llu ms", held)
 
         def st_cam(back=0.60, serial=3):
             if back:
@@ -24561,6 +24577,11 @@ def self_test_health():
               [("NEVER APPLIED", ST)], has=["the turret view was on for 28 s", "draw(s) refused, said once per reason: no-geometry"])
         check("srv turret: the view on for 5 s and no 10 s line yet is idle for the hud, and no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (7, st_view(False))], 0, [("OK", ST)],
               has=["camera back 0.60 m published 1 time(s)", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
+        check("srv turret: an early edge raised by the gunner sheet, then Status.json agreeing, parse as the view's lines", st_ok + [(1, st_set()), (2, st_view_early()), (3, st_cam()), (3, st_agreed()), (7, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret: an early edge whose latch expired, and the off edge after it, parse as the view's lines", st_ok + [(1, st_set()), (2, st_view_early()), (3, st_cam()), (4, st_latch_end()), (4, st_view(False))], 0, [("OK", ST)],
+              lacks=["UNPARSED"])
+        check("srv turret: a drifted early-edge tail is UNPARSED", st_ok + [st_view_early().replace("Status.json not yet", "status unknown")], 4, [("UNPARSED", ST)])
         check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
               has=["camera off by key", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
         check("srv turret: all four keys at 0 is idle", st_ok + [(1, st_set(0, 0, 0, 0, rforward=0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],

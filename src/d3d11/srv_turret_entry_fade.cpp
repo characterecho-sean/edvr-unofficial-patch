@@ -27,7 +27,7 @@ namespace ef = srv_turret::entryfade;
 
 namespace {
 
-constexpr size_t kPairs = 256;   // paired frames kept: 2.8 s at 90 Hz
+constexpr size_t kPairs = 384;   // paired frames kept: 4.3 s at 90 Hz, 2.7 s at 144 Hz; a report is written 250 ms after a run whose window began 1000 ms before the edge, so it needs about 2.35 s
 
 struct Pair {
     uint32_t seq = 0;

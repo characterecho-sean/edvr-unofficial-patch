@@ -97,7 +97,7 @@ inline constexpr int kSystemsNearDefaultCm = 80, kSystemsNearMaxCm = 200;   // e
 inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
 inline constexpr int kGunnerUpDefaultCm = 35, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards. 35 is the raise kept on 2026-11-03.
 inline constexpr int kCardsUpDefaultCm = 0, kCardsUpMaxCm = 100;   // experimental.srv_turret_cards_up: centimetres up, along the seat, for the target card and SYSTEMS only
-inline constexpr int kTargetCardShiftDefaultMm = 7, kSystemsCardShiftDefaultMm = 9, kCardShiftMaxMm = 30;   // experimental.srv_turret_target_card_shift and experimental.srv_turret_systems_card_shift (TEMPORARY): whole millimetres the gunner sheet's content moves rightwards inside the target card and inside SYSTEMS. Sean's flight of 6fa96705 on 2026-11-03.
+inline constexpr int kTargetCardShiftDefaultMm = 7, kSystemsCardShiftDefaultMm = 6, kCardShiftMaxMm = 30;   // experimental.srv_turret_target_card_shift and experimental.srv_turret_systems_card_shift (TEMPORARY): whole millimetres the gunner sheet's content moves rightwards inside the target card and inside SYSTEMS. Sean's flight of 6fa96705 on 2026-11-03; the SYSTEMS default went from 9 to 6 on his screenshot of d39973d5 (25 px left, 15 px right of a 587 px fill, about 0.58 mm a pixel).
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
@@ -691,6 +691,7 @@ static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature == 8 && kGunne
 constexpr bool isGunnerSheetSignature(int sig) { return sig == kGunnerSheetSignature || sig == kGunnerSheetAltSignature; }
 inline int gunnerSignature(uint64_t vs, char kind, uint32_t indexCount) {
     if (kind != 'I' && kind != 'X') return -1;
+    if (indexCount != kGunnerSheetIndices && indexCount != kGunnerCardsIndices) return -1;   // the index count first: nearly every draw ends here
     if (vs == kGunnerCardsVs && indexCount == kGunnerCardsIndices) return kGunnerCardsSignature;
     if (vs == kGunnerSheetVs && indexCount == kGunnerSheetIndices) return kGunnerSheetSignature;
     if (vs == kGunnerSheetAltVs && indexCount == kGunnerSheetIndices) return kGunnerSheetAltSignature;

@@ -25,7 +25,7 @@
   panels back 0, systems near 80, weapon panel up 10, gunner up 35, cards up 0, screen
   limit game, radar anchor off, depth game. TEMPORARY, to bake and remove once Sean
   settles them: `srv_turret_target_card_shift` 7 mm and `srv_turret_systems_card_shift`
-  9 mm (whole mm, 0 to 30, live). The sheet draws the card contents and not the border.
+  6 mm (was 9; whole mm, 0 to 30, live). The sheet draws the card contents and not the border.
 - **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
   anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
   `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
@@ -57,6 +57,7 @@
 - **Sheet brackets (2026-11-02):** SV_ClipDistance0 cuts the SYSTEMS dash at x 0.53 (flown right) and the target card's leaning edge plane at 3 mm
   (`kBracketCutM`). Sean tuned that dial in flight ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
 - **Entry fade (2026-11-03, branch `claude/srv-turret-entry-fade`):** both eyes held at black from the turret-view-on edge until the runtime reports the camera move applied plus 150 ms, then in over 200 ms, whole run capped at 1 s, with a luma trace in the log that shows the game's own fade against the edge; built, NOT FLOWN (journal entry below).
+- **Early edge and sheet polish (2026-11-03, branch `claude/srv-turret-polish`, built, NOT FLOWN):** the view is also on when the Scorpion is known and the gunner sheet drew in an eye pass within 1 s while Status.json says off (`srv_turret_sheet_latch.h`); Status takes over with no edge; the luma lead is 1000 ms. Sheet: the 0.79 bound only above y -0.33, top plane -0.3125. Journal "the early edge" below.
 - **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet drawn by vs A888D510, signature K, flown OK; card content shifts are keys now and the two corner notches are fixed, built, NOT FLOWN).
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
@@ -244,6 +245,9 @@ same amount. Matching them needs a change to one layer's stereo depth.
   to 25 cm wrong: the native content itself swings +-9 cm sideways in the
   camera frame during sweeps, and Sean saw the disc "sort of orbit up and
   down" (flight fe0b2560, `edvr_gfx_20261101_080045.log`).
+- ruled out: a hold that starts at the Status.json edge, because the game's
+  fade has already ended by then (dump 144324256001, luma traces of 14:42 to
+  14:43).
 
 ## Journal
 
@@ -2019,3 +2023,23 @@ Sean flew 6fa96705 and sent close screenshots of both cards. Black fill against 
 - **Gate.** `tools\srv_turret_entry_fade_test` (a rig in `build.bat`): the machine frame by frame, the lines, and a scan of the wiring.
 - **Would the same hold fit the exit?** Structurally yes, not built (not asked): the off edge clears the camera term under a new serial the same way (`srv turret camera: back cleared (serial N)`), so the same machine could wait for that serial and the margin. It has the same unknown (is the game's fade over when the bit flips), and the trace here covers entries only.
 - **NOT FLOWN.** The next flight: enter the turret view a few times with the log at its default. Read the run lines for the signal that ended each hold (`applied serial plus the margin` is the good one) and the luma trace for the game's fade against the edge.
+
+### 2026-11-03: the early edge, and three small changes to the gunner sheet (built, NOT FLOWN)
+
+Branch `claude/srv-turret-polish`, from d39973d5 (Sean's flight, log `edvr_gfx_20261103_144101.log`, eye dump `144324256001`).
+
+**Sheet changes (shared body of the I and K shaders).**
+
+- The orange right angle at the SYSTEMS card's lower right: commit 08a3ce58 widened `inSystems` to x < 0.79, which also kept triangle (9, 301, 302), the bracket's bottom-right corner (v301 at (0.7805, -0.4783)). The 0.79 bound now holds only for the header row (y above -0.33), below it the bound is 0.78. The three notch triangles (106,111,112), (112,113,106) and (293,292,296) stay kept (the last has vertices at y -0.2460 and -0.3248). Rig cases on those exact vertices in both sheet shaders, and mutants: the old 0.78 bound, 0.79 on every row, the header-row cutoff moved down to -0.50.
+- The bright orange dash above the planet card's upper-left: the notch triangles also hold a piece of the bracket's top hook just below the top clip plane. `kTargetCardTopY` went from -0.309 to -0.3125. Sean's screenshot, at about 0.56 mm a pixel (so good to a pixel or two, about 1 mm): the brown card art's top is near y -0.315, the dash's bottom near y -0.3105. The plane sits between the hook piece and the art, not 2 mm above the fill. A rig case puts a vertex at y -0.311 (cut) and two at y -0.314 (kept); the old -0.309 is a mutant.
+- SYSTEMS card default shift 9 to 6 mm: his screenshot at 9 mm, 25 px left and 15 px right of a 587 px fill (about 0.58 mm a pixel), is about 3 mm too far right. `experimental.srv_turret_systems_card_shift` defaults to 6 in code, `edvr.ini` (comment and `recommended` on the ui line) and the rig pins. The target card stays at 7. Both keys stay TEMPORARY.
+
+**The early edge.** Evidence: the dump's 16 frames across the entry (12216 to 12231). 12216-12219 are black (the game's fade); 12222-12227 show the game fading in with the camera at its unmoved position and the HUD unmoved; at 12228, where the log says `srv turret view: on at frame 12228`, the camera and panels jump to the place. The luma traces show the game's image bright for the whole 300 ms before the edge in all three entries and jumping only when the camera move lands, so the settle margin is fine. The hold starts too late because Status.json lags the game, and a longer hold cannot hide that.
+
+- The signal is the gunner sheet draw (vs A888D510 or vs 5DAD41AA at 2016 indices). The census of frames 12216-12218 has none. HYPOTHESIS, tested by the next flight: it starts when the turret's HUD appears and does not draw outside the turret view. The log check made here: every sheet census line (`n=2016 ... vh=A888D510` or `vh=5DAD41AA`) in the 18 logs that hold one (2026-11-02 and 124427 of 11-03) falls in a stay where Status had the view on. The census samples only a few frames, so this does not exclude a draw outside the view; the 144101 flight has no n=2016 census line at all.
+- Draw path: the gate (`g_srvTurretHudWanted`) is now also open while `watching` (the Scorpion in its SRV seat, Status.json seat bit 2, view off). `srvTurretHudBeginDraw` (vscreen.cpp) already asked `gunnerSignature` first; it now tests the index count before the shader hash (nearly every draw ends at that one compare), and `srvTurretGunnerBegin` stores `GetTickCount64()` into `g_srvTurretSheetSeenMs` for a sheet signature with an eye of 0 or 1. While watching, `srvTurretWatchOnly()` makes the gunner call and the HUD families return false after that store: nothing moves. Cost: in the Scorpion in VR with the view off the gate is open, which shuts the AA-off draw fast path (draw_fast_path.h) for every draw there, the price the HUD move already pays inside the view. Elsewhere one relaxed load.
+- Latch (`srv_turret_sheet_latch.h`, run by the rig): sheet seen within 1000 ms, Scorpion known, Status off: on. Status on: the latch clears with no edge. No sheet for 1000 ms with Status off: expires. The off edge stays Status-driven. A Status off edge while the sheet was seen within the last second latches again, so a sheet that keeps drawing after the exit would keep the view on for up to that second past its last draw. This is the specified rule; whether the sheet draws after the exit is unread.
+- Log: the existing `srv turret view: on at frame N (Status.json Flags ..., seat kind ...)` gains the tail ` (the gunner sheet drew; Status.json not yet)` when the latch raised it (`tools\edvr_log.py` reads the tail in an optional group; its self-test has cases). One line per entry when Status catches up: `srv turret view: Status.json agreed N ms after the sheet`. When the latch ends without it: `srv turret view: the gunner sheet latch expired after N ms: no sheet draw for 1000 ms and Status.json still off` (or `dropped ... the journal no longer calls the Scorpion`). A flight with the agreed lines shows the lag, and an expired line with no agreed line is a false positive.
+- The fade, the camera move, the anchor and the HUD all follow `on`, so they start early too. `srv_turret_entry_fade.cpp` reads `srvTurretViewOn()` and its skipped line says only that the camera move is off; the flags text is printed from Status.json's word and needs no change. The luma lead is 1000 ms (`kLeadMs`), the trace cap 7 lines of 40 (a run of lead, cap and tail is 252 pairs at 120 Hz) and the rolling buffer 384 pairs (the window plus the 250 ms report delay at 144 Hz); the rig pins those relations.
+- The exit: not built. The log cannot say whether it lags: the off edge and `back cleared` come in the same frame (14:43:07.726, 14:43:17.793, 14:45:47.794), and the luma trace covers entries only. The first reading of the flight is the agreed lines and the traces; for the exit, an eye dump across one, as for the entry, is the instrument.
+- Observed in the same log: entry 3 reports a hold settled at +2073 ms though the frame numbers say five frames (12228 to 12233): the render thread stalled about two seconds there. The machine steps once a frame, so the wall-clock cap cannot fire during a stall.

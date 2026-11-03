@@ -100,7 +100,12 @@ extern std::atomic<bool> g_srvTurretHudCounting;
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
 // Camera mode's match of the radar's own picture billboard: true while the view is on in camera mode (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarWritersOn;
+// The early edge (srv_turret_sheet_latch.h): true while the Scorpion is in its SRV seat and the turret view is off. The draw gate is open for it, the gunner sheet's draws are timed
+// (g_srvTurretSheetSeenMs, GetTickCount64) and every other draw is the game's.
+extern std::atomic<bool> g_srvTurretWatchOnly;
+extern std::atomic<uint64_t> g_srvTurretSheetSeenMs;
 }  // namespace detail
+inline bool srvTurretWatchOnly() { return detail::g_srvTurretWatchOnly.load(std::memory_order_relaxed); }
 
 // The radar's picture writers, for camera mode's match of the radar's own picture billboard (srv_turret.cpp billboardKind). vscreen.cpp forwardWithVerdict, every owner-context draw while camera mode is on (one
 // relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the frame, which a radar billboard's t4 is
