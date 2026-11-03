@@ -244,6 +244,7 @@ python tools\run_jobs.py ^
     --gate "tools\package_native.py --self-test" ^
     --gate "tools\install_proton.py --self-test" ^
     --gate "tools\build_diff.py --self-test" ^
+    --gate "tools\effects_arc.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
     --gate "tools\compile_only.py --self-test" ^
     --gate "tools\linux_toolchain.py --self-test" ^
