@@ -57,11 +57,15 @@
   both reviews.
 - **Build 3 designed (2026-11-03, "Build 3: one marker copy for both
   eyes"):** `mergePlans` and one copy per Unmap; the F87c line's requested
-  and copied figures and eye 0's ring; a `non-eye draws:` count by RTV0/DSV
-  key in every draw hook (a temporary instrument, removed when B1 closes).
-  No config key. Decided: the map-bounce gates wait for the A3 pass. No
-  earlier review in this arc ran on Fable (see "Reviews in this arc").
-  Awaiting the choice of reviewer.
+  and copied figures and eye 0's ring. No config key. Decided: the
+  map-bounce gates wait for the A3 pass. No earlier review in this arc ran
+  on Fable (see "Reviews in this arc").
+- **Build 3 reviewed and revised (2026-11-03, "Review of the build 3
+  design", Opus, fresh context):** changes required, all taken. B1 moves to
+  the existing draw census (one press after the profile capture, with
+  flight-only `census_offscreen` and `census_lines` settings), replacing the
+  planned seven-hook counter. A merged-range fault now zeroes the plan
+  windows inside it and is counted. Awaiting the re-review.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -1303,16 +1307,27 @@ flight at Shamash 1 a's concourse).
 
 ### Changes
 
+Revised 2026-11-03 after the design review ("Review of the build 3
+design"): item 3's new counter is replaced by the existing draw census, and
+items 1 and 2 take the review's corrections.
+
 1. **The merged copy (#157, A1).** In `streamUnmapCopy`
    (`native_on_foot.cpp:29568`):
    - Plan each eye exactly as today: `hist[e].expire`, then `planWindows`
      into `plan[e]`. Nothing about which entries are wanted changes.
-   - A new pure function in `native_on_foot_f87.h`, `mergePlans(plan[0],
-     plan[1], &merged)`, sorts the windows of both plans by `lo` and joins
-     those that overlap or touch. `merged` holds up to `2 * kWinMax` (14)
-     ranges and `2 * kWinCapEntries` (65,536) entries, Argon's capacity
-     guard. Each range keeps `lo`, `n` and `off` (its start in the copy
-     buffer, ranges end to end).
+   - New in `native_on_foot_f87.h`, so the rig runs the shipped code: a
+     `MergedPlan` (up to `2 * kWinMax` = 14 ranges of `lo`, `n`, `off`, and
+     `2 * kWinCapEntries` = 65,536 entries, Argon's capacity guard), a pure
+     `mergePlans(plan[0], plan[1], &merged)`, and the merged lookup
+     (`where(entry)`, the entry's offset in the buffer).
+   - `mergePlans` skips zero-length windows (`planWindows` can add one,
+     `native_on_foot_f87.h:382`), sorts the rest by `lo`, and joins windows
+     that overlap or touch. `off` runs end to end. The ranges stay even, as
+     the windows are; that matters only for speed (`streamLoad16` falls back
+     to a plain copy when unaligned).
+   - `merged` lives in `StreamShadow`, beside `plan[2]`, so a new stream
+     resets it with the rest (`g_stream = StreamShadow{}`,
+     `native_on_foot.cpp:29631`).
    - Copy each merged range once into one flat buffer,
      `g_streamWin[2 * kWinCapEntries * 2]`, the same 512 KB as today's two.
    - `streamEntryX` looks the entry up in `merged` instead of `plan[0]` and
@@ -1320,43 +1335,60 @@ flight at Shamash 1 a's concourse).
      same Unmap. A miss goes on to `outside`, `nearest` (still
      `plan[eye].distance`, per eye), the escalation and the whole copy,
      unchanged.
-   - A copy that faults zeroes that merged range's `n`, as a faulted window
-     does today. The fault is in the source, so today's two copies of those
-     bytes would both fault too.
+   - **A fault** in a merged range's copy zeroes that range's `n` and the
+     `n` of every `plan[e]` window inside it, so `nearest` never measures to
+     a window with no copy. This is the one place the merge differs from
+     today. Today a fault loses only the window it hit; a merged fault
+     loses the whole range, which may hold windows whose own bytes would
+     have copied. Faults are counted on the new line (item 2), so a flight
+     shows whether this ever happens. The default log does not record them
+     today (only the detail log's F63 line, `native_on_foot.cpp:34863`).
    - The escalation's whole-stream copy is unchanged.
-   - No key: coverage is identical by construction, and nothing reaches the
-     screen differently.
+   - No key: coverage is the same by construction outside a fault, and
+     nothing reaches the screen differently.
 2. **The F87c figures.** The two eyes' copy can no longer be split by eye.
-   - The per-eye line keeps its fields, but `Unmap copy C copies, B bytes, M
-     ms` becomes `requested B bytes` (that eye's planned entries times 8).
-     It also gains eye 0's ring beside eye 1's (`eye-0 first/last ring`).
-   - A new line per window: `marker fix (F87c) Unmap copy: C copies,
-     requested R bytes, copied B bytes in K ranges, whole stream W bytes, M
-     ms; over N s`. R is both eyes' requested bytes, B the merged bytes
-     copied, K the merged ranges summed over the copies.
-   - `edvr_log.py`: `PERF_COPY_RE` and `--perf-windows` read the new line;
-     the source pin at `edvr_log.py:24111` and the self-tests follow the new
-     strings.
-3. **The non-eye draw count (B1), in every draw hook** (decided
-   2026-11-03): `hookedDraw`, `hookedDrawIndexed`, `hookedDrawInstanced`,
-   `hookedDrawIndexedInstanced`, the two indirect hooks and `hookedDrawAuto`
-   (`vscreen.cpp:4809-5430`). Each calls one shared `nonEyeNote(self, kind)`
-   at its top, for owner-context draws, before any fast path or early exit,
-   so no path hides a draw.
-   - The note keeps its own cache: RTV0's and DSV0's descriptions (width,
-     height, format, or `none`) and whether RTV0 is eye-sized, refreshed when
-     `bindingGeneration(BindSlot::Rtv0)` or `Dsv0` moves. It does not read
-     `g_state->rtv0Eye`, which only the full path refreshes. A draw pays two
-     compares and an increment.
-   - Eye-sized draws are counted as a total only. Non-eye draws are counted
-     per key (RTV0, DSV0), up to 16 keys (the rest under `other`), with each
-     key's split by draw kind and its four most frequent vertex shaders.
-   - Log per 1800-frame window, next to `draw mask:`: `non-eye draws: N of T
-     draws; RTV wxh fmt / DSV wxh fmt: n (DII n, DI n, D n, ...; vs hash n,
-     ...); ...`.
-   - The cross-check: the key counts of `DrawIndexedInstanced` draws on the
-     full path must cover `draw mask:`'s `weapon_motion` skips.
-   - A temporary instrument: listed in Status, removed when B1 closes.
+   - The per-eye line's `Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1
+     first/last ring %s` becomes, exactly, `Unmap copy %llu copies,
+     requested %llu bytes; eye-0 first/last ring %s; eye-1 first/last ring
+     %s`. Requested is that eye's planned window entries times 8. Eye 0's
+     figure no longer carries the whole-stream bytes; those move to the new
+     line.
+   - A new line per window, exactly: `marker fix (F87c) Unmap copy: %llu
+     copies, requested %llu bytes, copied %llu bytes in %llu ranges (%llu
+     windows joined), whole stream %llu bytes, faults %llu, %.3f ms; over %u
+     s`. Requested is both eyes' planned bytes; copied the merged bytes;
+     ranges the merged ranges summed over the copies; windows joined the
+     planned windows that landed in a range with another (summed); the ms
+     the whole function's time, `g_win.streamCopyTicks`'s span.
+   - `edvr_log.py`:
+     - Keep `PERF_COPY_RE` (line 17249) for build-2 logs such as L2, and add
+       a regex for the new line. `--perf-windows` prints the merged copy
+       when the new line is there, the old per-eye figures when not.
+     - The marker health rule (lines 16361-16366) gains a pattern for the
+       new line, so `--health` does not report it as unmatched.
+     - The source pin at line 24111 is a literal match: it takes the new
+       per-eye text and the new line's text.
+     - Self-tests for each of these.
+3. **B1, what the non-eye draws are: the existing draw census, no new
+   code.** The review's finding 9 ("reuse the owner"): a census line records
+   each draw's RTV0 (`r=`) and DSV0 (`d=`) as `texWxHfFMT` or an interned
+   `@id` whose size the census's table gives, and its vertex shader hash
+   (`vh=`) (`draw_census.cpp:367-387`, `817-818`, `489`). With
+   `census_offscreen` on, the non-eye draws are recorded too (`DCO`), for
+   every draw kind, so the decision to cover all draw hooks holds.
+   - Flight-only settings, in the live `edvr.ini` (edited with the Edit
+     tool and diffed, reverted after the flight): `dump_draws` set to a free
+     key, `census_offscreen = 1`, `census_lines = 16384` (L1 had about
+     4,070 non-eye DrawIndexedInstanced draws a frame, so 3 frames need
+     more than the default 4,096).
+   - One press, after the profile capture has stopped, so the census's
+     logging is not in the profile.
+   - Read with `edvr_log.py --tally vh` and the `DCO` lines' `r=`/`d=`
+     columns.
+   - This drops the seven-hook counter and with it the review's findings 5
+     (placement after the world route's `g_vrWorldInternal` return), 6
+     (line length), 7 (its cost), 8 (top-N and threads) and 10 (the
+     cross-check).
 
 Left out, in order for after build 3 (Argon's A3 findings):
 - The three ungated map-bounce calls in `hookedMap` and `hookedUnmap`.
@@ -1372,49 +1404,90 @@ Left out, in order for after build 3 (Argon's A3 findings):
 
 ### Test seams
 
-In `tools\native_frame_test\f85_checks.h`, beside the F87c checks:
-- `mergePlans` over random histories and centres (a fixed seed), both eyes:
-  every entry `plan[0]` or `plan[1]` holds is in `merged`, and nothing else;
-  ranges are sorted, disjoint and not touching; `lo` and `n` stay even (the
-  16-byte streaming copy needs it); `off` runs end to end; the totals stay
+In `tools\native_frame_test\f85_checks.h`, beside the F87c checks, all on
+the header's own `mergePlans` and merged lookup:
+- Random histories and centres (a fixed seed), both eyes: every entry
+  `plan[0]` or `plan[1]` holds is in `merged`, and nothing else; ranges are
+  sorted, disjoint and not touching; `lo` and `n` even; `off` end to end;
   within 14 ranges and 65,536 entries.
 - Two disjoint full plans (7 windows each, 32,768 entries each) merge to 14
   ranges and 65,536 entries with nothing dropped: the capacity guard.
-- Identical plans merge to one eye's ranges, so copied is half of requested.
+- Identical plans: copied equals the plan's own union (which is less than
+  its requested entries when its windows overlap each other), and requested
+  is twice the plan's requested.
+- A plan with a zero-length window: the window is skipped and the rest
+  merge as without it.
 - A synthetic stream (entry i holds x = i): the merged lookup returns the
   same x as today's two-buffer lookup for every entry of the stream, hit or
   miss.
-- `edvr_log.py --self-test`: the new F87c lines parse, and `--perf-windows`
-  prints the merged copy.
-- The non-eye count's key table: 17 keys put the last under `other`; the top
-  four shaders per key are kept by count.
+- A fault in one merged range: that range and every `plan[e]` window inside
+  it read as empty, and every other range still returns its entries.
+- `edvr_log.py --self-test`: the new per-eye text and the new line parse,
+  the health rule matches the new line, `--perf-windows` prints the merged
+  copy for a new log and the per-eye copy for an L2-style log, and the
+  source pin holds.
 
 ### What the log shows if the new code never ran
 
-- The merge: `copied` equals `requested`, or the new line is missing.
-- The non-eye count: no `non-eye draws:` line, `T` 0, or `N` 0 while
-  `draw mask:` shows `weapon_motion` skips above 0 (each such skip is a
-  non-eye draw).
+- The merge: no `marker fix (F87c) Unmap copy:` line (only the new code
+  writes it), or `windows joined 0` across the window while the per-eye
+  lines show both eyes' windows. Joined 0 with copied equal to requested is
+  possible only when every window is disjoint; the eye-0 and eye-1 rings
+  say whether the eyes' entries are far enough apart for that.
+- The census: no `DCO` lines (`edvr_log.py --tally vh` prints `no
+  draw-census lines`), meaning the key was not pressed or the settings did
+  not load.
 
 ### Flight
 
-One profiled flight with `EDVR_PROFILE_SYMBOLS=1`: the L2 spot (Shamash 1 a,
-the concourse), standing still, DLAA, a 100 s capture. First command:
-`edvr_log.py --target steam --expect-build HEAD --version`, then `--health`.
+The L2 spot (Shamash 1 a, the concourse), standing still, DLAA, the build
+made with `EDVR_PROFILE_SYMBOLS=1`.
+1. A 100 s profile capture.
+2. After it stops: one census press.
+
+First command after: `edvr_log.py --target steam --expect-build HEAD
+--version`, then `--health`.
 
 ### Pass criteria
 
 - **Coverage held:** steady-state F87c lines show `outside 0` and
-  `escalated 0` after arrival, as in L2 from 11:26:34 on, and `named` a
-  second within L2's range (80-90 an eye).
-- **The cut:** `copied / requested` from the new line. The profile's
-  `streamUnmapCopy` (inclusive, R5) against L2's 0.697 ms should fall by
-  that ratio, within the 1.45-1.57 ns a byte seen in both logs.
+  `escalated 0` after arrival, as in L2 from 11:26:34 to 11:28:15, `faults
+  0` on the new line, and `named` per copy at 3.0 an eye, as in L2 (for
+  example 831 named in 277 copies at 11:26:34). Named per second rises with
+  the frame rate, so it is not the measure.
+- **The cut:** `copied / requested` from the new line. `streamUnmapCopy`'s
+  inclusive time in R5 should fall by that ratio from 0.697 ms (the
+  build-2 profile, windows 1-20, R5, 2,773 frames; the table's rounded
+  0.70), at the 1.45-1.57 ns a byte seen in both logs.
 - **Nothing else rose:** no EDVR function in the profile up more than
-  0.1 ms against L2's windows.
-- **B1 answered:** the `non-eye draws:` keys name the targets of the
-  non-eye draws. The next step on B1 (a ledger entry, or dropping it) is
-  decided from them.
+  0.1 ms against the build-2 profile's windows.
+- **B1 answered:** the census's `DCO` lines name the non-eye draws'
+  targets and shaders. The next step on B1 (a ledger entry, or dropping it)
+  is decided from them.
+
+### Review of the build 3 design (2026-11-03)
+
+A fresh-context review on `claude-opus-5-5` (its transcript records that
+model only), against the code at `0e3cc1f2`. Verdict: changes required; two
+blocking findings, both on the non-eye counter. Dispositions:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | A merged fault loses the whole range; `nearest` could read faulted windows | Taken: zero the covered `plan[e]` windows too, count faults (item 1) |
+| 2 | Readers complete; keep `merged` in `StreamShadow`; skip zero-length windows | Taken (item 1, a test) |
+| 3 | Capacity bound right; evenness only for speed | Wording fixed (item 1) |
+| 4 | "Identical plans: half" is wrong when a plan overlaps itself | Test fixed |
+| 5 | BLOCKING: a note at the hook top counts EDVR's own world-route draws | Moot: the counter is dropped for the census |
+| 6 | BLOCKING: the line exceeds `Log::note`'s 1200 bytes | Moot, as 5 |
+| 7 | Counter cost unproven | Moot, as 5 |
+| 8 | Top-N method and threads undefined | Moot, as 5 |
+| 9 | The census already records this | Taken: B1 by census (item 3) |
+| 10 | The cross-check wording; the hook range | Moot, as 5 |
+| 11 | `edvr_log.py`: health pattern, keep the old regex, exact text, eye 0's whole-stream bytes | Taken (item 2) |
+| 12 | Put the merged lookup in the header so the rig tests shipped code | Taken (item 1, test seams) |
+| 13 | Copied = requested does not prove the merge never ran | Taken: `windows joined`, the new line's presence (never-ran section) |
+| 14 | 0.697 uncited; use named per copy | Taken (pass criteria) |
+| 15 | No key, right; say VR-only | The census is a developer key already; the merge applies wherever the marker fix does |
 
 ### Reviews in this arc (checked 2026-11-03)
 
