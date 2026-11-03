@@ -10502,6 +10502,14 @@ def _hsum(rows, key):
     return sum(int(r[key]) for r in rows)
 
 
+def _hnative_onfoot(ctx):
+    """Whether native stereo on foot was on in the window: F115 logged it beginning inside the window, or it was on as the window opened (the last F115 began/ended
+    line before a --since window, which health_scan carries in under H_CARRIED)."""
+    if _hrows(ctx, H_F115, "began"):
+        return True
+    return any(r.get("kind") == "began" for r in _hrows(ctx, H_CARRIED, "onfoot"))
+
+
 def _hpairs(text):
     """The `name N, name N` list a line prints for its refusals, as a Counter ("none" gives an empty one). A parenthesised aside is dropped first."""
     c = collections.Counter()
@@ -12283,7 +12291,8 @@ def _hj_f107_unflagged(left, ended, ctx):
 def _hj_shop(rows, ctx):
     """F209: the Pioneer Supplies buy screens found by the game's own open flag (shop_screen_core.h): the five hooks (armed or stood down), each buy screen's Show and Close (the byte
     +0x79 before and after), the shop signal's edges, the SuitUIStateMachine's states, the armoury kiosk's start and stop, and the objects the frame thread forgot. A shop signal that went on
-    with no F107 episode by the shop screen is NEVER APPLIED (the view did not change); a signal that did not hold on its object, events the hooks lost or the cap dropped, a Show that left
+    with native on foot begun and no F107 episode by the shop screen (its left line's test, or calls its ended line says the shop screen held) is NEVER APPLIED (the view did not
+    change); a signal that did not hold on its object, events the hooks lost or the cap dropped, a Show that left
     the byte unset, a signal that went on more often than it went off, hooks that all stood down, or a Show with no signal are PARTIAL."""
     kinds = ("hook", "show", "close", "on", "off", "state", "kstart", "kstop", "forgot", "sec", "capped", "lost")
     if not any(rows.get(k) for k in kinds):
@@ -12306,8 +12315,11 @@ def _hj_shop(rows, ctx):
     if rows.get("sec"):
         parts.append("%d one-second line(s)" % len(rows["sec"]))
     text = "; ".join(parts)
+    # An episode is the shop's when F107's left line names the shop screen as the test that made it away, or when its ended line counts calls the shop screen held (F107 can open an
+    # episode by its distance test and the shop signal then keeps it open).
     shop_eps = [r for r in _hrows(ctx, "camera away (F107)", "left") if r.get("test") == "shop screen"]
-    if ons and not shop_eps:
+    shop_eps += [r for r in _hrows(ctx, "camera away (F107)", "ended") if int(r.get("shopcalls") or 0) > 0]
+    if ons and not shop_eps and _hnative_onfoot(ctx):
         return ("NEVER APPLIED", text + "; the shop signal went on %d time(s) but F107 logged no episode by the shop screen: the view did not change" % len(ons))
     problems = []
     if rows.get("forgot"):
@@ -12331,6 +12343,8 @@ def _hj_shop(rows, ctx):
 
 
 H_F212 = "conversation look (F212)"
+H_F115 = "boarding reset (F115)"
+H_CARRIED = "_carried"   # health_scan's state carried into a --since window: "onfoot" (the last F115 began/ended line) and "f212_hook" (the conversation-look hook's line)
 F212_TALK_STATES = ("Mission Giver", "Service Giver", "StartConversation")   # SuitUIStateMachine states (F209 logs them) in which the conversation camera runs
 
 
@@ -12339,14 +12353,16 @@ def _hj_f212(rows, ctx):
     end (the run's calls, duration and the largest |yaw| and |pitch| the game asked), and a 10 s summary of a window with any call or any spring above zero (calls gated and passed, and
     the springs the look processor read for the local component while native on foot was active). A conversation state in F209's lines (Mission Giver, Service Giver, StartConversation)
     with native on foot begun and no gated call is NEVER APPLIED: the hook stood down, or was armed and the leaf never ran with native on foot active. The springs' targets read above zero
-    in a window that had gated calls (another writer), or a store that faulted, are PARTIAL. Armed with no conversation at all is IDLE."""
-    if not any(rows.get(k) for k in ("hook", "began", "ended", "sum")):
+    in a window that had gated calls (another writer), springs that moved in a 10 s window with no gated call at all (a path the hook does not hold), or a store that faulted, are
+    PARTIAL. Armed with no conversation at all is IDLE. Native on foot and the hook's line may predate a --since window: health_scan carries the last of each into it."""
+    talks = [r["to"] for r in _hrows(ctx, H_SHOP, "state") if r["to"] in F212_TALK_STATES]
+    onfoot = _hnative_onfoot(ctx)
+    if not any(rows.get(k) for k in ("hook", "began", "ended", "sum")) and not (talks and onfoot):
         return None
-    hooks, began, ended, sums = rows.get("hook", []), rows.get("began", []), rows.get("ended", []), rows.get("sum", [])
+    # The hook's line is written once, when the hooks are installed: a --since window usually opens after it, so the last one before the window stands in.
+    hooks, began, ended, sums = rows.get("hook") or _hrows(ctx, H_CARRIED, "f212_hook"), rows.get("began", []), rows.get("ended", []), rows.get("sum", [])
     armed = [r for r in hooks if r["st"] == "armed"]
     stood = [r for r in hooks if r["st"] == "stood down"]
-    talks = [r["to"] for r in _hrows(ctx, H_SHOP, "state") if r["to"] in F212_TALK_STATES]
-    onfoot = bool(_hrows(ctx, "boarding reset (F115)", "began"))
     gated = max([_hsum(ended, "calls")] + [int(r["sg"]) for r in sums])
     applied = bool(began) or gated > 0
     parts = []
@@ -12375,6 +12391,10 @@ def _hj_f212(rows, ctx):
     if moved:
         problems.append("%d 10 s window(s) with gated calls read a spring target above zero (up to yaw %.5f pitch %.5f): something else sets the targets" % (
             len(moved), max(float(r["ty"]) for r in moved), max(float(r["tp"]) for r in moved)))
+    # The 10 s line is sampled only while native on foot is active, so springs that moved in a window with nothing gated were turned by a path the hook does not hold.
+    unheld = [r for r in sums if int(r["g"]) == 0 and any(float(r[k]) > 0.0 for k in ("ty", "tp", "vy", "vp"))]
+    if unheld:
+        problems.append("the look springs moved in %d 10 s window(s) with no gated call: something other than the hooked leaf turned the look" % len(unheld))
     faults = max([int(r["f"]) for r in sums] + [0])
     if faults:
         problems.append("%d store(s) into the facade faulted" % faults)
@@ -17776,12 +17796,18 @@ def health_scan(text, since=None, until=None):
     census = {}
     rows = {rule.name: {} for rule in HEALTH_RULES}
     rows["_health_window"] = {"since": since, "until": until}
+    rows[H_CARRIED] = {}
     unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
     tagged = 0
     first = last = None
     # F125: the detail log's state is said when native on foot arms and at each change, often long before a --since window opens. The last F125 line read
     # before the window's first line is the state in force as it opens: it goes to the log diet rule as an "entry" row.
     carried, entered = None, False
+    # F212 and F209 read two states that are logged once, long before a --since window opens: whether native stereo on foot was on (the last F115 began/ended line)
+    # and the conversation-look hook's armed or stood-down line (written when the hooks are installed). The last of each before the window goes in under H_CARRIED.
+    f115_rule = next(r for r in HEALTH_RULES if r.name == H_F115)
+    f212_rule = next(r for r in HEALTH_RULES if r.name == H_F212)
+    f115_state = f212_hook = None
     settings = {}
     setting_rules = (
         ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
@@ -17836,6 +17862,25 @@ def health_scan(text, since=None, until=None):
                 rows[name].setdefault("entry", []).append(dict(state))
             if carried is not None:
                 rows[H_F125].setdefault("entry", []).append(carried)
+            if f115_state is not None:
+                rows[H_CARRIED].setdefault("onfoot", []).append(f115_state)
+            if f212_hook is not None:
+                rows[H_CARRIED].setdefault("f212_hook", []).append(f212_hook)
+        if not entered and sm:
+            # Before the window: keep the last native-stereo-on-foot edge and the last F212 hook line.
+            pre = raw[sm.end():]
+            if "(F115)" in pre:
+                for kind, rx in f115_rule.kinds:
+                    g = rx.search(pre) if kind in ("began", "ended") else None
+                    if g:
+                        f115_state = dict(g.groupdict(), kind=kind, _t=tod)
+                        break
+            elif "conversation-look" in pre:
+                for kind, rx in f212_rule.kinds:
+                    g = rx.search(pre) if kind == "hook" else None
+                    if g:
+                        f212_hook = dict(g.groupdict(), _t=tod)
+                        break
         for name, regex in setting_rules:
             match = regex.search(raw)
             if match:
@@ -21470,8 +21515,14 @@ def self_test_health():
                    "1 episodes (by the shop screen 1) (12.0 s, 540 calls refused, the camera 1.2-1.3 m from the neck, 540 calls with a buy screen open)"], lacks=["UNPARSED", "PARTIAL"])
         check("F209: the weapon buy screen and the armoury kiosk are counted by class", [neck(), KSTART209, WSHOW209, ON209, AWAY_LEFT_SHOP, OFF209, AWAY_END_SHOP, KSTOP209, neck()], 0,
               [("OK", S209)], has=["1 Show / 0 Close (WeaponsVendorInteraction 1)", "kiosk 1 start / 1 stop"], lacks=["UNPARSED"])
-        check("F209: the shop signal went on and F107 logged no episode by the shop screen: the view did not change", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 3,
+        BEGAN209 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        check("F209: the shop signal went on and F107 logged no episode by the shop screen: the view did not change", [neck(), BEGAN209, SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 3,
               [("NEVER APPLIED", S209)], has=["went on 1 time(s) but F107 logged no episode by the shop screen: the view did not change"], lacks=["UNPARSED"])
+        check("F209: the same log with native on foot never begun (flat, or the log's start cut off) is not NEVER APPLIED", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 0,
+              lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F209: an episode F107 opened by its distance test and the shop signal kept open (its ended line counts calls the shop screen held) is the shop's, not NEVER APPLIED",
+              [neck(), BEGAN209, SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_SHOP, CLOSE209, OFF209, neck()], 0, [("OK", S209)],
+              lacks=["NEVER APPLIED", "no episode by the shop screen", "UNPARSED"])
         check("F209: a shop-sized distance episode with the shop signal beside it is not flagged", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_LEFT_BOTH, AWAY_END_3M7, CLOSE209, OFF209, neck()], 0,
               [("OK", S209), ("OK", F107)], has=["(by the distance test 1, by the shop screen 1)"], lacks=["no shop signal in the log"])
         check("F209: a distance episode at a showroom's distance with no shop signal is PARTIAL (the flag did not see that camera)", [neck(), AWAY_LEFT_3M7, AWAY_END_3M7, neck()], 0,
@@ -21508,6 +21559,7 @@ def self_test_health():
         SUM212_MOVED = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 0, 0.2, 0.0646, 541, 0.3, 0.1, 0.12, 0.0)
         SUM212_FAULT = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 2, 0.2, 0.0646, 541, 0.0, 0.0, 0.0, 0.0)
         SUM212_SPRINGS = R212("call(s) gated", TAG212, 10.0, 0, 0, 0, 0, 0, 0.0, 0.0, 450, 0.3, 0.0, 0.2, 0.0)
+        SUM212_REST = R212("call(s) gated", TAG212, 10.0, 0, 0, 0, 0, 0, 0.0, 0.0, 450, 0.0, 0.0, 0.0, 0.0)
         check("F212: a mission giver's conversation, the leaf gated for the run, the springs at rest: OK", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212, neck()], 0,
               [("OK", S212)], has=["hook armed", "1 run(s) begun, 1 ended (longest 5.9 s, 541 gated call(s), the game asked for up to |yaw| 0.20000 and |pitch| 0.06460, raw floats)",
                                    "541 gated call(s), 0 passed in the 10 s lines", "1 conversation state(s) in F209's lines (Mission Giver)",
@@ -21533,6 +21585,20 @@ def self_test_health():
               [("PARTIAL", S212)], has=["1 10 s window(s) with gated calls read a spring target above zero (up to yaw 0.12000 pitch 0.00000): something else sets the targets"], lacks=["UNPARSED"])
         check("F212: a store into the facade that faulted is PARTIAL", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212_FAULT, neck()], 0, [("PARTIAL", S212)],
               has=["2 store(s) into the facade faulted"], lacks=["UNPARSED"])
+        END212_115 = R("native on foot (F115): native stereo on foot", "ended", 86333)
+        check("F212: native on foot and the hook's line before a --since window, a conversation state in it and no gated call is NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_UP212, neck(), TALK212, neck()], 3, [("NEVER APPLIED", S212)],
+              has=["hook armed", "a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held"],
+              lacks=["UNPARSED"], extra=["--since", "10:00:04"])
+        check("F212: the hook stood down before a --since window is named in the NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_DOWN212, neck(), TALK212, neck()], 3, [("NEVER APPLIED", S212)],
+              has=["hook stood down (the game build differs", "the hook stood down and a conversation state was logged with native on foot begun"], lacks=["UNPARSED"], extra=["--since", "10:00:04"])
+        check("F212: native stereo on foot ended before the --since window: the conversation state in it is not NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_UP212, END212_115, neck(), TALK212, neck()], 0, lacks=["NEVER APPLIED", "UNPARSED"], extra=["--since", "10:00:05"])
+        check("F212: the springs moved in a 10 s window with no gated call and no conversation state is PARTIAL (something else turned the look)",
+              [neck(), ONFOOT212, HOOK_UP212, SUM212_SPRINGS, neck()], 0, [("PARTIAL", S212)],
+              has=["the look springs moved in 1 10 s window(s) with no gated call: something other than the hooked leaf turned the look"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a 10 s window with no gated call and springs at rest stays OK", [neck(), ONFOOT212, HOOK_UP212, SUM212_REST, neck()], 0, [("OK", S212)], lacks=["PARTIAL", "UNPARSED"])
         check("F212: a line that drifted from its pattern is unparsed", [neck(), "conversation look (F212): the leaf is somewhere else"], 4, [("UNPARSED", S212)])
 
         # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
@@ -24466,7 +24532,12 @@ def self_test_health():
         check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
         check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
               has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
-        check("srv turret: a settings line of bb545c8b, which also said the bracket cut (a key since baked and removed), still parses", st_ok + [st_set().replace(" (live; ", ", bracket cut 18 mm (live; ", 1)], 0, [("IDLE", ST)],
+        st_set_old = st_set().replace(" (live; ", ", bracket cut 18 mm (live; ", 1)
+        checks += 1
+        if st_set_old == st_set() or "bracket cut 18 mm" not in st_set_old:   # a settings line whose format dropped " (live; " would make the next case a copy of the one above it
+            print("health: the srv turret settings line no longer holds ' (live; ': the bb545c8b case would not test the older line")
+            ok = False
+        check("srv turret: a settings line of bb545c8b, which also said the bracket cut (a key since baked and removed), still parses", st_ok + [st_set_old], 0, [("IDLE", ST)],
               has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
               has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera back 0.60 m published 1 time(s)",
