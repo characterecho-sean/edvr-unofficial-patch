@@ -431,10 +431,11 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
-// The flat profile's HUD edge smoothing (fix.hud_antialiasing; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
+// The HUD edge smoothing (fix.hud_antialiasing, both profiles; the flat adapter asks through here; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
 // the HUD layer"): SMAA 1x over the layer's finished 8-bit content before the composite downsamples it, so the HUD gets the edge smoothing the game's own
 // anti-aliasing would have given it. The adapter asks for the NEXT composite only, once a frame, with the key it just read: `on` smooths the layer, false leaves it as
-// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (the VR profiles) never sees it set. The result is what that
+// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (VR) never sees it set: VR reads the same key itself, at every
+// configure (2026-11-03), and smooths both eyes' composites when it is on. The result is what that
 // composite did: kNone (no layer composite ran), kRaw (it ran on the layer as is, as asked), kSmoothed (it read the SMAA output) or kFault (smoothing was asked
 // for, the SMAA resources could not be had, and it read the raw layer); w x h is the layer's size at that composite.
 enum class UiLayerEdgeSmoothing : uint8_t { kNone = 0, kRaw, kSmoothed, kFault };

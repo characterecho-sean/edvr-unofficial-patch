@@ -1404,14 +1404,69 @@ void testFlatLayerRules() {
         for (int i = 0; i < 4; ++i) anyTaken = anyTaken || flatUiLayerTakesFamily(flatUiFamilyOf(kHoloVs[i], kHoloPs[i]));
         check(!anyTaken, "flat layer: none of the census's hologram pairs (94D5 the one with camera rows among them) reaches the take");
     }
-    check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) &&
-              !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
-          "flat layer: the scene lines, the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
+          "flat layer: the orbit lines (their width patch is VR's), the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
+    // 2026-11-03: the supercruise bars, the supercruise space dust and the normal-space dust are asked for (they blur under the flat anti-aliasing's history),
+    // and each is a family the shared HDR take draws; the density rule for the lines is the flat one (a layer at least as large as the render).
+    check(flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) && flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) &&
+              flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust),
+          "flat layer: the supercruise bars, the supercruise space dust and the normal-space dust are asked for (2026-11-03)");
     for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite, UiLayerFamily::kMapCanvas,
-                            UiLayerFamily::kMapSprite})
+                            UiLayerFamily::kMapSprite, UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust,
+                            UiLayerFamily::kNormalSpaceDust})
         check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
+    check(flatUiSceneSlotOf(UiLayerFamily::kSupercruiseBars) == 0 && flatUiSceneSlotOf(UiLayerFamily::kSpaceDust) == 1 &&
+              flatUiSceneSlotOf(UiLayerFamily::kNormalSpaceDust) == 2 && flatUiSceneSlotOf(UiLayerFamily::kOrbitLines) == -1 &&
+              flatUiSceneSlotOf(UiLayerFamily::kHolo) == -1 && flatUiSceneSlotOf(UiLayerFamily::kMapCanvas) == -1,
+          "flat layer: the scene families' per-reason slots are the bars, the space dust and the normal-space dust, and nothing else");
+    {
+        // The flat route's pairs name them (flatUiFamilyOf is the shared rule, asked for the HDR target): the same pairs as VR.
+        check(flatUiFamilyOf(kUiVsSupercruiseBars, kUiPsSupercruiseBars) == UiLayerFamily::kSupercruiseBars &&
+                  flatUiFamilyOf(kUiVsSpaceDust, kUiPsSpaceDust) == UiLayerFamily::kSpaceDust &&
+                  flatUiFamilyOf(kVsNormalSpaceDust, kPsNormalSpaceDust) == UiLayerFamily::kNormalSpaceDust,
+              "flat layer: the bars', the space dust's and the normal-space dust's shader pairs name their families");
+        // ... and the pair is the key: the vertex shaders' other flat pairs (flat_projection_recipes.h) name nothing.
+        check(flatUiFamilyOf(kUiVsSpaceDust, 0xCB7AF179DF4E6A60ull) == UiLayerFamily::kNone &&
+                  flatUiFamilyOf(kUiVsSupercruiseBars, 0xC67370DE72E4422Cull) == UiLayerFamily::kNone &&
+                  flatUiFamilyOf(kVsNormalSpaceDust, kUiPsSpaceDust) == UiLayerFamily::kNone,
+              "flat layer: another pixel shader with these vertex shaders names no family");
+    }
+    // The density rule per profile (uiLayerSceneLinesFit): VR needs a layer WIDER than the render (the lines are taken for density), flat a layer at least
+    // as large on both axes (the take is for the temporal history, and DLAA at UI quality 100 has render == display); a narrower layer, one axis short or an
+    // unknown render size is refused in both.
+    check(uiLayerSceneLinesFit(5040, 4873, 2016, 1949, false) && !uiLayerSceneLinesFit(2016, 1949, 2016, 1949, false) &&
+              !uiLayerSceneLinesFit(5040, 1949, 2016, 1949, false) && !uiLayerSceneLinesFit(2016, 4873, 2016, 1949, false),
+          "density rule, VR: the layer must be wider than the render on both axes (a layer as large as the render is refused)");
+    check(uiLayerSceneLinesFit(5040, 4873, 2016, 1949, true) && uiLayerSceneLinesFit(2016, 1949, 2016, 1949, true) &&
+              uiLayerSceneLinesFit(3840, 2160, 3840, 2160, true) && uiLayerSceneLinesFit(4032, 1949, 2016, 1949, true),
+          "density rule, flat: a layer at least as large as the render on both axes is enough (DLAA at UI quality 100: render == display)");
+    check(!uiLayerSceneLinesFit(1920, 1080, 3840, 2160, true) && !uiLayerSceneLinesFit(3840, 1080, 3840, 2160, true) &&
+              !uiLayerSceneLinesFit(1920, 2160, 3840, 2160, true) && !uiLayerSceneLinesFit(5040, 4873, 0, 1949, true) &&
+              !uiLayerSceneLinesFit(5040, 4873, 2016, 0, true) && !uiLayerSceneLinesFit(5040, 4873, 0, 1949, false),
+          "density rule, flat: a layer narrower than the render (Elite's supersampling above the UI quality), one axis short, or an unknown render size is refused");
+    {
+        // Through the decision: a bars draw with the flat rule's fit (layer == render) is taken, with the VR rule's strict one it is left in the scene.
+        UiLayerDrawFacts g;
+        g.family = UiLayerFamily::kSupercruiseBars;
+        g.eyeTarget = true;
+        g.crispHdr = true;
+        g.eye = 0;
+        g.armed = true;
+        g.blend = UiBlendShape::kOpaque;
+        g.layerWider = uiLayerSceneLinesFit(2016, 1949, 2016, 1949, true);
+        check(uiLayerDecide(g) == UiLayerDecision::kRedirect, "flat bars draw in a layer as large as the render: taken");
+        g.layerWider = uiLayerSceneLinesFit(2016, 1949, 2016, 1949, false);
+        check(uiLayerDecide(g) == UiLayerDecision::kNoDensityGain, "VR bars draw in a layer as large as the render: left in the scene (kNoDensityGain)");
+        g.layerWider = uiLayerSceneLinesFit(1920, 1080, 3840, 2160, true);
+        check(uiLayerDecide(g) == UiLayerDecision::kNoDensityGain, "flat bars draw in a layer narrower than the render: left in the scene (kNoDensityGain)");
+        // The dusts are exempt from the density rule in both profiles.
+        g.family = UiLayerFamily::kSpaceDust;
+        check(uiLayerDecide(g) == UiLayerDecision::kRedirect, "flat space dust in a layer narrower than the render: taken (exempt from the density rule)");
+        g.family = UiLayerFamily::kNormalSpaceDust;
+        check(uiLayerDecide(g) == UiLayerDecision::kRedirect, "normal-space dust in a layer narrower than the render: taken (exempt from the density rule)");
+    }
     // The System Map's two families (2026-10-10, flat draw census flight 081437): asked only while a map is open (GuiFocus 6,
     // 7 or 8) and only on the HDR target (flatUiMapFamilyOf); no VR classifier names them.
     check(flatUiLayerTakesFamily(UiLayerFamily::kMapCanvas) && flatUiLayerTakesFamily(UiLayerFamily::kMapSprite),
@@ -2437,12 +2492,13 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kHoloGeneric || fam == UiLayerFamily::kOrbitLines ||
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
-                               fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark;
+                               fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark ||
+                               fam == UiLayerFamily::kNormalSpaceDust;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple and the scope mark");
-    check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the space dust has no width to give: it is exempt from the density rule)");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark and the normal-space dust");
+    check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the two dusts have no width to give: they are exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
               !uiLayerWiderThanRender(5040, 1949, 2016, 1949) && !uiLayerWiderThanRender(2016, 4873, 2016, 1949) &&
@@ -2702,6 +2758,93 @@ void testSupercruiseLines() {
     // The mutant of the exemption: were it a scene line, a narrow layer would decline it.
     check(lines(UiLayerFamily::kSupercruiseBars, dustEffect, narrow) == UiLayerDecision::kNoDensityGain,
           "SD3i: (control) a family that IS a scene line is declined by the same fact, so SD3h proves the exemption");
+
+    // ---------------------------------------------------------------------------------------------------------------------------------
+    // THE NORMAL-SPACE DUST (2026-11-03; vs E904D334BC8B11EA / ps 095030F27D2C362A, supercruise_lines.h): the specks near a planet or a station, a
+    // non-indexed Draw of 3072 vertices, additive SRC_ALPHA / ONE (UiBlendShape::kScaledAdditive), depth tested with no write, into the lit HDR target.
+    // The family is the pair, on the HDR target alone; the decision is every other HDR family's; it is exempt from the density rule and needs no private pass.
+    UiFamilyFacts n;
+    n.targetKind = 1;
+    n.vs = kVsNormalSpaceDust;
+    n.ps = kPsNormalSpaceDust;
+    UiFamilyWhy nwhy = UiFamilyWhy::kOther;
+    check(kVsNormalSpaceDust == 0xE904D334BC8B11EAull && kPsNormalSpaceDust == 0x095030F27D2C362Aull, "ND1a: the pair is the confirmed one (vs E904D334BC8B11EA / ps 095030F27D2C362A)");
+    check(uiLayerFamilyFor(n, &nwhy) == UiLayerFamily::kNormalSpaceDust && nwhy == UiFamilyWhy::kDirect,
+          "ND1b: the pair on the HDR target names the normal-space-dust family, a direct shader");
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kNormalSpaceDust), "normal-space dust") == 0, "ND1c: the family is named \"normal-space dust\" in the 30 s line");
+    // The PAIR is the key: none, a bit away, and the other families' shaders name nothing; neither does the pair on any other target.
+    bool normalNothing = true;
+    for (uint64_t ps : {0ull, kPsNormalSpaceDust ^ 1ull, kPsNormalSpaceDust >> 4, kUiPsSpaceDust, kUiPsSupercruiseBars, kUiPsOrbitLines}) {
+        n.ps = ps;
+        normalNothing = normalNothing && uiLayerFamilyFor(n) == UiLayerFamily::kNone;
+    }
+    n.ps = kPsNormalSpaceDust;
+    for (uint64_t vs : {kVsNormalSpaceDust ^ 1ull, kVsNormalSpaceDust ^ 0x100ull, kUiVsSpaceDust, kUiVsSupercruiseBars, kUiVsOrbitLines}) {
+        n.vs = vs;
+        normalNothing = normalNothing && uiLayerFamilyFor(n) != UiLayerFamily::kNormalSpaceDust;
+    }
+    n.vs = kVsNormalSpaceDust;
+    for (int kind : {0, 2}) {
+        n.targetKind = kind;
+        normalNothing = normalNothing && uiLayerFamilyFor(n) != UiLayerFamily::kNormalSpaceDust;
+        n.panelSized = true;
+        normalNothing = normalNothing && uiLayerFamilyFor(n) != UiLayerFamily::kNormalSpaceDust;
+        n.panelSized = false;
+    }
+    check(normalNothing, "ND1d: another pixel shader or vertex shader, the supercruise draws' shaders and any target but the lit HDR one name no normal-space dust");
+    // The supercruise dust and the bars keep their families with the new pair around.
+    n.targetKind = 1;
+    n.vs = kUiVsSpaceDust;
+    n.ps = kUiPsSpaceDust;
+    check(uiLayerFamilyFor(n) == UiLayerFamily::kSpaceDust, "ND1e: the supercruise space dust is still the space dust");
+    n.vs = kUiVsSupercruiseBars;
+    n.ps = kUiPsSupercruiseBars;
+    check(uiLayerFamilyFor(n) == UiLayerFamily::kSupercruiseBars, "ND1f: ...and the bars the bars");
+    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "ND1g: the family is appended after the scope mark, last before kCount (no older family's number moved)");
+    check(uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, false, true) &&
+              !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kNormalSpaceDust),
+          "ND1h: fix.ui_quality's half governs it (not the weapons layer's)");
+
+    UiDsState normalDs;  // depth tested, no write; no stencil
+    normalDs.depthEnable = true;
+    normalDs.depthFunc = 7;
+    normalDs.depthWriteAll = false;
+    const UiDsEffect normalEffect = uiLayerDsEffect(normalDs, true);
+    check(normalEffect.depthTest && !normalEffect.depthWrite && !normalEffect.stencilWrite, "ND2a: the normal dust's state tests depth and writes nothing");
+    UiBlendRt scaled;  // SRC_ALPHA, ONE, add (census 2026-10-10 16:40:44)
+    scaled.enable = true;
+    scaled.src = uiblend::kSrcAlpha;
+    scaled.dst = uiblend::kOne;
+    scaled.op = uiblend::kOpAdd;
+    scaled.srcA = uiblend::kOne;
+    scaled.dstA = uiblend::kOne;
+    scaled.opA = uiblend::kOpAdd;
+    scaled.mask = 0xF;
+    check(uiLayerBlendShape(scaled) == UiBlendShape::kScaledAdditive, "ND2b: the normal dust's blend is the scaled-additive shape");
+    auto normalDust = [&](void (*edit)(UiLayerDrawFacts&)) {
+        UiLayerDrawFacts g;
+        g.family = UiLayerFamily::kNormalSpaceDust;
+        g.verdictForwards = true;
+        g.eyeTarget = true;
+        g.ldrView = false;
+        g.crispHdr = true;
+        g.eye = 0;
+        g.armed = true;
+        g.ds = normalEffect;
+        g.blend = UiBlendShape::kScaledAdditive;
+        edit(g);
+        return uiLayerDecide(g);
+    };
+    check(normalDust(none) == UiLayerDecision::kRedirect, "ND3a: the census tuple (armed, HDR, scaled additive, depth tested) is kRedirect");
+    check(normalDust([](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) == UiLayerDecision::kBlendRefused &&
+              normalDust([](UiLayerDrawFacts& g) { g.dsReproducible = false; }) == UiLayerDecision::kDepthStencilTest &&
+              normalDust([](UiLayerDrawFacts& g) { g.lateTone = true; }) == UiLayerDecision::kToneLate &&
+              normalDust([](UiLayerDrawFacts& g) { g.crispHdr = false; }) == UiLayerDecision::kHdrTarget &&
+              normalDust([](UiLayerDrawFacts& g) { g.familyEnabled = false; }) == UiLayerDecision::kFamilyOff,
+          "ND3b: a multiply, an unreproducible depth state, a draw after the tonemap re-issue, the crisp take off and the governing half off are each the ladder's own reason");
+    check(normalDust([](UiLayerDrawFacts& g) { g.layerWider = false; }) == UiLayerDecision::kRedirect && normalDust([](UiLayerDrawFacts& g) { g.familyReady = false; }) == UiLayerDecision::kRedirect,
+          "ND3c: the normal-space dust is exempt from the density rule and the bars' private pass: taken whatever the layer's size");
 }
 
 // fix.ui_quality's after-UI take (uiLayerNoteOther, vscreen.cpp): a draw

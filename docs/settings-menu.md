@@ -7,7 +7,7 @@
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 - **Current code state (2026-10-08; dated notes in Status detail):**
   - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`visual.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. The Desktop window page (2026-10-28, `menu desktop_window`, docs\desktop-window.md) follows it: `visual.desktop_window` and its aspect and style keys. Sections "What it shows" and "Visual tab" below.
-  - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
+  - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a HUD Anti-Aliasing row (2026-10-24, flat-only as `menu flat_performance`; on VR's Performance page too since 2026-11-03, `menu performance`, NOT FLOWN); sections below.
   - Explorer Cam page (2026-10-08): REMOVED with Explorer Cam (F98, 2026-10-24); its keys are retired.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
     comparison, exposure and history keys (Explorer Cam's key until F98). FLOWN
@@ -268,10 +268,16 @@ with no `menu` token is desktop-only, as a `[fix]` row is; the installer's windo
 BUILT. The Performance tab is built from `kFlatPageRows` in `menu_flat_rows.h` whatever page a row's `menu`
 token names, and the headset's Performance page is the Fix-tier rows whose page is `performance`. A row that
 does something only in the flat profile therefore takes `menu flat_performance`: a page the headset's menu
-builds none of, so the row is on the flat tab and not on VR's page. The first is HUD Anti-Aliasing
+builds none of, so the row is on the flat tab and not on VR's page. The first was HUD Anti-Aliasing
 (`fix.hud_antialiasing`, on or off, default off, live), directly under UI quality; it dims, and refuses a step,
-while UI quality is off or the flat anti-aliasing is off (`hudAntiAliasingRowDim`; the layer it smooths is live
-only with both on), and its hint and refusal name the cause that applies. `tools/gen_settings_schema.py` refuses the token on a key
+while UI quality is off or the anti-aliasing is off (`hudAntiAliasingRowDim`; the layer it smooths is live
+only with both on), and its hint and refusal name the cause that applies.
+**2026-11-03: the row is on both menus.** VR's UI layer now smooths its HUD with the same key (`ui_layer.cpp`
+`uiLayerConfigure` reads it; `docs/ui-layer-2026-09-23.md`, "2026-11-03"), so the row's token is `menu performance`: it
+is on VR's Performance page, directly under UI quality, and on the flat tab (`kFlatPageRows` lists it, as before). The
+dim rule reads the running profile's own anti-aliasing: the flat mode in flat, `fix.temporal_aa` in VR. No row uses
+`flat_performance` today; the generator still supports the token. NOT FLOWN.
+`tools/gen_settings_schema.py` refuses the token on a key
 that is not in `[fix]` and on a key `kFlatPageRows` does not list (the row would be on no menu at all); the
 rigs `flat_sharpen_test` and `sharp_weapons_test` hold the placement, the dimming and VR's page. The installer's
 window, VR view, still lists the row.
