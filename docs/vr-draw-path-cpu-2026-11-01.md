@@ -25,6 +25,11 @@
   read in the flight: `draw gate holders:` (on change), `draw mask:`,
   `gpu timing queries:` (each window) and the F87c lines' `Unmap copy`
   figures; `edvr_log.py --perf-windows` lays them beside R1 and the cycle.
+- **Build 2 flown (2026-11-03, "Flight 2026-11-03"):** the byte's targets
+  fell about 0.6 ms a frame in the profile (`uiLayerFamilyOf` 0.41 to 0.01,
+  screen motion's draw calls to 0) and nothing rose more than 0.2 ms. The
+  marker fix's Unmap copy is the next target: 0.80 ms a frame, reading
+  about 230 KB of write-combined memory per eye per frame.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -603,3 +608,56 @@ prices several things.
   frame cycle, not on an A/B.
 - Superseded: the `vr_draw_mask` key, the pair table and the ABBA flight
   above.
+
+## Flight 2026-11-03
+
+Build `277fae1f` with profile symbols, DLAA, Steam, PSVR2. The concourse at
+Shamash 1 a, standing still. The log is from this build (`--expect-build
+HEAD`). `--health` flags only full outfit (F142) as NEVER APPLIED, the same
+as in every build-1 leg.
+
+**Log, five 1800-frame windows (09:57-10:02, unprofiled):**
+- R1 26.2 ms, cycle 36.0 ms. Build 1 leg 1a was 25.8 and 34.8, inside the
+  noise as expected.
+- `draw mask:` about 18,300 draws a frame on the full path. Skipped: screen
+  motion's two calls on about 98% of them, the UI family on about 76%, and
+  weapon motion on about 7M offscreen draws a window.
+- Marker fix Unmap copy: one copy per eye per frame, about 230 KB each, 0.37
+  ms (eye 0) plus 0.43 ms (eye 1) = 0.80 ms a frame, about 0.65 GB/s. The
+  cost is reading write-combined memory, not the byte count.
+- GPU timing query Ends: 75 a frame. 65 are untagged ("other": temporal
+  pass, DLAA, engine velocity, the frame driver), the GPU census 8.5, UI
+  depth 1.4, the particle copy 0.7-1.0.
+- Gate holders: 13 of 28 (remlok, holo, ui_depth, sun_glare, object_probe,
+  particle, backdrop, scrim, loader_panel, wake_pulse, night_vision,
+  depth_probe, footprint).
+
+**Profile.** The 300 s capture failed in the save: `wpr -stop` timed out at
+180 s merging 7 GB. A 100 s capture (17:26:22Z, 2,773 frames, no events
+lost) worked. Notes outside the repo: `profile-b2\table.md`. Baseline:
+the 2026-11-01 DLAA concourse windows. Figures in ms a frame, old to new:
+
+| | old | new |
+|---|---|---|
+| R1, profiled | 32.26 | 26.15 |
+| EDVR leaf | 7.43 | 4.97 |
+| EDVR innermost | 12.90 | 9.54 |
+| game exe | 13.01 | 11.12 |
+| `uiLayerFamilyOf` | 0.407 | 0.008 |
+| `screenMotionUiDraw` + `screenMotionDraw` | 0.211 | 0 |
+| `fssPanelRectDrawArgs` | 0.024 | gone |
+| `shaderHashMemo` (the byte at bind) | 0 | 0.023 |
+| `streamUnmapCopy` (post-submit) | 0.82 | 0.70 |
+
+- The byte's own targets fell about 0.6 ms, at the top of the reviewed
+  0.3-0.5 estimate. The rises (`shaderHashMemo`,
+  `hookedPSSetConstantBuffers`, the hash map) total under 0.2 ms.
+- The whole-EDVR drop (2.5 ms leaf) is an upper bound, not the build's
+  saving. The game exe also fell 1.9 ms and EDHM 0.4, so the scene and
+  session differ. The old capture also lost 1.29M events.
+- The analyzer in the worktree's build lacked `msdia140.dll`, so the
+  analysis ran from a copy with it added. That is the same symbol-path gap
+  as the 2026-11-01 note.
+- Next target, by size: the marker fix's Unmap copy (0.70-0.80 ms). Then
+  `hookedPSSetShaderResources` (0.90 self), `hookedMap` and `hookedUnmap`
+  (0.58, 0.50), and `flushIaObserved` (0.49).
