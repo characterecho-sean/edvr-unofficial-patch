@@ -2,102 +2,59 @@
 
 ## Status
 
-- **State (2026-11-02): build 1 flown (`53c965cd`); it failed the total
-  criterion, and the maintainer approved the cleanup the same day** (branch
-  `build1/cleanup`, based on `c089b802`). Shipped: item 1 as the standard
-  behaviour (it is a behaviour fix with AA off: eye rows, marker fix and
-  reticle depth now apply), item 3, the re-issue counter. Removed: items 2
-  and 4. No temporary key remains. Draft PR #166 holds the build.
-- **Review of the flight (2026-11-02, "Review of build 1's flight"):** the
-  render thread is CPU-bound; build 1's DLAA items were worth 0.2-0.4 ms
-  against a 0.8 ms leg-to-leg noise floor, and the profile prices were
-  diluted about 1.7x by a non-concourse window. Build 2 (/GL flight) is
-  replaced by the draw pair mask.
-- **Build 2 (designed 2026-11-02, "Build 2: the draw pair mask"):** a
-  per-shader-pair mask skips DLAA subscribers that cannot want a draw
-  (#152), plus `drawPathFast` in the instanced hook (#151). No temporary
-  key. Reviewed the same day ("Review of the mask design"): about
-  0.4 ms, not 0.8-1.2; two bits are wrong; too small for an ABBA flight.
-  Decided: "Build 2 as decided" (no key, instruments, one profiled flight).
-- **Build 2 built (2026-11-02, branch `build2/may-want-byte`, #168):** the
-  VS "may-want" byte, the pair test before `GetType`, the stash deleted,
-  `drawPathFast` in the instanced hook, and the instruments. Log lines to
-  read in the flight: `draw gate holders:` (on change), `draw mask:`,
-  `gpu timing queries:` (each window) and the F87c lines' `Unmap copy`
-  figures; `edvr_log.py --perf-windows` lays them beside R1 and the cycle.
-- **Build 2 flown (2026-11-03, "Flight 2026-11-03"):** the byte's targets
-  fell about 0.6 ms a frame in the profile (`uiLayerFamilyOf` 0.41 to 0.01,
-  screen motion's draw calls to 0) and nothing rose more than 0.2 ms. The
-  marker fix's Unmap copy is the next target: 0.80 ms a frame, reading
-  about 230 KB of write-combined memory per eye per frame.
-- **Post-build-2 review (2026-11-03, "Review of build 2's flight and next
-  targets"):** two tracks: (A) next EDVR-internal CPU cuts (`streamUnmapCopy`
-  0.80 ms via tight instance windows, `hookedPSSetShaderResources` 0.90 ms,
-  `hookedMap`/`hookedUnmap` 1.08 ms, `flushIaObserved` 0.49 ms, and the F100
-  tee's eye-0 slow-path trap); and (B) engine and hook-chain draw reductions
-  (shadow-cascade small-prop filter and sub-pixel clutter floor in
-  `FUN_1442B3FC0`, concourse keep-cell in `optimized_station`, layer-A
-  weathering decal fade gate, and bypassing 3Dmigoto on `t33` scene draws).
-  Checked the same day ("Check of that review" and "Rebuttal & code trace on
-  A1, A2 and B1"). Kept: the marker copy (with two zero-coverage-loss cuts
-  found in `streamUnmapCopy`: duplicate eye copies and overlapping windows),
-  the bind and map hooks, the post-R1 split, and the layer-A fade gate.
-  Ruled out or deferred: the tee trap under DLAA (0.08 ms; only matters with
-  AA off), the sub-pixel floor, the EDHM bypass, and offscreen/concourse
-  culling until a census/RTV check establishes what those draws are.
-- **Build 3 as agreed (2026-11-03, "Reply to the rebuttal" and "Argon's
-  reply"):** merge both eyes' marker-copy windows and copy each range once;
-  same coverage by construction, so no key. Size the merged plan for up to
-  `2 * kWinMax` (14) windows and `2 * kWinCapEntries` (65,536) entries so
-  disjoint eye plans never truncate. The logs bound its saving only loosely, at
-  0-86% of the copy (0-0.61 ms); the build 3 flight measures it. Ruled out:
-  skipping the windows during an escalation (escalations only on arrival).
-  Open: what the non-eye-target draws are (the `weapon_motion` skip count:
-  4,070 a frame in one log, 514 in the other; not `8BC3..` draws). Agreed by
-  both reviews.
-- **Build 3 designed (2026-11-03, "Build 3: one marker copy for both
-  eyes"):** `mergePlans` and one copy per Unmap; the F87c line's requested
-  and copied figures and eye 0's ring. No config key. Decided: the
-  map-bounce gates wait for the A3 pass. No earlier review in this arc ran
-  on Fable (see "Reviews in this arc").
-- **Build 3 reviewed and revised (2026-11-03, "Review of the build 3
-  design", Opus, fresh context):** changes required, all taken. B1 moves to
-  the existing draw census (one press after the profile capture, with
-  flight-only `census_offscreen` and `census_lines` settings), replacing the
-  planned seven-hook counter. A merged-range fault now zeroes the plan
-  windows inside it and is counted. Re-reviewed the same day: approved,
-  its eight non-blocking fixes folded in (among them `edvr_log.py --tally
-  offscreen` for the census's non-eye lines). Next: the spec, then the
-  build.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
-  the screen?
-- **Earlier investigation:** `docs\stereo-cpu-sharing-2026-10-16.md` (the
-  2026-10-31 flight, H5-H7, and the 2026-11-01 CPU profile).
-- **Test build 1:** item 1 (scene depth without AA: world rows and the
-  marker tee's fast path; changes behaviour, #155), item 2 (benchmark
-  collector), item 3 (two early exits inline), item 4 (depth slot cache),
-  and a re-issue counter (GLOSSARY: Re-issue).
-- **Temporary keys: all three are gone (2026-11-02).** Item 1's key is
-  removed and its path is the behaviour; items 2 and 4 and their keys are
-  removed with their code. See "The temporary keys".
+  the screen? Earlier investigation: `docs\stereo-cpu-sharing-2026-10-16.md`.
+- **Build 1 (flown 2026-11-02, `53c965cd`):** failed the total criterion;
+  cleanup approved the same day (branch `build1/cleanup`, draft PR #166).
+  Shipped: item 1 as the behaviour (scene depth without AA: eye rows, marker
+  fix, reticle depth), item 3, the re-issue counter. Removed: items 2 and 4.
+  All three temporary keys are gone ("The temporary keys"). Review of its
+  flight: the render thread is CPU-bound; build 1's DLAA items were worth
+  0.2-0.4 ms against a 0.8 ms noise floor.
+- **Build 2 (#168, branch `build2/may-want-byte`; flown 2026-11-03):** the VS
+  "may-want" byte and pair test before `GetType`, the stash deleted,
+  `drawPathFast` in the instanced hook, instruments (`draw gate holders:`,
+  `draw mask:`, `gpu timing queries:`, the F87c `Unmap copy` figures; read
+  with `edvr_log.py --perf-windows`). The byte's targets fell about 0.6 ms a
+  frame, nothing rose more than 0.2 ms. The marker fix's Unmap copy is the
+  next target: 0.80 ms a frame, about 230 KB of write-combined memory per eye.
+- **Post-build-2 review (2026-11-03, "Review of build 2's flight and next
+  targets", checked in "Check of that review" and "Rebuttal & code trace on
+  A1, A2 and B1"):** track A, EDVR-internal cuts (`streamUnmapCopy`,
+  `hookedPSSetShaderResources`, `hookedMap`/`hookedUnmap`, `flushIaObserved`,
+  the F100 tee's eye-0 trap); track B, engine and hook-chain draw reductions.
+  Kept: the marker copy (duplicate eye copies, overlapping windows), the bind
+  and map hooks, the post-R1 split, the layer-A fade gate. Ruled out or
+  deferred: the tee trap under DLAA (0.08 ms), the sub-pixel floor, the EDHM
+  bypass, offscreen/concourse culling until a census/RTV check says what those
+  draws are.
+- **Build 3 (designed, reviewed and revised 2026-11-03, "Build 3: one marker
+  copy for both eyes" and "Review of the build 3 design", Opus, fresh
+  context; arc #157, spec #180):** `mergePlans` and one copy per Unmap, sized
+  for up to 14 ranges and 65,536 entries so disjoint eye plans never truncate;
+  same coverage by construction, so no key. The F87c per-eye line carries
+  requested bytes and its own ring; a new line carries requested against
+  copied bytes and copy faults (a merged fault zeroes the plan windows inside
+  its range). The logs bound the saving at 0-86% of the copy (0-0.61 ms); the
+  flight measures it. B1 (what the non-eye draws are: 4,070 a frame in one
+  log, 514 in the other) goes through the existing draw census and
+  `edvr_log.py --tally offscreen`, one press after the profile capture, with
+  flight-only `census_offscreen` and `census_lines` settings. The map-bounce
+  gates wait for the A3 pass. Ruled out: skipping the windows during an
+  escalation (escalations only on arrival). Next: the build 3 flight.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is
-  held as not scene depth (about 64M per leg), the tee never goes fast and
-  F113 reports `none` 100%. Key on: fast path 36-46%, F113 scene meshes 94%.
-- **Ruled out:** re-issues as a CPU cost: at most 0.004 ms per sampled frame
-  in any window, and none at all with AA off. Item 4 as a saving: 0 hits in
-  the whole flight, because the binding generation moves between every eye
-  draw. Item 2 as a saving in flight: the collector cleared nothing, done or
-  skipped, in any on-foot or cockpit window.
-- **Ruled out:** idling the whole marker tee without the UI layer, because
-  its slow path is the only publisher of the per-eye world rows
-  (`eyeRowsPublish`), which on-foot systems read without the layer.
-  Changing `eyeOfDraw` itself, because `rowSourceDraw` and five census
-  callers would shift and a wrong eye would publish wrong rows silently.
+  held as not scene depth, the tee never goes fast and F113 reports `none`
+  100%. Key on: fast path 36-46%, F113 scene meshes 94%.
+- **Ruled out:** re-issues as a CPU cost (at most 0.004 ms per sampled
+  frame). Item 4 as a saving (0 hits: the binding generation moves between
+  every eye draw). Item 2 as a saving (the collector cleared nothing).
+  Idling the whole marker tee without the UI layer (its slow path is the only
+  publisher of the per-eye world rows, `eyeRowsPublish`). Changing
+  `eyeOfDraw` itself (`rowSourceDraw` and five census callers would shift).
 - **Left out, tracked:** #151 (`drawPathFast` in
   `hookedDrawIndexedInstanced`), #152 (per-scene subscriber mask), #153
   (cross-profile per-bind counter), #154 (`/GL /LTCG`).
-- **Reviewed:** design review 2026-11-01; its corrections are folded in.
 
 ## Evidence in brief
 

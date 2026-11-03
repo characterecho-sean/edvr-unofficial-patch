@@ -27722,6 +27722,9 @@ struct Window {
     // (the read-back's entry 0 record equal or not), the stream shadow's Unmap copies (time, faults), writes it could not shadow.
     uint64_t cpuFind = 0, cpuHeldRec = 0, cpuOther = 0, cpuNoShadow = 0, cpuOutside = 0, cpuSkipped = 0, cpuAgree = 0, cpuDiffer = 0;
     uint64_t streamCopies = 0, streamCopyTicks = 0, streamFaults = 0, streamUpdates = 0, streamOtherMaps = 0, streamLearned = 0;
+    // Build 3: the merged Unmap copy: every Unmap that reached the copy, the bytes both eyes' plans asked for and the bytes the merged ranges copied, the ranges and the planned
+    // windows that landed in a range with another, the whole-stream copies' bytes. Here and not in StreamSecond, which each eye's line clears.
+    uint64_t streamUnmaps = 0, streamRequested = 0, streamCopied = 0, streamRanges = 0, streamJoined = 0, streamWholeBytes = 0;
     // #155: the tee's slow-path calls by the first term that held the fast frame back (nofoot::f100::teeHeldBy, kTeeHeldNone: published), and, while the
     // depth probe is wanted, the world draws whose depth-size scene test agreed or disagreed with the probe's (eyeOfDraw >= 0).
     uint64_t teeHeld[nofoot::f100::kTeeHeldCount] = {}, sceneSizeAgree = 0, sceneSizeDisagree = 0;
@@ -28011,19 +28014,20 @@ struct StreamShadow {
     uint32_t frame = ~0u;               // the frame of the newest copy
     uint32_t centre[2] = {~0u, ~0u};    // per eye: the newest marker composite entry seen
     nofoot::f87::ClusterHist hist[2];   // per eye: the entries drawn in the last 64 frames, as clusters
-    nofoot::f87::WinPlan plan[2];       // per eye: the windows copied at the newest Unmap (lo, n, where in the eye's buffer)
+    nofoot::f87::WinPlan plan[2];       // per eye: the windows planned at the newest Unmap (lo, n)
+    nofoot::f87::MergedPlan merged;     // build 3: both plans' windows as sorted disjoint ranges, each copied once (lo, n, where in the buffer)
     nofoot::f87::Escalation esc;        // the whole stream's copy after a draw outside the windows
     bool fullOk = false;                // the newest copy held the whole stream
     uint32_t entryFrame[2] = {~0u, ~0u}, firstEntry[2] = {}, lastEntry[2] = {}, ringFirst[2] = {}, ringLast[2] = {};   // the eye's first and last entry of the newest frame and of the one before
     bool ringHave[2] = {};
 };
 StreamShadow g_stream;
-alignas(16) uint32_t g_streamWin[2][nofoot::f87::kWinCapEntries * 2];   // per eye: the windows end to end, (x, y) per entry
+alignas(16) uint32_t g_streamWin[nofoot::f87::kMergeCapEntries * 2];    // the merged ranges end to end, (x, y) per entry
 std::vector<uint32_t> g_streamFull;                                     // the whole stream (x, y per entry), made on the first escalation
 // F87c: this second's figures per eye: draws named from a window or the whole copy, draws outside every window and how far from the nearest window the nearest of them was.
 struct StreamSecond {
     uint64_t named = 0, outside = 0, fullNamed = 0, copies = 0, escCopies = 0, windowsSum = 0, clustersSum = 0;
-    uint64_t copyBytes = 0, copyTicks = 0;   // the window's Unmap copy: bytes streamed out of the mapped stream and the time it took (the whole-stream copy serves both eyes and counts under eye 0)
+    uint64_t copyBytes = 0;   // the eye's requested bytes: its planned window entries times 8 (the copy itself is shared: the Window's streamCopied)
     uint32_t nearest = ~0u;
 };
 StreamSecond g_streamSec[2];
@@ -29575,48 +29579,58 @@ void streamUnmapCopy(uint32_t frame) {
         return;
     }
     const uint64_t t0 = f30Qpc();
+    ++g_win.streamUnmaps;
     const uint32_t total = g_stream.bytes / drawtag::kStreamStride;
-    bool any = false;
     g_stream.fullOk = false;
     const bool escalated = g_stream.esc.active(frame);
     if (escalated && total) {
         if (g_streamFull.size() != static_cast<size_t>(total) * 2u) g_streamFull.assign(static_cast<size_t>(total) * 2u, 0u);
-        const uint64_t tFull = f30Qpc();
         if (streamCopyGuarded(g_streamFull.data(), base, total * drawtag::kStreamStride)) {
             g_stream.fullOk = true;
-            g_streamSec[0].copyBytes += static_cast<uint64_t>(total) * drawtag::kStreamStride;
+            g_win.streamWholeBytes += static_cast<uint64_t>(total) * drawtag::kStreamStride;
         } else ++g_win.streamFaults;
-        g_streamSec[0].copyTicks += f30Qpc() - tFull;
     }
+    // Plan each eye as before, then copy both plans' windows once as merged ranges (nofoot::f87::mergePlans).
+    uint64_t requested = 0;
     for (int e = 0; e < 2; ++e) {
-        const uint64_t tEye = f30Qpc();
-        uint64_t eyeBytes = 0;
         nofoot::f87::WinPlan& plan = g_stream.plan[e];
         g_stream.hist[e].expire(frame);
         nofoot::f87::planWindows(g_stream.hist[e], g_stream.centre[e] != ~0u, g_stream.centre[e], total, &plan);
         plan.full = g_stream.fullOk;
-        uint32_t good = 0;
-        for (uint32_t w = 0; w < plan.windows; ++w) {
-            if (!plan.n[w]) continue;
-            if (!streamCopyGuarded(g_streamWin[e] + static_cast<size_t>(plan.off[w]) * 2u, base + static_cast<size_t>(plan.lo[w]) * drawtag::kStreamStride,
-                                   plan.n[w] * drawtag::kStreamStride)) {
-                ++g_win.streamFaults;
-                plan.n[w] = 0;
-                continue;
-            }
-            ++good;
-            eyeBytes += static_cast<uint64_t>(plan.n[w]) * drawtag::kStreamStride;
+        uint64_t eyeBytes = 0;
+        for (uint32_t w = 0; w < plan.windows; ++w) eyeBytes += static_cast<uint64_t>(plan.n[w]) * drawtag::kStreamStride;
+        requested += eyeBytes;
+        g_streamSec[e].copyBytes += eyeBytes;
+    }
+    nofoot::f87::MergedPlan& mp = g_stream.merged;
+    nofoot::f87::mergePlans(g_stream.plan[0], g_stream.plan[1], &mp);
+    uint32_t goodRanges = 0;
+    uint64_t copied = 0;
+    for (uint32_t r = 0; r < mp.ranges; ++r) {
+        if (!streamCopyGuarded(g_streamWin + static_cast<size_t>(mp.off[r]) * 2u, base + static_cast<size_t>(mp.lo[r]) * drawtag::kStreamStride,
+                               mp.n[r] * drawtag::kStreamStride)) {
+            ++g_win.streamFaults;
+            mp.fault(r, &g_stream.plan[0], &g_stream.plan[1]);   // the range and the windows inside it read as empty
+            continue;
         }
-        if (good || plan.full) any = true;
+        ++goodRanges;
+        copied += static_cast<uint64_t>(mp.n[r]) * drawtag::kStreamStride;
+    }
+    for (int e = 0; e < 2; ++e) {
+        const nofoot::f87::WinPlan& plan = g_stream.plan[e];
+        uint32_t good = 0;
+        for (uint32_t w = 0; w < plan.windows; ++w) good += plan.n[w] ? 1u : 0u;
         StreamSecond& ss = g_streamSec[e];
-        ss.copyBytes += eyeBytes;
-        ss.copyTicks += f30Qpc() - tEye;
         ++ss.copies;
         if (plan.full) ++ss.escCopies;
         ss.windowsSum += good;
         ss.clustersSum += plan.clusters;
     }
-    if (any) {
+    g_win.streamRequested += requested;
+    g_win.streamCopied += copied;
+    g_win.streamRanges += mp.ranges;
+    g_win.streamJoined += mp.joined;
+    if (goodRanges || g_stream.fullOk) {
         g_stream.frame = frame;
         ++g_win.streamCopies;
     }
@@ -29662,14 +29676,11 @@ void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry, uint32_t frame) {
 bool streamEntryX(const void* res, uint32_t entry, uint32_t frame, uint32_t* x, bool* outside, int eye = -1) {
     *outside = false;
     if (!res || res != g_stream.res || g_stream.frame != frame) return false;
-    for (int e = 0; e < 2; ++e) {
-        const nofoot::f87::WinPlan& p = g_stream.plan[e];
-        const int w = p.where(entry);
-        if (w >= 0) {
-            *x = g_streamWin[e][2 * (static_cast<size_t>(p.off[w]) + (entry - p.lo[w]))];
-            if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
-            return true;
-        }
+    const uint32_t slot = g_stream.merged.slot(entry);
+    if (slot != ~0u) {
+        *x = g_streamWin[2 * static_cast<size_t>(slot)];
+        if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
+        return true;
     }
     if (eye == 0 || eye == 1) {
         StreamSecond& ss = g_streamSec[eye];
@@ -34871,21 +34882,27 @@ void report(uint64_t nowMs) {
                             ull(w.cpuSkipped), ull(w.tally[0].skipped), ull(w.tally[1].skipped), ull(w.cpuNoShadow), ull(w.cpuOutside),
                             ull(w.cpuAgree), ull(w.cpuDiffer));
         // F87c, per eye: the windows at the newest Unmap (F85's, the history's), the Unmap copies of the second that held the whole stream, and what the second's draws
-        // found: named (from a window or the whole copy), outside every window, how far from the nearest window the nearest outside draw was, and the eye's first and last
-        // entry of the frame before (eye 1's ring moves 6-14k between layouts in the flicker). F125: the counts are sums over the window and the nearest its least,
-        // the windows and the ring as they stand at its close; the window's seconds end the line.
-        if (fixOn)
+        // found: named (from a window or the whole copy), outside every window, how far from the nearest window the nearest outside draw was, the bytes the eye's windows
+        // asked for and the eye's first and last entry of the frame before (eye 1's ring moves 6-14k between layouts in the flicker). F125: the counts are sums over the
+        // window and the nearest its least, the windows and the ring as they stand at its close; the window's seconds end the line.
+        if (fixOn) {
             for (int e = 0; e < 2; ++e) {
                 StreamSecond& ss = g_streamSec[e];
                 const nofoot::f87::WinPlan& pl = f44::g_stream.plan[e];
                 char ring[64];
-                if (e == 1 && f44::g_stream.ringHave[1]) std::snprintf(ring, sizeof(ring), "first %u last %u", f44::g_stream.ringFirst[1], f44::g_stream.ringLast[1]);
-                else std::snprintf(ring, sizeof(ring), "%s", e == 1 ? "none yet" : "-");
-                Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1 first/last ring %s; over %u s",
+                if (f44::g_stream.ringHave[e]) std::snprintf(ring, sizeof(ring), "first %u last %u", f44::g_stream.ringFirst[e], f44::g_stream.ringLast[e]);
+                else std::snprintf(ring, sizeof(ring), "%s", "none yet");
+                Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); Unmap copy %llu copies, requested %llu bytes; eye-%d first/last ring %s; over %u s",
                                 e, pl.windows, pl.f85, pl.history, static_cast<unsigned>(ss.escCopies), ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest,
-                                ull(ss.copies), ull(ss.copyBytes), double(f30QpcUs(ss.copyTicks)) / 1000.0, ring, windowSecs);
+                                ull(ss.copies), ull(ss.copyBytes), e, ring, windowSecs);
                 ss = StreamSecond{};
             }
+            // Build 3: the one copy both eyes share: requested (both eyes' planned bytes) against copied (the merged ranges), the windows that landed in a range with another,
+            // the whole-stream copies' bytes, the copy faults (a merged one counts once per range) and the time of the whole function, planning and merge included.
+            Log::get().note("marker fix (F87c) Unmap copy: %llu Unmaps, requested %llu bytes, copied %llu bytes in %llu ranges (%llu windows joined), whole stream %llu bytes, faults %llu, %.3f ms; over %u s",
+                            ull(w.streamUnmaps), ull(w.streamRequested), ull(w.streamCopied), ull(w.streamRanges), ull(w.streamJoined), ull(w.streamWholeBytes),
+                            ull(w.streamFaults), double(f30QpcUs(w.streamCopyTicks)) / 1000.0, windowSecs);
+        }
         // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks
         // of a source's rows against a scene mesh's that second, their largest difference, the source draws refused (no scene depth eye, no b1 shadow), the scene meshes'
         // rows a source replaced and the meshes marked (F130: sources are never latched off; a mesh with other rows is marked and refused).

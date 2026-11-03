@@ -7,6 +7,7 @@
     python tools/edvr_log.py --target steam --tail 80
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
+    python tools/edvr_log.py --target steam --tally offscreen
     python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target frontier --tally cover
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
@@ -72,6 +73,11 @@ the totals row. The census caps its log output at 16384 lines
 (draw_census.cpp), so a long census keeps per-draw detail only for the
 first frames; --tally says which frames survive only as summaries
 rather than printing an empty table.
+
+--tally offscreen answers what the draws that are not eye-sized are (#157 B1). It reads the census's non-eye lines: the `DCO` lines (census_offscreen on) and the `DC`
+lines marked t=i (indirect), t=f (deferred context) or t=fi, whatever their target. Per census frame it groups them by the render target (r=) and depth target (d=) with each
+@N resolved through the census's `DC id @N tex WxH` table, and lists each group's count, draw kinds (the type letter) and top vertex shaders (vh=). It compares the DC frame
+line's off= with the number of DCO lines: DCO truncation is not in `truncated=`, so a smaller count means the census was cut short. --frame restricts to one census frame.
 
 --tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
 caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
@@ -646,6 +652,136 @@ def print_vh_tally(text, frame):
               "clears=%s unseen=%s"
               % (f, s["draws"], s["off"], s["copies"], s["disp"],
                  s["clears"], s["unseen"]))
+    return 0
+
+
+# --tally offscreen (build 3, #180, B1): what the draws that are not eye-sized are. The census writes them as `DCO` lines (census_offscreen on), and the indirect draws
+# (`t=i`, `t=fi`) and the deferred-context draws (`t=f`) as `DC` lines whatever their target. Each line names its render target (r=) and depth target (d=) as texWxHfFMT or an
+# interned @N, whose size the census's `DC id @N tex WxH ...` table gives (written last, after the frames). One census per `DC begin`; the table belongs to its census.
+CENSUS_BEGIN_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?DC begin\b(?P<rest>.*)$")
+CENSUS_ID_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?DC id @(?P<id>\d+) (?P<what>.*)$")
+CENSUS_D_RE = re.compile(r"\sd=(\S+)")
+CENSUS_T_RE = re.compile(r"\st=(fi|i|f)(?=\s|$)")
+
+
+def parse_offscreen(text):
+    """The census's non-eye draws, per census: a list of dicts begin (the DC begin line's text, or None), ids ({id: what}), draws (dicts cls, frame, type, r, d, vh) and frames
+    ({frame: the DC frame line's groups}). cls is DCO, or `DC t=i` / `DC t=f` / `DC t=fi` for the DC lines the provenance tail marks; the other DC lines are eye draws and are not kept."""
+    censuses = []
+
+    def cur():
+        if not censuses:
+            censuses.append({"begin": None, "ids": {}, "draws": [], "frames": {}})
+        return censuses[-1]
+
+    for raw in text.splitlines():
+        m = CENSUS_BEGIN_RE.match(raw)
+        if m:
+            censuses.append({"begin": m.group("rest").strip(), "ids": {}, "draws": [], "frames": {}})
+            continue
+        m = CENSUS_ID_RE.match(raw)
+        if m:
+            cur()["ids"][m.group("id")] = m.group("what").strip()
+            continue
+        m = CENSUS_FRAME_RE.match(raw)
+        if m:
+            cur()["frames"][int(m.group("frame"))] = m.groupdict()
+            continue
+        m = CENSUS_DRAW_RE.match(raw)
+        if not m:
+            continue
+        t = CENSUS_T_RE.search(raw)
+        if m.group("kind") == "DCO":
+            cls = "DCO"
+        elif t:
+            cls = "DC t=" + t.group(1)
+        else:
+            continue   # an eye-sized draw: --tally vh's
+        d = CENSUS_D_RE.search(raw, m.end("r"))
+        vh = VH_RE.search(raw)
+        cur()["draws"].append({"cls": cls, "frame": int(m.group("frame")), "type": m.group("type"), "r": m.group("r"), "d": d.group(1) if d else "-",
+                               "vh": vh.group(1).upper() if vh else None})
+    return censuses
+
+
+def offscreen_target(token, ids):
+    """A census target token for a table row: @N resolved through the census's id table (`@12 = 1920x1080 fmt=87`), an inline texWxHfFMT as `tex 1920x1080 fmt 87`, else as written."""
+    if token.startswith("@"):
+        what = ids.get(token[1:])
+        if what is None:
+            return token + " (not in the id table)"
+        m = re.match(r"tex (\d+x\d+)(?: fmt=(\d+))?", what)
+        if m:
+            return "%s = %s%s" % (token, m.group(1), " fmt=" + m.group(2) if m.group(2) else "")
+        if what.startswith("?"):
+            return token + " (unresolved)"
+        return "%s = %s" % (token, " ".join(what.split()[:2]))
+    m = re.match(r"tex(\d+x\d+)f(\d+)$", token)
+    if m:
+        return "%s fmt=%s (inline)" % (m.group(1), m.group(2))
+    return token
+
+
+def offscreen_groups(draws, ids):
+    """Group one frame's draws by (class, resolved r=, resolved d=): rows with count, kinds (type char -> count) and vh (hash -> count), the largest first."""
+    groups = {}
+    for d in draws:
+        key = (d["cls"], offscreen_target(d["r"], ids), offscreen_target(d["d"], ids))
+        g = groups.setdefault(key, {"count": 0, "kinds": {}, "vh": {}})
+        g["count"] += 1
+        g["kinds"][d["type"]] = g["kinds"].get(d["type"], 0) + 1
+        g["vh"][d["vh"] or "(no vh=)"] = g["vh"].get(d["vh"] or "(no vh=)", 0) + 1
+    rows = [dict(cls=k[0], r=k[1], d=k[2], **g) for k, g in groups.items()]
+    rows.sort(key=lambda r: (-r["count"], r["cls"], r["r"], r["d"]))
+    return rows
+
+
+def print_offscreen_tally(text, frame=None):
+    """The --tally offscreen report. Returns the process exit code."""
+    censuses = parse_offscreen(text)
+    if not censuses or not any(c["draws"] or c["frames"] or c["begin"] is not None for c in censuses):
+        print("[edvr] no draw-census lines (DC begin/DCO/DC frame) in this log")
+        return 0
+    for n, c in enumerate(censuses, 1):
+        print("[edvr] tally offscreen, census %d: %s" % (n, "DC begin " + c["begin"] if c["begin"] is not None else "no DC begin line (a log cut before it)"))
+        if c["begin"] is not None and "offscreen=no" in c["begin"]:
+            print("[edvr]   offscreen=no: census_offscreen did not load, so no DCO line was written; only the t=i / t=f DC lines below")
+        if not c["ids"]:
+            print("[edvr]   no `DC id` table: the census was cut off before it was written (the log cap), so an @N target stays unresolved")
+        frames = sorted({d["frame"] for d in c["draws"]} | set(c["frames"]))
+        if frame is not None:
+            frames = [f for f in frames if f == frame]
+        if not frames:
+            print("[edvr]   no frame in scope")
+            continue
+        for f in frames:
+            draws = [d for d in c["draws"] if d["frame"] == f]
+            counts = {}
+            for d in draws:
+                counts[d["cls"]] = counts.get(d["cls"], 0) + 1
+            dco = counts.get("DCO", 0)
+            others = ", ".join("%s %d" % (k, counts[k]) for k in sorted(counts) if k != "DCO")
+            rows = offscreen_groups(draws, c["ids"])
+            print("[edvr] census %d frame %d: %d non-eye draw line(s) in %d group(s): DCO %d%s" % (n, f, len(draws), len(rows), dco, ", " + others if others else ""))
+            s = c["frames"].get(f)
+            if s is None:
+                print("[edvr]   no `DC frame %d` line: off= unknown, so DCO truncation cannot be checked" % f)
+            else:
+                off = int(s["off"])
+                if off == dco:
+                    print("[edvr]   off= %d agrees with the %d DCO line(s): none cut" % (off, dco))
+                elif dco < off:
+                    print("[edvr]   DCO CUT SHORT: the DC frame line counts off=%d, the log holds %d DCO line(s) (%d missing: the census line cap, which `truncated=` does not count, "
+                          "or the log cap)" % (off, dco, off - dco))
+                else:
+                    print("[edvr]   MORE DCO lines (%d) than off=%d: the census frame line and its draws disagree" % (dco, off))
+            if not rows:
+                continue
+            print("%5s  %-8s  %-28s  %-28s  %-22s  %s" % ("count", "line", "r=", "d=", "kinds", "top vh"))
+            for r in rows:
+                kinds = " ".join("%s:%d" % kv for kv in sorted(r["kinds"].items(), key=lambda kv: (-kv[1], kv[0])))
+                top = " ".join("%s:%d" % kv for kv in sorted(r["vh"].items(), key=lambda kv: (-kv[1], kv[0]))[:3])
+                print("%5d  %-8s  %-28s  %-28s  %-22s  %s" % (r["count"], r["cls"], r["r"], r["d"], kinds, top))
     return 0
 
 
@@ -16364,6 +16500,9 @@ HEALTH_RULES = (
                     r"(?:.*; over " + H_WL + r"$)?"),
         ("idle", r"marker fix \(F62c\): eye \d: no decision " + H_WL_THIS),
         ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)(?:.*; over " + H_WL + r"$)?"),
+        # build 3: the one Unmap copy both eyes share (requested against copied bytes, copy faults); the judge reads the eye lines, so the line is matched and not judged
+        ("_", r"marker fix \(F87c\) Unmap copy: \d+ Unmaps, requested \d+ bytes, copied \d+ bytes in \d+ ranges \(\d+ windows joined\), whole stream \d+ bytes, faults \d+, "
+              r"[\d.]+ ms; over " + H_WL + r"$"),
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
         ("sec", r"prompt anchor \(F87p\) " + H_WL + r": SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
@@ -17242,15 +17381,18 @@ def _perf_window_of(line):
 #   draw mask: 1800-frame window ending N; D draws through the full path; calls skipped by the vertex shader's may-want byte: ui_family A, ...        draw_mask_line.h
 #   gpu timing queries: 1800-frame window ending N; X EDVR timing-query Ends a frame over F frames (T in all); by owner a frame: other a, ...        gpu_query_count.h
 #   draw gate holders: K of 28 terms hold the gate open: a, b.        draw_gate_holders.h, when the set changes
-#   marker fix (F87c) eye E: ...; Unmap copy C copies, B bytes, M ms; ...        native_on_foot.cpp, per eye per window
+#   marker fix (F87c) eye E: ...; Unmap copy C copies, B bytes, M ms; ...        native_on_foot.cpp, per eye per window (build 2; build 3 writes "requested B bytes" and no ms)
+#   marker fix (F87c) Unmap copy: U Unmaps, requested R bytes, copied C bytes in N ranges (J windows joined), whole stream W bytes, faults F, M ms; over S s        build 3
 PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
 PERF_QUERY_RE = re.compile(r"gpu timing queries: \d+-frame window ending (?P<end>\d+); (?P<per>[\d.]+) EDVR timing-query Ends a frame over \d+ frames \((?P<all>\d+) in all\); by owner a frame: (?P<rest>.*)\.$")
 PERF_GATE_RE = re.compile(r"draw gate holders: (?P<n>\d+) of (?P<of>\d+) terms hold the gate open: (?P<names>.*)\.$")
 PERF_COPY_RE = re.compile(r"marker fix \(F87c\) eye (?P<eye>\d): .*?Unmap copy (?P<copies>\d+) copies, (?P<bytes>\d+) bytes, (?P<ms>[\d.]+) ms")
+PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Unmaps, requested (?P<req>\d+) bytes, copied (?P<copied>\d+) bytes in (?P<ranges>\d+) ranges "
+                            r"\((?P<joined>\d+) windows joined\), whole stream (?P<whole>\d+) bytes, faults (?P<faults>\d+), (?P<ms>[\d.]+) ms; over (?P<secs>\d+) s")
 
 
 def perf_extra_of(msg):
-    """The build-2 line one log message holds, or None: (kind, dict) for kind mask, query, gate or copy."""
+    """The build-2 or build-3 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures) or merged (build 3's one line)."""
     m = PERF_MASK_RE.search(msg)
     if m:
         return "mask", {"end": int(m.group("end")), "draws": int(m.group("draws")), "rest": m.group("rest")}
@@ -17263,6 +17405,11 @@ def perf_extra_of(msg):
     m = PERF_COPY_RE.search(msg)
     if m:
         return "copy", {"eye": int(m.group("eye")), "copies": int(m.group("copies")), "bytes": int(m.group("bytes")), "ms": float(m.group("ms"))}
+    m = PERF_MERGED_RE.search(msg)
+    if m:
+        d = {k: int(m.group(k)) for k in ("unmaps", "req", "copied", "ranges", "joined", "whole", "faults", "secs")}
+        d["ms"] = float(m.group("ms"))
+        return "merged", d
     return None
 
 
@@ -17298,7 +17445,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
     Returns the process exit code: 1 when there is no window to report."""
     wins, rt = [], {}
     extra = {"mask": {}, "query": {}}
-    gates, copies = [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures
+    gates, copies, merged = [], [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures (build 2's per-eye lines, build 3's merged line)
 
     def on_gfx(msg, t):
         w = _perf_window_of(msg)
@@ -17312,6 +17459,8 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
                 extra[e[0]][e[1]["end"]] = e[1]
             elif e[0] == "gate":
                 gates.append((t, e[1]))
+            elif e[0] == "merged":
+                merged.append((t, e[1]))
             else:
                 copies.append((t, e[1]))
 
@@ -17381,7 +17530,15 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
         held = [g for t, g in gates if t <= w["close"]]
         parts.append("gate held by %s" % ("%d of %d: %s" % (held[-1]["n"], held[-1]["of"], held[-1]["names"]) if held else "n/a (no `draw gate holders:` line before this window)"))
         mine = [c for t, c in copies if w["from"] < t <= w["close"]]
-        if mine:
+        mm = [c for t, c in merged if w["from"] < t <= w["close"]]
+        if mm:   # build 3: one copy for both eyes
+            u, rq, cp = sum(c["unmaps"] for c in mm), sum(c["req"] for c in mm), sum(c["copied"] for c in mm)
+            parts.append("marker copy (F87c merged, %d line(s) in window): %d Unmaps, requested %d bytes, copied %d bytes (%s of requested), %d ranges (%d windows joined), "
+                         "whole stream %d bytes, faults %d, %.3f ms (%s a Unmap)" % (
+                             len(mm), u, rq, cp, "%.1f%%" % (100.0 * cp / rq) if rq else "n/a", sum(c["ranges"] for c in mm), sum(c["joined"] for c in mm),
+                             sum(c["whole"] for c in mm), sum(c["faults"] for c in mm), sum(c["ms"] for c in mm),
+                             "%.3f ms" % (sum(c["ms"] for c in mm) / u) if u else "n/a"))
+        elif mine:
             parts.append("marker copy (F87c lines in window): " + ", ".join("eye %d %d copies %d bytes %.3f ms" % (
                 eye, sum(c["copies"] for c in mine if c["eye"] == eye), sum(c["bytes"] for c in mine if c["eye"] == eye), sum(c["ms"] for c in mine if c["eye"] == eye))
                 for eye in sorted({c["eye"] for c in mine})))
@@ -17425,11 +17582,14 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "cover", "reissue"], default=None,
+    ap.add_argument("--tally", choices=["vh", "offscreen", "periodic", "pose", "cover", "reissue"], default=None,
                     help="aggregate instead of dumping: pose tables the `pose gap:` "
                          "lines of the runtime log by caller; "
                          "cover tables the `terrain cull cover:` lines of the graphics log "
                          "(the hook, its first call, its ten-minute heartbeat); "
+                         "offscreen groups the census's non-eye draws (DCO, and the t=i / t=f DC lines) by "
+                         "resolved render target and depth target, with draw kinds and top vertex shaders, "
+                         "and checks the DC frame line's off= against the DCO line count; "
                          "vh counts eye-texture "
                          "DC lines per vh= hash, split by r= render-target "
                          "token, with the DC frame summaries as totals; "
@@ -17731,6 +17891,8 @@ def main(argv=None):
         return print_cover_tally(parse_cover(text))
     if args.tally == "reissue":
         return print_reissue_tally(parse_reissue(text), text)
+    if args.tally == "offscreen":
+        return print_offscreen_tally(text, args.frame)
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -18773,7 +18935,11 @@ def self_test_health():
             return R("native on foot marker fix (F62c): eye %d: no decision", eye, span)
 
         def mark_win(named=113, outside=8, eye=1, wl=1):
-            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, 600, 4800000, 120.5, "first 1 last 2", wl)
+            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, 600, 4800000, eye, "first 1 last 2", wl)
+
+        def mark_copy(wl=1, faults=0):
+            """Build 3: the one Unmap copy line both eyes share."""
+            return R("marker fix (F87c) Unmap copy:", 600, 9600000, 7200000, 1200, 900, 0, faults, 150.25, wl)
 
         # F125: lines as a build before F125 wrote them (1 s, no window field), from the 10-25 flight
         MARK_OLD = ("native on foot marker fix (F62c/F64): eye 0: patch applied 95.7% (45 of 47 decisions bound at the issue, 0 through the newest rows); decided: "
@@ -18781,6 +18947,8 @@ def self_test_health():
                     "positive 0, |d| over 0.40 NDC 0, no P 0, other (ranged b0, no CPU b0 rows, no CPU o_hud) 0; bind refused 0")
         MARK_IDLE_OLD = "native on foot marker fix (F62c): eye 1: no decision this second (no marker composite draw of the eye reached the fix)"
         MARK_WIN_OLD = "marker fix (F87c) eye 0: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); eye-1 first/last ring -"
+        MARK_WIN_B2 = ("marker fix (F87c) eye 0: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); Unmap copy 600 copies, 4800000 bytes, "
+                       "120.500 ms; eye-1 first/last ring -; over 10 s")
 
         def anchor(s=11, u=0, i=1, key=-1, wl=1, focus_secs=None):
             return RWindowTail("prompt anchor (F87p) %u s: SetMarker", wl, s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10,
@@ -22201,6 +22369,13 @@ def self_test_health():
               lacks=["IDLE", "UNPARSED"])
         check("marker fix: only F87c's windows, nothing named or outside", [F125_MK_OFF, mark_win(0, 0, 0, 10), mark_win(0, 0, 1, 10)], 0, [("IDLE", MK)],
               has=["no marker composite draw reached the fix"])
+        # build 3: the one Unmap copy line is matched (not UNPARSED) beside the eye lines, and a build-2 per-eye line (copies, bytes, ms) still parses
+        check("marker fix: build 3's Unmap copy line is matched", [F125_MK_OFF, mark(230, 250, 0, 10), mark(225, 250, 1, 10), mark_win(1130, 80, 0, 10), mark_win(1100, 90, 1, 10),
+              mark_copy(10)], 0, [("OK", MK)], has=["patch applied eye 0 92% (230 of 250), eye 1 90% (225 of 250); named 2230, outside 170 (F87c)"], lacks=["UNPARSED"])
+        check("marker fix: build 3's Unmap copy line with faults is matched", [F125_MK_OFF, mark(230, 250, 0, 10), mark_win(1130, 80, 0, 10), mark_copy(10, faults=3)], 0,
+              [("OK", MK)], lacks=["UNPARSED"])
+        check("marker fix: a build-2 per-eye line (Unmap copy copies, bytes, ms) still parses", [F125_MK_OFF, mark(230, 250, 0, 10), MARK_WIN_B2], 0, [("OK", MK)],
+              has=["named 40, outside 2 (F87c)"], lacks=["UNPARSED"])
         check("marker fix: only F87c's windows, mostly outside", [mark_win(10, 80, 0, 10), mark_win(10, 90, 1, 10)], 0, [("PARTIAL", MK)],
               has=["named 20 of 190"])
 
@@ -23724,6 +23899,75 @@ def self_test():
         if rc != 0 or "appears in no census line or summary" not in out:
             print("--tally vh --frame 9 rc=%d:\n%s" % (rc, out))
             ok = False
+
+        # --tally offscreen (build 3): DCO lines and the t=i / t=f DC lines grouped by resolved r= and d=; off= against the DCO line count.
+        off_lines = [
+            "[00:00:01.000] DC begin census=1 frames=2 frame=100 offscreen=yes capture_id=x\n",
+            "[00:00:01.001] DC 0 #0 X n=10 i=1 r=@10 d=@50 c=- s=-,-,-,- vs=@1 vh=AAAAAAAAAAAAAAAA ia=0,0,0 q=0\n",   # an eye draw: not tallied
+            "[00:00:01.002] DCO 0 #0 I n=5 i=1 r=@20 d=@51 c=- s=-,-,-,- vs=@4 vh=CCCCCCCCCCCCCCCC ia=0,0,0 q=1\n",
+            "[00:00:01.003] DCO 0 #1 I n=6 i=1 r=@20 d=@51 c=- s=-,-,-,- vs=@4 vh=CCCCCCCCCCCCCCCC ia=0,0,0 q=2\n",
+            "[00:00:01.004] DCO 0 #2 D n=7 i=1 r=@20 d=@51 c=- s=-,-,-,- vs=@5 vh=eeeeeeeeeeeeeeee ia=0,0,0 q=3\n",
+            "[00:00:01.005] DCO 0 #3 I n=8 i=1 r=tex256x256f28 d=- c=- s=-,-,-,- vs=@5 ia=0,0,0 q=4\n",
+            "[00:00:01.006] DC 0 #1 I n=0 i=0 r=@10 d=@50 c=- s=-,-,-,- vs=@1 vh=FFFFFFFFFFFFFFFF args=@7+0 t=i q=5\n",
+            "[00:00:01.007] DC 0 #2 I n=3 i=1 r=@21 d=- c=- s=-,-,-,- vs=@1 vh=BBBBBBBBBBBBBBBB t=f q=6\n",
+            "[00:00:01.008] DC frame 0 draws=7 off=5 copies=0 disp=0 clears=0 unseen=0\n",
+            "[00:00:01.009] DCO 1 #0 I n=5 i=1 r=@20 d=@51 c=- s=-,-,-,- vs=@4 vh=CCCCCCCCCCCCCCCC ia=0,0,0 q=7\n",
+            "[00:00:01.010] DC frame 1 draws=1 off=3 copies=0 disp=0 clears=0 unseen=0\n",
+            "[00:00:01.011] DC id @10 tex 1920x1080 fmt=87 res=0x1 vf=87\n",
+            "[00:00:01.012] DC id @20 tex 512x512 fmt=28 res=0x2\n",
+            "[00:00:01.013] DC id @21 ?\n",
+            "[00:00:01.014] DC id @50 tex 1920x1080 fmt=39 res=0x3\n",
+            "[00:00:01.015] DC id @51 tex 512x512 fmt=39 res=0x4\n",
+        ]
+        off_dir = os.path.join(tmp, "offscreen_logs")
+        os.makedirs(off_dir)
+        with open(os.path.join(off_dir, "edvr_gfx_20260910_080000.log"), "wb") as f:
+            f.write("".join(off_lines).encode("utf-8"))
+        cs = parse_offscreen("".join(off_lines))
+        if len(cs) != 1 or len(cs[0]["draws"]) != 7 or cs[0]["ids"].get("20") != "tex 512x512 fmt=28 res=0x2" or sorted(cs[0]["frames"]) != [0, 1] \
+                or [d["cls"] for d in cs[0]["draws"] if d["frame"] == 0] != ["DCO", "DCO", "DCO", "DCO", "DC t=i", "DC t=f"]:
+            print("parse_offscreen -> %r" % (cs,))
+            ok = False
+        rc, out = run_census_tally(["--dir", off_dir, "--tally", "offscreen"])
+        for want in ("census 1 frame 0: 6 non-eye draw line(s) in 4 group(s): DCO 4, DC t=f 1, DC t=i 1",
+                     "DCO CUT SHORT: the DC frame line counts off=5, the log holds 4 DCO line(s) (1 missing",
+                     "@20 = 512x512 fmt=28", "@51 = 512x512 fmt=39", "256x256 fmt=28 (inline)", "@10 = 1920x1080 fmt=87", "@21 (unresolved)",
+                     "I:2 D:1",
+                     "CCCCCCCCCCCCCCCC:2 EEEEEEEEEEEEEEEE:1",
+                     "census 1 frame 1: 1 non-eye draw line(s) in 1 group(s): DCO 1", "DCO CUT SHORT: the DC frame line counts off=3, the log holds 1 DCO line(s) (2 missing"):
+            if want not in out:
+                print("--tally offscreen lacks %r:\n%s" % (want, out))
+                ok = False
+        if rc != 0:
+            print("--tally offscreen rc=%d" % rc)
+            ok = False
+        rc, out = run_census_tally(["--dir", off_dir, "--tally", "offscreen", "--frame", "1"])
+        if rc != 0 or "frame 0:" in out or "frame 1:" not in out:
+            print("--tally offscreen --frame 1 did not restrict:\n%s" % out)
+            ok = False
+        agree = "".join(off_lines).replace("off=3 copies", "off=1 copies")
+        rc, out = run_census_tally(["--file", os.path.join(off_dir, "edvr_gfx_20260910_080000.log"), "--tally", "offscreen"])
+        if "DC t=i" not in out:
+            print("--tally offscreen --file did not read the log:\n%s" % out)
+            ok = False
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            print_offscreen_tally(agree)
+        if "off= 1 agrees with the 1 DCO line(s): none cut" not in buf2.getvalue():
+            print("--tally offscreen did not report off= agreeing with the DCO count:\n%s" % buf2.getvalue())
+            ok = False
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            print_offscreen_tally("[00:00:01.000] DC begin census=1 frames=1 frame=1 offscreen=no capture_id=x\n[00:00:01.001] DC frame 0 draws=1 off=0 copies=0 disp=0 clears=0 unseen=0\n")
+        if "offscreen=no: census_offscreen did not load" not in buf2.getvalue() or "off= 0 agrees with the 0 DCO line(s)" not in buf2.getvalue():
+            print("--tally offscreen did not say offscreen=no:\n%s" % buf2.getvalue())
+            ok = False
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            print_offscreen_tally("[00:00:01.000] version 1\n")
+        if "no draw-census lines" not in buf2.getvalue():
+            print("--tally offscreen on a log with no census:\n%s" % buf2.getvalue())
+            ok = False
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -24103,12 +24347,38 @@ def self_test_perf_windows():
             fail("--perf-windows with the build-2 lines lacks %r:\n%s" % (want, mo))
     if perf_extra_of("draw mask: nothing like it") is not None:
         fail("a line of another instrument parsed as a build-2 line")
+    # Build 3: the merged copy line and the per-eye text it brings. A build-3 log prints the merged copy; an L2-style (build 2) log keeps the per-eye figures.
+    mg = ("marker fix (F87c) Unmap copy: 600 Unmaps, requested 9600000 bytes, copied 7200000 bytes in 1200 ranges (900 windows joined), whole stream 0 bytes, "
+          "faults 2, 150.250 ms; over 10 s")
+    pe3 = ("marker fix (F87c) eye 1: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); Unmap copy 600 copies, requested 4800000 bytes; "
+           "eye-1 first/last ring first 1 last 2; over 10 s")
+    kind, d = perf_extra_of(mg) or (None, {})
+    if kind != "merged" or d.get("unmaps") != 600 or d.get("req") != 9600000 or d.get("copied") != 7200000 or d.get("ranges") != 1200 or d.get("joined") != 900 \
+            or d.get("whole") != 0 or d.get("faults") != 2 or d.get("secs") != 10 or abs(d.get("ms", 0) - 150.25) > 1e-9:
+        fail("the build-3 merged copy line did not parse: %r" % ((kind, d),))
+    if perf_extra_of(pe3) is not None:
+        fail("build 3's per-eye text (requested bytes, no ms) parsed as build 2's copy figures")
+    if perf_extra_of(cp0) is None or perf_extra_of(cp0)[0] != "copy":
+        fail("build 2's per-eye copy line stopped parsing")
+    m3 = ("[10:00:00.000] version v0.0.0 (build 00000000)\n[10:00:01.500] " + pe3 + "\n[10:00:01.600] " + mg + "\n" + gwin("10:00:02.000", 1800, "0.500", 4))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = print_perf_windows(m3)
+    m3o = buf.getvalue()
+    for want in ("marker copy (F87c merged, 1 line(s) in window): 600 Unmaps, requested 9600000 bytes, copied 7200000 bytes (75.0% of requested), 1200 ranges (900 windows joined), "
+                 "whole stream 0 bytes, faults 2, 150.250 ms (0.250 ms a Unmap)",):
+        if want not in m3o:
+            fail("--perf-windows on a build-3 log lacks %r:\n%s" % (want, m3o))
+    if "eye 1 " in m3o and "copies" in m3o:
+        fail("--perf-windows on a build-3 log printed per-eye copy figures too:\n%s" % m3o)
     # The formatters' own text: the fragments the parser reads are held to the sources, so a formatter that drifts fails here.
     srcdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11")
     for name, frags in (("draw_mask_line.h", ("draw mask: 1800-frame window ending %u; %u draws through the full path; calls skipped by the vertex shader's may-want byte: ",)),
                         ("gpu_query_count.h", ("gpu timing queries: 1800-frame window ending %u; %.3f EDVR timing-query Ends a frame over %u frames (%llu in all); by owner a frame: ",)),
                         ("draw_gate_holders.h", ("draw gate holders: %u of %u terms hold the gate open: ",)),
-                        ("native_on_foot.cpp", ("Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1 first/last ring",))):
+                        ("native_on_foot.cpp", ("Unmap copy %llu copies, requested %llu bytes; eye-%d first/last ring %s; over %u s",
+                                                "marker fix (F87c) Unmap copy: %llu Unmaps, requested %llu bytes, copied %llu bytes in %llu ranges (%llu windows joined), "
+                                                "whole stream %llu bytes, faults %llu, %.3f ms; over %u s"))):
         path = os.path.join(srcdir, name)
         if not os.path.isfile(path):
             fail("the formatter %s is missing" % name)
