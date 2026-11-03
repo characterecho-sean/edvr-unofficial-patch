@@ -58,8 +58,10 @@
 - **Build 3 designed (2026-11-03, "Build 3: one marker copy for both
   eyes"):** `mergePlans` and one copy per Unmap; the F87c line's requested
   and copied figures and eye 0's ring; a `non-eye draws:` count by RTV0/DSV
-  key (a temporary instrument, removed when B1 closes). No config key.
-  Awaiting the grilling and review.
+  key in every draw hook (a temporary instrument, removed when B1 closes).
+  No config key. Decided: the map-bounce gates wait for the A3 pass. No
+  earlier review in this arc ran on Fable (see "Reviews in this arc").
+  Awaiting the choice of reviewer.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -1335,17 +1337,25 @@ flight at Shamash 1 a's concourse).
    - `edvr_log.py`: `PERF_COPY_RE` and `--perf-windows` read the new line;
      the source pin at `edvr_log.py:24111` and the self-tests follow the new
      strings.
-3. **The non-eye draw count (B1).** At the weapon-motion site
-   (`vscreen.cpp:5520`), for each owner-context draw whose RTV0 is not
-   eye-sized:
-   - Key the draw by RTV0 (width, height, format, or `none`) and DSV0
-     (width, height, format, or `none`). Read the descriptions once per
-     binding generation (`bindingGeneration(BindSlot::Rtv0)`, `Dsv0`), as
-     `rtv0Eye` is, so a draw pays a compare and an increment.
-   - Count draws per key, up to 16 keys (the rest under `other`), and keep
-     each key's four most frequent vertex shaders with their counts.
-   - Log per 1800-frame window, next to `draw mask:`: `non-eye draws: N
-     draws; RTV wxh fmt / DSV wxh fmt: n (vs hash n, ...); ...`.
+3. **The non-eye draw count (B1), in every draw hook** (decided
+   2026-11-03): `hookedDraw`, `hookedDrawIndexed`, `hookedDrawInstanced`,
+   `hookedDrawIndexedInstanced`, the two indirect hooks and `hookedDrawAuto`
+   (`vscreen.cpp:4809-5430`). Each calls one shared `nonEyeNote(self, kind)`
+   at its top, for owner-context draws, before any fast path or early exit,
+   so no path hides a draw.
+   - The note keeps its own cache: RTV0's and DSV0's descriptions (width,
+     height, format, or `none`) and whether RTV0 is eye-sized, refreshed when
+     `bindingGeneration(BindSlot::Rtv0)` or `Dsv0` moves. It does not read
+     `g_state->rtv0Eye`, which only the full path refreshes. A draw pays two
+     compares and an increment.
+   - Eye-sized draws are counted as a total only. Non-eye draws are counted
+     per key (RTV0, DSV0), up to 16 keys (the rest under `other`), with each
+     key's split by draw kind and its four most frequent vertex shaders.
+   - Log per 1800-frame window, next to `draw mask:`: `non-eye draws: N of T
+     draws; RTV wxh fmt / DSV wxh fmt: n (DII n, DI n, D n, ...; vs hash n,
+     ...); ...`.
+   - The cross-check: the key counts of `DrawIndexedInstanced` draws on the
+     full path must cover `draw mask:`'s `weapon_motion` skips.
    - A temporary instrument: listed in Status, removed when B1 closes.
 
 Left out, in order for after build 3 (Argon's A3 findings):
@@ -1382,8 +1392,9 @@ In `tools\native_frame_test\f85_checks.h`, beside the F87c checks:
 ### What the log shows if the new code never ran
 
 - The merge: `copied` equals `requested`, or the new line is missing.
-- The non-eye count: no `non-eye draws:` line, or `N` 0 while `draw mask:`
-  shows `weapon_motion` skips above 0 (each such skip is a non-eye draw).
+- The non-eye count: no `non-eye draws:` line, `T` 0, or `N` 0 while
+  `draw mask:` shows `weapon_motion` skips above 0 (each such skip is a
+  non-eye draw).
 
 ### Flight
 
@@ -1404,3 +1415,12 @@ the concourse), standing still, DLAA, a 100 s capture. First command:
 - **B1 answered:** the `non-eye draws:` keys name the targets of the
   non-eye draws. The next step on B1 (a ledger entry, or dropping it) is
   decided from them.
+
+### Reviews in this arc (checked 2026-11-03)
+
+The "Fable" reviews named in this arc did not run on Fable. Every subagent
+transcript of this project's sessions records its model, and none records
+`claude-fable`; the reviews dispatched as Fable ran on `claude-opus-5-5`.
+Fable needs usage credits this account does not have. So "Review of the
+mask design (2026-11-02)" is an Opus review, independent only in that it
+ran with a fresh context.
