@@ -8,12 +8,13 @@
 // texture wraps with no seam). The result is a single channel, stored normalised: the brightest texel is 255 and the mean is kTargetMean of it, so the shader's one
 // scale (kStreakMax, 0.09) gives the legacy max, and the mean comes out at the legacy 0.024. tools\cockpit_glass_test holds all of this.
 //
-// How it is made, from EDVR's own value noise:
-//   flow    a mostly uniform direction (along x) with a slow periodic bend: the strokes follow y = const + warp(x), warp a low-frequency periodic noise of x alone.
-//   blotch  very low frequency, isotropic: where the glass was wiped more.
-//   strokes broad soft bands along the flow: value noise stretched along it, two scales.
-//   fibres  white noise smeared along the flow (line integral convolution), a low-amplitude layer on top, with a little isotropic grain.
-// The four are standardised and added with weights that set the band energies, and the sum goes through an exponential, so the values are positive with a soft long
+// How it is made, from EDVR's own noise (section 13 of the doc): every band is itself made of strokes, long along one diagonal flow (about 49 degrees, image
+// coordinates, y down) and narrow across it, with a slow periodic bend.
+//   strokes  three layers of periodic value noise in the diagonal coordinates u = x - y (across) and v = x + y (along), a lattice coarse across and coarser still along
+//            it: wide soft bands, narrower bands, and fine strokes. u and v both have period `size`, so every layer tiles on a diagonal flow with no seam.
+//   fibres   white noise smeared along the flow (line integral convolution), thin and faint.
+//   grain    a little isotropic noise, only in the finest band.
+// The layers are standardised and added with variance shares that set the band energies, and the sum goes through an exponential, so the values are positive with a soft
 // upper tail and nothing reaches black; the exponent is found by bisection so the stored mean is the target with the maximum at 1.
 #include <algorithm>
 #include <cmath>
@@ -25,7 +26,15 @@ namespace glass_streaks {
 
 constexpr int kSize = 512;          // texels a side; the texture wraps
 constexpr int kMips = 10;           // 512 down to 1
-constexpr int kHalfLength = 10;     // texels either side of a texel the fibres are smeared over
+// The layers. Three stroke layers are periodic value noise in the diagonal coordinates u = x - y (across the strokes) and v = x + y (along them), both of period `size`, so a
+// layer is periodic in x and in y and tiles; its lattice of kCu x kCv cells is long along v where kCv is small. The across coordinate is bent by a slow periodic noise of v.
+// The finest stroke layer is white noise smeared along the flow (line integral convolution), and there is a little isotropic grain. Each layer has a share of the variance.
+constexpr float kFlowAngle = 0.85f;     // the fibres' direction, about 49 degrees in image coordinates (y down): upper-left to lower-right
+constexpr int kCu0 = 3, kCv0 = 1;       // the coarsest strokes
+constexpr int kCu1 = 12, kCv1 = 3;
+constexpr int kCu2 = 40, kCv2 = 16;
+constexpr int kHalf3 = 14;              // the fibres' half length in texels (at kSize)
+constexpr float kShare0 = 0.38f, kShare1 = 0.20f, kShare2 = 0.26f, kShare3 = 0.07f, kShareGrain = 0.07f;
 constexpr float kLegacyMean = 0.024f;   // the legacy dirt texture's linear mean (section 10)
 constexpr float kLegacyMax = 0.09f;     // and its max
 // The shader multiplies the stored value by this, so the stored 1.0 is the legacy max.
@@ -76,66 +85,65 @@ inline void generate(uint8_t* out, int size = kSize) {
     using namespace detail;
     const int n = size * size;
     const float scale = static_cast<float>(size) / static_cast<float>(kSize);   // the lengths are for kSize
-    const int half = std::max(2, static_cast<int>(std::lround(kHalfLength * scale)));
-    // The flow: the stroke centreline is displaced by warp(x), a slow periodic bend (two cells across, about +-6% of the size), so the direction at x is the slope of it.
-    std::vector<float> warp(size), flowX(size), flowY(size);
-    for (int x = 0; x < size; ++x) warp[x] = (periodicNoise(static_cast<float>(x) + 0.5f, 0.5f, size, 2, 1, 0x57A71C01u) - 0.5f) * 0.24f * static_cast<float>(size);
+    // The fibres' flow: about kFlowAngle with a slow periodic bend in the angle (two cells across, about +-0.1 rad), a function of x alone, so a wrapped path stays on the same field.
+    std::vector<float> flowX(size), flowY(size);
     for (int x = 0; x < size; ++x) {
-        const float slope = (warp[wrap(x + 1, size)] - warp[wrap(x - 1, size)]) * 0.5f;
-        const float len = std::sqrt(1.0f + slope * slope);
-        flowX[x] = 1.0f / len;
-        flowY[x] = slope / len;
+        const float bend = (periodicNoise(static_cast<float>(x) + 0.5f, 0.5f, size, 2, 1, 0x57A71C01u) - 0.5f) * 0.2f;
+        flowX[x] = std::cos(kFlowAngle + bend);
+        flowY[x] = std::sin(kFlowAngle + bend);
     }
-    std::vector<float> blotch(n), mid(n), fine(n), fibre(n), grain(n), noise(n);
+    // White noise smeared along the flow, a triangular kernel of +-half texels: thin fibres.
+    auto fibres = [&](const std::vector<float>& base, int half) {
+        std::vector<float> res(n);
+        const int steps = std::max(2, static_cast<int>(std::lround(half * scale)));
+        for (int y = 0; y < size; ++y)
+            for (int x = 0; x < size; ++x) {
+                float sum = base[static_cast<size_t>(y) * size + x] * static_cast<float>(steps + 1), weight = static_cast<float>(steps + 1);
+                for (int dir = -1; dir <= 1; dir += 2) {
+                    float qx = static_cast<float>(x) + 0.5f, qy = static_cast<float>(y) + 0.5f;
+                    for (int k = 1; k <= steps; ++k) {
+                        const int ix = wrap(static_cast<int>(std::floor(qx)), size);
+                        qx += static_cast<float>(dir) * flowX[ix];
+                        qy += static_cast<float>(dir) * flowY[ix];
+                        const float w = static_cast<float>(steps + 1 - k);
+                        sum += w * base[static_cast<size_t>(wrap(static_cast<int>(std::floor(qy)), size)) * size + wrap(static_cast<int>(std::floor(qx)), size)];
+                        weight += w;
+                    }
+                }
+                res[static_cast<size_t>(y) * size + x] = sum / weight;
+            }
+        return res;
+    };
+    std::vector<float> l0(n), l1(n), l2(n), b3(n), grain(n);
     for (int y = 0; y < size; ++y)
         for (int x = 0; x < size; ++x) {
             const int i = y * size + x;
             const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
-            const float yw = py - warp[x];   // the coordinate across the strokes
-            blotch[i] = 0.7f * periodicNoise(px, py, size, 2, 2, 0xB10C4001u) + 0.3f * periodicNoise(px, py, size, 3, 3, 0xB10C4002u);
-            mid[i] = periodicNoise(px, yw, size, 4, 12, 0x5780AE01u);
-            fine[i] = periodicNoise(px, yw, size, 28, 56, 0x5780AE02u);
-            grain[i] = 0.5f * periodicNoise(px, py, size, 24, 24, 0x6A41A001u) + 0.5f * periodicNoise(px, py, size, 130, 130, 0x6A41A002u);
-            noise[i] = hash01(x, y, 0xC0FFEE01u);
+            const float v = px + py;
+            const float u = px - py + 0.2f * static_cast<float>(size) * (periodicNoise(v, 0.5f, size, 2, 1, 0x57A71C02u) - 0.5f);
+            l0[i] = periodicNoise(u, v, size, kCu0, kCv0, 0x5780AE01u);
+            l1[i] = periodicNoise(u, v, size, kCu1, kCv1, 0x5780AE02u);
+            l2[i] = periodicNoise(u, v, size, kCu2, kCv2, 0x5780AE03u);
+            b3[i] = hash01(x, y, 0xC0FFEE01u);
+            grain[i] = hash01(x, y, 0x6A41A001u);
         }
-    // The fibres: the white noise smeared along the flow, both ways from each texel, with a triangular weight.
-    for (int y = 0; y < size; ++y)
-        for (int x = 0; x < size; ++x) {
-            float sum = noise[y * size + x] * static_cast<float>(half + 1), weight = static_cast<float>(half + 1);
-            for (int dir = -1; dir <= 1; dir += 2) {
-                float qx = static_cast<float>(x) + 0.5f, qy = static_cast<float>(y) + 0.5f;
-                for (int s = 1; s <= half; ++s) {
-                    const int ix = wrap(static_cast<int>(std::floor(qx)), size);
-                    qx += static_cast<float>(dir) * flowX[ix];
-                    qy += static_cast<float>(dir) * flowY[ix];
-                    const float w = static_cast<float>(half + 1 - s);
-                    sum += w * noise[wrap(static_cast<int>(std::floor(qy)), size) * size + wrap(static_cast<int>(std::floor(qx)), size)];
-                    weight += w;
-                }
-            }
-            fibre[y * size + x] = sum / weight;
-        }
-    standardise(blotch); standardise(mid); standardise(fine); standardise(fibre); standardise(grain);
-    // The weights are the shares of the variance: very low frequency, broad strokes, finer strokes, fibres, and a little isotropic grain (so the strokes are not perfectly clean).
-    const float wBlotch = std::sqrt(0.36f), wMid = std::sqrt(0.04f), wFine = std::sqrt(0.12f), wFibre = std::sqrt(0.18f), wGrain = std::sqrt(0.30f);
+    std::vector<float> l3 = fibres(b3, kHalf3);
+    standardise(l0); standardise(l1); standardise(l2); standardise(l3); standardise(grain);
     std::vector<float> z(n);
-    for (int i = 0; i < n; ++i) z[i] = wBlotch * blotch[i] + wMid * mid[i] + wFine * fine[i] + wFibre * fibre[i] + wGrain * grain[i];
+    for (int i = 0; i < n; ++i) z[i] = std::sqrt(kShare0) * l0[i] + std::sqrt(kShare1) * l1[i] + std::sqrt(kShare2) * l2[i] + std::sqrt(kShare3) * l3[i] + std::sqrt(kShareGrain) * grain[i];
     standardise(z);
     // exp(s z), normalised to its maximum: s by bisection so the mean is the target (the mean falls as s rises).
-    std::vector<float> v(n);
+    float top = 0;
+    for (int i = 0; i < n; ++i) top = std::max(top, z[i]);
     float lo = 0.01f, hi = 2.0f;
     for (int it = 0; it < 40; ++it) {
         const float s = 0.5f * (lo + hi);
-        float top = 0;
-        for (int i = 0; i < n; ++i) top = std::max(top, z[i]);
         double m = 0;
         for (int i = 0; i < n; ++i) m += std::exp(s * (z[i] - top));
         m /= n;
         if (m > kTargetMean) lo = s; else hi = s;
     }
     const float s = 0.5f * (lo + hi);
-    float top = 0;
-    for (int i = 0; i < n; ++i) top = std::max(top, z[i]);
     for (int i = 0; i < n; ++i) out[i] = static_cast<uint8_t>(std::lround(255.0f * std::exp(s * (z[i] - top))));
 }
 

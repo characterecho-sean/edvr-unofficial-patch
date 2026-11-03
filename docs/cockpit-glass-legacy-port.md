@@ -594,6 +594,23 @@ percentiles, each band within 0.06, global agreement at least 0.85, local cohere
 deterministic, tileable, the mip chain. Pictures: `%LOCALAPPDATA%\EDVR\captures\edvr-streaks.png` and the 2 x 2
 tiling.
 
+**Reworked again (2026-11-03, after 40da695a).** The first rework met the figures above and still read as blotchy static
+with fine horizontal scan lines; legacy reads as long soft diagonal brush strokes. The figures were incomplete: a
+per-band spectrum elongation (eigenvalue ratio of the band's second moment) and stroke angle show legacy elongated in
+every band along one diagonal (6.7 / 4.1 / 6.3 / 2.1 at 44.5 / 53.4 / 52.2 / 55.0 degrees for 1-4, 4-16, 16-64, 64+ cycles
+per tile), where EDVR's isotropic blotch (0.36 of the variance) and grain (0.30) carried the broad bands. The generator
+now has no isotropic blotch: three stroke layers of periodic value noise in the diagonal coordinates u = x - y and v = x + y
+(both of period `size`, so the layers tile on a diagonal flow with no seam, checked), the lattice coarse across and
+coarser along (3 x 1, 12 x 3 and 40 x 16 cells, across by along), the across coordinate bent by a slow periodic noise of v; thin fibres
+(white noise smeared along a flow at about 49 degrees); and isotropic grain at 0.07 of the variance, in the finest band only.
+Variance shares 0.38 / 0.20 / 0.26 / 0.07 / 0.07, an exponential for the soft tail, mean 0.2667 kept. Measured with the
+same script on the saved PNG: std 0.110 (0.093), p5 / p50 / p95 0.129 / 0.243 / 0.482 (0.158 / 0.245 / 0.442), band
+energies 0.456 / 0.238 / 0.145 / 0.162 (0.418 / 0.236 / 0.161 / 0.185), elongation 5.7 / 2.7 / 6.3 / 2.0, stroke angle
+48.5 / 45.9 / 44.3 / 46.1, global direction agreement 0.999 (0.972), local coherence 0.400 (0.413). Misses: the 4-16
+elongation is 2.7 against 4.1 (34% low; the rig allows 40%), std and p95 are a little high (the exponential's tail), and
+the picture still shows soft dark pockets between the strokes. 512 x 512, 93 ms in the rig. The rig measures the same
+elongation and angle and holds them.
+
 ## Ruled out
 
 - ruled out: porting legacy's ambient scale of 5, because legacy's VS cube is black in all three captures

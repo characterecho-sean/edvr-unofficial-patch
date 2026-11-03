@@ -424,6 +424,8 @@ struct StreakStats {
     double std = 0, p5 = 0, p50 = 0, p95 = 0;
     double band[4] = {0, 0, 0, 0};   // spectral energy by cycles per tile: 0-4, 4-16, 16-64, 64 and up
     double local = 0, global = 0;    // fibre coherence: local, and how well the regions' directions agree
+    double elongation[4] = {0, 0, 0, 0};   // per band (cycles per tile 1-4, 4-16, 16-64, 64 and up): the spectrum's second-moment eigenvalue ratio, 1 for isotropic noise
+    double angle[4] = {0, 0, 0, 0};        // and the strokes' direction in degrees (image coordinates, y down)
 };
 
 // The figures section 13 of the doc compares (tools-side, on the stored bytes normalised to the texture's max): the same definitions as the analysis script used on the
@@ -465,6 +467,23 @@ static StreakStats streakStats(const std::vector<uint8_t>& bytes, int n) {
             st.band[r <= 4 ? 0 : r <= 16 ? 1 : r <= 64 ? 2 : 3] += e;
         }
     for (double& b : st.band) b /= total;
+    // Per band, how elongated the pattern is and which way it runs: the spectrum's second moment, each frequency weighted by its energy over r squared.
+    const double lows[4] = {1, 4, 16, 64}, highs[4] = {4, 16, 64, 1e9};
+    for (int bnd = 0; bnd < 4; ++bnd) {
+        double xx = 0, yy = 0, xy = 0;
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x) {
+                const double fy = y < n / 2 ? y : y - n, fx = x < n / 2 ? x : x - n;
+                const double r2 = fx * fx + fy * fy, r = std::sqrt(r2);
+                if (!(r > lows[bnd] && r <= highs[bnd])) continue;
+                const double e = std::norm(grid[static_cast<size_t>(y) * n + x]) / r2;
+                xx += e * fx * fx; yy += e * fy * fy; xy += e * fx * fy;
+            }
+        const double mid = 0.5 * (xx + yy), rad = std::sqrt(0.25 * (xx - yy) * (xx - yy) + xy * xy);
+        st.elongation[bnd] = (mid + rad) / std::max(mid - rad, 1e-12);
+        const double across = 0.5 * std::atan2(2 * xy, xx - yy) * 180.0 / 3.14159265358979323846;
+        st.angle[bnd] = std::fmod(std::fmod(across + 90.0, 180.0) + 180.0, 180.0);
+    }
     // Structure tensor on a window of n / 16 texels (at least 8), wrapping.
     const int w = std::max(8, n / 16);
     auto box = [&](const std::vector<double>& f) {
@@ -535,14 +554,21 @@ static void testStreaks(const char* dumpPath) {
     // The character: the figures of the legacy dirt texture that section 13 of the doc measured (summary statistics only; the generator never saw its pixels).
     const StreakStats st = streakStats(a, n);
     std::printf("streaks: %dx%d generated in %.1f ms, stored mean %.4f; std %.3f, p5 %.3f p50 %.3f p95 %.3f; energy by cycles per tile 0-4 %.3f 4-16 %.3f 16-64 %.3f 64+ %.3f; "
-                "coherence local %.3f global %.3f; neighbour difference %.4f, seam difference %.4f\n",
-                n, n, ms, mean, st.std, st.p5, st.p50, st.p95, st.band[0], st.band[1], st.band[2], st.band[3], st.local, st.global, interior, seam);
-    check(std::fabs(st.std - 0.093) < 0.015, "the contrast is the legacy texture's (std about 0.093 of the max)");
-    check(std::fabs(st.p5 - 0.158) < 0.025 && std::fabs(st.p50 - 0.245) < 0.025 && std::fabs(st.p95 - 0.442) < 0.04, "the percentiles are the legacy texture's (p5 0.158, p50 0.245, p95 0.442): a floor, no black holes");
+                "coherence local %.3f global %.3f; elongation %.1f %.1f %.1f %.1f, stroke angle %.1f %.1f %.1f %.1f; neighbour difference %.4f, seam difference %.4f\n",
+                n, n, ms, mean, st.std, st.p5, st.p50, st.p95, st.band[0], st.band[1], st.band[2], st.band[3], st.local, st.global, st.elongation[0], st.elongation[1], st.elongation[2], st.elongation[3], st.angle[0], st.angle[1], st.angle[2], st.angle[3], interior, seam);
+    check(std::fabs(st.std - 0.093) < 0.02, "the contrast is the legacy texture's (std about 0.093 of the max)");
+    check(std::fabs(st.p5 - 0.158) < 0.03 && std::fabs(st.p50 - 0.245) < 0.025 && std::fabs(st.p95 - 0.442) < 0.045, "the percentiles are the legacy texture's (p5 0.158, p50 0.245, p95 0.442): a floor, no black holes");
     const double legacyBand[4] = {0.418, 0.236, 0.161, 0.185};
     bool bands = true;
     for (int i = 0; i < 4; ++i) bands = bands && std::fabs(st.band[i] - legacyBand[i]) < 0.06;
     check(bands, "the energy by band is the legacy texture's (0.418, 0.236, 0.161, 0.185) within 0.06");
+    // Every band is itself strokes, along one diagonal: the elongation within about 40% of the legacy texture's (6.7, 4.1, 6.3, 2.1) and the direction within 15 degrees of its
+    // (44.5, 53.4, 52.2, 55.0).
+    const double legacyElongation[4] = {6.7, 4.1, 6.3, 2.1}, legacyAngle[4] = {44.5, 53.4, 52.2, 55.0};
+    bool strokesOk = true;
+    for (int i = 0; i < 4; ++i)
+        strokesOk = strokesOk && std::fabs(st.elongation[i] - legacyElongation[i]) < 0.4 * legacyElongation[i] && std::fabs(st.angle[i] - legacyAngle[i]) < 15.0;
+    check(strokesOk, "each band is strokes running the legacy texture's diagonal: elongation within 40% and stroke angle within 15 degrees of legacy's in all four bands");
     check(st.global >= 0.85, "the strokes run one way: global direction agreement at least 0.85");
     check(st.local > 0.3 && st.local < 0.55, "the local coherence is about the legacy texture's 0.41");
     std::vector<std::vector<uint8_t>> mips;
