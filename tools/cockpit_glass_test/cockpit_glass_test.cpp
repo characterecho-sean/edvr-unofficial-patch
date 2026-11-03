@@ -500,15 +500,25 @@ static void testShader() {
     check(s.r < 0.1f * c0.r, "an occluder between the light and the pixel darkens the dirt");
     check(closeTo(l.r, c0.r, 0.02f), "an occluder behind the pixel leaves the dirt as lit as no cascade");
 
-    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = 0.25 * the read scale 256, times the albedo, not scaled by 1/pi.
+    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = legacy's 5 x (cube(N) + cube(-N)) x the read scale 256 = 640, times the albedo,
+    // not scaled by 1/pi.
+    const float ambient = 5.0f * (0.25f + 0.25f) * 256.0f;
     Case hangar = dirt;
     hangar.sunColour[0] = hangar.sunColour[1] = hangar.sunColour[2] = 1e-13f;
     hangar.probe = true;
     hangar.probeColour[0] = hangar.probeColour[1] = hangar.probeColour[2] = 0.25f;
     const Pixel h = canopy.draw(hangar);
-    const float hangarWant = (0.25f * 256.0f) * albedo / kBaseAlpha / 256.0f;
+    const float hangarWant = ambient * albedo / kBaseAlpha / 256.0f;
     std::printf("hangar: got (%g %g %g %g), wanted rgb %g\n", h.r, h.g, h.b, h.a, hangarWant);
     check(closeTo(h.r, hangarWant, 0.03f) && closeTo(h.a, kBaseAlpha, 0.01f), "a hangar canopy is lit by the probe's cube alone, through the cluster lists and the probe records");
+    // The sun and the probe together: the direct light over pi and the ambient add before the albedo.
+    Case both = dirt;
+    both.probe = true;
+    both.probeColour[0] = both.probeColour[1] = both.probeColour[2] = 0.25f;
+    const Pixel bo = canopy.draw(both);
+    const float bothWant = (ndl * sun * kInvPi + ambient) * albedo / kBaseAlpha / 256.0f;
+    std::printf("dirt under the sun with a probe: got (%g %g %g %g), wanted rgb %g\n", bo.r, bo.g, bo.b, bo.a, bothWant);
+    check(closeTo(bo.r, bothWant, 0.02f), "the sun's light over pi and the probe ambient add before the albedo");
     Case dark = hangar;
     dark.probe = false;
     const Pixel k = canopy.draw(dark);

@@ -183,8 +183,9 @@ static const float kCrackSpec = 0.02;          // crack glare strength (cb0[38].
 static const float kCrackGloss = 450.0;        // and its exponent (cb0[38].z)
 // The streak texture is stored normalised (its brightest texel 1, its mean 0.267); times this, the max is the legacy dirt texture's 0.09 and the mean its 0.024.
 static const float kStreakMax = 0.09;
-// CHOSEN, not measured: the probe ambient in the light's own HDR units.
-static const float kAmbientScale = 1.0;
+// MEASURED: the legacy vertex shader's ambient scale (VS cb0[0].y, section 10: 5 in all three captures). Legacy applied exposure through this scale, so the value may be
+// revisited by a later Odyssey capture; it is legacy's own number, not a tuned one. The probe cube here is in the light's own HDR units (times CB1[90].z).
+static const float kLegacyAmbientScale = 5.0;
 // Fixed choices.
 static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
@@ -192,7 +193,7 @@ static const uint kMaxProbes = 16;             // the live loop stops when the w
 static const float kMinCoverage = 1.0 / 1024.0;  // the overlays skip a pixel whose dirt, smudge and crack are all under this
 
 // The ambient: the game's clustered reflection probes, looked up as the live shader does (the pixel's cluster from its tile and depth, the probes in it
-// weighted by their volumes, summed until the weights reach 1), but sampled once, at the roughest mip, along the normal. That is the stand-in for the
+// weighted by their volumes, summed until the weights reach 1), but sampled at the roughest mip along the normal and its opposite, summed, as the legacy vertex shader summed cube(N) and cube(-N) at mip 30. That is the stand-in for the
 // legacy vertex shader's cube ambient, and the canopy stays lit in a hangar, where the sun is off and the frame's ambient colour is 0.
 float3 probeAmbient(float3 viewPos, float3 nView, float2 pixel) {
     uint tile = max(asuint(cb1[228].w), 1u);
@@ -237,7 +238,7 @@ float3 probeAmbient(float3 viewPos, float3 nView, float2 pixel) {
         }
         if (weight <= 0.0) continue;
         float3 dir = float3(dot(axisX.xyz, nView), dot(axisY, nView), dot(axisZ, nView));
-        float3 c = Probes.SampleLevel(EnvSampler, float4(dir, (float)head.x), kAmbientMip).rgb * asfloat(head.y);
+        float3 c = (Probes.SampleLevel(EnvSampler, float4(dir, (float)head.x), kAmbientMip).rgb + Probes.SampleLevel(EnvSampler, float4(-dir, (float)head.x), kAmbientMip).rgb) * asfloat(head.y);
         float use = min(weight, 1.0 - accW);
         acc += c * use;
         accW += use;
@@ -303,7 +304,7 @@ float4 main(PsIn i) : SV_Target {
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
     // The dirt is grey (R = G = B): the streak texture times the mask times the colour scale.
     float3 albedo = lerp((streak * dirtMask * kLegacyDirtColour).xxx, cb2[8].yzw * cb1[56].y, crackA);
-    float3 ambient = probeAmbient(pv, nIn, i.position.xy) * kAmbientScale;
+    float3 ambient = probeAmbient(pv, nIn, i.position.xy) * kLegacyAmbientScale;
     // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
     float3 direct = shadow * kInvPi * lightColour;
     float3 radiance = (ndl * direct + ambient) * albedo + specAmt * glare * direct;

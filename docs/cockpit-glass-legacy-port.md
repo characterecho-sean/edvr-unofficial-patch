@@ -41,6 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
+The ambient is now legacy's measured 5 x (probe(N) + probe(-N)) (section 11), after a flight whose A/B looked the same.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -452,7 +453,7 @@ clamp took it to 0, where legacy's mask would be under 0.005). Dirt albedo is gr
 Smudge glare is 0.001 at gloss 120, crack glare 0.02 (times CB1[56].y) at gloss 450. Smudges keep live's
 imperfection mask (`masks.z`) times the blemish map's y channel: the legacy smudge mask was a vertex alpha
 channel (`1.2 A - 0.2`), which live's vertex shader does not pass. The 1/pi on the direct light, the probe
-ambient and the legacy normal are unchanged. The only chosen constant left is the probe ambient scale (1.0).
+ambient and the legacy normal are unchanged (the ambient scale changed after the next flight, below).
 
 **The streak texture** (`src\d3d11\cockpit_glass_streaks.h`). An original pattern, not traced from the legacy
 texture (only its two statistics were used, mean 0.024 and max 0.09): white noise smeared along a slowly turning
@@ -509,6 +510,17 @@ while ice or condensation shows. Both are to be measured on the flight.
 0.09769); hangar (probe only) 0.01964 (0.01964); lit crack 0.3728 (0.3730); crack glare 0.3542 (0.3544);
 smudge glare 0.12238 (0.12240) at alpha 0.02; ice and condensation overlays 0.001953 with alpha written 0, equal to
 the intact variant's alpha times colour; no streak texture: no dirt.
+
+**Ambient ported (2026-11-03, after the flight of bd441ccd).** That flight ran everything (streaks bound, binds
+and ice-overlays about 3,050 per 30 s) and A/B looked about the same. Legacy's ambient was measured and not yet
+ported: its vertex shader computes `cube(N) + cube(-N)` at mip 30 (the 1x1 average) times VS cb0[0].y, which the
+captures read as 5 (section 10). The port had sampled the probe once along the normal and scaled it by 1.0,
+about a tenth of legacy's. Now, in all three variants, `ambient = 5 x (probe(N) + probe(-N))` at the roughest
+mip, with `kLegacyAmbientScale = 5.0` a measured constant. One cluster walk serves both directions; only the cube
+sample doubles. Legacy applied exposure through this scale, so the value may be revisited by a later Odyssey
+capture; it is legacy's own number, not a tuned one. No chosen constant is left in the shader. Rig (WARP): a
+0.25 grey cube gives an ambient of 640 (5 x 0.5 x 256); hangar rgb 0.1964 (wanted 0.1964); dirt under the sun
+with the probe 0.2939 (wanted 0.2941) against 0.09766 for the sun alone.
 
 **What the flight must check** (after section 8's list): the log lines above; with ice forming, the dirt streaks
 stay on the canopy and the ice looks as the game draws it; `ice-overlays` counts about one a frame while ice
