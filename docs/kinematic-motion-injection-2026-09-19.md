@@ -30,7 +30,7 @@
   entries describe coverage repairs. The 09-28 bytecode proof supersedes their
   native-marker/bypass interpretation: all five alleged native pairs and BA58
   were EDVR-generated.
-- **2026-11-03 NPCs with no AA (DIAGNOSED; fix BUILT, NOT FLOWN, last entry):** NPCs whose palette base is >= 65,536 (`kMaxRows`; palette 174,763 rows) never joined (masked, no history); tables now 180,224 rows.
+- **2026-11-03 NPCs with no AA (DIAGNOSED; fix BUILT, NOT FLOWN, entry before last):** NPCs whose palette base is >= 65,536 (`kMaxRows`; palette 174,763 rows) never joined (masked, no history); tables now 180,224 rows.
 - **Other open work:** walkers (F10, F1, F2 entries at the end); ships, evaluated-but-undrawn movers, flat-source aliasing; stale cockpit (low
   priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
@@ -42,8 +42,8 @@
   content-pairing A, fix-round five hypotheses, on-foot camera/packing
   assumptions, fetch cost, cockpit depth pre-pass/bias, motion-cost
   interpretations, wrong joined station motion, close-range
-  reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe
-  naming it, per-part rotation, rigid-only keying under 1 px, own body gain.
+  reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe naming it, per-part rotation,
+  rigid-only keying under 1 px, own body gain; 11-03: VR overlay guard copies per draw (one an eye-frame; last entry).
 - **Validation / delivery:** build.bat --jobs 4 passed all gates (82 pooled jobs
   + 4 quiet, 262-key contract, installer); engine rig 1686 checks, real corpus
   2398. Fix 4118ae84 merged, pushed, remote main verified.
@@ -4533,3 +4533,11 @@ The fix the entry above proposed, on the pilot's word. `kMaxRows` (`skin_join.h`
 - Cost, not measured: the tables are 92 bytes a row, 16.6 MB at 180,224 rows against 6 MB; the 3-table clear covers 2.75 times the rows (4 to 5 us a frame at 65,536 measured on 10-09).
 - Flight check, same station with NPCs in view (a Mission Giver conversation and the concourse): `python tools\edvr_log.py --target <install> --expect-build HEAD --grep "skin join"`. Working: `failed: ... cap 0` in every window (it was 30% of jobs), `compose: skinned pixels on the trained path (joined N, masked M)` with M a small share (216,494 masked against 1,226,027 joined in the 05:29:36 window). In an eye dump, `masked_by_base.py` (shared notes folder) reads no masked skinned pixel at base >= 65,536. Refuted if `cap` is 0 and NPCs still show masked pixels: the next suspects are `pose` (12% of jobs) and `prefix`, and `binds writing no history`.
 - Also asked for the Holo-Me repro: the log's `skin join` lines above are the cheap check there; a steady commander-only scene probably keeps its rows low, so `cap` near 0 with masked pixels would be a different cause.
+
+## 2026-11-03 (the VR overlay guard's copy cost, read from seven flights)
+
+The post-rc.5 review suspected the VR overlay guard (776baeee) of a full MRT6 copy per overlay draw: `engine_velocity.cpp` ends the overlay group on any other eye-pass draw (the reset sits before the family filter, so draws EDVR does not touch end it too), and each new group copies the whole slot target (`snapshotOverlayBase`). If the 66 BBE5/DB3E draws a frame were interleaved with other draws, that would be dozens of 32.5 MB copies per eye-frame.
+
+- ruled out: per-draw group copies, because every VR flight since the guard landed reads about one copy per eye-frame. The heaviest window, Epic 062236 06:24:06, has `copies 5320 (173060.5 MB)` in 2,661 frames (2.00 a frame); Frontier 064831 06:49:31 has 1,764; 061437, 063129, 052135, 044624 and 02 191605 agree. The overlay draws are drawn back to back.
+- What is left is one 2016x2017 x 8-byte copy per eye-frame, about 65 MB of read and write traffic, not timed by the census. Estimated 0.05 to 0.15 ms per eye depending on the GPU's bandwidth.
+- Check on a later flight: if `copies` ever exceeds about 2 a frame (`ui quality: layer: 30 s, N frames` gives N), the grouping has broken; the reset before the family filter is where to look.
