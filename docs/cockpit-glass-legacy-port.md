@@ -38,6 +38,7 @@ Decisions for Sean (section 6):
   texture, and live's shadow map is a moment map, not depth.
 - Key name and values.
 - Whether ice and condensation stay stock in the first version.
+- Legacy RGB dirt: waits for the probe flight (2026-11-03, item 4).
 
 Next flight: Steam, flat, with `experimental.cockpit_glass_probe = on` in
 `edvr-flat.ini` (and `edvr.ini`). Sit in a lit station hangar, then
@@ -215,6 +216,15 @@ build carries a debug view for those.
 2. **Key.** `visual.cockpit_glass = odyssey | legacy`?
 3. **Scope.** Is the intact canopy only enough for the first version,
    with ice and condensation left stock?
+4. **Legacy RGB dirt.** The shader side ports. The blocker is the
+   texture. The legacy client's Win64 asset files (a 400-file sample:
+   70% `FREA`, 30% zlib with an unknown inner format, no texture names)
+   are not decoded, and the texture is Frontier's artwork, so EDVR does
+   not ship it. Shippable routes: read it at run time from the player's
+   own legacy install, or an EDVR-made look-alike. A legacy-client frame
+   capture in flat would show it. Decided 2026-11-03: wait for the probe
+   flight's `pDirtDiffuse` (CB2[11]) and t9 values, which say how far
+   live's flat-colour dirt already is from legacy, then choose.
 
 ## Ruled out
 
