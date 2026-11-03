@@ -15,10 +15,10 @@
   replaced by the draw pair mask.
 - **Build 2 (designed 2026-11-02, "Build 2: the draw pair mask"):** a
   per-shader-pair mask skips DLAA subscribers that cannot want a draw
-  (#152), plus `drawPathFast` in the instanced hook (#151). Temporary key:
-  `vr_draw_mask`. Reviewed the same day ("Review of the mask design"): about
+  (#152), plus `drawPathFast` in the instanced hook (#151). No temporary
+  key. Reviewed the same day ("Review of the mask design"): about
   0.4 ms, not 0.8-1.2; two bits are wrong; too small for an ABBA flight.
-  Direction pending with the pilot.
+  Decided: "Build 2 as decided" (no key, instruments, one profiled flight).
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -575,3 +575,25 @@ keep-or-remove test.
 - Larger: `streamLoad16` 0.8 ms after the submits (in the frame, not in R1),
   `hookedEnd` +0.19 ms with DLAA (likely EDVR's own GPU timer queries), and
   a line-level split of `beginPanelOverride` (0.80 ms).
+
+### Build 2 as decided (2026-11-02)
+
+The pilot took the reviewed version: one build, one profiled flight that
+prices several things.
+- **Ships as behaviour, no key:** the VS "may want" byte (UI family on target
+  kind 1, screen motion, weapon motion), the pair test before `GetType`, the
+  `fssPanelRectDrawArgs` stash deleted, `drawPathFast` in the instanced hook
+  (#151).
+- **Instruments in the default log:** gate holders on change; mask skips per
+  window; marker-fix Unmap copy bytes and time per eye per window; GPU
+  timing queries per frame by owner.
+- **Marker-fix copy, first read:** the build-1 flight log's F87c lines show
+  whole-stream escalation in 12 of 568 ten-second lines, transients only.
+  ruled out: escalated whole-stream copies as the steady 0.8 ms, because
+  steady state is `escalated 0` with 6-7 windows per eye; the cost is the
+  windowed copy itself.
+- **Flight:** 5 minutes standing in the concourse, DLAA, with a CPU profile
+  capture. Judged on the profile (per-function, about 0.05 ms) and the whole
+  frame cycle, not on an A/B.
+- Superseded: the `vr_draw_mask` key, the pair table and the ABBA flight
+  above.
