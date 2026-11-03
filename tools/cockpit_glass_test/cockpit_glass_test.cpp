@@ -1,0 +1,472 @@
+// visual.cockpit_glass = legacy (docs\cockpit-glass-legacy-port.md section 8): src\d3d11\cockpit_glass_core.h held to its contract, and the build's bytecode
+// (kCockpitGlassLegacyPsBytecode, from tools\temporal_shader_build) run on a WARP device with the D3D debug layer, drawn with a vertex shader that
+// carries the game's canopy vertex shader's output signature, so the draw links as the game's does. The pixel it draws is compared with the legacy model
+// worked out here, in C++, from the same inputs:
+//   - no coverage: transparent black (the early out);
+//   - dirt under the sun: Lambert on the live shader's lit normal, the dirt colour, divided by the alpha written, scaled by the HDR write scale;
+//   - a cascade whose moment map puts an occluder between the light and the pixel: dark; one with the occluder behind the pixel: lit as without a cascade;
+//   - the reflection probe ambient with the sun off (a hangar): lit by the probe's cube alone, through the cluster lists and the probe records;
+//   - a cluster that lists no probe and a sun that is off: the dirt is dark, and nothing is NaN.
+// Output under obj\ and System32's d3d11.
+#include "../../src/d3d11/cockpit_glass_core.h"
+#include "temporal_shader_bytecode.h"
+
+#include <windows.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <utility>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+namespace cg = edvr::cockpit_glass;
+
+static int g_failures = 0;
+static void check(bool ok, const char* what) {
+    if (!ok) {
+        std::printf("FAIL: %s\n", what);
+        ++g_failures;
+    }
+}
+static void hr(HRESULT h, const char* what) {
+    if (FAILED(h)) {
+        std::printf("FAIL: %s (0x%08X)\n", what, static_cast<unsigned>(h));
+        std::exit(1);
+    }
+}
+
+// ---- the pure half --------------------------------------------------------------------------------------------------
+static void testCore() {
+    bool recognised = false;
+    check(cg::parseLook("legacy", &recognised) == cg::Look::Legacy && recognised, "legacy is the legacy look");
+    check(cg::parseLook("LEGACY", &recognised) == cg::Look::Legacy && recognised, "the key is not case sensitive");
+    check(cg::parseLook("odyssey", &recognised) == cg::Look::Odyssey && recognised, "odyssey is the stock look");
+    check(cg::parseLook(nullptr, &recognised) == cg::Look::Odyssey && recognised, "no value is the stock look, recognised");
+    check(cg::parseLook("", &recognised) == cg::Look::Odyssey && !recognised, "an empty value is stock and not recognised");
+    check(cg::parseLook("legacyx", &recognised) == cg::Look::Odyssey && !recognised, "a near miss is stock and not recognised");
+    check(cg::parseLook("on", &recognised) == cg::Look::Odyssey && !recognised, "on is not a look");
+    check(cg::parseLook("legacy", nullptr) == cg::Look::Legacy, "the recognised flag is optional");
+
+    const uint64_t other = 0x70F56E2EB7032E1Aull;   // the intact quality 0-1 shader: stock
+    check(cg::swapWanted(cg::Look::Legacy, true, cg::kReplacedPsHash), "legacy with a replacement swaps the intact quality-3 canopy shader");
+    check(!cg::swapWanted(cg::Look::Odyssey, true, cg::kReplacedPsHash), "odyssey never swaps");
+    check(!cg::swapWanted(cg::Look::Legacy, false, cg::kReplacedPsHash), "no replacement, no swap");
+    check(!cg::swapWanted(cg::Look::Legacy, true, other), "another canopy shader stays stock");
+    check(!cg::swapWanted(cg::Look::Legacy, true, 0), "an unhashed shader stays stock");
+    check(!cg::swapWanted(cg::Look::Legacy, true, cg::kCanopyVsHash), "the vertex shader's hash is not the pixel shader's");
+
+    check(cg::windowDue(30000, 0, 30000) && !cg::windowDue(29999, 0, 30000), "the window line is due at 30 s");
+    char line[200];
+    cg::formatWindow(line, sizeof line, 30.0, 0, 3050, cg::replacementName(cg::Replacement::Refused));
+    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=0 canopy-seen=3050 replacement=refused") == 0, "binds=0 with canopy-seen above 0 reads as it should");
+    cg::formatWindow(line, sizeof line, 30.0, 3050, 3050, cg::replacementName(cg::Replacement::Ready));
+    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=3050 canopy-seen=3050 replacement=ready") == 0, "a working window reads binds equal to canopy-seen");
+    check(std::strcmp(cg::replacementName(cg::Replacement::NotTried), "not-made-yet") == 0, "an untried replacement is named");
+
+    check(cg::kLiveInputCount == 7 && cg::kLiveInputs[6].isPosition && cg::kLiveInputs[1].isUint, "the signature table has the game's seven inputs");
+    for (size_t i = 0; i < cg::kLiveInputCount; ++i) check(cg::kLiveInputs[i].reg == i, "the game's inputs sit in registers 0 to 6 in order");
+}
+
+// ---- the device ------------------------------------------------------------------------------------------------------
+struct Rig {
+    ComPtr<ID3D11Device> dev;
+    ComPtr<ID3D11DeviceContext> ctx;
+    ComPtr<ID3D11InfoQueue> queue;
+    bool debugLayer = false;
+    Rig() {
+        D3D_FEATURE_LEVEL fl;
+        HRESULT h = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx);
+        if (h == DXGI_ERROR_SDK_COMPONENT_MISSING)
+            h = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx);
+        else
+            debugLayer = SUCCEEDED(h);
+        hr(h, "CreateDevice");
+        dev.As(&queue);
+    }
+    unsigned problems() {
+        unsigned n = 0;
+        if (!queue) return 0;
+        for (UINT64 i = 0; i < queue->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
+            SIZE_T sz = 0;
+            queue->GetMessage(i, nullptr, &sz);
+            std::vector<char> b(sz);
+            auto* m = reinterpret_cast<D3D11_MESSAGE*>(b.data());
+            queue->GetMessage(i, m, &sz);
+            if (m->Severity <= D3D11_MESSAGE_SEVERITY_WARNING) {
+                std::printf("debug layer: %s\n", m->pDescription);
+                ++n;
+            }
+        }
+        queue->ClearStoredMessages();
+        return n;
+    }
+};
+
+static const char kVs[] = R"HLSL(
+struct VO {
+    float3 masks : __USER_KEY_COCKPITGLASSMASKS;
+    nointerpolation uint faceInvariant : __USER_VERTEX_FACEINVARIANT;
+    float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 lightingPosition : __USER_VERTEX_M_LIGHTINGPOSITION;
+    float3 lightingTangent : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 texcoord : __USER_VERTEX_M_TEXCOORD;
+    float4 position : SV_POSITION;
+};
+cbuffer Values : register(b0) { float4 masks; float4 normal; float4 position; float4 tangent; float4 uv; }
+VO main(uint id : SV_VertexID) {
+    float2 p = id == 0 ? float2(-1, -1) : (id == 1 ? float2(-1, 3) : float2(3, -1));
+    VO o;
+    o.masks = masks.xyz;
+    o.faceInvariant = 0;
+    o.lightingNormal = normal.xyz;
+    o.lightingPosition = position.xyz;
+    o.lightingTangent = tangent.xyz;
+    o.texcoord = uv.xy;
+    o.position = float4(p, 0.5, 1);
+    return o;
+}
+)HLSL";
+
+struct Float4 { float v[4]; };
+
+static float halfToFloat(uint16_t h) {
+    const uint32_t sign = (h >> 15) & 1, exp = (h >> 10) & 31, man = h & 1023;
+    float f;
+    if (exp == 0) f = std::ldexp(static_cast<float>(man), -24);
+    else if (exp == 31) f = man ? std::nanf("") : HUGE_VALF;
+    else f = std::ldexp(static_cast<float>(man | 1024), static_cast<int>(exp) - 25);
+    return sign ? -f : f;
+}
+static uint16_t floatToHalf(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const uint32_t sign = (x >> 16) & 0x8000;
+    int exp = static_cast<int>((x >> 23) & 0xFF) - 127 + 15;
+    const uint32_t man = x & 0x7FFFFF;
+    if (exp <= 0) return static_cast<uint16_t>(sign);
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00);
+    return static_cast<uint16_t>(sign | (exp << 10) | (man >> 13));
+}
+
+struct Case {
+    float masks[3] = {0, 0, 0};
+    float normal[3] = {0, 0, 1}, position[3] = {0, 0, 5}, tangent[3] = {1, 0, 0};
+    float tint = 0, alphaMultiplier = 1;
+    float sunColour[3] = {0, 0, 0}, sunDir[3] = {0, 0, 1};
+    bool sunOn = true;
+    float k = 0;   // CB2[17].w: 0 leaves the whole mask
+    float dirtColour[3] = {0.5f, 0.5f, 0.5f};
+    int cascades = 0;
+    float occluder = 0.9f;   // the moment map's occluder, in the shader's depth space (1 - clip z)
+    bool probe = false;
+    float probeColour[3] = {0, 0, 0};
+    bool crack = false;   // the crack texture's alpha is full and its normal flat, and the crack colour is 0.3 grey
+};
+
+struct Pixel { float r, g, b, a; };
+
+class Canopy {
+public:
+    Canopy() {
+        ComPtr<ID3DBlob> vs, err;
+        hr(D3DCompile(kVs, sizeof kVs - 1, "test canopy vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs, &err), "the test vertex shader compiles");
+        hr(rig.dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vsh), "CreateVertexShader");
+        hr(rig.dev->CreatePixelShader(edvr::kCockpitGlassLegacyPsBytecode, sizeof(edvr::kCockpitGlassLegacyPsBytecode), nullptr, &psh), "the production bytecode creates");
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; sd.MaxLOD = D3D11_FLOAT32_MAX;
+        hr(rig.dev->CreateSamplerState(&sd, &s0), "s0");
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        hr(rig.dev->CreateSamplerState(&sd, &s1), "s1");
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        hr(rig.dev->CreateSamplerState(&sd, &s2), "s2");
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 4; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.SampleDesc.Count = 1;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        hr(rig.dev->CreateTexture2D(&td, nullptr, &target), "target");
+        hr(rig.dev->CreateRenderTargetView(target.Get(), nullptr, &rtv), "rtv");
+        td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        hr(rig.dev->CreateTexture2D(&td, nullptr, &staging), "staging");
+        // t6: no crack (all zero). t9: the blemish map's x channel full, y empty.
+        crack = texture1x1(0, 0, 0, 0);
+        crackFull = texture1x1(128, 128, 0, 255);
+        blemish = texture1x1(255, 0, 0, 0);
+    }
+
+    Pixel draw(const Case& c) {
+        // b1: the frame block, 336 registers (the game binds 5,376 bytes; the shader declares 327).
+        std::vector<Float4> frame(336, Float4{{0, 0, 0, 0}});
+        auto setu = [&](int reg, int comp, uint32_t u) { std::memcpy(&frame[reg].v[comp], &u, 4); };
+        frame[56] = {{c.tint, c.alphaMultiplier, 0, 0}};
+        frame[90] = {{0, 1.0f / 256.0f, 256.0f, 0}};
+        frame[227] = {{0, 0, 1.0f, 0}};   // the cluster depth slice: log(z) * 1 + 0, clamped to the one slice
+        setu(228, 0, 1); setu(228, 1, 1); setu(228, 2, 1); setu(228, 3, 16);   // one tile column and row, one slice, 16 px tiles
+        setu(245, 1, c.sunOn ? 1 : 0);
+        setu(253, 1, 0); setu(253, 2, 1024);   // probe volumes at byte 0 of t2, their headers at byte 1024
+        frame[261] = {{0.2f, 0.001f, 0, 0}};   // the moment shadow's light-bleed cutoff and bias
+        frame[277] = {{1, 0, 0, 0}}; frame[278] = {{0, 1, 0, 0}}; frame[279] = {{0, 0, 1, 0}};   // the camera basis: identity, so lighting space is view space
+        frame[297] = {{4, 4, 0.25f, 0.25f}};
+        frame[298] = {{1, 0, 0, 0}}; frame[299] = {{0, 1, 0, 0}}; frame[300] = {{0, 0, 1, 0}}; frame[301] = {{0, 0, 0, 0}};
+        frame[302] = {{1, 1, 0.1f, 0}};   // cascade 0: clip = (x, y, z / 10)
+        frame[310] = {{0, 0, 0, 0}};
+        frame[318] = {{0.5f, 0.5f, 0.5f, 0.5f}};
+        setu(326, 0, static_cast<uint32_t>(c.cascades));
+        frame[326].v[1] = 0.0f; frame[326].v[2] = 0.0f; frame[326].v[3] = 0.0f;
+        std::vector<Float4> material(18, Float4{{0, 0, 0, 0}});
+        material[7] = {{0, 0, 1.0f, 0}};   // the crack's occlusion scale
+        material[8] = {{0, 0.3f, 0.3f, 0.3f}};   // the crack colour
+        material[11] = {{c.dirtColour[0], c.dirtColour[1], c.dirtColour[2], 0}};
+        material[13] = {{0, 0, 0, 0}};
+        material[15] = {{1, 1, 0, 0}};
+        material[17] = {{0, 0, 0.5f, c.k}};   // crack threshold 0.5, the layer mask cutoff k
+        // t0: the cluster record 0 (count at +28, probe list at +2212), t1: the sun, t2: the probe volume and header.
+        std::vector<uint32_t> lists(4096 / 4, 0), sun(48 / 4, 0), records(2048 / 4, 0);
+        if (c.probe) {
+            lists[28 / 4] = 1;
+            lists[2212 / 4] = 0;   // probe id 0
+            const float centre[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 4; ++i) std::memcpy(&records[(80 + 4 * i) / 4], &centre[i], 4);
+            const float axes[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+            for (int a = 0; a < 3; ++a)
+                for (int i = 0; i < 4; ++i) std::memcpy(&records[(112 + 16 * a + 4 * i) / 4], &axes[a][i], 4);
+            const float intensity = 1.0f;
+            std::memcpy(&records[(1024 + 4) / 4], &intensity, 4);   // header: slice 0, intensity 1, blend 0, type 0 (a global probe)
+        }
+        std::memcpy(&sun[0], c.sunColour, 12);
+        std::memcpy(&sun[4], c.sunDir, 12);
+        ComPtr<ID3D11Buffer> cb1 = constantBuffer(frame.data(), 16 * 336), cb2 = constantBuffer(material.data(), 16 * 18);
+        Float4 vsv[5] = {{{c.masks[0], c.masks[1], c.masks[2], 0}}, {{c.normal[0], c.normal[1], c.normal[2], 0}}, {{c.position[0], c.position[1], c.position[2], 0}},
+                         {{c.tangent[0], c.tangent[1], c.tangent[2], 0}}, {{0.5f, 0.5f, 0, 0}}};
+        ComPtr<ID3D11Buffer> vcb = constantBuffer(vsv, sizeof vsv);
+        ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 4096), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 2048);
+        ComPtr<ID3D11ShaderResourceView> t3 = cubeArray(c.probeColour), t5 = moments(c.occluder);
+        auto* ctx = rig.ctx.Get();
+        const float clear[4] = {-1, -1, -1, -1};
+        ctx->ClearRenderTargetView(rtv.Get(), clear);
+        ID3D11RenderTargetView* rtvs[1] = {rtv.Get()};
+        ctx->OMSetRenderTargets(1, rtvs, nullptr);
+        D3D11_VIEWPORT vp{0, 0, 4, 4, 0, 1};
+        ctx->RSSetViewports(1, &vp);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(vsh.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, vcb.GetAddressOf());
+        ctx->PSSetShader(psh.Get(), nullptr, 0);
+        ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
+        ctx->PSSetConstantBuffers(1, 2, cbs);
+        ID3D11ShaderResourceView* srvs[10] = {t0.Get(), t1.Get(), t2.Get(), t3.Get(), nullptr, t5.Get(), c.crack ? crackFull.Get() : crack.Get(), nullptr, nullptr, blemish.Get()};
+        ctx->PSSetShaderResources(0, 10, srvs);
+        ID3D11SamplerState* smp[3] = {s0.Get(), s1.Get(), s2.Get()};
+        ctx->PSSetSamplers(0, 3, smp);
+        ctx->Draw(3, 0);
+        ctx->CopyResource(staging.Get(), target.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        hr(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m), "Map");
+        const uint16_t* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(m.pData) + 2 * m.RowPitch);
+        Pixel p{halfToFloat(row[8]), halfToFloat(row[9]), halfToFloat(row[10]), halfToFloat(row[11])};
+        ctx->Unmap(staging.Get(), 0);
+        ID3D11ShaderResourceView* none[10] = {};
+        ctx->PSSetShaderResources(0, 10, none);
+        return p;
+    }
+
+    Rig rig;
+
+private:
+    ComPtr<ID3D11VertexShader> vsh;
+    ComPtr<ID3D11PixelShader> psh;
+    ComPtr<ID3D11SamplerState> s0, s1, s2;
+    ComPtr<ID3D11Texture2D> target, staging;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11ShaderResourceView> crack, crackFull, blemish;
+
+    ComPtr<ID3D11Buffer> constantBuffer(const void* data, UINT bytes) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = bytes; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA init{data, 0, 0};
+        ComPtr<ID3D11Buffer> b;
+        hr(rig.dev->CreateBuffer(&bd, &init, &b), "constant buffer");
+        return b;
+    }
+    ComPtr<ID3D11ShaderResourceView> rawView(const void* data, UINT bytes) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = bytes; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE; bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA init{data, 0, 0};
+        ComPtr<ID3D11Buffer> b;
+        hr(rig.dev->CreateBuffer(&bd, &init, &b), "raw buffer");
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_TYPELESS; sv.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+        sv.BufferEx.FirstElement = 0; sv.BufferEx.NumElements = bytes / 4; sv.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr(rig.dev->CreateShaderResourceView(b.Get(), &sv, &v), "raw view");
+        return v;
+    }
+    ComPtr<ID3D11ShaderResourceView> texture1x1(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 1; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const uint8_t px[4] = {r, g, b, a};
+        D3D11_SUBRESOURCE_DATA init{px, 4, 4};
+        ComPtr<ID3D11Texture2D> t;
+        hr(rig.dev->CreateTexture2D(&td, &init, &t), "1x1 texture");
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr(rig.dev->CreateShaderResourceView(t.Get(), nullptr, &v), "1x1 view");
+        return v;
+    }
+    ComPtr<ID3D11ShaderResourceView> cubeArray(const float rgb[3]) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 2; td.MipLevels = 1; td.ArraySize = 6; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.SampleDesc.Count = 1;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE; td.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+        uint16_t texel[4] = {floatToHalf(rgb[0]), floatToHalf(rgb[1]), floatToHalf(rgb[2]), floatToHalf(1.0f)};
+        uint16_t face[4 * 4];
+        for (int i = 0; i < 4; ++i) std::memcpy(face + 4 * i, texel, 8);
+        D3D11_SUBRESOURCE_DATA init[6];
+        for (auto& i : init) i = {face, 16, 0};
+        ComPtr<ID3D11Texture2D> t;
+        hr(rig.dev->CreateTexture2D(&td, init, &t), "cube");
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = td.Format; sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+        sv.TextureCubeArray.MipLevels = 1; sv.TextureCubeArray.NumCubes = 1;
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr(rig.dev->CreateShaderResourceView(t.Get(), &sv, &v), "cube view");
+        return v;
+    }
+    // A 4x4 moment map (float32 here; the game's is 16 bits a channel) holding one occluder at depth z in the shader's space. The shader decodes q = M (b - offset); this stores b = M^-1 m + offset for m = (z, z^2, z^3, z^4).
+    ComPtr<ID3D11ShaderResourceView> moments(float z) {
+        static const double M[4][4] = {{0.222774, 0.077197, 0.792699, 0.031942}, {0.154968, 0.139463, 0.796342, -0.172282},
+                                       {0.145199, 0.212020, 0.725869, -0.275801}, {0.163127, 0.259143, 0.653909, -0.337613}};
+        double a[4][8];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 8; ++j) a[i][j] = j < 4 ? M[i][j] : (j - 4 == i ? 1.0 : 0.0);
+        for (int c = 0; c < 4; ++c) {
+            int p = c;
+            for (int r = c + 1; r < 4; ++r) if (std::fabs(a[r][c]) > std::fabs(a[p][c])) p = r;
+            for (int j = 0; j < 8; ++j) std::swap(a[c][j], a[p][j]);
+            const double d = a[c][c];
+            for (int j = 0; j < 8; ++j) a[c][j] /= d;
+            for (int r = 0; r < 4; ++r) {
+                if (r == c) continue;
+                const double f = a[r][c];
+                for (int j = 0; j < 8; ++j) a[r][j] -= f * a[c][j];
+            }
+        }
+        const double m[4] = {z, double(z) * z, double(z) * z * z, double(z) * z * z * z};
+        float texel[4];
+        for (int i = 0; i < 4; ++i) {
+            double b = 0;
+            for (int j = 0; j < 4; ++j) b += a[i][4 + j] * m[j];
+            if (i == 0) b += 0.035956;
+            texel[i] = static_cast<float>(b);
+        }
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 4; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<float> data(16 * 4);
+        for (int i = 0; i < 16; ++i) std::memcpy(&data[4 * i], texel, 16);
+        D3D11_SUBRESOURCE_DATA init{data.data(), 4 * 16, 0};
+        ComPtr<ID3D11Texture2D> t;
+        hr(rig.dev->CreateTexture2D(&td, &init, &t), "moment map");
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr(rig.dev->CreateShaderResourceView(t.Get(), nullptr, &v), "moment view");
+        return v;
+    }
+};
+
+static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-4f; }
+
+// The legacy model on the live shader's no-crack lit normal, for a vertex normal (0,0,1) and tangent (1,0,0) in a view basis that is the identity.
+static float expectedNdl(const Case& c) {
+    // N = (0,0,1), T = (1,0,0), B = N x T = (0,1,0). Weights (0.5, 0.5, 1): nIn = 0.5 T - 0.5 N + 1 B.
+    const float n[3] = {0.5f, 1.0f, -0.5f};
+    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    const float dot = -(n[0] * c.sunDir[0] + n[1] * c.sunDir[1] + n[2] * c.sunDir[2]) / len;
+    return dot < 0 ? 0 : (dot > 1 ? 1 : dot);
+}
+
+static void testShader() {
+    Canopy canopy;
+    Case none;   // no mask at all
+    const Pixel zero = canopy.draw(none);
+    check(zero.r == 0 && zero.g == 0 && zero.b == 0 && zero.a == 0, "no coverage draws transparent black (the early out)");
+
+    // Dirt under the sun. masks.y = 0.2 of the blemish map's full x channel with k = 1 is a coverage of 0.2.
+    Case dirt;
+    dirt.masks[1] = 0.2f; dirt.k = 0.0f;
+    dirt.sunColour[0] = dirt.sunColour[1] = dirt.sunColour[2] = 1000.0f;
+    dirt.sunDir[2] = 1.0f;   // the light travels along +z, so its direction toward the light is -z
+    dirt.sunDir[1] = -0.5f; dirt.sunDir[2] = 1.0f;
+    const Pixel d = canopy.draw(dirt);
+    const float cover = 0.2f;   // k = 1 - saturate(0 * 1.0526) = 1; coverage = 1 * 0.2
+    const float ndl = expectedNdl(dirt);
+    const float radiance = ndl * 1000.0f * (cover * 1.0f * 0.5f);
+    const float want = radiance / cover / 256.0f;
+    std::printf("dirt under the sun: got (%g %g %g %g), wanted rgb %g alpha %g\n", d.r, d.g, d.b, d.a, want, cover);
+    check(closeTo(d.a, cover, 0.01f), "dirt alpha is its coverage");
+    check(closeTo(d.r, want, 0.02f) && closeTo(d.g, want, 0.02f) && closeTo(d.b, want, 0.02f), "dirt under the sun is Lambert on the lit normal, divided by the alpha, scaled by the HDR write scale");
+
+    // The same with a cascade whose moment map holds an occluder in front of the pixel (shadowed) and one behind it (lit).
+    Case shadowed = dirt;
+    shadowed.cascades = 1;
+    shadowed.position[0] = shadowed.position[1] = 0.1f; shadowed.position[2] = 5.0f;   // clip = (0.1, 0.1, 0.5): inside the cascade, zf = 0.5
+    shadowed.occluder = 0.1f;
+    const Pixel s = canopy.draw(shadowed);
+    Case lit = shadowed;
+    lit.occluder = 0.9f;
+    const Pixel l = canopy.draw(lit);
+    Case cascadeless = dirt;
+    cascadeless.position[0] = cascadeless.position[1] = 0.1f;
+    const Pixel c0 = canopy.draw(cascadeless);
+    std::printf("shadow: unshadowed %g, occluder near the light %g, occluder behind the pixel %g\n", c0.r, s.r, l.r);
+    check(std::isfinite(s.r) && std::isfinite(l.r), "the shadow solve is finite");
+    check(s.r < 0.1f * c0.r, "an occluder between the light and the pixel darkens the dirt");
+    check(closeTo(l.r, c0.r, 0.02f), "an occluder behind the pixel leaves the dirt as lit as no cascade");
+
+    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = 0.25 * the read scale 256, the albedo 0.2 * 0.5.
+    Case hangar = dirt;
+    hangar.sunColour[0] = hangar.sunColour[1] = hangar.sunColour[2] = 1e-13f;
+    hangar.probe = true;
+    hangar.probeColour[0] = hangar.probeColour[1] = hangar.probeColour[2] = 0.25f;
+    const Pixel h = canopy.draw(hangar);
+    const float hangarWant = (0.25f * 256.0f) * (cover * 0.5f) / cover / 256.0f;
+    std::printf("hangar: got (%g %g %g %g), wanted rgb %g\n", h.r, h.g, h.b, h.a, hangarWant);
+    check(closeTo(h.r, hangarWant, 0.03f) && closeTo(h.a, cover, 0.01f), "a hangar canopy is lit by the probe's cube alone, through the cluster lists and the probe records");
+    Case dark = hangar;
+    dark.probe = false;
+    const Pixel k = canopy.draw(dark);
+    check(k.r == 0 && k.g == 0 && k.b == 0 && std::isfinite(k.a) && closeTo(k.a, cover, 0.01f), "with the sun off and no probe the dirt is dark and finite, still covering");
+
+    // A crack: the vertex mask past its threshold and the crack texture's alpha full. The lit normal is the crack's (flat here, so the inward vertex normal),
+    // alpha 1, the crack colour 0.3 lit by the whole sun.
+    Case crack = dirt;
+    crack.masks[0] = 1.0f; crack.masks[1] = 0.0f;
+    crack.crack = true;
+    crack.sunDir[0] = 0.0f; crack.sunDir[1] = 0.0f; crack.sunDir[2] = 1.0f;
+    const Pixel cr = canopy.draw(crack);
+    std::printf("crack under the sun: got (%g %g %g %g), wanted rgb %g\n", cr.r, cr.g, cr.b, cr.a, 300.0f / 256.0f);
+    check(closeTo(cr.a, 1.0f, 0.01f) && closeTo(cr.r, 300.0f / 256.0f, 0.02f), "a crack is opaque, in the crack colour, lit by the sun on the crack's normal");
+    // The glare lobe: the light straight behind the view axis' far side (toward the light is +z, the pixel is straight ahead), so dot(L, V) is 1 and the lobe is
+    // (64 + 6) / 32; the crack's normal faces the light's far side, so the Lambert term is 0 and the glare is the whole of it.
+    Case glare = crack;
+    glare.sunDir[2] = -1.0f;
+    const Pixel g = canopy.draw(glare);
+    std::printf("glare in a crack: got (%g %g %g %g), wanted rgb %g\n", g.r, g.g, g.b, g.a, 1000.0f * 70.0f / 32.0f / 256.0f);
+    check(closeTo(g.r, 1000.0f * 70.0f / 32.0f / 256.0f, 0.02f), "the glare lobe is normal-independent: (gloss + 6) / 32 toward the light, at the crack's gloss of 64");
+    // The tint alpha adds to the coverage: 0.2 + 0.5 * (1 - 0.2), and the colour is divided by the alpha written.
+    Case tinted = dirt;
+    tinted.tint = 0.5f;
+    const Pixel ti = canopy.draw(tinted);
+    check(closeTo(ti.a, 0.6f, 0.01f) && closeTo(ti.r, ndl * 1000.0f * 0.1f / 0.6f / 256.0f, 0.02f), "the tint alpha adds to the coverage and the colour is divided by the alpha written");
+
+    const unsigned problems = canopy.rig.problems();
+    std::printf("D3D debug layer: %s\n", canopy.rig.debugLayer ? "on" : "not installed here (the signature check in temporal_shader_build still holds the link)");
+    check(problems == 0, "the debug layer reports nothing: the draw links with the game's canopy vertex shader's outputs");
+}
+
+int main() {
+    testCore();
+    testShader();
+    std::printf("cockpit glass test: %s\n", g_failures ? "FAILED" : "passed");
+    return g_failures ? 1 : 0;
+}

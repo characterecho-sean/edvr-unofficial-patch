@@ -2,58 +2,39 @@
 
 ## Status
 
-State 2026-11-03: **OFFLINE ANALYSIS DONE; CAPTURE PROBE FLOWN, ALL ANSWERED.** The ask (Sean,
-2026-11-03): port the legacy client's cockpit glass shader and offer it as a
-Visual-tab option in both flat and VR. Branch
-`claude/cockpit-glass-shader-port-1852e3`.
+State 2026-11-03: **BUILT, NOT FLOWN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
+unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
+own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
+quality-3 canopy shader `4E4FF61E8A08FC7E`, at bind time. What was built, the constants chosen and what the
+flight must check: section 8.
 
 Settled offline (sections 1 to 3):
 
-- Both builds' glass shaders are in `Win64\EffectsBinary\*.arc`, which
-  `tools\effects_arc.py` now reads. Legacy (Horizons 3.8, build 312425):
-  effect `CockpitGlassEffects3`. Live: effect `CockpitGlass_Forward`.
-  CONFIRMED that it is the canopy: its VS is byte-identical to
-  `8C091FFD08644E02`, the canopy VS EDVR logs (`kHoloCanopy`). The flight
-  dump also holds its PS `4E4FF61E8A08FC7E` (state 0, quality 3).
-- **The legacy shader cannot be dropped in.** Legacy is a small `ps_4_1`
-  that reads one per-draw cb0. Live reads the frame block CB1 (333
-  registers, dynamically indexed), a material block CB2, raw light
-  buffers, a reflection-probe cube array and a moment shadow map. The VS
-  outputs differ too. A port is a new EDVR pixel shader that works the
-  legacy lighting out from live's own bindings (section 4).
-- EDVR's shader hash (`src\common\log.cpp`) uses offset basis
-  1469598103934665603, not the standard FNV basis. That is why
-  `fss-scanner.md` and `bloom-artifact-2026-10-20.md` found nothing in
-  these archives. Their "no DXBC offline" conclusion is withdrawn.
+- Both builds' glass shaders are in `Win64\EffectsBinary\*.arc`, which `tools\effects_arc.py` reads. Legacy
+  (Horizons 3.8, build 312425): effect `CockpitGlassEffects3`. Live: effect `CockpitGlass_Forward`.
+  CONFIRMED that it is the canopy: its VS is byte-identical to `8C091FFD08644E02`, the canopy VS EDVR logs.
+- **The legacy shader cannot be dropped in** (cb0 against CB1/CB2, other slots, other VS outputs), so the port
+  is a new EDVR pixel shader that works the legacy lighting out from live's own bindings (section 4).
+- EDVR's shader hash (`src\common\log.cpp`) uses offset basis 1469598103934665603, not the standard FNV basis.
+  That is why `fss-scanner.md` and `bloom-artifact-2026-10-20.md` found nothing in these archives.
 
-Probe FLOWN 2026-11-03 (Steam, flat, docked and in sunlight; section 7).
-It answered C1 to C6. What it changes: only intact q3 draws; blend is
-straight alpha; t1 holds one light, direction in view space; docked, the
-sun is off and CB1[257] ambient is 0 everywhere, so a legacy model on t1
-alone leaves the canopy unlit in a hangar and the port must read the
-probes. Live's dirt on this ship: a constant warm grey at 7.5% of its mask.
+Probe FLOWN 2026-11-03 (Steam, flat; section 7): only the intact q3 canopy draws; blend is straight alpha;
+t1 holds one light, direction in view space; docked, the sun is off and CB1[257] ambient is 0 everywhere.
 
-Decisions for Sean (section 6):
+Decisions (Sean, 2026-11-03), all applied in section 8: an approximation of the legacy look is accepted; key
+`visual.cockpit_glass = odyssey | legacy`; the intact canopy only, ice and condensation stay stock; live's
+constant dirt colour stands in for the legacy RGB dirt texture (no legacy-client capture needed); the canopy
+keeps live's reflection-probe lighting as its ambient, so it stays lit in a hangar.
 
-- Is an approximation of the legacy look acceptable? Live has no RGB dirt
-  texture, and live's shadow map is a moment map, not depth.
-- Key name and values.
-- Whether ice and condensation stay stock in the first version.
-- Legacy RGB dirt (item 4): live side measured; the legacy side needs a
-  legacy-client capture.
+Open: the flight (section 8); whether live's no-crack normal weights (0.5, 0.5, 1.0) are a game quirk worth
+correcting (section 8, finding 2); the tuned constants (section 8).
 
-Next: no flight. The decisions above, then the replacement shader.
+Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
+`:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
 
-Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`,
-`tools\cockpit_glass_probe_test`, the `:rig_cockpit_glass_probe_test`
-rig, its flat allow-list line). Remove all of it when the shader is
-written.
-
-Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt`
-(312425) and `..._live.txt` (334925), filed 2026-11-03. They hold the
-permutation tables, the cb0 layout and the legacy PS written out.
-`..._live_mapping.txt` holds the legacy-to-live input table; the decode
-scripts are `..._*.py` beside them (scratch, not runnable as filed).
+Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt` (312425) and `..._live.txt` (334925),
+filed 2026-11-03: permutation tables, the cb0 layout, the legacy PS written out. `..._live_mapping.txt` holds
+the legacy-to-live input table.
 
 Ruled out: see the end of this doc.
 
@@ -274,6 +255,84 @@ What this changes in section 4: the replacement needs the probes (t0,
 t2, t3) for ambient and for any light in a hangar, one directional
 light, and output written for a straight-alpha blend. Only the q3
 intact variant is needed on this rig.
+
+## 8. The replacement shader (built 2026-11-03, not flown)
+
+**Built.** `src\d3d11\cockpit_glass_shader.h` (the HLSL), `cockpit_glass_core.h` (the key, the swap rule, the
+live signature table, the log wording), `cockpit_glass.{h,cpp}` (the swap and the 30 s window), a hook in
+`hookedPSSetShader` (`vscreen.cpp`) and a tick at the frame boundary. The HLSL is compiled by
+`tools\temporal_shader_build` into `kCockpitGlassLegacyPsBytecode` (optimization level 3; the build's self-test
+holds its input signature to the game's, element for element, and its bindings to b1, b2, t0 to t3, t5, t6, t9,
+s0 to s2) and created with `shaderSwapCreatePs`; null means draw stock. `:rig_cockpit_glass_test` runs the
+bytecode on WARP with the debug layer on (it draws with a vertex shader carrying the game's canopy outputs, so the
+link is the game's; no layer message): no coverage is transparent, and dirt under the sun, a cascade's shadow, a
+hangar lit by one probe, a lit crack, the glare lobe and the tint alpha each match the legacy model worked out in
+C++ to half-float precision (the dirt case 1.594 against 1.595). The key is in `edvr.ini` `[visual]`, the flat allow-list, the flat
+Visual tab and the headset menu's Visual page.
+
+**The swap.** With the key `legacy`, a PS bind whose hash is `4E4FF61E8A08FC7E` is handed the replacement; the
+binding shadow still records the game's shader and hash, so the census and the probe see the game's. Any other
+bind, and every bind under `odyssey`, goes through unchanged (one load of a flag, then one hash compare).
+The key is read on each config generation, so it switches live; the next canopy bind takes effect.
+
+**What the shader takes from live, as it is** (from the disassembly): the tangent frame and the face flag, the
+crack and blemish masks and their scales, the crack normal and the lit normal N_in, the moment shadow resolve
+(cascade selection, the two-slot blend, the B-spline filter from four bilinear taps, the Hamburger solve and the
+light-bleed cutoff), the probe lookup (cluster from tile and depth, the probe weights by volume type, the sum to
+weight 1), the HDR write scale. **What it takes from legacy:** Lambert times shadow on the one directional
+light, the normal-independent glare lobe `pow(saturate(L . V), gloss) * (gloss + 6) / 32`, an ambient term in
+the albedo's lighting, and the colour arithmetic (the dirt colour weighted by the dirt coverage, crack colour in
+a crack). Ambient comes from the probes, sampled once at mip 7 along N_in, not from legacy's VS cube.
+
+**The blend.** Straight alpha, so the colour written is the coverage-weighted legacy colour divided by the alpha
+written; the blend then applies coverage once. Alpha is the legacy formula (crack term, scaled, plus the tint
+alpha) plus the dirt and imperfection coverage. Legacy alpha ignored those two (its blend took the colour as
+it was), and under straight alpha that would hide the dirt entirely. Below an alpha of 1/1024 the shader returns
+transparent black without lighting.
+
+**Constants chosen, not measured** (the legacy client's values were not recoverable from its archive, which
+holds the shaders and not the materials' cb0 values):
+
+| Constant | Value | Why |
+|---|---|---|
+| imperfection glare strength | 1.0 | legacy's `cb0[39].x`; unity as the neutral start |
+| imperfection gloss exponent | 24 | a broad smudge, about 12 degrees wide |
+| crack glare strength | 1.0, times the frame's alpha multiplier | legacy's `cb0[38].y * AlphaMultiplier` |
+| crack gloss exponent | 64 | a tighter glint than a smudge; legacy has `cb0[38].z` |
+| ambient scale | 1.0 | the probe cube in the light's own HDR units (times CB1[90].z) |
+| ambient mip | 7 | the roughest mip live samples (`sqrt(roughness) * 8`, capped at 7) |
+| probe cap | 16 | live stops when the weights reach 1; this bounds a cluster that never does |
+
+**Findings while porting** (all from the live disassembly, none flown):
+
+1. **Live runs the probe loop only in cracks.** The whole probe block sits under a flag that is the crack mask
+   times a crack-id difference, so on an intact canopy live lights the glass by the sun's GGX alone and the
+   probes are not read. The legacy ambient from the probes is therefore new work on the intact glass, not
+   work live already does there; the cost is one cluster lookup and one probe sample (a few probes in a
+   cluster at most) per covered pixel, and the shader skips pixels below the 1/1024 alpha.
+2. **Live's no-crack normal weights are (0.5, 0.5, 1.0)** on (tangent, normal, bitangent), not (0, 1, 0): the
+   lerp between "no crack" and the crack normal starts from the flat normal map's encoded value. So the intact
+   glass is lit by a normal tilted about 66 degrees off the surface normal. Ported as it is, as asked. If a
+   flight shows the lighting depending oddly on which way the tangent runs, this is the first place to look:
+   the constant is one vector in `main` (`float3(0.5, 0.5, 1.0)`).
+3. **The blemish map's channels:** x is the dirt (times the dirt vertex mask, `masks.y`), y the imperfection
+   (times `masks.z`). The decode note's "x with `v0.z`" has them the other way round; the instruction order in
+   the PS (the `mul_sat` swizzle `v0.zzzy`, then the dirt roughness on the x-derived term) gives this.
+4. Legacy's second directional light has no source in live (t1 holds one light), so the port has one.
+
+**What the flight must check** (flat first, Steam; then the headset):
+
+- `python tools\edvr_log.py --target steam --expect-build HEAD --version`: the right build.
+- With the key `legacy`: `cockpit glass: legacy on`, then once `cockpit glass: replacement pixel shader ready`
+  (and the shader-swap line `cockpit glass: precompiled pixel shader cockpit_glass_legacy_ps created`), then every
+  30 s `cockpit glass: window 30 s legacy binds=N canopy-seen=M replacement=ready` with N equal to M and both
+  about 3,000 on this rig. `binds=0 canopy-seen>0 replacement=refused` is a replacement that did not create;
+  `binds=0 canopy-seen=0` is a canopy the game never drew with that shader; no window line at all means the key
+  was never read.
+- The picture, docked in a hangar, then in space in sunlight, then the headset: the canopy is lit in the hangar
+  (the probe ambient), glares toward the sun, shows the dirt at the amounts live gives it, and nothing flickers
+  between the eyes. Compare with `odyssey` on the same ship. Then the draw cost at the same spot.
+- Switching the key in the F8 menu while in the cockpit takes effect within a few frames, both ways.
 
 ## Ruled out
 

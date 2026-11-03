@@ -72,6 +72,7 @@
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
 #include "cockpit_glass_probe.h"   // TEMPORARY: the canopy draw's state and constants, for the legacy-glass port
+#include "cockpit_glass.h"         // visual.cockpit_glass: the legacy canopy shader, handed to the real PSSetShader at bind time
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
 #include "srv_turret.h"         // issue 140: the SRV turret view's HUD, a private geometry-shader pass bound around every issue of the HUD families' draws
@@ -3327,6 +3328,9 @@ void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelS
         if (h) engineVelocityNoteSelfMarkingPs(h);   // the seam arc's bind census (engine_velocity.cpp)
         ++g_state->psSets;
         if (ps && !h) ++g_state->psSetsNoHash;
+        // visual.cockpit_glass = legacy (cockpit_glass.h): the canopy's pixel shader is swapped for EDVR's here, after the binding shadow took the game's own
+        // (the census and the glass probe see what the game bound). Odyssey, the default, is this one load.
+        if (cockpitGlassLegacyLive()) ps = cockpitGlassPsFor(self, ps, h);
     }
     g_state->realPSSetShader(self, ps, ci, n);
 }
@@ -6419,6 +6423,7 @@ EDVR_BOUNDARY_TICK(tkScreenMotion, "screen_motion");
 EDVR_BOUNDARY_TICK(tkEngineVelocity, "engine_velocity");
 EDVR_BOUNDARY_TICK(tkCelestialMotion, "celestial_motion");
 EDVR_BOUNDARY_TICK(tkCockpitGlassProbe, "cockpit_glass_probe");
+EDVR_BOUNDARY_TICK(tkCockpitGlass, "cockpit_glass");
 EDVR_BOUNDARY_TICK(tkSharpenTick, "sharpen_tick");
 EDVR_BOUNDARY_TICK(tkTemporalTick, "temporal_tick");
 EDVR_BOUNDARY_TICK(tkTemporalBoundary, "temporal_boundary");
@@ -6508,6 +6513,8 @@ void vScreenFrameBoundary() {
         tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
         // TEMPORARY (cockpit_glass_probe.h): the key (live), a pending readback, the 30 s window line. Off, a generation compare.
         tkCockpitGlassProbe.run([&] { cockpitGlassProbeFrameBoundary(g_state->ownerCtx); });
+        // visual.cockpit_glass (cockpit_glass.h): the key (live) and, while it is legacy, the 30 s window line. Odyssey, a generation compare.
+        tkCockpitGlass.run([&] { cockpitGlassFrameBoundary(); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });

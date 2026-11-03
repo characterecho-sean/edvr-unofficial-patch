@@ -119,6 +119,8 @@ struct LegacyContract {
 #include "fixed_desktop_window_variants.h"
 #include "fixed_scope_zoom_variants.h"
 #include "fixed_srv_turret_variants.h"
+#include "fixed_cockpit_glass_variants.h"
+#include "../../src/d3d11/cockpit_glass_core.h"   // the game canopy shader's input signature, which the replacement must carry
 #include "../../src/d3d11/srv_turret_math.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
@@ -349,6 +351,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), scopeZoom.begin(), scopeZoom.end());
     const auto srvTurret = srvTurretHudVariants();
     variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());
+    const auto cockpitGlass = cockpitGlassVariants();
+    variants.insert(variants.end(), cockpitGlass.begin(), cockpitGlass.end());
     return variants;
 }
 
@@ -634,8 +638,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 88 && coreLegacy.size() + 41 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's nine geometry shaders are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 89 && coreLegacy.size() + 42 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's nine geometry shaders and the legacy cockpit glass's pixel shader are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1259,6 +1263,59 @@ static void selfTest() {
                           "...signature H's GameVS is the draw's vertex constants at b1, 280 registers, so rows 277 to 279 are in range");
                 }
             }
+        }
+    }
+
+    // visual.cockpit_glass = legacy's canopy pixel shader (src/d3d11/cockpit_glass_shader.h; src/d3d11/cockpit_glass.cpp; docs\cockpit-glass-legacy-port.md): new, held to its own
+    // contract -- the symbol, source name, entry, profile and flags, the text it compiles -- and to what it must be to take the game's canopy shader's place: the game's own input
+    // signature element for element and register for register (cockpit_glass_core.h kLiveInputs, read from the game's disassembly), so it links with the game's canopy vertex
+    // shader; the frame block at b1 (327 registers) and the material block at b2 (18), the same bind points; the textures at the game's slots (t0 to t3, t5, t6 and t9) and the
+    // samplers at s0 to s2; and no other constant buffer, texture or sampler.
+    {
+        auto& shader = coreFixed[coreLegacy.size() + 41];
+        check(!std::strcmp(shader.symbol, "kCockpitGlassLegacyPsBytecode") && !std::strcmp(shader.sourceName, "cockpit_glass_legacy_ps") &&
+              !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "ps_5_0") && shader.alternate == edvr::kCockpitGlassLegacyPsHlsl &&
+              shader.macros == nullptr && shader.flags1 == D3DCOMPILE_OPTIMIZATION_LEVEL3 && !shader.flags2,
+              "the legacy cockpit glass shader has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+              "the legacy cockpit glass shader compiles to fixed DXBC");
+        if (reflect && !shader.bytes.empty()) {
+            namespace cg = edvr::cockpit_glass;
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+            bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_PIXEL_SHADER &&
+                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5;
+            check(ok, "the legacy cockpit glass shader reflects as a Shader Model 5 pixel shader");
+            bool signature = ok && desc.InputParameters == cg::kLiveInputCount && desc.OutputParameters == 1;
+            for (UINT e = 0; signature && e < cg::kLiveInputCount; ++e) {
+                D3D11_SIGNATURE_PARAMETER_DESC in{};
+                const cg::InputElement& want = cg::kLiveInputs[e];
+                signature = SUCCEEDED(reflection->GetInputParameterDesc(e, &in)) && !_stricmp(in.SemanticName, want.name) && in.SemanticIndex == want.index &&
+                            in.Register == want.reg && in.Mask == want.mask &&
+                            in.ComponentType == (want.isUint ? D3D_REGISTER_COMPONENT_UINT32 : D3D_REGISTER_COMPONENT_FLOAT32) &&
+                            (want.isPosition ? in.SystemValueType == D3D_NAME_POSITION : in.SystemValueType == D3D_NAME_UNDEFINED);
+            }
+            check(signature, "the legacy cockpit glass shader's inputs are the game's canopy pixel shader's, element for element and register for register, so it links with the game's canopy vertex shader");
+            D3D11_SHADER_INPUT_BIND_DESC bind{};
+            D3D11_SHADER_BUFFER_DESC frame{}, material{};
+            ID3D11ShaderReflectionConstantBuffer* frameBuffer = ok ? reflection->GetConstantBufferByName("Frame") : nullptr;
+            ID3D11ShaderReflectionConstantBuffer* materialBuffer = ok ? reflection->GetConstantBufferByName("Material") : nullptr;
+            bool bindings = ok && desc.ConstantBuffers == 2 && desc.BoundResources == 12 &&
+                            frameBuffer && SUCCEEDED(frameBuffer->GetDesc(&frame)) && frame.Size == 16u * cg::kFrameRegisters &&
+                            materialBuffer && SUCCEEDED(materialBuffer->GetDesc(&material)) && material.Size == 16u * cg::kMaterialRegisters &&
+                            SUCCEEDED(reflection->GetResourceBindingDescByName("Frame", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 1 &&
+                            SUCCEEDED(reflection->GetResourceBindingDescByName("Material", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 2;
+            struct Slot { const char* name; D3D_SHADER_INPUT_TYPE type; UINT point; };
+            static const Slot slots[] = {
+                {"ClusterLists", D3D_SIT_BYTEADDRESS, 0}, {"SunLight", D3D_SIT_BYTEADDRESS, 1}, {"ProbeRecords", D3D_SIT_BYTEADDRESS, 2}, {"Probes", D3D_SIT_TEXTURE, 3},
+                {"ShadowMoments", D3D_SIT_TEXTURE, 5}, {"CrackNormalAlpha", D3D_SIT_TEXTURE, 6}, {"Blemish", D3D_SIT_TEXTURE, 9},
+                {"QualitySampler", D3D_SIT_SAMPLER, 0}, {"ClampSampler", D3D_SIT_SAMPLER, 1}, {"EnvSampler", D3D_SIT_SAMPLER, 2},
+            };
+            for (const Slot& slot : slots)
+                bindings = bindings && SUCCEEDED(reflection->GetResourceBindingDescByName(slot.name, &bind)) && bind.Type == slot.type && bind.BindPoint == slot.point &&
+                           bind.BindCount == 1;
+            check(bindings, "the legacy cockpit glass shader keeps the game's b1 (327 registers) and b2 (18), reads t0 to t3, t5, t6 and t9 and samples with s0 to s2, and binds nothing else");
         }
     }
 

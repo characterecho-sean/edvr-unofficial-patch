@@ -43,7 +43,7 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);
 
-// The Visual tab (2026-10-22): the [visual] options that do something in flat, for every flat user (Fix tier). Both are choices, both live:
+// The Visual tab (2026-10-22): the [visual] options that do something in flat, for every flat user (Fix tier). All are choices, all live:
 //   intro_video  Intro movie  skip, or the game's own movie (flat, 2026-10-14). On the Performance tab until 2026-10-22, as fix.intro_video.
 //                             Its `menu visual` token is the page VR's menu builds too (2026-10-27), so the row is on both Visual pages.
 //   star_glow    Star glow    100 to 400 percent of the halo the game's own bloom draws around a star. Its `menu visual` token (2026-10-27) is the page
@@ -56,6 +56,8 @@ inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlat
 inline constexpr FlatPageRow kFlatVisualRows[] = {
     {"visual", "intro_video", FlatRowRead::Allowlist},
     {"visual", "star_glow",   FlatRowRead::Allowlist},
+    // Cockpit glass (2026-11-03): odyssey (the game's) or the Horizons 3.8 look, both profiles; its `menu visual` token is the page VR's menu builds too.
+    {"visual", "cockpit_glass", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatVisualRowCount = sizeof(kFlatVisualRows) / sizeof(kFlatVisualRows[0]);
 
