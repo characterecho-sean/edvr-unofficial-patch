@@ -20,13 +20,12 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight,
-  systems near and gunner up from 2026-11-03: camera back 80, HUD forward 0, radar
-  forward 0, panels back 0, systems near 80, weapon panel up 10, gunner up 35, cards up 0. Screen limit is game, radar anchor
-  is off, depth is game. `srv_turret_hud_up` raises the weapon panel.
-  `srv_turret_gunner_up` raises the whole gunner frame. `srv_turret_cards_up`
-  raises only the target card and SYSTEMS. The sheet draws the card contents
-  and not the border. The dark cards and the centre reticle stay.
+- **Keys** (`[experimental]`): fifteen. Baked from the 2026-11-02 Frontier flight, systems
+  near and gunner up from 2026-11-03: camera back 80, HUD forward 0, radar forward 0,
+  panels back 0, systems near 80, weapon panel up 10, gunner up 35, cards up 0, screen
+  limit game, radar anchor off, depth game. TEMPORARY, to bake and remove once Sean
+  settles them: `srv_turret_target_card_shift` 7 mm and `srv_turret_systems_card_shift`
+  9 mm (whole mm, 0 to 30, live). The sheet draws the card contents and not the border.
 - **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
   anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
   `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
@@ -39,7 +38,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The thirteen `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The fifteen `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
@@ -58,7 +57,7 @@
 - **Sheet brackets (2026-11-02):** SV_ClipDistance0 cuts the SYSTEMS dash at x 0.53 (flown right)
   and the target card's leaning edge plane at 3 mm (`kBracketCutM`). Sean tuned that dial in flight
   ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
-- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet drawn by vs A888D510, signature K, flown OK; the target card's content shifted 5.3 mm, built, NOT FLOWN).
+- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet drawn by vs A888D510, signature K, flown OK; card content shifts are keys now and the two corner notches are fixed, built, NOT FLOWN).
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1999,3 +1998,12 @@ Sean flew 6a78acfd (the sheet drawn by A888D510 is moved and trimmed) and asked 
 - **Change.** The shared sheet body (I and K) moves the triangles the target side's region test keeps whole by `kTargetCardShiftM` = 5.3 mm along U, which is (+3.95, 0, +3.54) mm in mesh x, y, z, applied in mesh metres as a clip-space delta through the draw's clip rows before the gunner move. The region test and the clip planes read the unshifted position, so the bracket cut travels with the content and the bar stays removed. The systems card, the label row and every vertical position are unchanged. No ini key.
 - **Gate.** `tools\srv_turret_hud_test`: a target-card triangle and a triangle left of the fill (the bar's column) move by the translation plus the shift, a systems-card triangle and a label-row triangle by the translation alone, in both sheet shaders; eight mutants (shift dropped, on the whole sheet, on the systems side, wrong sign, along x alone, 4 mm, clip delta without its depth row, clip planes read after the shift) are caught.
 - **NOT FLOWN:** the next flight is the turret with the target card in view. Look for the dark fill showing about the same on the left and the right of the card's art. If it is still off, the constant is `kTargetCardShiftM`.
+
+### 2026-11-03: both cards' content shifts become keys; the two corner notches (built, not flown)
+
+Sean flew 6fa96705 and sent close screenshots of both cards. Black fill against brown art, row by row: the target (planet) card, with its 5.3 mm already applied, about 820 px wide with 16 px on the left and 23 to 24 px on the right from y 80 to 440, so about +4 px more (+1.6 mm at 0.40 mm a pixel, 6.9 mm in all); the SYSTEMS card, unshifted, about 1090 px wide with 24 px on the left and 82 to 85 px on the right through the header and the three middle panels, so +29.5 px (+9.0 mm at 0.305 mm a pixel). Photos at an angle can put either figure off by 10 to 20%, and the mesh cannot settle it (see the entry before).
+
+- **Keys.** `experimental.srv_turret_target_card_shift` (default 7) and `experimental.srv_turret_systems_card_shift` (default 9): whole millimetres, 0 to 30, live, TEMPORARY. Both are in `edvr.ini` with ui lines, in the settings log line (`target card shift N mm, systems card shift N mm`), in `edvr_log.py`'s parse and in the wiring pins. They reach the sheet shader (I and K) in the Turret constant block's fourth register (`TurretParams::targetShiftM`, `systemsShiftM`, metres; refused outside 0 to 30 mm), which replaces the baked 5.3 mm constant. The target card moves along U = (0.7451, 0, 0.6670), SYSTEMS along its own U = (0.74314, 0, -0.66913) from the top edge of its fill (vs `C4B4B334`, dump `125141609001`); the label row, the cards' fills and every vertical position stay. A triangle moves only when all three vertices are in one card's region; a triangle with a vertex in the label-only strip (y at or below -0.51) belongs to the label row and does not move. The gunner path still declines when systems near and gunner up are both 0. To bake: when Sean settles the values, make them constants in the shader and remove both keys (AGENTS.md "Every key is one a user would set").
+- **The notches are case (a): triangles the sheet shader dropped.** Epic dump `125141609001`, sheet vertices decoded with the shader's own unpack. The header row's tiles lean outward going up, so two vertices lay outside the region bounds. v112 (-0.8330, -0.2460, 0.5741) is the planet icon tile's upper-left vertex, outside x > -0.822; the two triangles holding it, (106, 111, 112) and (112, 113, 106), covered the fill's top-left corner over a 12 by 10 mm area (35 by 24 px in the screenshot) and were dropped, so the black fill showed. v292 (0.7856, -0.2460, 0.6378) is the last SYSTEMS header tile's upper-right vertex, outside x < 0.78; its triangle (293, 292, 296) covers a 10 mm sliver of the fill's top-right corner, and the tile's other triangle (296, 297, 293) stayed, so the diagonal 293 to 296 showed as a chamfer (34 px). Widening the target bound to -0.835 keeps exactly those two triangles and the SYSTEMS bound to 0.79 exactly that one; the next vertices outside (v291 x 0.8370, v298 x 0.8222, v299 x 0.8034 on the right; none between -0.90 and -0.835 on the left) are the border column and stay dropped. What is left of the target edge plane and above the fill is still cut by the clip planes. Not an issue of the tile outline or of texture alpha.
+- **Gate.** `tools\srv_turret_hud_test`: the shift follows each key and 0 is no shift, each key moves only its card, the label row moves with neither, the three notch triangles are kept and moved with their card, the border column beyond each bound is still dropped, in both sheet shaders; fourteen mutants (wrong key, sign, direction, label row shifted, old bounds, bounds too wide, clip delta, clip planes read after the shift) are caught.
+- **NOT FLOWN:** the next flight is the turret with both cards in view. Look for the dark fill showing the same on the left and right of each card's art, no notch at the planet card's upper-left corner and no chamfer at the SYSTEMS header's upper-right corner. Tune with the two keys.

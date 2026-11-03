@@ -74,7 +74,7 @@ namespace edvr {
     "    float4 s0;   // row 0 of seat-from-math-eye. Identity except on the gunner sheet, where it keeps the border test still as the head turns\n" \
     "    float4 s1;\n" \
     "    float4 s2;\n" \
-    "    float4 s3;   // unused padding: stays 0\n" \
+    "    float4 s3;   // x: the target card content shift, metres; y: the SYSTEMS card content shift, metres (the gunner sheet only). z, w: padding, stay 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -240,11 +240,11 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n" \
     "static const float kCardRowBottomY = -0.481;\n" \
     "static const float kLabelRowLeftX = 0.53;\n" \
-    "// The target card (the left one) shows its content off-centre in its dark fill. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, it is 0.342 m wide, and the sheet last tile column ends 11.5 mm inside the fill right edge.\n" \
-    "// Sean screenshot of 2026-11-03: the panel art ends 20 px (11.4 mm) inside the fill on the right and about 1 mm inside on the left (the cut column is trimmed 3 mm outside the edge), so the content moves (11.4 - 1) / 2 = 5.3 mm along U, rightwards.\n" \
-    "// Only the target card side moves. The region test and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
-    "static const float kTargetCardShiftM = 0.0053;\n" \
+    "// The cards show their content off-centre in their dark fills. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the target card (left) fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, the SYSTEMS card (right) fill top edge along U = (0.74314, 0, -0.66913), the sheet curving the other way on that side.\n" \
+    "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That makes 6.9 mm and 9.0 mm rightwards in all; the keys default to 7 and 9.\n" \
+    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. The label row, which shares the right region only in a sliver, and everything else stay. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
     "static const float3 kTargetCardAcross = float3(0.7451, 0.0, 0.6670);\n" \
+    "static const float3 kSystemsCardAcross = float3(0.74314, 0.0, -0.66913);\n" \
     "float4x4 sheetInv(float4x4 m, out float det) {\n" \
     "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n" \
     "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n" \
@@ -271,13 +271,16 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n" \
     "    return r;\n" \
     "}\n" \
+    "// The region bounds cover each card and its header row. The target side starts at x -0.835 and the SYSTEMS side ends at x 0.79: the header tiles lean outward going up, so the upper-left vertex of the planet icon tile (v112, x -0.8330) and the upper-right vertex of the last SYSTEMS header tile (v292, x 0.7856) lay outside the old bounds -0.822 and 0.78, and the triangles holding them (two on the target side, one on SYSTEMS) were dropped, leaving a 14 by 10 mm notch at the target fill upper-left corner and a 10 mm chamfer at the SYSTEMS fill upper-right corner. Dump 125141609001. Nothing else lies in the widened strips, and the clip planes still cut what is left of the target edge plane.\n" \
     "bool inTarget(float3 p) {\n" \
-    "    return p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
+    "    return p.x > -0.835 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
+    "}\n" \
+    "bool inSystems(float3 p) {\n" \
+    "    return p.x > 0.50 && p.x < 0.79 && p.y > -0.51 && p.y < -0.245;\n" \
     "}\n" \
     "bool inFill(float3 p) {\n" \
-    "    const bool right = p.x > 0.50 && p.x < 0.78 && p.y > -0.51 && p.y < -0.245;\n" \
     "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \
-    "    return inTarget(p) || right || label;\n" \
+    "    return inTarget(p) || inSystems(p) || label;\n" \
     "}\n" \
     "bool liveLocal(float4 c, out float3 local) {\n" \
     "    float det;\n" \
@@ -306,8 +309,10 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    }\n" \
     "    const float3 cen = (p0 + p1 + p2) / 3.0;\n" \
     "    float4 shiftClip = float4(0.0, 0.0, 0.0, 0.0);\n" \
-    "    if (live && draw && inTarget(p0) && inTarget(p1) && inTarget(p2)) {\n" \
-    "        const float3 sd = kTargetCardAcross * kTargetCardShiftM;\n" \
+    "    if (live && draw) {\n" \
+    "        float3 sd = float3(0.0, 0.0, 0.0);\n" \
+    "        if (inTarget(p0) && inTarget(p1) && inTarget(p2)) sd = kTargetCardAcross * s3.x;\n" \
+    "        else if (inSystems(p0) && inSystems(p1) && inSystems(p2)) sd = kSystemsCardAcross * s3.y;\n" \
     "        shiftClip = float4(dot(clipRows[4].xyz, sd), dot(clipRows[5].xyz, sd), dot(clipRows[6].xyz, sd), dot(clipRows[7].xyz, sd));\n" \
     "    }\n" \
     "    const bool locked = an.w > 0.5;\n" \

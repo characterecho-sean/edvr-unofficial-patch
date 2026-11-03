@@ -97,6 +97,7 @@ inline constexpr int kSystemsNearDefaultCm = 80, kSystemsNearMaxCm = 200;   // e
 inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
 inline constexpr int kGunnerUpDefaultCm = 35, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards. 35 is the raise kept on 2026-11-03.
 inline constexpr int kCardsUpDefaultCm = 0, kCardsUpMaxCm = 100;   // experimental.srv_turret_cards_up: centimetres up, along the seat, for the target card and SYSTEMS only
+inline constexpr int kTargetCardShiftDefaultMm = 7, kSystemsCardShiftDefaultMm = 9, kCardShiftMaxMm = 30;   // experimental.srv_turret_target_card_shift and experimental.srv_turret_systems_card_shift (TEMPORARY): whole millimetres the gunner sheet's content moves rightwards inside the target card and inside SYSTEMS. Sean's flight of 6fa96705 on 2026-11-03.
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
@@ -581,6 +582,7 @@ inline constexpr float kContentInvZMax = 20.0f;   // z_c of 5 cm or more
 //   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes; invZc: 1 / the content depth z_c (THE CONTENT DEPTH above), 0 as the module writes it
 //   [4] gap2, dMin2, dMax2, 0        a second radial window. w stays 0.
 //   [5..7] rows of seat-from-math-eye. Identity except the gunner sheet's border test.
+//   [8] targetShiftM, systemsShiftM, 0, 0   the gunner sheet's content shifts in metres (experimental.srv_turret_target_card_shift, experimental.srv_turret_systems_card_shift); 0 for every other draw
 struct TurretParams {
     float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
@@ -590,7 +592,7 @@ struct TurretParams {
     float s0x = 1.0f, s0y = 0.0f, s0z = 0.0f, s0w = 0.0f;   // row 0 of seat-from-math-eye. The gunner sheet uses it to tell the outer border from the card brackets.
     float s1x = 0.0f, s1y = 1.0f, s1z = 0.0f, s1w = 0.0f;
     float s2x = 0.0f, s2y = 0.0f, s2z = 1.0f, s2w = 0.0f;
-    float s3x = 0.0f, s3y = 0.0f, s3z = 0.0f, s3w = 0.0f;   // unused padding: stays 0 (the gunner sheet's bracket cut is a constant in its shader)
+    float targetShiftM = 0.0f, systemsShiftM = 0.0f, s3z = 0.0f, s3w = 0.0f;   // fourth register. targetShiftM and systemsShiftM: the gunner sheet's content shifts, metres (the target card's and SYSTEMS'); only the sheet's shader reads them. The rest stays 0.
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
 static_assert(sizeof(TurretParams) == 144, "the turret shader's cbuffer is nine 16-byte registers");
@@ -703,9 +705,11 @@ inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPa
 // does something (a gap, a translation, or the systems pull).
 inline bool paramsUsable(const TurretParams& p) {
     const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc, p.gap2, p.dMin2, p.dMax2, p.pad2,
-                         p.s0x, p.s0y, p.s0z, p.s0w, p.s1x, p.s1y, p.s1z, p.s1w, p.s2x, p.s2y, p.s2z, p.s2w, p.s3x, p.s3y, p.s3z, p.s3w};
+                         p.s0x, p.s0y, p.s0z, p.s0w, p.s1x, p.s1y, p.s1z, p.s1w, p.s2x, p.s2y, p.s2z, p.s2w, p.targetShiftM, p.systemsShiftM, p.s3z, p.s3w};
     for (float f : all)
         if (!std::isfinite(f)) return false;
+    if (!(p.targetShiftM >= 0.0f && p.targetShiftM <= static_cast<float>(kCardShiftMaxMm) * 0.001f + 1.0e-6f)) return false;   // the sheet's content shifts: 0 to 30 mm each
+    if (!(p.systemsShiftM >= 0.0f && p.systemsShiftM <= static_cast<float>(kCardShiftMaxMm) * 0.001f + 1.0e-6f)) return false;
     if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;
     if (p.lock != 0.0f && p.lock != 1.0f) return false;
     if (p.depth != 0.0f && p.depth != 1.0f && p.depth != 2.0f) return false;
@@ -722,7 +726,7 @@ inline bool paramsUsable(const TurretParams& p) {
 }
 
 // After paramsUsable: a translation toward the camera, at the game's own depth. The curved sheet is not reshaped. cards adds the cards-only seat-up.
-inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out, bool cards = false) {
+inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out, bool cards = false, int targetShiftMm = kTargetCardShiftDefaultMm, int systemsShiftMm = kSystemsCardShiftDefaultMm) {
     const float tx = e.tNear[0] + (cards ? e.tCards[0] : 0.0f);
     const float ty = e.tNear[1] + (cards ? e.tCards[1] : 0.0f);
     const float tz = e.tNear[2] + (cards ? e.tCards[2] : 0.0f);
@@ -737,6 +741,8 @@ inline bool gunnerParamsFor(const EyeFrame& e, TurretParams& out, bool cards = f
     out.s0x = e.seatR[0]; out.s0y = e.seatR[1]; out.s0z = e.seatR[2]; out.s0w = e.eyeSeat[0];
     out.s1x = e.seatR[3]; out.s1y = e.seatR[4]; out.s1z = e.seatR[5]; out.s1w = e.eyeSeat[1];
     out.s2x = e.seatR[6]; out.s2y = e.seatR[7]; out.s2z = e.seatR[8]; out.s2w = e.eyeSeat[2];
+    out.targetShiftM = static_cast<float>(targetShiftMm < 0 ? 0 : (targetShiftMm > kCardShiftMaxMm ? kCardShiftMaxMm : targetShiftMm)) / 1000.0f;   // the sheet's content shifts (the cards' own draw ignores them)
+    out.systemsShiftM = static_cast<float>(systemsShiftMm < 0 ? 0 : (systemsShiftMm > kCardShiftMaxMm ? kCardShiftMaxMm : systemsShiftMm)) / 1000.0f;
     return paramsUsable(out);
 }
 

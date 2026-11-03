@@ -125,7 +125,7 @@ static bool wiredModule(const std::string& t) {
     const size_t cardsUp = t.find("cfg.getIntInRange(\"experimental.srv_turret_cards_up\", 0, 0, 100)");
     // the sheet's bracket cut was a TEMPORARY key (tuned in flight to 3 mm on 2026-11-02, then baked into the shader as kBracketCutM and the key removed): nothing reads it or keeps its value
     const bool bracketKeyGone = !found(t.find("srv_turret_bracket_cut")) && !found(t.find("g_bracketCutMm")) && !found(t.find("bracket cut %d"));
-    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm (live; \"");
+    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm, target card shift %d mm, systems card shift %d mm (live; \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
@@ -202,7 +202,11 @@ static bool wiredModule(const std::string& t) {
                         found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
     // the gunner sheet with Disable GUI effects off (vs A888D510, signature K) has its geometry shader in the table and is told from the menu panel by the same gate as the other sheet
     const bool sheetK = found(t.find("EDVR_SRV_TURRET_SHADER(K, \"A888D510\")")) && found(t.find("const bool sheet = st::isGunnerSheetSignature(sig);"));
-    return sheetK && found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && bracketKeyGone && found(settings) && found(edge) &&
+    // the two cards' content shifts (TEMPORARY keys, whole millimetres): read with their literal defaults, kept live, and handed to the sheet's constants
+    const bool cardShifts = found(t.find("cfg.getIntInRange(\"experimental.srv_turret_target_card_shift\", 7, 0, 30)")) && found(t.find("cfg.getIntInRange(\"experimental.srv_turret_systems_card_shift\", 9, 0, 30)")) &&
+                            found(t.find("targetCardShift != g_targetCardShiftMm.load(std::memory_order_relaxed)")) && found(t.find("systemsCardShift != g_systemsCardShiftMm.load(std::memory_order_relaxed)")) &&
+                            found(t.find("st::gunnerParamsFor(frame, params, cards, g_targetCardShiftMm.load(std::memory_order_relaxed), g_systemsCardShiftMm.load(std::memory_order_relaxed))"));
+    return sheetK && cardShifts && found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && scissorOk && found(panels) && found(radar) && found(gap) && found(systems) && found(hudUp) && found(gunnerUp) && found(cardsUp) && bracketKeyGone && found(settings) && found(edge) &&
            found(camera) && found(cleared) && found(line) && found(lineTail) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
 }
 // journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
@@ -302,7 +306,13 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const bool flatClean = !found(flatKeys.find("srv_turret"));
     // the sheet's bracket cut key is gone (baked at 3 mm into the shader)
     const bool bracketKeyGone = !found(ini.find("srv_turret_bracket_cut"));
-    return inExperimental && ui && flatClean && bracketKeyGone;
+    // the two cards' content shift keys: in [experimental] with their ui: lines, default 7 and 9 millimetres, not on the flat allow-list
+    const size_t targetShift = ini.find("\nsrv_turret_target_card_shift = 7\n"), systemsShift = ini.find("\nsrv_turret_systems_card_shift = 9\n");
+    const size_t targetShiftUi = found(targetShift) ? ini.rfind("# ui: SRV turret target card shift | range 0..30 | step 1 | unit mm | zero exact | recommended 7 | live\n", targetShift) : std::string::npos,
+                 systemsShiftUi = found(systemsShift) ? ini.rfind("# ui: SRV turret systems card shift | range 0..30 | step 1 | unit mm | zero exact | recommended 9 | live\n", systemsShift) : std::string::npos;
+    const bool shiftKeys = found(targetShift) && found(systemsShift) && targetShift > experimental && targetShift < end && systemsShift > experimental && systemsShift < end &&
+                           found(targetShiftUi) && targetShift - targetShiftUi < 200 && found(systemsShiftUi) && systemsShift - systemsShiftUi < 200;
+    return inExperimental && ui && shiftKeys && flatClean && bracketKeyGone;
 }
 
 // the shader tables and build.bat.
@@ -528,6 +538,10 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_hud_up\", 10, 0, 100", "\"experimental.srv_turret_hud_up\", 20, 0, 100")), "control: a drifted default of the weapon-panel height key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_gunner_up\", 35, 0, 100", "\"experimental.srv_turret_gunner_up\", 20, 0, 100")), "control: a drifted default of the gunner-panel height key trips the pin");
     check(!wiredModule(replaced(module, "\"experimental.srv_turret_cards_up\", 0, 0, 100", "\"experimental.srv_turret_cards_up\", 20, 0, 100")), "control: a drifted default of the cards-up key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_target_card_shift\", 7, 0, 30", "\"experimental.srv_turret_target_card_shift\", 5, 0, 30")), "control: a drifted default of the target-card shift key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_systems_card_shift\", 9, 0, 30", "\"experimental.srv_turret_systems_card_shift\", 0, 0, 30")), "control: a drifted default of the systems-card shift key trips the pin");
+    check(!wiredModule(replaced(module, "systemsCardShift != g_systemsCardShiftMm.load(std::memory_order_relaxed)", "false")), "control: a systems-card shift key that is not kept live trips the pin");
+    check(!wiredModule(replaced(module, ", g_systemsCardShiftMm.load(std::memory_order_relaxed))) return false;", ", 0)) return false;")), "control: a systems-card shift key that never reaches the sheet's constants trips the pin");
     check(!wiredModule(module + "\n    const int bracketCut = cfg.getIntInRange(\"experimental.srv_turret_bracket_cut\", 3, 0, 40);\n"), "control: the removed bracket cut key read again trips the pin");
     check(!wiredModule(module + "\nstd::atomic<int> g_bracketCutMm{3};\n"), "control: a kept bracket cut value trips the pin");
     check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out, group == st::Group::kPanels ? g_systemsNearCm.load(std::memory_order_relaxed) : 0, group == st::Group::kPanels ? g_hudUpCm.load(std::memory_order_relaxed) : 0)", "g_forwardCm.load(std::memory_order_relaxed), out)")),
@@ -599,6 +613,9 @@ static void wiringCases() {
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_up = 10\n", "\nsrv_turret_hud_up = 20\n"), flatKeys), "control: a drifted shipped default of the weapon-panel height key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_gunner_up = 35\n", "\nsrv_turret_gunner_up = 20\n"), flatKeys), "control: a drifted shipped default of the gunner-panel height key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_cards_up = 0\n", "\nsrv_turret_cards_up = 20\n"), flatKeys), "control: a drifted shipped default of the cards-up key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_target_card_shift = 7\n", "\nsrv_turret_target_card_shift = 5\n"), flatKeys), "control: a drifted shipped default of the target-card shift key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_systems_card_shift = 9\n", "\nsrv_turret_systems_card_shift = 0\n"), flatKeys), "control: a drifted shipped default of the systems-card shift key trips the pin");
+    check(!wiredKeys(ini, flatKeys + "\nsrv_turret_target_card_shift\n"), "control: the target-card shift key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_cards_up = 0\n", "\nsrv_turret_cards_up = 0\nsrv_turret_bracket_cut = 3\n"), flatKeys), "control: the removed bracket cut key back in edvr.ini trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = game\n", "\nsrv_turret_hud_depth = front\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD depth | choices front, game, real | recommended game", "# ui: SRV turret HUD depth | choices front, game, real | recommended front"), flatKeys), "control: a drifted recommendation of the depth key trips the pin");
