@@ -1553,7 +1553,7 @@ and the second (05:04:15, seated, sealed) are the two draw censuses; the log rec
   and a count-bearing kind sets `uncertain` (the tracker's unmatched-End rule), and it never clears. A flat launch observes from the first call, so nothing escapes.
   This fits 5 of 5 and 0 of 120+, and the 72 ms; it is not yet shown. Others the instrument separates: T2 a duplicate Begin, T3 a full table (64 open), T4 a kind
   mismatch, T5 a null query, T6 a Begin on a deferred context and its End on the immediate one (not observed at all today).
-- **Instrument (BUILT, NOT FLOWN, log only, no key, no behaviour change; flat_replay_query_tracker.h, flat_replay_query_reject.h, flat_runtime.cpp, pinned in
+- **Instrument (BUILT 6af59804, INSTALLED on Frontier odyssey-64 `--scope both --xess` and verified, NOT FLOWN, NOT MERGED, log only, no key, no behaviour change; flat_replay_query_tracker.h, flat_replay_query_reject.h, flat_runtime.cpp, pinned in
   flat_temporal_test's flat_replay_query_reject_tests.h).** The tracker keeps the cause of its first escape and counts the Begins and Ends it saw. Two lines, once per session:
   `flat replay query tracker: observing from here (first call End on context ..., thread N); calls before this were not observed ...` at the first Begin or End the
   observer sees, and `flat replay query tracker: first escape: cause=unmatched-end call=End query=OCCLUSION_PREDICATE#5 kind=count thread=N context=...; seen begins=0 ends=1 open=0,
