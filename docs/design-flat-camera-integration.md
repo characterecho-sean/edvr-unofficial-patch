@@ -1570,7 +1570,7 @@ and the second (05:04:15, seated, sealed) are the two draw censuses; the log rec
   **The unmatched-End rule is stricter than the safety rule.** `FlatReplayQueryTracker::end` escapes on any unmatched End that is not End-only, a timing End included, while `safe()` already
   ignores an open Timing bracket because a timestamp-disjoint query counts no draws. So a Timing End the observer never saw the Begin of cannot make a replay unsafe, and sets the
   sticky flag anyway. Why it never shows when launched flat: the observer's first call there is a Begin.
-  **The fix (Sean said build it; BUILT, NOT FLOWN):** an End of a Timing query with no Begin seen is not an escape (`unmatchedTimingEnds` counts it; flat_replay_query_tracker.h);
+  **The fix (Sean said build it; BUILT 4014cc7f on branch claude/clever-fermat-c6f96b, full build green, INSTALLED on Frontier odyssey-64 `--scope both --xess` and verified, NOT FLOWN, NOT MERGED; read with `--expect-build 4014cc7f`):** an End of a Timing query with no Begin seen is not an escape (`unmatchedTimingEnds` counts it; flat_replay_query_tracker.h);
   Count-bearing and Unknown kinds keep the rule. The two instrument lines stay, so if a Count-bearing End also arrives unmatched at adoption (it was hidden behind the timing escape)
   the next flight names it, and the grace at adoption is then designed against that evidence. A third line, once per session, says the rule ran: `an End of a timing query with no
   Begin seen is not an escape (first: query=TIMESTAMP_DISJOINT#3 ...)`. Expected log after the fix: the start line, that line, no escape line, `rejected=0` with `checked>0` on foot,
