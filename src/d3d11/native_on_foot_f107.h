@@ -39,7 +39,7 @@ inline bool onCommander(double eyeNeckM) noexcept { return eyeNeckM == eyeNeckM 
 // about a second, then far again: the 1.0 s hold ended 18 episodes (2 to 19), each beginning 12 ms to 1.4 s after the last ended, and every end let the pin, the neck reference (its target -31 cm
 // from the camera 46 cm over the neck) and the settle take the near calls in between: the dip the pilot saw when he switched suits. The near stretches between the far reads were 1.0 to 2.8 s (and
 // 4.2 s once, at the end). The hold is now 2.0 s, and it adapts: an episode that begins again within kRejoinS of an end is the same trouble, and the hold doubles (to kMaxHoldS) for it; one that
-// begins after a quiet kRejoinS starts from the base again. The suit change's pattern then runs as 3 episodes in 32 s, not 20, and the first shop's flaps (near runs of 0.5 s) never end one.
+// begins after a quiet kRejoinS starts from the base again. The suit change's pattern then runs as 3 episodes in 40 s, not 20, and the first shop's flaps (near runs of 0.5 s) never end one.
 //
 // F209 (the game's own flag): the suit and the weapon buy screens at Pioneer Supplies are found by the open byte their interaction objects keep (shop_screen_core.h). While one is open the
 // camera is held away at ANY distance (the weapon showroom's camera is the commander's own, 0.9 cm under the neck: no distance test could see it): `shopOpen` joins the distance test as a
