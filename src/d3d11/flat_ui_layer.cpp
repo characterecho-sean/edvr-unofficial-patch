@@ -58,10 +58,10 @@ struct Window {
     uint64_t mapOpenFrames = 0;
     uint64_t mapRefused[2][kRefusals] = {};
     uint64_t mapDeclined[2][kDecisions] = {};
-    // The scene families' (2026-11-03: flatUiSceneSlotOf, 0 supercruise bars, 1 space dust, 2 normal-space dust) refusals by reason, the same way: the
-    // adapter's and the shared decision's. Their asked/decided/taken/refused-at-issue are the family arrays above.
-    uint64_t sceneRefused[3][kRefusals] = {};
-    uint64_t sceneDeclined[3][kDecisions] = {};
+    // The scene families' (2026-11-03: flatUiSceneSlotOf, 0 supercruise bars, 1 space dust, 2 normal-space dust, 3 orbit lines) refusals by reason, the
+    // same way: the adapter's and the shared decision's. Their asked/decided/taken/refused-at-issue are the family arrays above.
+    uint64_t sceneRefused[kFlatUiSceneSlots][kRefusals] = {};
+    uint64_t sceneDeclined[kFlatUiSceneSlots][kDecisions] = {};
     // The candidates of the tonemaps flatUiMapToneSlotOf names (the maps', the Full System Scanner's): the tone reads the candidate
     // branch saw, and those that proved.
     uint64_t mapToneCandidates = 0, mapToneMatched = 0;
@@ -82,7 +82,7 @@ bool g_glowNoted = false;  // the once-only first feed line
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
 UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last kDecided draw (flatUiLayerNoteIssue's)
 bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
-bool g_sceneNoted[3] = {false, false, false};             // the once-only first take of each scene family (flatUiSceneSlotOf)
+bool g_sceneNoted[kFlatUiSceneSlots] = {};                // the once-only first take of each scene family (flatUiSceneSlotOf)
 bool g_mapToneNoted[2] = {false, false};                  // the once-only first proof from a tonemap of this table: the maps', the scanner's
 bool g_mapFirstToneNoted[2] = {false, false};             // the once-only first candidate line of each (proved or not)
 FlatUiMapAaTally g_mapAa;                                 // temporal AA off on the maps and the Full System Scanner: the map line's counts
@@ -936,15 +936,17 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.mapJitter[0][2]), static_cast<unsigned long long>(w.mapJitter[0][3]),
         static_cast<unsigned long long>(w.mapJitter[1][0]), static_cast<unsigned long long>(w.mapJitter[1][1]),
         static_cast<unsigned long long>(w.mapJitter[1][2]), static_cast<unsigned long long>(w.mapJitter[1][3]));
-    // The scene families (2026-11-03): the supercruise bars, the supercruise space dust and the normal-space dust, each asked/decided/taken/refused-at-issue and
-    // refused in all with the reasons (the adapter's, the shared decision's and the refusals at the game's issue, as the map line has them). ALWAYS printed,
-    // zeros included: a log without this line is a build that never ran it, and a window with all zeros is a flight without that draw (not in supercruise, not near
-    // a body) or one the pair classifier never named. The bars' own strip pass prints its 30 s line from here too (supercruiseBarsLog), with the layer's half.
+    // The scene families (2026-11-03): the supercruise bars, the supercruise space dust, the normal-space dust and the orbit lines (in flatUiSceneSlotOf's order),
+    // each asked/decided/taken/refused-at-issue and refused in all with the reasons (the adapter's, the shared decision's and the refusals at the game's issue, as
+    // the map line has them). ALWAYS printed, zeros included: a log without this line is a build that never ran it, and a window with all zeros is a flight
+    // without that draw (not in supercruise, not near a body) or one the pair classifier never named. The bars' own strip pass prints its 30 s line from here too
+    // (supercruiseBarsLog), with the layer's half.
     {
-        const UiLayerFamily scene[3] = {UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust, UiLayerFamily::kNormalSpaceDust};
-        const char* const names[3] = {"supercruise-bars", "space-dust", "normal-space-dust"};
+        const UiLayerFamily scene[kFlatUiSceneSlots] = {UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust, UiLayerFamily::kNormalSpaceDust,
+                                                        UiLayerFamily::kOrbitLines};
+        const char* const names[kFlatUiSceneSlots] = {"supercruise-bars", "space-dust", "normal-space-dust", "orbit-lines"};
         std::string text, barsLayer;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kFlatUiSceneSlots; ++i) {
             const size_t fi = static_cast<size_t>(scene[i]);
             char one[640];
             std::snprintf(one, sizeof(one), "%s%s asked=%llu decided=%llu taken=%llu refused-at-issue=%llu refused=%llu (%s)", i ? "; " : "", names[i],

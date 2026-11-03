@@ -994,11 +994,12 @@ static bool wiredFlat(const std::string& adapter, const std::string& runtimeH, c
 static void flatTests() {
     // The family rule.
     check(flatUiLayerTakesFamily(UiLayerFamily::kWeaponsFire) && flatUiLayerTakesFamily(UiLayerFamily::kShieldRipple), "the flat adapter takes the weapons fire and the shield ripple");
-    check(flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) && !flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric) && !flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines),
-          "...and still the cockpit HUD families besides (not the holograms, not the orbit lines)");
-    // 2026-11-03: the supercruise bars and the two dusts joined them (they blur under the flat anti-aliasing's history; ui_quality_test pins the rest).
-    check(flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) && flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust),
-          "...and, since 2026-11-03, the supercruise bars and the two dusts");
+    check(flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) && !flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric),
+          "...and still the cockpit HUD families besides (not the holograms)");
+    // 2026-11-03: the supercruise bars, the two dusts and the orbit lines joined them (they blur under the flat anti-aliasing's history; ui_quality_test pins the rest).
+    check(flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) && flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust) &&
+              flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines),
+          "...and, since 2026-11-03, the supercruise bars, the two dusts and the orbit lines");
     // The pairs name their family through the shared rule the flat adapter uses.
     check(flatUiFamilyOf(kUiVsWeaponBeams, kUiPsWeaponBeams) == UiLayerFamily::kWeaponsFire && flatUiFamilyOf(kUiVsMulticannon, kUiPsMulticannon) == UiLayerFamily::kWeaponsFire &&
               flatUiFamilyOf(kUiVsShieldStrike, kUiPsShieldStrike) == UiLayerFamily::kWeaponsFire,

@@ -1404,33 +1404,46 @@ void testFlatLayerRules() {
         for (int i = 0; i < 4; ++i) anyTaken = anyTaken || flatUiLayerTakesFamily(flatUiFamilyOf(kHoloVs[i], kHoloPs[i]));
         check(!anyTaken, "flat layer: none of the census's hologram pairs (94D5 the one with camera rows among them) reaches the take");
     }
-    check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
-              !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
-              !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
-          "flat layer: the orbit lines (their width patch is VR's), the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
-    // 2026-11-03: the supercruise bars, the supercruise space dust and the normal-space dust are asked for (they blur under the flat anti-aliasing's history),
-    // and each is a family the shared HDR take draws; the density rule for the lines is the flat one (a layer at least as large as the render).
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kScreen) && !flatUiLayerTakesFamily(UiLayerFamily::kPanel) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) && !flatUiLayerTakesFamily(UiLayerFamily::kNone) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
+          "flat layer: the 2D screen, the menus, the panels' rasterisation and the after-UI take are not asked for");
+    // 2026-11-03: the supercruise bars, the supercruise space dust, the normal-space dust and the orbit lines are asked for (they blur under the flat
+    // anti-aliasing's history), and each is a family the shared HDR take draws; the density rule for the lines is the flat one (a layer at least as large
+    // as the render). The orbit lines are taken as the game draws them: their width patch (orbital_width.h) stays VR's.
     check(flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) && flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) &&
-              flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust),
-          "flat layer: the supercruise bars, the supercruise space dust and the normal-space dust are asked for (2026-11-03)");
+              flatUiLayerTakesFamily(UiLayerFamily::kNormalSpaceDust) && flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines),
+          "flat layer: the supercruise bars, the supercruise space dust, the normal-space dust and the orbit lines are asked for (2026-11-03)");
     for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite, UiLayerFamily::kMapCanvas,
                             UiLayerFamily::kMapSprite, UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust,
-                            UiLayerFamily::kNormalSpaceDust})
+                            UiLayerFamily::kNormalSpaceDust, UiLayerFamily::kOrbitLines})
         check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
     check(flatUiSceneSlotOf(UiLayerFamily::kSupercruiseBars) == 0 && flatUiSceneSlotOf(UiLayerFamily::kSpaceDust) == 1 &&
-              flatUiSceneSlotOf(UiLayerFamily::kNormalSpaceDust) == 2 && flatUiSceneSlotOf(UiLayerFamily::kOrbitLines) == -1 &&
+              flatUiSceneSlotOf(UiLayerFamily::kNormalSpaceDust) == 2 && flatUiSceneSlotOf(UiLayerFamily::kOrbitLines) == 3 &&
               flatUiSceneSlotOf(UiLayerFamily::kHolo) == -1 && flatUiSceneSlotOf(UiLayerFamily::kMapCanvas) == -1,
-          "flat layer: the scene families' per-reason slots are the bars, the space dust and the normal-space dust, and nothing else");
+          "flat layer: the scene families' per-reason slots are the bars, the space dust, the normal-space dust and the orbit lines, and nothing else");
+    {
+        // Every family with a slot is one the flat layer asks for, and the slots are the kFlatUiSceneSlots distinct numbers 0..3.
+        int seen = 0;
+        for (UiLayerFamily f : {UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust, UiLayerFamily::kNormalSpaceDust, UiLayerFamily::kOrbitLines}) {
+            const int s = flatUiSceneSlotOf(f);
+            if (s >= 0 && s < kFlatUiSceneSlots && flatUiLayerTakesFamily(f)) seen |= 1 << s;
+        }
+        check(kFlatUiSceneSlots == 4 && seen == (1 << kFlatUiSceneSlots) - 1, "flat layer: the four scene slots are each one asked-for family (kFlatUiSceneSlots)");
+    }
     {
         // The flat route's pairs name them (flatUiFamilyOf is the shared rule, asked for the HDR target): the same pairs as VR.
         check(flatUiFamilyOf(kUiVsSupercruiseBars, kUiPsSupercruiseBars) == UiLayerFamily::kSupercruiseBars &&
                   flatUiFamilyOf(kUiVsSpaceDust, kUiPsSpaceDust) == UiLayerFamily::kSpaceDust &&
-                  flatUiFamilyOf(kVsNormalSpaceDust, kPsNormalSpaceDust) == UiLayerFamily::kNormalSpaceDust,
-              "flat layer: the bars', the space dust's and the normal-space dust's shader pairs name their families");
+                  flatUiFamilyOf(kVsNormalSpaceDust, kPsNormalSpaceDust) == UiLayerFamily::kNormalSpaceDust &&
+                  flatUiFamilyOf(kUiVsOrbitLines, kUiPsOrbitLines) == UiLayerFamily::kOrbitLines,
+              "flat layer: the bars', the space dust's, the normal-space dust's and the orbit lines' shader pairs name their families");
         // ... and the pair is the key: the vertex shaders' other flat pairs (flat_projection_recipes.h) name nothing.
         check(flatUiFamilyOf(kUiVsSpaceDust, 0xCB7AF179DF4E6A60ull) == UiLayerFamily::kNone &&
                   flatUiFamilyOf(kUiVsSupercruiseBars, 0xC67370DE72E4422Cull) == UiLayerFamily::kNone &&
-                  flatUiFamilyOf(kVsNormalSpaceDust, kUiPsSpaceDust) == UiLayerFamily::kNone,
+                  flatUiFamilyOf(kVsNormalSpaceDust, kUiPsSpaceDust) == UiLayerFamily::kNone &&
+                  flatUiFamilyOf(kUiVsOrbitLines, 0) == UiLayerFamily::kNone && flatUiFamilyOf(kUiVsOrbitLines, kUiPsSupercruiseBars) == UiLayerFamily::kNone &&
+                  flatUiFamilyOf(kUiVsOrbitLines, kUiPsSpaceDust) == UiLayerFamily::kNone,
               "flat layer: another pixel shader with these vertex shaders names no family");
     }
     // The density rule per profile (uiLayerSceneLinesFit): VR needs a layer WIDER than the render (the lines are taken for density), flat a layer at least
