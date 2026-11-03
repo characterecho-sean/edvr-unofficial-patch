@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13). Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33). Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
