@@ -137,6 +137,16 @@ inline int flatQueryTrackerFormatEscape(char* out, size_t size, uint32_t cause, 
         static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends), open, static_cast<unsigned long long>(msSinceFirstCall));
 }
 
+// The first End of a Timing query with no Begin seen (the rule of 2026-11-03: not an escape). Written once per session, so a flight shows the rule ran.
+inline int flatQueryTrackerFormatIgnoredTimingEnd(char* out, size_t size, uint32_t queryCode, uint32_t thread, unsigned long long context,
+                                                  uint64_t begins, uint64_t ends, uint64_t msSinceFirstCall) {
+    return std::snprintf(out, size,
+        "flat replay query tracker: an End of a timing query with no Begin seen is not an escape (first: query=%s#%u thread=%u context=%016llX; seen begins=%llu "
+        "ends=%llu, %llu ms after the first observed call): a timing bracket counts no draws, so an unobserved one cannot make a replay unsafe",
+        flatQueryCodeName(queryCode), queryCode, thread, context, static_cast<unsigned long long>(begins), static_cast<unsigned long long>(ends),
+        static_cast<unsigned long long>(msSinceFirstCall));
+}
+
 class FlatQueryRejectStats {
 public:
     // A foreground draw reached the safety test.

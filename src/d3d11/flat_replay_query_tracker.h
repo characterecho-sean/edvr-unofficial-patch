@@ -21,6 +21,11 @@ struct FlatReplayQueryTracker {
     uint64_t begins = 0, ends = 0;
     uint64_t causeBegins = 0, causeEnds = 0;
     uint32_t causeOpen = 0;
+    // Ends of Timing queries with no Begin seen (2026-11-03): counted, never an escape. The observer runs only in the flat profile, so after a live VR-to-flat
+    // switch its first call can be the End of a timestamp-disjoint bracket the game opened in VR (flight edvr_gfx_20261103_061437: begins=0 ends=1, 0 ms in), and
+    // that one End set the sticky flag and refused every on-foot DLSS frame. safe() already ignores an open Timing bracket (it counts no draws), so an unobserved
+    // one cannot make a replay unsafe either.
+    uint64_t unmatchedTimingEnds = 0;
 
     uint32_t openCount() const {
         uint32_t n = 0;
@@ -46,9 +51,11 @@ struct FlatReplayQueryTracker {
                 escape(Cause::KindMismatch, kind, identity);
             entry = {}; return;
         }
-        // EVENT and TIMESTAMP are End-only D3D11 queries. Any other
-        // unmatched End means a bracket escaped observation.
-        if (kind != Kind::EndOnly) escape(Cause::UnmatchedEnd, kind, identity);
+        // EVENT and TIMESTAMP are End-only D3D11 queries, and a Timing bracket counts nothing: neither one escapes. Any other
+        // unmatched End means a count-bearing (or unknown) bracket escaped observation.
+        if (kind == Kind::EndOnly) return;
+        if (kind == Kind::Timing) { ++unmatchedTimingEnds; return; }
+        escape(Cause::UnmatchedEnd, kind, identity);
     }
     bool safe() const {
         if (uncertain) return false;

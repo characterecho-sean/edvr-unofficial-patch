@@ -1570,8 +1570,11 @@ and the second (05:04:15, seated, sealed) are the two draw censuses; the log rec
   **The unmatched-End rule is stricter than the safety rule.** `FlatReplayQueryTracker::end` escapes on any unmatched End that is not End-only, a timing End included, while `safe()` already
   ignores an open Timing bracket because a timestamp-disjoint query counts no draws. So a Timing End the observer never saw the Begin of cannot make a replay unsafe, and sets the
   sticky flag anyway. Why it never shows when launched flat: the observer's first call there is a Begin.
-  **Proposed fix (NOT built, waits on Sean):** an End of a Timing query with no Begin seen is not an escape (counted, not sticky); Count-bearing and Unknown kinds keep the rule. The
-  two instrument lines stay, so if a Count-bearing End also arrives unmatched at adoption (it would have been hidden behind the timing escape) the next flight names it, and the grace
-  at adoption is then designed against that evidence. Expected log after the fix: the start line, no escape line, `rejected=0` with `checked>0` on foot, `treated` rising on foot.
+  **The fix (Sean said build it; BUILT, NOT FLOWN):** an End of a Timing query with no Begin seen is not an escape (`unmatchedTimingEnds` counts it; flat_replay_query_tracker.h);
+  Count-bearing and Unknown kinds keep the rule. The two instrument lines stay, so if a Count-bearing End also arrives unmatched at adoption (it was hidden behind the timing escape)
+  the next flight names it, and the grace at adoption is then designed against that evidence. A third line, once per session, says the rule ran: `an End of a timing query with no
+  Begin seen is not an escape (first: query=TIMESTAMP_DISJOINT#3 ...)`. Expected log after the fix: the start line, that line, no escape line, `rejected=0` with `checked>0` on foot,
+  `treated` rising on foot in the hangar and no `flat-resolve-foreground-contract-unqualified` windows there. An escape line with another cause means the adoption has a second source.
+  Pinned in flat_temporal_test (the timing, count and unknown unmatched Ends, the kind mismatch, the reset, the line text and the wiring).
 - `ruled out: a Count-bearing bracket as the first escape, because the first observed call was the End of TIMESTAMP_DISJOINT#3 (kind=timing), begins=0 ends=1, 0 ms after the first observed call.` (A later Count escape is hidden behind it, so this does not say none exists.)
 - `ruled out: a duplicate Begin, a full table, a kind mismatch and a null query as the first escape, because the first escape was unmatched-end.`

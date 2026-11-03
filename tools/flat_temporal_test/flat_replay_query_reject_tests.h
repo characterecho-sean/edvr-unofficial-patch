@@ -164,6 +164,27 @@ inline int flatReplayQueryRejectTests() {
         T endOnly;
         endOnly.end(&a, T::Kind::EndOnly);
         expect(!endOnly.uncertain && endOnly.firstCause == T::Cause::None && endOnly.ends == 1, "an End-only query (EVENT, TIMESTAMP) without a Begin is not an escape");
+        // The rule of 2026-11-03: the 061437 flight's first observed call was the End of a TIMESTAMP_DISJOINT (kind timing, begins=0), which set the sticky flag and refused
+        // every on-foot DLSS frame. A timing bracket counts no draws (safe() already ignores an open one), so its unobserved End is counted, never an escape.
+        T timingEnd;
+        timingEnd.end(&a, T::Kind::Timing);
+        expect(!timingEnd.uncertain && timingEnd.safe() && timingEnd.firstCause == T::Cause::None && timingEnd.unmatchedTimingEnds == 1 && timingEnd.ends == 1 &&
+               timingEnd.causeEnds == 0, "an End of a timing query with no Begin seen is counted and is not an escape: the tracker stays certain and safe");
+        timingEnd.begin(&b, T::Kind::Count); timingEnd.end(&b, T::Kind::Count);
+        timingEnd.end(&a, T::Kind::Timing);
+        expect(timingEnd.safe() && timingEnd.unmatchedTimingEnds == 2 && timingEnd.begins == 1 && timingEnd.ends == 3,
+               "later paired brackets and another unmatched timing End leave it certain, and the count moves");
+        timingEnd.end(&b, T::Kind::Count);   // a count-bearing End with no Begin is still an escape, and its counts include the ignored timing Ends
+        expect(timingEnd.uncertain && timingEnd.firstCause == T::Cause::UnmatchedEnd && timingEnd.firstCauseKind == T::Kind::Count && timingEnd.causeEnds == 4 &&
+               timingEnd.unmatchedTimingEnds == 2, "an unmatched count-bearing End after ignored timing Ends is still an unmatched-end escape");
+        T unknownEnd;
+        unknownEnd.end(&a, T::Kind::Unknown);
+        expect(unknownEnd.uncertain && unknownEnd.firstCause == T::Cause::UnmatchedEnd && unknownEnd.unmatchedTimingEnds == 0, "an unmatched End of an unknown kind is still an escape");
+        T timingMismatch;
+        timingMismatch.begin(&a, T::Kind::Timing); timingMismatch.end(&a, T::Kind::Count);
+        expect(timingMismatch.uncertain && timingMismatch.firstCause == T::Cause::KindMismatch, "a matched End of another kind is still a kind-mismatch, whatever the Begin's kind");
+        timingEnd.resetForNewContext();
+        expect(timingEnd.unmatchedTimingEnds == 0 && !timingEnd.uncertain, "a new context clears the timing End count");
         T full;
         int ids[65]{};
         for (int& id : ids) full.begin(&id, T::Kind::Count);
@@ -182,6 +203,12 @@ inline int flatReplayQueryRejectTests() {
         expect(std::strcmp(text, "flat replay query tracker: first escape: cause=unmatched-end call=End query=OCCLUSION_PREDICATE#5 kind=count thread=4321 "
                                  "context=00000208662D5580; seen begins=0 ends=1 open=0, 3 ms after the first observed call; uncertain now stays set for the session "
                                  "(only a new context clears it)") == 0, "the escape line, character for character");
+        flatQueryTrackerFormatIgnoredTimingEnd(text, sizeof(text), 3, 4321, 0x00000208662D5580ull, 0, 1, 0);
+        expect(std::strcmp(text, "flat replay query tracker: an End of a timing query with no Begin seen is not an escape (first: query=TIMESTAMP_DISJOINT#3 thread=4321 "
+                                 "context=00000208662D5580; seen begins=0 ends=1, 0 ms after the first observed call): a timing bracket counts no draws, so an unobserved "
+                                 "one cannot make a replay unsafe") == 0, "the ignored-timing-End line, character for character");
+        flatQueryTrackerFormatIgnoredTimingEnd(text, sizeof(text), kFlatQueryUnheld, ~0u, ~0ull, ~0ull, ~0ull, ~0ull);
+        expect(std::strlen(text) < 640 && has(text, "query=UNREADABLE_QUERY#103"), "the ignored-timing-End line at the worst digits fits its 640-byte buffer");
         flatQueryTrackerFormatEscape(text, sizeof(text), 3, "Begin", kFlatQueryUnheld, 2, ~0u, ~0ull, ~0ull, ~0ull, ~0u, ~0ull);
         expect(std::strlen(text) < 640 && has(text, "cause=table-full") && has(text, "query=UNREADABLE_QUERY#103"),
                "the escape line at the worst digits fits its 640-byte buffer, and an unreadable query is named as such");
@@ -223,6 +250,9 @@ inline int flatReplayQueryRejectTests() {
             {&runtimeCpp, "replayQueryTakeNote(observer,*entry,ctx,async,\"End\",note);", 1, "an End takes the first-call and first-escape notes after the tracker has seen it"},
             {&runtimeCpp, "flatQueryTrackerFormatStart(text,sizeof(text),note.call,note.context,note.thread);", 1, "the start line is written from the note"},
             {&runtimeCpp, "flatQueryTrackerFormatEscape(text,sizeof(text),note.cause,note.call,", 1, "the escape line is written from the note"},
+            {&runtimeCpp, "flatQueryTrackerFormatIgnoredTimingEnd(text,sizeof(text),note.ignoredCode,", 1, "the ignored-timing-End line is written from the note"},
+            {&runtimeCpp, "if(entry.tracker.unmatchedTimingEnds>0 && !entry.ignoredLogged) {", 1, "the first unmatched timing End is noted once, after the tracker has seen it"},
+            {&rejectH, "\"flat replay query tracker: an End of a timing query with no Begin seen is not an escape", 1, "the ignored-timing-End line's key is in the header"},
             {&rejectH, "\"flat replay query tracker: observing from here", 1, "the start line's key is in the header"},
             {&rejectH, "\"flat replay query tracker: first escape: cause=%s", 1, "the escape line's key is in the header"},
             {&rejectH, "\"flat replay query rejected %u/%u: frame=%llu", 1, "the event line's key is in the header"},
