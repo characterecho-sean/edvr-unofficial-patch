@@ -130,6 +130,8 @@ inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(
 void srvTurretFrameTick(uint32_t frameNo);
 // The seated z alignTick adds to its eye alignment: -D metres while the camera is moved back, else exactly 0. Frame thread.
 double srvTurretBackSeatedZ();
+// True while the Scorpion's turret view is on (the tick's `on`: Status.json's bit, the journal's Scorpion, VR). Frame thread. The entry fade (srv_turret_entry_fade.h) starts its hold on this edge.
+bool srvTurretViewOn();
 // alignTick, right after it published an alignment: the z it added and the serial it published under. Said in the log when it changed. Frame thread.
 void srvTurretNotePublished(double seatedZ, uint32_t serial);
 

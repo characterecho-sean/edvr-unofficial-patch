@@ -704,7 +704,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" "src\d3d11\srv_radar_anchor.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" "src\d3d11\srv_turret_entry_fade.cpp" "src\d3d11\srv_radar_anchor.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -4196,6 +4196,24 @@ if not exist "%OBJ%\srvturrethud" mkdir "%OBJ%\srvturrethud"
 if errorlevel 1 ( echo [edvr] ERROR: srv turret hud test build failed & exit /b 1 )
 "%OBJ%\srvturrethud\srv_turret_hud_test.exe" --dry-run || exit /b 1
 "%OBJ%\srvturrethud\srv_turret_hud_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_srv_turret_entry_fade_test
+echo [edvr] === srv_turret_entry_fade_test.exe ===
+REM Rig: the SRV turret view's entry fade (src\d3d11\srv_turret_entry_fade.h, srv_turret_entry_fade.cpp; issue 140): the hold to black from the turret-view-on edge until the camera has settled, then
+REM a short fade back in. No device. The state machine run frame by frame as the module runs it (the edge, the move published in its frame, the applied-serial signal and its margin, a runtime that
+REM reports nothing, a signal that never comes and the cap, the view going off, no move key, a missing publish, a new edge in the fade-in, a retargeted move, no re-trigger while the view stays on, the level
+REM in range and never rising), the instrument's log lines (they fit the log, say FIRED only when the cap fired, tell a skipped hold from a run, and avoid the phrases the turret health rule reads), and a
+REM scan of the sources that connect it (the call after alignTick, the mix term, the move's publish, the luma probe's frame-by-frame mode, the Status.json cadence, the build list).
+if not exist "%OBJ%\srvturretentryfade" mkdir "%OBJ%\srvturretentryfade"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\srvturretentryfade\\" /Fe"%OBJ%\srvturretentryfade\srv_turret_entry_fade_test.exe" ^
+    "tools\srv_turret_entry_fade_test\srv_turret_entry_fade_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: srv turret entry fade test build failed & exit /b 1 )
+"%OBJ%\srvturretentryfade\srv_turret_entry_fade_test.exe" --dry-run || exit /b 1
+"%OBJ%\srvturretentryfade\srv_turret_entry_fade_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_orbit_layer_test
