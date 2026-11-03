@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **OFFLINE ANALYSIS DONE, NOTHING BUILT.** The ask (Sean,
+State 2026-11-03: **OFFLINE ANALYSIS DONE; CAPTURE PROBE BUILT, NOT FLOWN.** The ask (Sean,
 2026-11-03): port the legacy client's cockpit glass shader and offer it as a
 Visual-tab option in both flat and VR. Branch
 `claude/cockpit-glass-shader-port-1852e3`.
@@ -39,12 +39,17 @@ Decisions for Sean (section 6):
 - Key name and values.
 - Whether ice and condensation stay stock in the first version.
 
-Next: build the glass probe (temporary key
-`experimental.cockpit_glass_probe`, section 5) and fly once, flat, in a
-lit cockpit. Then write the replacement shader against the logged values.
+Next flight: Steam, flat, with `experimental.cockpit_glass_probe = on` in
+`edvr-flat.ini` (and `edvr.ini`). Sit in a lit station hangar, then
+launch into open space in sunlight, at least 30 s in each. Then
+`python tools\edvr_log.py --target steam --expect-build HEAD` and grep
+`glass probe:`. Then write the replacement shader against the logged
+values.
 
-Temporary keys: none yet. The probe key above will be one; remove it when
-the arc closes.
+Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`,
+`tools\cockpit_glass_probe_test`, the `:rig_cockpit_glass_probe_test`
+rig, its flat allow-list line). Remove all of it when the shader is
+written.
 
 Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt`
 (312425) and `..._live.txt` (334925), filed 2026-11-03. They hold the
@@ -171,20 +176,32 @@ headset independent: one draw, both eyes, flat or VR.
 
 One flight answers all of these together.
 
+Every line starts `glass probe:`. A sample's lines all carry
+`sample N`.
+
 | # | Question | Log signature that settles it |
 |---|---|---|
-| C1 | Blend, depth and write mask of the canopy draw, and its target format | `glass probe: om` line: blend desc RT0, depth-stencil desc, RTV format and size |
-| C2 | Permutations bound in flight | per-hash bind counts for all 9 live PS and 3 VS over the session |
-| C3 | Frame constants the port reads | CB1 registers 55, 56, 61, 90, 245, 248, 257, 261, 275-279 and 290-326 on one sampled draw |
-| C4 | Material constants | the whole of CB2 (18 registers) on the same draw |
-| C5 | Directional-light buffer layout (colour at +0, direction at +16, stride 48, as read from the PS) | the first 96 bytes of t1, copied once |
-| C6 | Slot formats | `srv` lines for t0 to t11 (dimension, format, size) and sampler descs for s0 to s2 |
+| C1 | Blend, depth and write mask of the canopy draw, and its target format | `sample N om blend rt0` / `rt1`, `om depth`, `om raster`, `om rtvK`, `om dsv` |
+| C2 | Permutations drawn in flight | `window 30 s draws=… ps: <hash>(intact q3)=… vs: … other-ps=…` |
+| C3 | Frame constants the port reads | `sample N cb1 [r] x y z w …` for registers 55-56, 61, 90, 245, 248, 257, 261, 275-279, 290-326 |
+| C4 | Material constants | `sample N cb2 [0]…[17]` |
+| C5 | Directional-light buffer layout (colour at +0, direction at +16, stride 48, as read from the PS) | `sample N t1 [0]…[11]`: the first 192 bytes from the view's first element |
+| C6 | Slot formats | `sample N srv tK …` (t0 to t11) and `sample N smp sK …` (s0 to s2); `cb bK bytes= range=` says whether register 0 is byte 0 |
 
-To log: once at the first canopy draw, then at most once every 30 s,
-with the PS hash and q on each line. If the probe never runs, the log
-shows `glass probe: armed` and no `om` line, so that cannot pass for
-success. Flat is the cheaper flight; a lit station hangar and open space
-in sunlight give two light setups.
+A component that is an integer in the shader's eyes (its bits are a
+denormal) prints `#n`, and a register past the copied range prints `-`.
+
+When it logs: the first canopy draw (`sample 1 draw`), then at most once
+every 30 s, 12 at most. The constants and t1 are GPU copies made at the
+draw and read at a frame boundary two or more frames later
+(`sample N read back`). What a failure looks like:
+
+- the key never read: no `armed` line;
+- no canopy draw reached the hooks: `window` lines with `draws=0`;
+- a readback that failed: `readback map failed` or `dropped`.
+
+Flat is the cheaper flight; a lit station hangar and open space in
+sunlight give two light setups.
 
 Not answerable from the CPU: the sign of the live `faceinvariant` input
 and whether the lighting normal faces in or out. The replacement's first

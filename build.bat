@@ -693,6 +693,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
+    "src\d3d11\cockpit_glass_probe.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
@@ -2313,6 +2314,18 @@ if not exist "%OBJ%\celestialmotion" mkdir "%OBJ%\celestialmotion"
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: celestial motion test build failed & exit /b 1 )
 "%OBJ%\celestialmotion\celestial_motion_test.exe" || exit /b 1
+exit /b 0
+
+:rig_cockpit_glass_probe_test
+echo [edvr] === cockpit glass probe (TEMPORARY) ===
+REM The canopy table, register list and log formatting of src\d3d11\cockpit_glass_probe_core.h (docs\cockpit-glass-legacy-port.md
+REM section 5). Pure; no device. Goes with the probe.
+if not exist "%OBJ%\glassprobe" mkdir "%OBJ%\glassprobe"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /WX /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\glassprobe\\" /Fe"%OBJ%\glassprobe\cockpit_glass_probe_test.exe" ^
+    "tools\cockpit_glass_probe_test\cockpit_glass_probe_test.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: cockpit glass probe test build failed & exit /b 1 )
+"%OBJ%\glassprobe\cockpit_glass_probe_test.exe" || exit /b 1
 exit /b 0
 
 :rig_on_foot_split_test
