@@ -240,7 +240,12 @@ def recorded_proton(compatdata):
     defaults = tuple("/%s/share/%s" % (tree, name)
                      for tree in ("files", "dist")
                      for name in ("default_pfx", "default_pfx_arm64"))
-    base = base_of(lines[7], defaults)
+    # Proton 9 and older add a files/lib64 line, which moves default_pfx off line 8.
+    base = None
+    for line in lines:
+        base = base_of(line, defaults)
+        if base is not None:
+            break
     if base is None or not (base / "proton").is_file():
         raise ValueError("recorded Proton is missing or stale in %s; launch Elite once or pass --proton PATH" % record)
     fonts = base_of(lines[1], ("/files/share/fonts", "/dist/share/fonts"))
@@ -473,6 +478,13 @@ def self_test():
             arm64_record[7] = str(proton / "files/share/default_pfx_arm64")
             (compat / "config_info").write_text(
                 "\n".join(path.replace("\\", "/") for path in arm64_record) + "\n", encoding="utf-8")
+            assert recorded_proton(compat) == proton
+            proton9_record = ["9.0-203", str(proton / "files/share/fonts"),
+                              str(proton / "files/lib"), str(proton / "files/lib64"),
+                              str(steam), "1793056620.0", "1793056626.0", "1516738214.0",
+                              str(proton / "files/share/default_pfx")]
+            (compat / "config_info").write_text(
+                "\n".join(path.replace("\\", "/") for path in proton9_record) + "\n", encoding="utf-8")
             assert recorded_proton(compat) == proton
             (compat / "config_info").write_text(
                 "\n".join(path.replace("\\", "/") for path in record_lines) + "\n", encoding="utf-8")
