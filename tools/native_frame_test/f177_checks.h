@@ -48,7 +48,7 @@ inline void run177(Check&& check) {
     check(std::strcmp(ap::kNotes[3], "Mouse/controller aim (the game's own):") == 0 && std::strlen(ap::kNotes[7]) == 0 && std::strcmp(ap::kNotes[8], "Look to aim:") == 0 && std::strlen(ap::kNotes[12]) == 0,
           "F177: the two section lines and the blank lines between and after them are the words given");
     check(std::strcmp(ap::kNotes[4], "  The mouse and right stick aim as in the flat game. Your head looks around on its own.") == 0 &&
-              std::strcmp(ap::kNotes[5], "  In the sights your head aims; mouse and stick only turn you (ADS: aim with head).") == 0 &&
+              std::strcmp(ap::kNotes[5], "  In the sights your head aims; mouse and stick only turn you (ADS: Look to Aim).") == 0 &&
               std::strcmp(ap::kNotes[6], "  Precise and familiar. Where you look and where you point can differ.") == 0,
           "F177: the three lines under mouse/controller aim are the words given");
     check(std::strcmp(ap::kNotes[9], "  Your head aims. Where you look is where you face, walk and point, sights included.") == 0 &&

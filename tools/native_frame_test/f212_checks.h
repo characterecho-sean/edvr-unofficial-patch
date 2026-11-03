@@ -357,7 +357,8 @@ inline void run212(Check&& check) {
                   block.find("malloc(") == std::string::npos && block.find("lock_guard") == std::string::npos && block.find("std::mutex") == std::string::npos &&
                   countOf(block, "nativeOnFootActive()") == 1 && countOf(block, "f212::decide(") == 1 && countOf(block, "f212::noteCall(") == 1,
               "F212: the callback never calls the trampoline (it does the leaf's work itself), takes no lock, allocates nothing, logs nothing, and decides by nativeOnFootActive() once");
-        check(hooks.find("convLookTick(sink);") != std::string::npos && hooks.find("convLookTick(sink);") < hooks.find("    updateGates();\n}\navh::Sink g_frameSink") &&
+        check(hooks.find("convLookTick(sink);") != std::string::npos && hooks.find("    updateGates();\n}\navh::Sink g_frameSink") != std::string::npos &&
+                  hooks.find("convLookTick(sink);") < hooks.find("    updateGates();\n}\navh::Sink g_frameSink") &&
                   hooks.find("g_gate[kHkLook].store(armed(kHkLook) && capture ? 1u : 0u") != std::string::npos && hooks.find("tryHook(kHkLook, sink)") != std::string::npos,
               "F212: the frame boundary tries the hook while the native key is on, writes the run and summary lines every frame, and opens the gate with the key");
         check(cpp.find("if (nativeOnFootActive()) f212SampleSprings(c);") != std::string::npos && cpp.find("if (nativeOnFootActive()) f212SampleSprings(c);") > cpp.find("if (co.local) {\n        g_f129Ctr.add(cl.path"),

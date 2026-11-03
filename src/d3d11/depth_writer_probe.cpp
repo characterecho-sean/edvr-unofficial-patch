@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../common/log.h"
+#include "vr_world_route.h"   // VrWorldInternalScope: the probe's own context calls step aside from the game-facing hooks
 
 namespace edvr {
 
@@ -221,6 +222,7 @@ bool boundEyeDepth(ID3D11DeviceContext* ctx, int* eye, ID3D11DepthStencilView** 
 }
 
 void takeBaseline(ID3D11DeviceContext* ctx, EyeState& e, ID3D11Texture2D* depth) {
+    VrWorldInternalScope internal;   // the probe's own copy and clear: not the game's (vr_world_route.h)
     ctx->CopyResource(e.scratch[0], depth);
     const UINT zero[4] = {0, 0, 0, 0};
     ctx->ClearUnorderedAccessViewUint(e.uav, zero);
@@ -231,6 +233,11 @@ void takeBaseline(ID3D11DeviceContext* ctx, EyeState& e, ID3D11Texture2D* depth)
 // Follows one depth-writing draw: copy the depth, compare with the copy before it, stamp the id. The context's compute state is put
 // back as it was; nothing else of the game's state is touched.
 void follow(ID3D11DeviceContext* ctx, EyeState& e, ID3D11Texture2D* depth, uint32_t id) {
+    // The copy, the compute binds, the dispatch and the restore all go through the hooked vtable. Under this scope the state hooks
+    // pass straight through (g_flatComputeInternal) and the dispatch thunk does too (g_vrWorldInternal), so the exposure fix, the
+    // census and the GPU pass profiler do not take this dispatch for the game's. What the probe observes of the game's draw (the
+    // OMGet / RSGet reads and the draw info) happens in depthWriterAfterDraw, outside this scope.
+    VrWorldInternalScope internal;
     const int next = 1 - e.cur;
     ctx->CopyResource(e.scratch[next], depth);
     ID3D11ComputeShader* oldCs = nullptr;
@@ -301,6 +308,7 @@ bool writeMap(const std::wstring& path, uint32_t w, uint32_t h, uint32_t eye, co
 }
 
 void closeProbedFrame(ID3D11DeviceContext* ctx) {
+    VrWorldInternalScope internal;   // the readback copies and maps are the probe's own
     const std::wstring dir = g_outputDir.empty() ? Log::get().dir() + L"\\pool" : g_outputDir;
     CreateDirectoryW(dir.c_str(), nullptr);
     uint32_t written = 0;

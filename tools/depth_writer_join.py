@@ -66,11 +66,20 @@ def report(logs, stamp, eye, top):
     import numpy as np
     pool = os.path.join(logs, 'pool')
     eyes = os.path.join(logs, 'eyes')
-    _, writer = read_texture(os.path.join(pool, 'depthwriter_%s_e%d.bin' % (stamp, eye)))
+    wmeta, writer = read_texture(os.path.join(pool, 'depthwriter_%s_e%d.bin' % (stamp, eye)))
     with open(os.path.join(pool, 'depthwriter_%s.json' % stamp), 'r', encoding='utf-8') as f:
         table = {row['id']: row for row in json.load(f)['draws']}
-    _, es = read_texture(os.path.join(eyes, 'eye_%s_EngineSlots.bin' % stamp))
-    _, z = read_texture(os.path.join(eyes, 'eye_%s_Z.bin' % stamp))
+    esmeta, es = read_texture(os.path.join(eyes, 'eye_%s_EngineSlots.bin' % stamp))
+    zmeta, z = read_texture(os.path.join(eyes, 'eye_%s_Z.bin' % stamp))
+    # The writer map is per eye; the EngineSlots and Z captures are one set per run and carry eye 0's (the eye run writes eye 0 in
+    # their headers). Joining another eye's writer ids to them names the wrong draws without any size mismatch to say so.
+    if wmeta['eye'] != eye:
+        raise SystemExit('writer map file says eye %d but --eye %d was asked for' % (wmeta['eye'], eye))
+    for name, m in (('EngineSlots', esmeta), ('Z', zmeta)):
+        if m['eye'] != wmeta['eye']:
+            raise SystemExit('cannot join: the writer map is eye %d but the run\'s %s capture is eye %d (the capture set is one eye per '
+                             'run); refusing to join eye %d\'s writer ids to eye %d\'s pixels'
+                             % (wmeta['eye'], name, m['eye'], wmeta['eye'], m['eye']))
     code = np.ascontiguousarray(es[..., 0])
     zslot = np.ascontiguousarray(es[..., 1])
     scene = np.ascontiguousarray(z, dtype=np.float32)
@@ -135,6 +144,24 @@ def self_test():
             result = report(tmp, 'T9', 0, 5)
         text = buf.getvalue()
         assert result['stale'] == 2 and 'AAAA000000000002' in text and 'bias -100' in text, text
+        # eye 1's map against eye 0's slot and Z captures, same shapes: the old code joined them silently
+        write_texture(os.path.join(tmp, 'pool', 'depthwriter_T9_e1.bin'), writer, 42, eye=1)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                report(tmp, 'T9', 1, 5)
+        except SystemExit as e:
+            assert 'eye 1' in str(e) and 'eye 0' in str(e), e
+        else:
+            raise AssertionError('an eye 1 writer map joined to eye 0 captures')
+        # a map file whose own header disagrees with the --eye asked for
+        write_texture(os.path.join(tmp, 'pool', 'depthwriter_T9_e1.bin'), writer, 42, eye=0)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                report(tmp, 'T9', 1, 5)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError('a map file with the wrong eye in its header joined')
     print('depth_writer_join self-test passed')
 
 

@@ -1251,9 +1251,14 @@ struct ReplayQueryObserver {
         Ptr<ID3D11DeviceContext> context;
         FlatReplayQueryTracker tracker;
         Ptr<ID3D11Asynchronous> holds[64];
+        bool escapeLogged=false;   // log only: the tracker's first escape has been written (flat_replay_query_reject.h)
+        bool ignoredLogged=false;  // log only: the first unmatched timing End has been written
+        bool staleLogged=false;    // log only: the first stale timing Begin has been written
     } contexts[8];
     std::mutex mutex;
     bool overflow=false;
+    bool started=false;        // log only: the first observed call has been written
+    ULONGLONG firstTick=0;     // GetTickCount64 at that call
     Context* find(ID3D11DeviceContext* ctx) {
         for(auto& entry:contexts)if(entry.context.Get()==ctx)return &entry;
         for(auto& entry:contexts)if(!entry.context) { entry.context=ctx;return &entry; }
@@ -5137,29 +5142,109 @@ void flatRuntimeClearBindings() {
         flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);
     }
 }
+// Log only (2026-11-03): what the observer saw that the log says once. Filled under the observer's lock, written after it.
+struct ReplayQueryNote {
+    bool start=false,escape=false;
+    const char* call="?";
+    unsigned long long context=0;
+    uint32_t thread=0,cause=0,queryCode=kFlatQueryUnheld,kind=0,open=0;
+    uint64_t begins=0,ends=0,sinceMs=0;
+    bool ignored=false;                         // the first End of a timing query with no Begin seen (not an escape since 2026-11-03)
+    uint32_t ignoredCode=kFlatQueryUnheld;
+    uint64_t ignoredBegins=0,ignoredEnds=0,ignoredSinceMs=0;
+    bool stale=false;                           // the first Begin of a timing query already open as a timing query (not an escape since 2026-11-03)
+    uint32_t staleCode=kFlatQueryUnheld;
+    uint64_t staleBegins=0,staleEnds=0,staleCount=0,staleUnmatched=0,staleSinceMs=0;
+};
+// The D3D11_QUERY of an asynchronous object, read back once for a log line (never on the hot path); kFlatQueryUnheld when it cannot be read.
+static uint32_t replayQueryCodeOf(ID3D11Asynchronous* async) {
+    Ptr<ID3D11Query> q;
+    if(!async || FAILED(async->QueryInterface(IID_PPV_ARGS(&q)))) return kFlatQueryUnheld;
+    D3D11_QUERY_DESC qd{};q->GetDesc(&qd);
+    return static_cast<uint32_t>(qd.Query);
+}
+static void replayQueryTakeNote(ReplayQueryObserver& observer,ReplayQueryObserver::Context& entry,ID3D11DeviceContext* ctx,ID3D11Asynchronous* async,
+    const char* call,ReplayQueryNote& note) {
+    const ULONGLONG now=GetTickCount64();
+    if(!observer.started) {
+        observer.started=true;observer.firstTick=now;
+        note.start=true;note.call=call;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+    }
+    if(entry.tracker.uncertain && !entry.escapeLogged) {
+        entry.escapeLogged=true;
+        note.escape=true;note.call=call;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.cause=static_cast<uint32_t>(entry.tracker.firstCause);note.kind=static_cast<uint32_t>(entry.tracker.firstCauseKind);
+        note.begins=entry.tracker.causeBegins;note.ends=entry.tracker.causeEnds;note.open=entry.tracker.causeOpen;
+        note.sinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        // The query's own kind, read back once (never on the hot path): the object of the call that caused the escape.
+        if(async && entry.tracker.firstCauseIdentity==async) note.queryCode=replayQueryCodeOf(async);
+    }
+    if(entry.tracker.unmatchedTimingEnds>0 && !entry.ignoredLogged) {
+        entry.ignoredLogged=true;
+        note.ignored=true;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.ignoredBegins=entry.tracker.begins;note.ignoredEnds=entry.tracker.ends;note.ignoredSinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        note.ignoredCode=replayQueryCodeOf(async);
+    }
+    if(entry.tracker.staleTimingBegins>0 && !entry.staleLogged) {
+        entry.staleLogged=true;
+        note.stale=true;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.staleBegins=entry.tracker.begins;note.staleEnds=entry.tracker.ends;note.staleCount=entry.tracker.staleTimingBegins;
+        note.staleUnmatched=entry.tracker.unmatchedTimingEnds;note.staleSinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        note.staleCode=replayQueryCodeOf(async);
+    }
+}
+static void replayQueryWriteNote(const ReplayQueryNote& note) {
+    char text[640];
+    if(note.start) {
+        flatQueryTrackerFormatStart(text,sizeof(text),note.call,note.context,note.thread);
+        Log::get().note("%s",text);
+    }
+    if(note.escape) {
+        flatQueryTrackerFormatEscape(text,sizeof(text),note.cause,note.call,note.queryCode,note.kind,note.thread,note.context,note.begins,note.ends,note.open,note.sinceMs);
+        Log::get().note("%s",text);
+    }
+    if(note.ignored) {
+        flatQueryTrackerFormatIgnoredTimingEnd(text,sizeof(text),note.ignoredCode,note.thread,note.context,note.ignoredBegins,note.ignoredEnds,note.ignoredSinceMs);
+        Log::get().note("%s",text);
+    }
+    if(note.stale) {
+        flatQueryTrackerFormatStaleTimingBegin(text,sizeof(text),note.staleCode,note.thread,note.context,note.staleBegins,note.staleEnds,note.staleCount,note.staleUnmatched,note.staleSinceMs);
+        Log::get().note("%s",text);
+    }
+}
 void flatRuntimeReplayQueryBegin(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
     if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
         const auto kind=replayQueryKind(async);
-        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
-        auto* entry=observer.find(ctx);if(!entry)return;
-        entry->tracker.begin(async,kind);
-        // Keep the object's identity alive for the whole bracket. A released
-        // query's address could otherwise be reused by an unrelated query.
-        if(async) for(size_t i=0;i<64;++i)
-            if(entry->tracker.active[i].identity==async && !entry->holds[i]) {
-                entry->holds[i]=async; break;
-            }
+        ReplayQueryNote note;
+        {
+            auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+            auto* entry=observer.find(ctx);if(!entry)return;
+            entry->tracker.begin(async,kind);
+            // Keep the object's identity alive for the whole bracket. A released
+            // query's address could otherwise be reused by an unrelated query.
+            if(async) for(size_t i=0;i<64;++i)
+                if(entry->tracker.active[i].identity==async && !entry->holds[i]) {
+                    entry->holds[i]=async; break;
+                }
+            replayQueryTakeNote(observer,*entry,ctx,async,"Begin",note);
+        }
+        if(note.start||note.escape||note.ignored||note.stale)replayQueryWriteNote(note);
     }
 }
 void flatRuntimeReplayQueryEnd(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
     if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
         const auto kind=replayQueryKind(async);
-        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
-        auto* entry=observer.find(ctx);if(!entry)return;
-        size_t release=64;
-        for(size_t i=0;i<64;++i)if(entry->tracker.active[i].identity==async) { release=i;break; }
-        entry->tracker.end(async,kind);
-        if(release<64)entry->holds[release].Reset();
+        ReplayQueryNote note;
+        {
+            auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+            auto* entry=observer.find(ctx);if(!entry)return;
+            size_t release=64;
+            for(size_t i=0;i<64;++i)if(entry->tracker.active[i].identity==async) { release=i;break; }
+            entry->tracker.end(async,kind);
+            if(release<64)entry->holds[release].Reset();
+            replayQueryTakeNote(observer,*entry,ctx,async,"End",note);
+        }
+        if(note.start||note.escape||note.ignored||note.stale)replayQueryWriteNote(note);
     }
 }
 void flatRuntimeUnknown() {

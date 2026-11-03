@@ -64,6 +64,39 @@ inline const char* releaseTraceName(ReleaseWhy w) noexcept {
     return "none";
 }
 
+// Built 2026-11-03 (log only): where the sealed pad leaves the pass. The 11-03 flight (edvr_gfx_20261103_044624) showed the own pad in the store's pass once in
+// 31 frames after a boarding seal (31 = kRigRefreshN + 1). The stages that can take it out, counted for the sealed pad's record and for the rig the tick last saw
+// it in (all window totals; the trace takes the deltas): the store callbacks it got (and the ones that left early, or on a pose that could not be read, before
+// the pad was gathered), the producer veto's verdicts on it, and the rig veto's outcomes for its rig. Store callbacks well under one a frame with vetoes in
+// the other columns: a veto took it. Store callbacks every frame and the pad still missing: the pose, not a veto.
+enum PadStage : uint8_t {
+    kPadStore = 0,      // store callbacks for the sealed pad's record
+    kPadEarly,          // ... that returned before the pad was gathered (bucket unreadable, no camera)
+    kPadUnread,         // ... that returned on a pose that could not be read
+    kPadGathered,       // ... that gathered the pad (store - early - unread - gathered: the node was not classed or named as a pad)
+    kPadProdVetoed,     // the producer veto vetoed the pad's record
+    kPadProdKept,       // ... let it through
+    kPadRigVetoed,      // the rig veto vetoed the pad's rig
+    kPadRigRefresh,     // ... let it through as the 31st call
+    kPadRigMixed,       // ... let it through: the published verdict is mixed
+    kPadRigUnknown,     // ... let it through: the published verdict is unknown
+    kPadRigMiss,        // ... let it through: the rig is not in the publication
+    kPadRigStale,       // ... let it through: published in an earlier epoch
+    kPadRigMoved,       // ... let it through: its collection moved since the publication
+    kPadStageEnd
+};
+constexpr size_t kPadStages = kPadStageEnd;
+// The tick's view of the pad's rig (the rig the pad's record was last gathered in): its publication and bound against the held cell.
+struct OwnRigTrace {
+    bool known = false;        // the tick has seen the pad's record in a rig
+    uint8_t publication = 1;   // 0 current, 1 not published, 2 published in an earlier epoch, 3 its collection moved since
+    uint8_t verdict = 255;     // the published verdict: 0 unknown, 1 mixed, 2 outside; 255 none
+    uint32_t run = 0;          // vetoes since the rig was last let through (the refresh comes at kRigRefreshN)
+    bool bounded = false;      // the rig has a bound (a box of its records' spheres)
+    float distM = 0.0f;        // the bound's centre to the held cell (0 inside it)
+    float radiusM = 0.0f;      // the bound's half-diagonal
+};
+
 // One record per tick. The tick fills the fields without a comment on the derived side; step() fills the derived ones.
 struct TickRecord {
     uint32_t frame = 0;
@@ -89,7 +122,10 @@ struct TickRecord {
     ReleaseWhy why = ReleaseWhy::kNone;
     bool originShift = false;        // a common-frame origin shift was read this tick
     bool holdStarted = false;        // the transition hold was set this tick
+    uint64_t pad[kPadStages] = {};   // the window totals of the pad's events (the trace takes the deltas)
+    OwnRigTrace rig;                 // the tick's view of the pad's rig
     // derived, by step()
+    uint64_t padD[kPadStages] = {};  // this tick's pad events (the window totals' rise)
     uint64_t ms = 0;                 // since the seal (held), else since this dock's trace started
     bool sealedNow = false;          // the seal was taken this tick
     float shiftM = 0.0f;             // the held centre's move from the previous tick's held centre
@@ -130,22 +166,35 @@ inline void eventText(const TickRecord& r, char* out, size_t cap) noexcept {
 
 // One tick as one line, keys short and in this order: f frame, t ms, h held, v verdict, th thin, pc pass calls, op own pad in pass, un own unseen,
 // rf refresh, hc held centre, hs its shift, fs frame shift, cv camera valid, cj camera jump, co camera outside, rv rig vetoes, ov producer vetoes,
-// cu culls (the three as per-tick deltas), ev the events. Under 300 characters with every integer at 20 digits.
+// cu culls (the three as per-tick deltas), then the pad's stages (built 2026-11-03; each delta capped at 99999):
+// pa store callbacks/left early/unreadable pose/gathered, pp producer veto vetoed/kept, pr rig veto vetoed/refresh/mixed/unknown/not-published-or-moved (the pad's rig),
+// pg the pad's rig: known/publication/verdict/run/bound-to-cell metres/bound radius metres (see OwnRigTrace); ev the events.
+// Under 440 characters with every integer at 20 digits.
+inline unsigned long long capDelta(uint64_t v) noexcept { return static_cast<unsigned long long>(v > 99999u ? 99999u : v); }
 inline int formatTickLine(const TickRecord& r, char* out, size_t cap) noexcept {
-    char hx[16], hy[16], hz[16], hs[16], fs[16], cj[16], ev[64];
+    char hx[16], hy[16], hz[16], hs[16], fs[16], cj[16], gd[16], gr[16], ev[64];
     numText(hx, sizeof(hx), r.centre[0], 1);
     numText(hy, sizeof(hy), r.centre[1], 1);
     numText(hz, sizeof(hz), r.centre[2], 1);
     numText(hs, sizeof(hs), r.shiftM, 2);
     numText(fs, sizeof(fs), r.frameShiftM, 2);
     numText(cj, sizeof(cj), r.camJumpM, 2);
+    numText(gd, sizeof(gd), r.rig.bounded ? r.rig.distM : 0.0f, 1);
+    numText(gr, sizeof(gr), r.rig.bounded ? r.rig.radiusM : 0.0f, 1);
     eventText(r, ev, sizeof(ev));
+    const uint64_t* d = r.padD;
     return std::snprintf(out, cap,
-                         "f=%u t=%llu h=%d v=%c th=%d pc=%llu op=%d un=%u rf=%c hc=%s,%s,%s hs=%s fs=%s cv=%d cj=%s co=%d rv=%llu ov=%llu cu=%llu ev=%s",
+                         "f=%u t=%llu h=%d v=%c th=%d pc=%llu op=%d un=%u rf=%c hc=%s,%s,%s hs=%s fs=%s cv=%d cj=%s co=%d rv=%llu ov=%llu cu=%llu "
+                         "pa=%llu/%llu/%llu/%llu pp=%llu/%llu pr=%llu/%llu/%llu/%llu/%llu pg=%d/%u/%u/%u/%s/%s ev=%s",
                          static_cast<unsigned>(r.frame), static_cast<unsigned long long>(r.ms), r.held ? 1 : 0, verdictChar(r.verdict), r.thin ? 1 : 0,
                          static_cast<unsigned long long>(r.passCalls), r.ownInPass ? 1 : 0, static_cast<unsigned>(r.ownUnseen), refreshChar(r.refresh),
                          hx, hy, hz, hs, fs, r.camValid ? 1 : 0, cj, r.cameraOutside ? 1 : 0, static_cast<unsigned long long>(r.rigDelta),
-                         static_cast<unsigned long long>(r.producerDelta), static_cast<unsigned long long>(r.cullDelta), ev);
+                         static_cast<unsigned long long>(r.producerDelta), static_cast<unsigned long long>(r.cullDelta),
+                         capDelta(d[kPadStore]), capDelta(d[kPadEarly]), capDelta(d[kPadUnread]), capDelta(d[kPadGathered]),
+                         capDelta(d[kPadProdVetoed]), capDelta(d[kPadProdKept]),
+                         capDelta(d[kPadRigVetoed]), capDelta(d[kPadRigRefresh]), capDelta(d[kPadRigMixed]), capDelta(d[kPadRigUnknown]),
+                         capDelta(d[kPadRigMiss] + d[kPadRigStale] + d[kPadRigMoved]), r.rig.known ? 1 : 0, static_cast<unsigned>(r.rig.publication),
+                         static_cast<unsigned>(r.rig.verdict), static_cast<unsigned>(r.rig.run), gd, gr, ev);
 }
 
 // The emitter: one line at a time (the tick passes its log writer; the rig passes a capture).
@@ -161,6 +210,7 @@ struct SealTrace {
     bool havePrevCam = false;
     float prevCam[3] = {};
     uint64_t prevRig = 0, prevProducer = 0, prevCull = 0;
+    uint64_t prevPad[kPadStages] = {};
     bool prevHeld = false;
     bool prevActive = false;
     uint64_t traceSinceMs = 0;        // this dock's trace started
@@ -180,10 +230,11 @@ struct SealTrace {
     // The 30 s summary reset the window totals: the next deltas count from zero.
     void windowReset() noexcept {
         prevRig = prevProducer = prevCull = 0;
+        for (uint64_t& p : prevPad) p = 0;
     }
 
     static void emitRecord(const TickRecord& r, TraceEmit emit, void* ctx) noexcept {
-        char line[320];
+        char line[448];
         formatTickLine(r, line, sizeof(line));
         emit(ctx, line);
     }
@@ -217,6 +268,10 @@ struct SealTrace {
         prevRig = r.rigVetoes;
         prevProducer = r.producerVetoes;
         prevCull = r.culled;
+        for (size_t k = 0; k < kPadStages; ++k) {
+            r.padD[k] = r.pad[k] >= prevPad[k] ? r.pad[k] - prevPad[k] : r.pad[k];
+            prevPad[k] = r.pad[k];
+        }
 
         r.trigger = TraceTrigger::kNone;
         if (postLeft == 0 && r.held && active) {

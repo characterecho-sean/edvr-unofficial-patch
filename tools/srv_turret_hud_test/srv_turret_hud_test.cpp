@@ -969,7 +969,8 @@ struct Captured {
 static float tagU(size_t i) { return 0.1f * float(i) + 0.05f; }
 static float tagV(size_t i) { return 0.3f - 0.2f * float(i); }
 // The points as triangles through the twin with the stream-output target: the clip position of every vertex as the game's shader made it (pre) and as the geometry shader wrote it (post).
-static Captured captureMove(int fam, ID3D11GeometryShader* twin, const std::vector<Pt>& pts, const Cam& cam, const st::TurretParams& params) {
+static uint32_t twinExtraFloats(uint32_t sig);   // defined with the twin's stream-output declaration below
+static Captured captureMove(int fam,ID3D11GeometryShader* twin, const std::vector<Pt>& pts, const Cam& cam, const st::TurretParams& params) {
     std::vector<Vtx> v;
     for (size_t i = 0; i < pts.size(); ++i) v.push_back(vtxOf(pts[i], tagU(i), tagV(i)));
     while (v.size() % 3) v.push_back(v.back());
@@ -979,7 +980,7 @@ static Captured captureMove(int fam, ID3D11GeometryShader* twin, const std::vect
     o.soTarget = true;
     (void)render(v, cam, twin, params, 64, 64, o);
     check(s.so.NumPrimitivesWritten == v.size() / 3 && s.so.PrimitivesStorageNeeded == v.size() / 3, "the twin wrote one triangle for each triangle it was given");
-    const uint32_t stride = st::sigFloats(fam) + st::kPreFloats, pos = st::sigPosFloat(fam), pre = st::sigFloats(fam);
+    const uint32_t stride = st::sigFloats(fam) + st::kPreFloats + twinExtraFloats(uint32_t(fam)), pos = st::sigPosFloat(fam), pre = st::sigFloats(fam);   // the sheet's record also carries its two clip distances
     Captured m;
     for (size_t i = 0; i < pts.size(); ++i) {
         std::array<float, 4> a{}, b{};
@@ -2879,7 +2880,6 @@ int main(int argc, char** argv) {
                 check(offScreen(-0.62f, -0.16f), "the gunner sheet sends the faint line above a card off screen");
                 check(offScreen(-0.85f, -0.36f), "the gunner sheet sends the border beside a card off screen");
                 sheetClipCases(twinOf[fam].Get(), production);   // the clip planes that cut the leftover brackets, read from the twin's streamed-out clip distances
-                continue;
             }
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
@@ -2939,7 +2939,6 @@ int main(int argc, char** argv) {
             {"the lighting position moved by the translation alone", "g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z", "g[277].xyz * tr.x + g[278].xyz * tr.y + g[279].xyz * tr.z"},
         };
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
-            if (fam == uint32_t(st::kGunnerSheetSignature)) continue;   // the border shader returns before the move, so a mutant of the move still draws nothing
             g_fam = int(fam);
             const std::string text = kBytes[fam].text;
             for (const Mutant& m : mutants) {
@@ -2976,7 +2975,7 @@ int main(int argc, char** argv) {
                 check(fails.n > 0, what);
             }
         }
-        {   // the gunner sheet's clip planes: an edit of each rule must be caught by the clip cases (the sheet's shader returns before the move, so the move mutants above skip it)
+        {   // the gunner sheet's clip planes: an edit of each rule must be caught by the clip cases (the move mutants above cover the sheet's move; these cover its clip planes)
             g_fam = int(st::kGunnerSheetSignature);
             const std::string text = kBytes[st::kGunnerSheetSignature].text;
             const Mutant clipMutants[] = {

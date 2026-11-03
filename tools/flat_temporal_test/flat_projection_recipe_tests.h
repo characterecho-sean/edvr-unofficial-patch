@@ -135,8 +135,22 @@ inline int flatProjectionRecipeTests() {
         // vertex shaders (the same hashes), so the same clip spans.
         {0x9BFC7FD232328391ull,0xDBF1725726018F52ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0xA47A3315FFF5E2E4ull,0x869FFF43E875906Eull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        // 2026-11-03: the supercruise orbit lines (the vertex shader's one pixel shader: the offset it adds to clip xy is a screen-space
+        // direction times 1/W,1/H of the target and never reads the jitter; the pixel shader reads SV_Position.w only), so the jitter in
+        // rows 270..273 reaches the rasteriser unchanged.
+        {0xC7FA0C0F5DD49180ull,0x6EEF165A350DA30Full,1,FlatProjectionPatchLayout::ForwardColumns,270},
     };
-    expect(sizeof(latest)/sizeof(latest[0])==48,"latest supported ordinary pair census size");
+    expect(sizeof(latest)/sizeof(latest[0])==49,"latest supported ordinary pair census size");
+    // The orbit lines' vertex shader is keyed by its one pixel shader: none, the bars' and the dust's pixel shaders get no recipe from it.
+    expect(flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0ull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0x869FFF43E875906Eull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xDBF1725726018F52ull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xC67370DE72E4422Cull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xCB7AF179DF4E6A60ull).count==0,
+        "the orbit lines' vertex shader names a recipe for its own pixel shader only");
+    expect(flatProjectionDrawRecipes(0x9BFC7FD232328391ull,0x6EEF165A350DA30Full).count==0 &&
+        flatProjectionDrawRecipes(0xA47A3315FFF5E2E4ull,0x6EEF165A350DA30Full).count==0,
+        "the orbit lines' pixel shader gets no recipe from the dust's or the bars' vertex shader");
     FlatProjectionJitter jitter{};
     expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
     for (const auto& pair : latest) {

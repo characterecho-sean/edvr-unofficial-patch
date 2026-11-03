@@ -57,7 +57,7 @@
   Anti-Aliasing", flat Performance tab under UI quality, default off; "flat ui layer smaa:" lines). Seen working at 2560x1440 (15:43);
   nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost.
 - **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them.
-- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; last entry, "the supercruise bars and the dust".
+- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; the orbit lines followed (FLOWN OK, 894343b1), last entry.
 - **Next on Epic:** SS 0.5 on the shipped build (copy route, eced5813's admission change), 100% at SS 1.0, then all three maps.
 
 ## Purpose
@@ -1208,3 +1208,28 @@ or a station) with them, in both editions.
   3840x2160 viewport` (layer and render the same size: the looser flat density rule is what admitted the bars); near a body `normal-space-dust taken=2669
   of 2672` (3 refused: `not-hdr-target=1 tone-unproven=2`, at a transition). `no-camera-rows` and `other-shift` never appeared: the two new recipes give
   the rows and the rows carry the frame's phase. `flat ui layer smaa: key=on smoothed=2669 raw-fault=0 size=3840x2160`.
+
+## 2026-11-03: the orbit lines in the flat UI layer (FLOWN OK)
+
+Sean asked for the orbit lines to go the way of the bars and the dust. Flat draws them with VR's pair (vs C7FA0C0F / ps 6EEF165A) into the
+3840x2160 R11G11B10 scene target, depth and stencil tested as in VR, and the generic classifier refused the pair (log `edvr_gfx_20261103_044624`,
+04:56:41: `verdict=refused ... vs-reason=not-forward ... ps-reason=vpos-consumer`). So the lines had no camera rows and stayed in the upscaler's history.
+
+- **The recipe** (`flat_projection_recipes.h`, beside the dust and the bars): ForwardColumns at cb1 row 270 on the vertex stage. The vertex shader
+  projects by cb1[270..273], then adds a screen-space offset scaled by clip w (the instance's half-width over the target's 1/W, 1/H). The offset never
+  reads the jitter, so the rows carry the frame's phase. The pixel shader reads SV_Position.w only (the edge distance's perspective divide), never its
+  x, its y or the target size, so the layer's size does not change what it draws; VR has drawn the pair into a larger layer since 2026-10-07.
+  `flat_temporal_test` pins the pair (49 pairs) and the orbit shaders' other pairings as recipe-less.
+- **The take.** `flatUiLayerTakesFamily` asks for `kOrbitLines` under the flat scene-line density rule (a layer at least as large as the render), as for
+  the bars. Flat has no width patch (`orbital_width.h` stays VR's): the game's half-width is in render pixels, so a line is as wide on screen as when it
+  was upscaled; it only leaves the history. The depth and stencil tests run against the layer's seeded copy, as the normal-space dust's do.
+- **Log:** the `flat ui layer scene:` line gains a fourth part, `orbit-lines asked=N decided=N taken=N refused-at-issue=N refused=N (reasons)`, and once:
+  `flat ui layer: the first orbit lines taken -- ...`.
+- **Flight check** (flat, supercruise with orbit lines showing): `orbit-lines taken` above zero, `no-camera-rows` and `depth-stencil-test` at 0, the
+  lines steady when the view turns. `depth-stencil-test` climbing means the seed refused this depth target; `no-density-gain` means the layer is
+  smaller than the render.
+- **Flight (Frontier, 2026-11-03, log `edvr_gfx_20261103_093139`, build v0.22.0-rc.6-1-g894343b1, flat, 3840x2160, HUD Anti-Aliasing on):** Sean:
+  "seems to work". First take at 09:33:24 (frame 9049). The two supercruise windows read `orbit-lines asked=1414 decided=1306 taken=1306 refused=108`
+  and `asked=2792 decided=2699 taken=2699 refused=93`, every refusal `not-hdr-target`: about three draws a second of the same pair go to a target
+  that is not the scene's HDR one, are left to the game as before, and are outside the history anyway. `no-camera-rows`, `other-shift` and
+  `depth-stencil-test` never appeared. `flat ui layer smaa: key=on smoothed=2699 raw-fault=0`.
