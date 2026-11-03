@@ -240,6 +240,11 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n" \
     "static const float kCardRowBottomY = -0.481;\n" \
     "static const float kLabelRowLeftX = 0.53;\n" \
+    "// The target card (the left one) shows its content off-centre in its dark fill. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, it is 0.342 m wide, and the sheet last tile column ends 11.5 mm inside the fill right edge.\n" \
+    "// Sean screenshot of 2026-11-03: the panel art ends 20 px (11.4 mm) inside the fill on the right and about 1 mm inside on the left (the cut column is trimmed 3 mm outside the edge), so the content moves (11.4 - 1) / 2 = 5.3 mm along U, rightwards.\n" \
+    "// Only the target card side moves. The region test and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
+    "static const float kTargetCardShiftM = 0.0053;\n" \
+    "static const float3 kTargetCardAcross = float3(0.7451, 0.0, 0.6670);\n" \
     "float4x4 sheetInv(float4x4 m, out float det) {\n" \
     "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n" \
     "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n" \
@@ -266,11 +271,13 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    r[3] = float4(-a10 * b09 + a11 * b07 - a12 * b06,  a00 * b09 - a01 * b07 + a02 * b06, -a30 * b03 + a31 * b01 - a32 * b00,  a20 * b03 - a21 * b01 + a22 * b00) * invDet;\n" \
     "    return r;\n" \
     "}\n" \
+    "bool inTarget(float3 p) {\n" \
+    "    return p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
+    "}\n" \
     "bool inFill(float3 p) {\n" \
-    "    const bool left = p.x > -0.822 && p.x < -0.47 && p.y > -0.51 && p.y < -0.245;\n" \
     "    const bool right = p.x > 0.50 && p.x < 0.78 && p.y > -0.51 && p.y < -0.245;\n" \
     "    const bool label = p.x > 0.12 && p.x < 0.78 && p.y > -0.58 && p.y < -0.50;\n" \
-    "    return left || right || label;\n" \
+    "    return inTarget(p) || right || label;\n" \
     "}\n" \
     "bool liveLocal(float4 c, out float3 local) {\n" \
     "    float det;\n" \
@@ -298,10 +305,15 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "        }\n" \
     "    }\n" \
     "    const float3 cen = (p0 + p1 + p2) / 3.0;\n" \
+    "    float4 shiftClip = float4(0.0, 0.0, 0.0, 0.0);\n" \
+    "    if (live && draw && inTarget(p0) && inTarget(p1) && inTarget(p2)) {\n" \
+    "        const float3 sd = kTargetCardAcross * kTargetCardShiftM;\n" \
+    "        shiftClip = float4(dot(clipRows[4].xyz, sd), dot(clipRows[5].xyz, sd), dot(clipRows[6].xyz, sd), dot(clipRows[7].xyz, sd));\n" \
+    "    }\n" \
     "    const bool locked = an.w > 0.5;\n" \
     "    const float3 lk = locked ? tr.xyz - turretLockCentre(c0, c1, c2) : float3(0.0, 0.0, 0.0);\n" \
     "    [unroll] for (int i = 0; i < 3; ++i) {\n" \
-    "        const float4 corner = i == 0 ? c0 : (i == 1 ? c1 : c2);\n" \
+    "        const float4 corner = (i == 0 ? c0 : (i == 1 ? c1 : c2)) + shiftClip;\n" \
     "        Moved o;\n" \
     "        o.v = v[i];\n" \
     "        o.pre = v[i].pos;\n" \

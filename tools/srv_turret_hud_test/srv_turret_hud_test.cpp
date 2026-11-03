@@ -2663,8 +2663,8 @@ struct SheetClips {
     bool wrote = false;     // the twin wrote the one triangle
     float c[3][2] = {};     // the clip distances of the three vertices
 };
-static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3], bool withView) {
-    check(st::isGunnerSheetSignature(g_fam), "the sheet's clip cases run on a gunner sheet signature (I or K)");
+// One triangle of mesh points (the rig's view constants give them back as the mesh-space points) through the sheet's twin, with the draw's view constants bound or not.
+static void sheetRender(ID3D11GeometryShader* twin, const float pts[3][3], bool withView, const st::TurretParams& params, Sample& s) {
     const Cam cam;
     std::vector<float> clipRows(8 * 4, 0.0f);
     clipRows[4 * 4 + 0] = cam.p00;
@@ -2679,7 +2679,6 @@ static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3]
     const auto camBuf = makeBuffer(UINT(camRows.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, camRows.data());
     std::vector<Vtx> v;
     for (int i = 0; i < 3; ++i) v.push_back(vtxOf(Pt{pts[i][0], pts[i][1], -pts[i][2], 0.5f * -pts[i][2] + 0.2f}, 0, 0));
-    Sample s;
     DrawOpts o;
     o.sample = &s;
     o.soTarget = true;
@@ -2687,7 +2686,12 @@ static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3]
         o.clipCb = clipBuf.Get();
         o.camCb = camBuf.Get();
     }
-    (void)render(v, cam, twin, defaultParams(), 64, 64, o);
+    (void)render(v, cam, twin, params, 64, 64, o);
+}
+static SheetClips sheetClipsOf(ID3D11GeometryShader* twin, const float pts[3][3], bool withView) {
+    check(st::isGunnerSheetSignature(g_fam), "the sheet's clip cases run on a gunner sheet signature (I or K)");
+    Sample s;
+    sheetRender(twin, pts, withView, defaultParams(), s);
     SheetClips r;
     const uint32_t stride = st::sigFloats(uint32_t(g_fam)) + st::kPreFloats + kSheetClipFloats, at = stride - kSheetClipFloats;
     r.wrote = s.so.NumPrimitivesWritten == 1 && s.records.size() >= 3 * stride;
@@ -2779,6 +2783,56 @@ static void sheetClipCases(ID3D11GeometryShader* twin, Fails& f) {
         const float label[3][3] = {{0.45f, -0.55f, kRigSheetZ}, {0.56f, -0.55f, kRigSheetZ}, {0.50f, -0.50f, kRigSheetZ}};
         f.expect(isOne(sheetClipsOf(twin, left, false)) && isOne(sheetClipsOf(twin, label, false)), "gunner sheet clip: with no SheetClip bound every clip distance is (1, 1), so a missed constant buffer clips nothing");
     }
+}
+
+// THE TARGET CARD'S SHIFT (kTargetCardShiftM = 5.3 mm along U = (0.7451, 0, 0.6670) in mesh metres, srv_turret_hud_shader.h). Run with the translation alone (gap 0, so the vertices move by T and nothing
+// else); a vertex's eye-space move is then T, plus the shift where the sheet shader moved it. The mesh point (x, y, z) is the eye-space point (x, y, -z) in the rig. The clip distances are read on
+// the unshifted position (sheetClipCases above, which would catch a shader that read them after the shift).
+static constexpr double kRigShiftM = 0.0053, kRigAcross[3] = {0.7451, 0.0, 0.6670};
+struct SheetMoves {
+    bool wrote = false;
+    double d[3][3] = {};   // post - pre, eye space, one row for each vertex
+};
+static SheetMoves sheetMovesOf(ID3D11GeometryShader* twin, const float pts[3][3], const st::TurretParams& params) {
+    Sample s;
+    sheetRender(twin, pts, true, params, s);
+    SheetMoves r;
+    const uint32_t stride = st::sigFloats(uint32_t(g_fam)) + st::kPreFloats + kSheetClipFloats, pos = st::sigPosFloat(uint32_t(g_fam)), pre = st::sigFloats(uint32_t(g_fam));
+    r.wrote = s.so.NumPrimitivesWritten == 1 && s.records.size() >= 3 * stride;
+    const Cam cam;
+    for (int i = 0; r.wrote && i < 3; ++i) {
+        std::array<float, 4> a{}, b{};
+        for (int c = 0; c < 4; ++c) {
+            a[c] = s.records[size_t(i) * stride + pre + c];
+            b[c] = s.records[size_t(i) * stride + pos + c];
+        }
+        double pa[3], pb[3];
+        eyePos(a, cam, pa);
+        eyePos(b, cam, pb);
+        for (int k = 0; k < 3; ++k) r.d[i][k] = pb[k] - pa[k];
+    }
+    return r;
+}
+static void sheetShiftCases(ID3D11GeometryShader* twin, Fails& f) {
+    const float tz[3] = {0.0f, 0.0f, 0.3f};
+    const st::TurretParams params = st::translateParamsFor(frameOfCam(Cam{}, nullptr, tz));
+    const double tol = 2.0e-5;
+    const double shiftEye[3] = {kRigShiftM * kRigAcross[0], kRigShiftM * kRigAcross[1], -kRigShiftM * kRigAcross[2]};   // mesh (dx, dy, dz) is eye (dx, dy, -dz)
+    auto movesBy = [&](const SheetMoves& m, const double extra[3]) {
+        bool ok = m.wrote;
+        for (int i = 0; ok && i < 3; ++i)
+            for (int k = 0; k < 3; ++k) ok = ok && std::fabs(m.d[i][k] - (double(tz[k]) + extra[k])) < tol;
+        return ok;
+    };
+    const double none[3] = {0.0, 0.0, 0.0};
+    const float target[3][3] = {{-0.65f, -0.40f, kRigSheetZ}, {-0.55f, -0.40f, kRigSheetZ}, {-0.60f, -0.33f, kRigSheetZ}};   // target card content: inside the fill, past the left plane
+    const float bar[3][3] = {{-0.80f, -0.40f, kRigSheetZ}, {-0.75f, -0.40f, kRigSheetZ}, {-0.78f, -0.34f, kRigSheetZ}};      // the bracket column left of the fill: in the target region, moved with the content (its cut is on the unshifted position)
+    const float systems[3][3] = {{0.55f, -0.45f, kRigSheetZ}, {0.65f, -0.45f, kRigSheetZ}, {0.60f, -0.35f, kRigSheetZ}};
+    const float label[3][3] = {{0.60f, -0.55f, kRigSheetZ}, {0.70f, -0.55f, kRigSheetZ}, {0.65f, -0.52f, kRigSheetZ}};
+    f.expect(movesBy(sheetMovesOf(twin, target, params), shiftEye), "gunner sheet shift: a target-card content triangle moves by the translation and 5.3 mm along U = (0.7451, 0, 0.6670), rightwards");
+    f.expect(movesBy(sheetMovesOf(twin, bar, params), shiftEye), "gunner sheet shift: ...and so does a triangle of the target region left of the fill (the cut follows it)");
+    f.expect(movesBy(sheetMovesOf(twin, systems, params), none), "gunner sheet shift: a systems-card triangle moves by the translation alone");
+    f.expect(movesBy(sheetMovesOf(twin, label, params), none), "gunner sheet shift: a label-row triangle moves by the translation alone");
 }
 
 // ---------------------------------------------------------------- the mutants
@@ -2895,6 +2949,7 @@ int main(int argc, char** argv) {
                 check(offScreen(-0.62f, -0.16f), "the gunner sheet sends the faint line above a card off screen");
                 check(offScreen(-0.85f, -0.36f), "the gunner sheet sends the border beside a card off screen");
                 sheetClipCases(twinOf[fam].Get(), production);   // the clip planes that cut the leftover brackets, read from the twin's streamed-out clip distances
+                sheetShiftCases(twinOf[fam].Get(), production);   // the target card's content moved 5.3 mm along its top edge; the systems card and the label row not
             }
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
@@ -3017,6 +3072,27 @@ int main(int argc, char** argv) {
                 std::snprintf(what, sizeof(what), "the mutant \"%s\" of gunner sheet signature %d's shader is caught by the clip cases", m.name, sheetSig);
                 check(fails.n > 0, what);
             }
+            const Mutant shiftMutants[] = {   // the target card's shift (kTargetCardShiftM): each edit must fail the shift cases or the clip cases
+                {"the shift dropped", " + shiftClip;", ";"},
+                {"the shift on the whole sheet", "if (live && draw && inTarget(p0)", "if (live && draw && true || inTarget(p0)"},
+                {"the shift on the systems card only", "inTarget(p0) && inTarget(p1) && inTarget(p2)) {", "!inTarget(p0) && !inTarget(p1) && !inTarget(p2)) {"},
+                {"the shift's sign", "kTargetCardAcross * kTargetCardShiftM;", "-kTargetCardAcross * kTargetCardShiftM;"},
+                {"the shift along x alone", "float3(0.7451, 0.0, 0.6670)", "float3(1.0, 0.0, 0.0)"},
+                {"the shift at 4 mm", "kTargetCardShiftM = 0.0053", "kTargetCardShiftM = 0.0040"},
+                {"the clip delta without its depth row", "dot(clipRows[7].xyz, sd)", "0.0"},
+                {"the clip planes read after the shift", "sheetClip(i == 0 ? p0 : (i == 1 ? p1 : p2), cen)", "sheetClip((i == 0 ? p0 : (i == 1 ? p1 : p2)) + kTargetCardAcross * kTargetCardShiftM, cen)"},
+            };
+            for (const Mutant& m : shiftMutants) {
+                const std::string mutated = replaceAll(text, m.from, m.to);
+                check(mutated != text, "a mutant differs from the production text");
+                const auto mg = twinFromText(sheetSig, mutated);
+                Fails fails;
+                sheetShiftCases(mg.Get(), fails);
+                sheetClipCases(mg.Get(), fails);
+                char what[200];
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of gunner sheet signature %d's shader is caught by the shift and clip cases", m.name, sheetSig);
+                check(fails.n > 0, what);
+            }
         }
         g_fam = 0;
         {
@@ -3040,7 +3116,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eleven signatures, five more in signature H, twelve in each gunner sheet's clip planes and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eleven signatures, five more in signature H, twelve in each gunner sheet's clip planes and eight in its target card shift and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);
