@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **BUILT, FLOWN ONCE (swap works, look too faint), CORRECTED, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
+State 2026-11-03: **FLOWN TWICE (swap works), CORRECTED TWICE, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
 quality-3 canopy shader `4E4FF61E8A08FC7E`, at bind time. What was built, the constants chosen and what the
@@ -28,7 +28,8 @@ keeps live's reflection-probe lighting as its ambient, so it stays lit in a hang
 
 Flown once (3ae212ae, Steam, flat): the swap ran (binds = canopy-seen, about 3,050 per 30 s) and little
 differed, because the shader scaled dirt colour and glare by live's alpha-only factor k (0.075) and lit by
-live's tilted normal. Fixed in the next commit (section 8, "After the first flight"); it needs a second flight.
+live's tilted normal. Fixed in 5b9c36f9 (section 8, "After the first flight"). Flown again: the canopy was covered in bright golden
+dirt speckle in sunlight, because the direct light lacked live's 1/pi (section 8, "After the second flight").
 
 Open: the second flight; the tuned constants (section 8).
 
@@ -343,6 +344,16 @@ alpha times colour is unchanged; a smudge (imperfection mask 0.5) under the ligh
 468.75 at k = 1 (alpha 0.5, colour 3.662) and at k = 0.075 (alpha 0.0375, colour 48.78); a smudge of 0.01 at
 k = 0.075 has alpha 0.00075, below the floor, and is written at alpha 1/1024 with its radiance (colour 37.47,
 wanted 9.375 / 256 / (1/1024)).
+
+**After the second flight (2026-11-03, 5b9c36f9).** With the masks unscaled the dirt was visible, and far too bright:
+golden speckle over the canopy in sunlight. Live multiplies its Lambert term by 0.318310 before the light colour
+(and again in its lights loop): its t1 colour is in units where diffuse = albedo * ndl / pi * colour. The legacy
+formula has no such factor, because the legacy light colour was in its own units, so on live's colour the direct
+light was pi times too bright. Both direct terms (Lambert times shadow, and the glare) are now scaled by
+`kInvPi = 0.318310`; the probe ambient is not (it is radiance, and albedo times radiance is already the diffuse
+response). Nothing else changed. Rig numbers (WARP, debug layer on): dirt under the sun 0.6216 (wanted 0.6217),
+alpha 0.2; at k = 0.075 colour 8.281 (wanted 8.289), alpha 0.015; smudge glare radiance 149.2 wanted, got colour
+1.165 at alpha 0.5 and 15.53 at alpha 0.0375 (both radiance 149.2); the hangar case is unchanged at 0.125.
 
 **What the flight must check** (flat first, Steam; then the headset):
 

@@ -374,6 +374,8 @@ private:
     }
 };
 
+static const float kInvPi = 0.318310f;   // live's factor on the direct light, which the port carries
+
 static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-4f; }
 
 // The legacy model's lit normal on flat glass, for a vertex normal (0,0,1) in a view basis that is the identity: the glass is lit from inside, so it is -N.
@@ -399,7 +401,7 @@ static void testShader() {
     const Pixel d = canopy.draw(dirt);
     const float cover = 0.2f;   // k = 1 - saturate(0 * 1.0526) = 1; alpha = k * dirt = 0.2
     const float ndl = expectedNdl(dirt);
-    const float radiance = ndl * 1000.0f * (cover * 1.0f * 0.5f);
+    const float radiance = ndl * 1000.0f * kInvPi * (cover * 1.0f * 0.5f);
     const float want = radiance / cover / 256.0f;
     std::printf("dirt under the sun: got (%g %g %g %g), wanted rgb %g alpha %g\n", d.r, d.g, d.b, d.a, want, cover);
     check(closeTo(d.a, cover, 0.01f), "dirt alpha is its coverage");
@@ -443,20 +445,20 @@ static void testShader() {
     crack.crack = true;
     crack.sunDir[0] = 0.0f; crack.sunDir[1] = 0.0f; crack.sunDir[2] = 1.0f;
     const Pixel cr = canopy.draw(crack);
-    std::printf("crack under the sun: got (%g %g %g %g), wanted rgb %g\n", cr.r, cr.g, cr.b, cr.a, 300.0f / 256.0f);
-    check(closeTo(cr.a, 1.0f, 0.01f) && closeTo(cr.r, 300.0f / 256.0f, 0.02f), "a crack is opaque, in the crack colour, lit by the sun on the crack's normal");
+    std::printf("crack under the sun: got (%g %g %g %g), wanted rgb %g\n", cr.r, cr.g, cr.b, cr.a, 300.0f * kInvPi / 256.0f);
+    check(closeTo(cr.a, 1.0f, 0.01f) && closeTo(cr.r, 300.0f * kInvPi / 256.0f, 0.02f), "a crack is opaque, in the crack colour, lit by the sun on the crack's normal");
     // The glare lobe: the light straight behind the view axis' far side (toward the light is +z, the pixel is straight ahead), so dot(L, V) is 1 and the lobe is
     // (64 + 6) / 32; the crack's normal faces the light's far side, so the Lambert term is 0 and the glare is the whole of it.
     Case glare = crack;
     glare.sunDir[2] = -1.0f;
     const Pixel g = canopy.draw(glare);
-    std::printf("glare in a crack: got (%g %g %g %g), wanted rgb %g\n", g.r, g.g, g.b, g.a, 1000.0f * 70.0f / 32.0f / 256.0f);
-    check(closeTo(g.r, 1000.0f * 70.0f / 32.0f / 256.0f, 0.02f), "the glare lobe is normal-independent: (gloss + 6) / 32 toward the light, at the crack's gloss of 64");
+    std::printf("glare in a crack: got (%g %g %g %g), wanted rgb %g\n", g.r, g.g, g.b, g.a, 1000.0f * kInvPi * 70.0f / 32.0f / 256.0f);
+    check(closeTo(g.r, 1000.0f * kInvPi * 70.0f / 32.0f / 256.0f, 0.02f), "the glare lobe is normal-independent: (gloss + 6) / 32 toward the light, at the crack's gloss of 64");
     // The tint alpha adds to the coverage: 0.2 + 0.5 * (1 - 0.2), and the colour is divided by the alpha written.
     Case tinted = dirt;
     tinted.tint = 0.5f;
     const Pixel ti = canopy.draw(tinted);
-    check(closeTo(ti.a, 0.6f, 0.01f) && closeTo(ti.r, ndl * 1000.0f * 0.1f / 0.6f / 256.0f, 0.02f), "the tint alpha adds to the coverage and the colour is divided by the alpha written");
+    check(closeTo(ti.a, 0.6f, 0.01f) && closeTo(ti.r, ndl * 1000.0f * kInvPi * 0.1f / 0.6f / 256.0f, 0.02f), "the tint alpha adds to the coverage and the colour is divided by the alpha written");
 
     // k = 1 - saturate(CB2[17].w * 1.0526) scales ALPHA ONLY. CB2[17].w = 0.8787 is the flown ship's 0.075. The dirt colour and the smudge glare keep the
     // legacy value (the radiance, alpha times the colour written, is the same as with k = 1) and only the alpha, and so the colour written, changes.
@@ -464,8 +466,8 @@ static void testShader() {
     Case dirtK = dirt;
     dirtK.k = 0.8787f;
     const Pixel dk = canopy.draw(dirtK);
-    std::printf("dirt with k = 0.075: got (%g %g %g %g), wanted rgb %g alpha %g\n", dk.r, dk.g, dk.b, dk.a, ndl * 1000.0f * 0.1f / (kShip * 0.2f) / 256.0f, kShip * 0.2f);
-    check(closeTo(dk.a, kShip * 0.2f, 0.02f) && closeTo(dk.r, ndl * 1000.0f * 0.1f / (kShip * 0.2f) / 256.0f, 0.03f),
+    std::printf("dirt with k = 0.075: got (%g %g %g %g), wanted rgb %g alpha %g\n", dk.r, dk.g, dk.b, dk.a, ndl * 1000.0f * kInvPi * 0.1f / (kShip * 0.2f) / 256.0f, kShip * 0.2f);
+    check(closeTo(dk.a, kShip * 0.2f, 0.02f) && closeTo(dk.r, ndl * 1000.0f * kInvPi * 0.1f / (kShip * 0.2f) / 256.0f, 0.03f),
           "with k = 0.075 the alpha is k times the dirt and the colour is the full legacy dirt radiance divided by it");
     check(closeTo(dk.a * dk.r, d.a * d.r, 0.03f), "the dirt radiance the blend adds (alpha times colour) does not depend on k");
     // The smudge glare: imperfection mask 0.5, the light straight ahead of the pixel (so dot(L, V) is 1), the gloss 24: strength 0.5 * (24 + 6) / 32 * 1000.
@@ -473,7 +475,7 @@ static void testShader() {
     smudge.masks[2] = 0.5f;
     smudge.sunColour[0] = smudge.sunColour[1] = smudge.sunColour[2] = 1000.0f;
     smudge.sunDir[2] = -1.0f;
-    const float smudgeRadiance = 0.5f * 30.0f / 32.0f * 1000.0f;
+    const float smudgeRadiance = 0.5f * 30.0f / 32.0f * 1000.0f * kInvPi;
     const Pixel sm1 = canopy.draw(smudge);
     smudge.k = 0.8787f;
     const Pixel sm2 = canopy.draw(smudge);
@@ -485,7 +487,7 @@ static void testShader() {
     Case faint = smudge;
     faint.masks[2] = 0.01f;
     const Pixel fa = canopy.draw(faint);
-    const float faintRadiance = 0.01f * 30.0f / 32.0f * 1000.0f;
+    const float faintRadiance = 0.01f * 30.0f / 32.0f * 1000.0f * kInvPi;
     std::printf("faint smudge: got (%g %g %g %g), alpha floor %g, radiance wanted %g\n", fa.r, fa.g, fa.b, fa.a, 1.0f / 1024.0f, faintRadiance);
     check(closeTo(fa.a, 1.0f / 1024.0f, 0.02f) && closeTo(fa.a * fa.r * 256.0f, faintRadiance, 0.03f), "glare under an alpha below the floor is written at the floor and keeps its radiance");
 

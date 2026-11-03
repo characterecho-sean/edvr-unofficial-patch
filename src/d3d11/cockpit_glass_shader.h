@@ -171,6 +171,7 @@ static const float kCrackSpec = 1.0;           // glare strength in a crack (tim
 static const float kCrackGloss = 64.0;         // its exponent: a tighter glint
 static const float kAmbientScale = 1.0;        // the probe ambient, in the light's own HDR units
 // Fixed choices.
+static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
 static const uint kMaxProbes = 16;             // the live loop stops when the weights reach 1; this bounds a cluster that never does
 static const float kMinCoverage = 1.0 / 1024.0;  // the smallest alpha written; a pixel with no alpha and no colour either returns transparent black unlit
@@ -282,7 +283,9 @@ float4 main(PsIn i) : SV_Target {
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
     float3 albedo = lerp(dirt * cb1[56].y * cb2[11].xyz, cb2[8].yzw * cb1[56].y, crackA);
     float3 ambient = probeAmbient(pv, nIn, i.position.xy) * kAmbientScale;
-    float3 radiance = (ndl * shadow * lightColour + ambient) * albedo + specAmt * glare * shadow * lightColour;
+    // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
+    float3 direct = shadow * kInvPi * lightColour;
+    float3 radiance = (ndl * direct + ambient) * albedo + specAmt * glare * direct;
 
     // Straight alpha: radiance is the legacy colour, weighted by the legacy masks. Divide by the alpha written and the blend adds it once.
     float3 rgb = radiance / alpha;
