@@ -53,6 +53,8 @@
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
 #include "draw_reissue_line.h" // ReissueCaller: the re-issue counter's names
+#include "draw_mask_line.h"    // MaskSkip: the may-want byte's counters
+#include "draw_gate_holders.h" // GateHolder: what holds the draw gate open
 #include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
 #include "frame_ticks.h"       // frameTick: the boundary's ticks, timed by name
 #include "boundary_tick.h"     // one fault budget per boundary tick
@@ -68,6 +70,7 @@
 #include "ui_layer.h"
 #include "scope_zoom.h"          // scopeZoomMarkArmed: the scope's gunsight mark family is named only while the lens is armed
 #include "ui_layer_math.h"
+#include "vs_may_want.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
@@ -115,6 +118,16 @@ std::atomic<bool> g_drawGateWanted{true};
 // frame boundary invalidates both once engine velocity needs them again.
 std::atomic<bool> g_aaOffDraw{false};
 std::atomic<bool> g_shadowsSkipped{false};
+
+// The may-want byte's counters (draw_mask_line.h). One writer, the owner context's draw thread, so a skip is a load and a store rather than a locked add;
+// perf_monitor.cpp reads them (vScreenDrawMaskCounts) and subtracts the last window's.
+std::atomic<uint32_t> g_maskDraws{0};
+std::atomic<uint32_t> g_maskSkips[kMaskSkips];
+inline void maskNoteSkip(MaskSkip k) {
+    std::atomic<uint32_t>& a = g_maskSkips[static_cast<size_t>(k)];
+    a.store(a.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+}
+inline void maskNoteDraw() { g_maskDraws.store(g_maskDraws.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed); }
 
 namespace {
 
@@ -443,6 +456,7 @@ struct State {
             void*    ptr = nullptr;
             uint64_t hash = 0;
             uint32_t gen = 0;   // the registry's generation at the lookup
+            uint8_t  mayWant = kVsMayWantAll;   // vsMayWantByte(hash), computed at the lookup (read for the vertex shader memo only)
         };
         Entry e[kSlots] = {};
     };
@@ -1759,7 +1773,7 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // State::drawGateWanted; the long comment at the use site says why that is
 // safe and what one frame of lateness costs.
 //
-// Kept as one expression, in the original order, so that a future subscriber
+// Kept as one function, in the original order, one named holder per term (draw_gate_holders.h), so that a future subscriber
 // is added HERE and nowhere else -- which is the mistake the use site's
 // comment records three times over. The wake pulse, night vision, the
 // witchspace starfield switch and the depth probe repeated it: each acts below
@@ -1781,29 +1795,53 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // expression objectProbeConfigure sets g_objectProbeOn from, which is
 // objectProbeWantsDraws() below, so neither can be true while the gate is shut.
 // Narrow that probe's on-condition and both belong here.
-bool drawGateSubscribed(State* s) {
-    return s->distanceEnabled ||
-        s->censusSkipCount != 0 ||
-        s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0 ||
-        s->quadSkipArmed ||
-        s->censusAutoW != 0 || fssResActive() ||
-        fssPanelWantsDraws() ||
-        remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
-        uiDepthWantsDraws() ||
-        sunglareWantsDraws() ||
-        drawCensusArmed() ||
-        blendProbeWantsDraws() ||   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
+uint32_t drawGateHolders(State* s) {
+    uint32_t m = 0;
+    if (s->distanceEnabled) m |= gateHolderBit(GateHolder::Distance);
+    if (s->censusSkipCount != 0 || s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0) m |= gateHolderBit(GateHolder::CensusSkip);
+    if (s->quadSkipArmed) m |= gateHolderBit(GateHolder::QuadSkip);
+    if (s->censusAutoW != 0) m |= gateHolderBit(GateHolder::CensusAuto);
+    if (fssResActive()) m |= gateHolderBit(GateHolder::FssRes);
+    if (fssPanelWantsDraws()) m |= gateHolderBit(GateHolder::FssPanel);
+    if (remlokWantsDraws()) m |= gateHolderBit(GateHolder::Remlok);
+    if (holoWantsDraws()) m |= gateHolderBit(GateHolder::Holo);
+    if (targetSharpWantsDraws()) m |= gateHolderBit(GateHolder::TargetSharp);
+    if (uiDepthWantsDraws()) m |= gateHolderBit(GateHolder::UiDepth);
+    if (sunglareWantsDraws()) m |= gateHolderBit(GateHolder::SunGlare);
+    if (drawCensusArmed()) m |= gateHolderBit(GateHolder::DrawCensus);
+    if (blendProbeWantsDraws()) m |= gateHolderBit(GateHolder::BlendProbe);   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
+    if (objectProbeWantsDraws()) m |= gateHolderBit(GateHolder::ObjectProbe);
+    if (panelCurveWants()) m |= gateHolderBit(GateHolder::PanelCurve);
+    if (particleWantsDraws()) m |= gateHolderBit(GateHolder::Particle);
+    if (backdropWantsDraws()) m |= gateHolderBit(GateHolder::Backdrop);
+    if (scrimWantsDraws()) m |= gateHolderBit(GateHolder::Scrim);
+    if (quadProbeWants()) m |= gateHolderBit(GateHolder::QuadProbe);
+    if (loaderPanelWants()) m |= gateHolderBit(GateHolder::LoaderPanel);
+    if (introPanelWants()) m |= gateHolderBit(GateHolder::IntroPanel);
+    if (wakePulseWantsDraws()) m |= gateHolderBit(GateHolder::WakePulse);
+    if (nightVisionWantsDraws()) m |= gateHolderBit(GateHolder::NightVision);
+    if (spaceDustHidden()) m |= gateHolderBit(GateHolder::SpaceDustHidden);
+    if (witchspaceStarsHidden()) m |= gateHolderBit(GateHolder::WitchspaceStarsHidden);
+    if (depthProbeWanted()) m |= gateHolderBit(GateHolder::DepthProbe);
+    if (vscreenFootprintWanted()) m |= gateHolderBit(GateHolder::Footprint);   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite
+    if (introCurveWants()) m |= gateHolderBit(GateHolder::IntroCurve);          // the splash's surface strip (intro_curve.h): it acts in the eye branch, below this gate -- and panelCurveWants()
+                                                                                // above is the ON-FOOT strip's flag, which stands down on its own while this one does not
+    return m;
+}
 
-        objectProbeWantsDraws() ||
-        panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
-        scrimWantsDraws() || quadProbeWants() || loaderPanelWants() ||
-        introPanelWants() ||
-        wakePulseWantsDraws() || nightVisionWantsDraws() ||
-        spaceDustHidden() ||
-        witchspaceStarsHidden() || depthProbeWanted() ||
-        vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite
-        introCurveWants();            // the splash's surface strip (intro_curve.h): it acts in the eye branch, below this gate -- and panelCurveWants()
-                                      // above is the ON-FOOT strip's flag, which stands down on its own while this one does not
+// The gate's sample, at the two places it is taken: the gate is open while any term holds it, and the set that holds it is logged when it changes
+// (draw_gate_holders.h). The first sample logs too.
+void drawGateSample(State* s) {
+    static uint32_t last = 0;
+    static bool logged = false;
+    const uint32_t m = drawGateHolders(s);
+    drawGateSet(m != 0);
+    if (logged && m == last) return;
+    logged = true;
+    last = m;
+    char line[512];
+    formatGateHolders(line, sizeof(line), m);
+    Log::get().note("%s", line);
 }
 
 // The bound target's resolve, for the wake pulse, memoised on Rtv0's binding
@@ -2012,8 +2050,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             }
             const uint32_t ord = s->fssChromeSkipCount++;
             fssPanelRectOnComposite(self, ord,
-                                    fssPanelRectStartInstance(),
-                                    fssPanelRectBaseVertex());
+                                    args.startInstance,
+                                    args.base);
             const uint32_t mask = fssPanelRectSkipMask();
             if (ord < 32 && ((mask >> ord) & 1u)) {
                 if (!s->fssChromeSkipNoted) {
@@ -3260,8 +3298,11 @@ void STDMETHODCALLTYPE hookedOMSetBlendState(ID3D11DeviceContext* self, ID3D11Bl
 // hash of zero -- a set that beat its registration, or a shader the
 // registry never met -- asked again at every set, because zero is the one
 // answer a consumer cannot tell from "no shader".
-uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
-    if (!shader) return 0;
+uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader, uint8_t* mayWant = nullptr) {
+    if (!shader) {
+        if (mayWant) *mayWant = kVsMayWantAll;
+        return 0;
+    }
     // Fibonacci hashing: the top 10 bits of the pointer times 2^64/phi, so
     // every address bit reaches the slot index (State::ShaderMemo says why
     // the low bits alone collided).
@@ -3274,7 +3315,9 @@ uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
         e.ptr = shader;
         e.gen = gen;
         e.hash = lookupShaderHash(shader);
+        e.mayWant = vsMayWantByte(e.hash);
     }
+    if (mayWant) *mayWant = e.mayWant;
     return e.hash;
 }
 
@@ -3283,8 +3326,10 @@ void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11Vertex
     if (!foreignContext(self)) flatIssueEpochBumpStage();
     if (g_flatComputeInternal) { g_state->realVSSetShader(self, vs, ci, n); return; }
     if (!foreignContext(self)) {
-        const uint64_t h = shaderHashMemo(g_state->vsMemo, vs);
+        uint8_t mayWant = kVsMayWantAll;
+        const uint64_t h = shaderHashMemo(g_state->vsMemo, vs, &mayWant);
         bindingSetShader(BindSlot::Vs, vs, h);
+        bindingSetVsMayWant(mayWant);
         ++g_state->vsSets;
         if (vs && !h) ++g_state->vsSetsNoHash;
     }
@@ -4207,6 +4252,7 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
+    maskNoteDraw();
     // Asked once. ownerCtx is written only at install (installVScreenFixes),
     // never by anything a draw can reach, so the answer cannot change between
     // the first use below and the last -- but g_state is a global the
@@ -4310,7 +4356,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
     bool barsFamily = false;
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
-        const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count, instances);
+        // The may-want byte (vs_may_want.h): on the HDR target a vertex shader the family rule never names is kNone without the check. Inside this branch
+        // alone, so the probe branch below is reached or not exactly as before; kind 2 always runs the check.
+        const bool skipFamily = vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKind() == 1;
+        if (skipFamily) maskNoteSkip(MaskSkip::UiFamily);
+        const UiLayerFamily uiFamily = skipFamily ? UiLayerFamily::kNone : uiLayerFamilyOf(g_state, kind, count, instances);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
@@ -5414,10 +5464,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
     DrawClock clock;
-    // The rect deriver's capture runs INSIDE beginPanelOverride (the
-    // chrome tracker's matched branch), so its draw-args stash must land
-    // before the call.
-    fssPanelRectDrawArgs(baseVertex, startInstance);
     // The sub-draw probe re-issues this draw from the verdict path, which
     // never sees these arguments. Stashed only while armed.
     if (g_state->quadSkipArmed || quadProbeWants() || loaderPanelWants()) {
@@ -5432,6 +5478,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    const bool fast = drawPathFast(v);   // draw_fast_path.h: the gate's tail below (weapon and screen motion, the temporal draws, the census and the footprint) is all behind a subscriber the fast path excludes
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
@@ -5444,7 +5491,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // and the guarded SRV3); the pool families' substituted shaders and MRT6 are
     // bound only when the game has rebound something since the last look. After
     // the verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
     }
@@ -5452,7 +5499,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
-    forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
+    if (fast) {
+        if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
+            const int64_t r0 = clock.on ? qpcNow() : 0;
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
+            if (clock.on) clock.realCall(r0);
+        }
+    } else forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             // The game's own draw, and only it (gpu_census.h): the weapon and screen motion
@@ -5465,7 +5518,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (clock.on) clock.realCall(r0);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
-            weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
+            (vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion) ? (maskNoteSkip(MaskSkip::WeaponMotion), false)
+                                                                : weaponMotionWants(bindingShaderHash(BindSlot::Vs)))) {
             GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
             weaponMotionDraw(self, reissueDrawIndexedInstanced<ReissueCaller::WeaponMotion>, perInstance, instances,
                              startIndex, baseVertex, startInstance);
@@ -5527,8 +5581,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 // work now, not this call site: most calls into either
                 // function return above, at screenMotionLive()'s own flags
                 // or g.sourceFrame!=g.frame, before issuing anything.
-                screenMotionUiDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotionUi>,perInstance,instances,startIndex,baseVertex,startInstance);
-                screenMotionDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotion>,perInstance,instances,startIndex,baseVertex,startInstance);
+                // The may-want byte (vs_may_want.h) skips the call whose pair test would reject this vertex shader for any pixel shader.
+                const uint8_t mayWant = bindingVsMayWant();
+                if (vsMaySkip(mayWant, kVsMayScreenUi)) maskNoteSkip(MaskSkip::ScreenUi);
+                else screenMotionUiDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotionUi>,perInstance,instances,startIndex,baseVertex,startInstance);
+                if (vsMaySkip(mayWant, kVsMayScreenRecognize)) maskNoteSkip(MaskSkip::ScreenRecognize);
+                else screenMotionDraw(self,reissueDrawIndexedInstanced<ReissueCaller::ScreenMotion>,perInstance,instances,startIndex,baseVertex,startInstance);
             }
         }
         return true;  // the original draw was issued
@@ -6097,6 +6155,13 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
 
+DrawMaskCounts vScreenDrawMaskCounts() {
+    DrawMaskCounts c;
+    c.draws = g_maskDraws.load(std::memory_order_relaxed);
+    for (size_t k = 0; k < kMaskSkips; ++k) c.skips[k] = g_maskSkips[k].load(std::memory_order_relaxed);
+    return c;
+}
+
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
 // The configure calls stay in this one body: the reload gate is the only difference between the two.
 static void vScreenRefreshConfigBody(bool forced) {
@@ -6186,7 +6251,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     // knowable now, and waiting for the next frame boundary would cost the
     // newly enabled fix its first frame of draws. A refresh runs this only on a change -- the reloadIfChanged early return in
     // vScreenRefreshConfig sees to that. A forced refresh (a profile switch) runs it with no change to wait for.
-    drawGateSet(drawGateSubscribed(s));
+    drawGateSample(s);
     // The AA-off fast path's switch (draw_fast_path.h): the same reading as uiLayerConfigure's VR gate.
     g_aaOffDraw.store(!temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false), std::memory_order_relaxed);
 }
@@ -7155,7 +7220,7 @@ void vScreenFrameBoundary() {
     // getters once a frame instead of forty per draw; draw_gate.h holds the
     // reasoning, and the arming paths that can fire between two of these
     // raise the gate themselves rather than waiting for the next one.
-    drawGateSet(drawGateSubscribed(s));
+    drawGateSample(s);
 
     // The steady-state breadcrumb. Rate-limits itself to one line every
     // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this

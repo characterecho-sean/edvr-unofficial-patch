@@ -17238,6 +17238,34 @@ def _perf_window_of(line):
             "eyes": int(eyes.group(1)) if eyes else None}
 
 
+# The lines laid beside each window (build 2, #168). All four are written by src/d3d11, the first two every window beside `draw hook CPU:`; the self-test holds the fragments to the sources.
+#   draw mask: 1800-frame window ending N; D draws through the full path; calls skipped by the vertex shader's may-want byte: ui_family A, ...        draw_mask_line.h
+#   gpu timing queries: 1800-frame window ending N; X EDVR timing-query Ends a frame over F frames (T in all); by owner a frame: other a, ...        gpu_query_count.h
+#   draw gate holders: K of 28 terms hold the gate open: a, b.        draw_gate_holders.h, when the set changes
+#   marker fix (F87c) eye E: ...; Unmap copy C copies, B bytes, M ms; ...        native_on_foot.cpp, per eye per window
+PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
+PERF_QUERY_RE = re.compile(r"gpu timing queries: \d+-frame window ending (?P<end>\d+); (?P<per>[\d.]+) EDVR timing-query Ends a frame over \d+ frames \((?P<all>\d+) in all\); by owner a frame: (?P<rest>.*)\.$")
+PERF_GATE_RE = re.compile(r"draw gate holders: (?P<n>\d+) of (?P<of>\d+) terms hold the gate open: (?P<names>.*)\.$")
+PERF_COPY_RE = re.compile(r"marker fix \(F87c\) eye (?P<eye>\d): .*?Unmap copy (?P<copies>\d+) copies, (?P<bytes>\d+) bytes, (?P<ms>[\d.]+) ms")
+
+
+def perf_extra_of(msg):
+    """The build-2 line one log message holds, or None: (kind, dict) for kind mask, query, gate or copy."""
+    m = PERF_MASK_RE.search(msg)
+    if m:
+        return "mask", {"end": int(m.group("end")), "draws": int(m.group("draws")), "rest": m.group("rest")}
+    m = PERF_QUERY_RE.search(msg)
+    if m:
+        return "query", {"end": int(m.group("end")), "per": float(m.group("per")), "all": int(m.group("all")), "rest": m.group("rest")}
+    m = PERF_GATE_RE.search(msg)
+    if m:
+        return "gate", {"n": int(m.group("n")), "of": int(m.group("of")), "names": m.group("names")}
+    m = PERF_COPY_RE.search(msg)
+    if m:
+        return "copy", {"eye": int(m.group("eye")), "copies": int(m.group("copies")), "bytes": int(m.group("bytes")), "ms": float(m.group("ms"))}
+    return None
+
+
 def perf_windows(text):
     """Every `draw hook CPU:` window, in order: dicts end, start, mean, max, samples and eyes."""
     return [w for w in map(_perf_window_of, text.splitlines()) if w]
@@ -17269,12 +17297,23 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
     the runtime windows whose span overlaps the window, weighted by the seconds they overlap. since and until: seconds of the day, bounding the window's closing stamp.
     Returns the process exit code: 1 when there is no window to report."""
     wins, rt = [], {}
+    extra = {"mask": {}, "query": {}}
+    gates, copies = [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures
 
     def on_gfx(msg, t):
         w = _perf_window_of(msg)
         if w:
             w["close"] = t
             wins.append(w)
+            return
+        e = perf_extra_of(msg)
+        if e:
+            if e[0] in extra:
+                extra[e[0]][e[1]["end"]] = e[1]
+            elif e[0] == "gate":
+                gates.append((t, e[1]))
+            else:
+                copies.append((t, e[1]))
 
     def on_rt(msg, t):
         m = RT_CYCLE_PHASE_RE.match(msg)
@@ -17335,6 +17374,19 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
                 parts.append("runtime: R1 %.2f ms, cycle %.2f ms (%d runtime window(s), %.1f s overlap)" % (r1, cyc, len(hit), secs))
             else:
                 parts.append("runtime: NO RUNTIME DATA (no runtime frame cycle window overlaps this window)")
+        # build 2: what the may-want byte skipped, who issued the timing queries, what held the draw gate, the marker fix's Unmap copy
+        mk, qy = extra["mask"].get(w["end"]), extra["query"].get(w["end"])
+        parts.append("draw mask: %d draws through the full path, skipped %s" % (mk["draws"], mk["rest"]) if mk else "draw mask: NO LINE (a build without the may-want byte)")
+        parts.append("timing queries a frame: %.3f (%s)" % (qy["per"], qy["rest"]) if qy else "timing queries: NO LINE (a build without the counter)")
+        held = [g for t, g in gates if t <= w["close"]]
+        parts.append("gate held by %s" % ("%d of %d: %s" % (held[-1]["n"], held[-1]["of"], held[-1]["names"]) if held else "n/a (no `draw gate holders:` line before this window)"))
+        mine = [c for t, c in copies if w["from"] < t <= w["close"]]
+        if mine:
+            parts.append("marker copy (F87c lines in window): " + ", ".join("eye %d %d copies %d bytes %.3f ms" % (
+                eye, sum(c["copies"] for c in mine if c["eye"] == eye), sum(c["bytes"] for c in mine if c["eye"] == eye), sum(c["ms"] for c in mine if c["eye"] == eye))
+                for eye in sorted({c["eye"] for c in mine})))
+        else:
+            parts.append("marker copy: no F87c line in this window (marker fix off, or a build without the figures)")
         hooks.append(w["mean"])
         print("; ".join(parts))
     if rt_text is None:
@@ -18721,7 +18773,7 @@ def self_test_health():
             return R("native on foot marker fix (F62c): eye %d: no decision", eye, span)
 
         def mark_win(named=113, outside=8, eye=1, wl=1):
-            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, "first 1 last 2", wl)
+            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, 600, 4800000, 120.5, "first 1 last 2", wl)
 
         # F125: lines as a build before F125 wrote them (1 s, no window field), from the 10-25 flight
         MARK_OLD = ("native on foot marker fix (F62c/F64): eye 0: patch applied 95.7% (45 of 47 decisions bound at the issue, 0 through the newest rows); decided: "
@@ -24026,6 +24078,45 @@ def self_test_perf_windows():
         rc = print_perf_windows(gtext, gfx_path=gname)
     if rc != 0 or buf.getvalue().count("no runtime log") < 3:
         fail("no runtime log should be said on every window (rc %d):\n%s" % (rc, buf.getvalue()))
+    # Build 2: the lines beside the window. A window without them says so (never silent), a window with zeros prints the zeros.
+    bare = buf.getvalue()
+    if "draw mask: NO LINE" not in bare or "timing queries: NO LINE" not in bare or "no `draw gate holders:` line" not in bare or "marker copy: no F87c line" not in bare:
+        fail("a window with none of the build-2 lines should say each is absent:\n%s" % bare)
+    mask = ("draw mask: 1800-frame window ending 1800; 14000 draws through the full path; calls skipped by the vertex shader's may-want byte: "
+            "ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3.")
+    qry = ("gpu timing queries: 1800-frame window ending 1800; 6.500 EDVR timing-query Ends a frame over 1800 frames (11700 in all); by owner a frame: "
+           "other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000.")
+    gate = "draw gate holders: 2 of 28 terms hold the gate open: ui_depth, footprint."
+    cp0 = ("marker fix (F87c) eye 0: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); Unmap copy 600 copies, 4800000 bytes, 120.500 ms; "
+           "eye-1 first/last ring -; over 10 s")
+    cp1 = cp0.replace("eye 0", "eye 1").replace("600 copies", "300 copies")
+    mtext = ("[10:00:00.000] version v0.0.0 (build 00000000)\n[10:00:01.000] " + gate + "\n[10:00:01.500] " + cp0 + "\n[10:00:01.600] " + cp1 + "\n" +
+             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = print_perf_windows(mtext)
+    mo = buf.getvalue()
+    for want in ("draw mask: 14000 draws through the full path, skipped ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3",
+                 "timing queries a frame: 6.500 (other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000)",
+                 "gate held by 2 of 28: ui_depth, footprint", "marker copy (F87c lines in window): eye 0 600 copies 4800000 bytes 120.500 ms, eye 1 300 copies 4800000 bytes 120.500 ms"):
+        if want not in mo:
+            fail("--perf-windows with the build-2 lines lacks %r:\n%s" % (want, mo))
+    if perf_extra_of("draw mask: nothing like it") is not None:
+        fail("a line of another instrument parsed as a build-2 line")
+    # The formatters' own text: the fragments the parser reads are held to the sources, so a formatter that drifts fails here.
+    srcdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11")
+    for name, frags in (("draw_mask_line.h", ("draw mask: 1800-frame window ending %u; %u draws through the full path; calls skipped by the vertex shader's may-want byte: ",)),
+                        ("gpu_query_count.h", ("gpu timing queries: 1800-frame window ending %u; %.3f EDVR timing-query Ends a frame over %u frames (%llu in all); by owner a frame: ",)),
+                        ("draw_gate_holders.h", ("draw gate holders: %u of %u terms hold the gate open: ",)),
+                        ("native_on_foot.cpp", ("Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1 first/last ring",))):
+        path = os.path.join(srcdir, name)
+        if not os.path.isfile(path):
+            fail("the formatter %s is missing" % name)
+            continue
+        body = read_text(path)
+        for frag in frags:
+            if frag not in body:
+                fail("%s no longer writes %r, which --perf-windows parses" % (name, frag))
     return ok
 
 

@@ -743,7 +743,7 @@ bool     g_maskNotedOnce = false;
 struct StellarCpu { uint32_t calls=0,samples=0; int64_t ticks=0; } g_stellarCpu[2];
 int g_stellarCpuActive=-1;
 int64_t g_stellarCpuStart=0;
-GpuIntervals<64> g_stellarGpu[2];
+GpuIntervals<64, GpuQueryOwner::UiDepth> g_stellarGpu[2];
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = 0;

@@ -77,7 +77,7 @@ std::vector<WirePin> wiringPins(const std::string& text) {
     const std::string bpo = quietBody(text, "DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,");
     const std::string fwd = quietBody(text, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
     const std::string thunk = quietBody(text, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
-    const std::string gate = quietBody(text, "bool drawGateSubscribed(State* s) {");
+    const std::string gate = quietBody(text, "uint32_t drawGateHolders(State* s) {");
     const std::string frame = quietBody(text, "void vScreenFrameBoundary() {");
     const std::string shut = quietBody(text, "void shutdownVScreenFixes() {");
     const std::string note = quietBody(text, "void introCurveNoteRetired() {");
@@ -110,8 +110,8 @@ std::vector<WirePin> wiringPins(const std::string& text) {
                     "composite's, and the new term sits behind panelCurveWants()"});
     // The draw gate lists the recogniser.
     pins.push_back({"gate",
-                    has(gate, "||vscreenFootprintWanted()||introCurveWants();}") && countOf(all, "introCurveWants()") == 2,
-                    "intro curve wiring [gate]: drawGateSubscribed lists introCurveWants() (the recogniser acts below the gate; the on-foot strip's panelCurveWants() stands down "
+                    has(gate, "if(introCurveWants())m|=gateHolderBit(GateHolder::IntroCurve);returnm;}") && countOf(all, "introCurveWants()") == 2,
+                    "intro curve wiring [gate]: drawGateHolders lists introCurveWants() (the recogniser acts below the gate; the on-foot strip's panelCurveWants() stands down "
                     "on its own)"});
     // The strip's site: after the verdict's Begin and the layer's Begin, before the game's own issue, the layer's End and the dim; the dim follows.
     pins.push_back({"strip-site",
@@ -250,10 +250,9 @@ void testIntroCurveControls(const std::string& text) {
          "guard"},
         // ---- gate
         {"the draw gate does not list the recogniser",
-         {{"vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n        introCurveWants();",
-           "vscreenFootprintWanted();   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n        ("}},
+         {{"    if (introCurveWants()) m |= gateHolderBit(GateHolder::IntroCurve);", "    if (false) m |= gateHolderBit(GateHolder::IntroCurve);"}},
          "gate"},
-        {"the draw gate lists the strip's own flag instead", {{"        introCurveWants();            // the splash's", "        panelCurveSurfaceWanted();    // the splash's"}}, "gate"},
+        {"the draw gate lists the strip's own flag instead", {{"if (introCurveWants()) m |=", "if (panelCurveSurfaceWanted()) m |="}}, "gate"},
         // ---- strip-site
         {"the verdict's Begin runs after the strip", {{kRawBegin, ""}, {kRawObserved, std::string(kRawBegin) + kRawObserved}}, "strip-site"},
         {"the strip is drawn after the game's own issue", {{kRawObserved, ""}, {kRawStripStart, std::string(kRawObserved) + kRawStripStart}}, "strip-site"},

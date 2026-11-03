@@ -129,8 +129,7 @@ W_OBSERVED = ("    const bool originalIssued=observedDraw(alteredClass == Altere
 W_STRIP_START = "    float stripGain = 0.0f;\n"
 W_GUARD = ("    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&\n"
            "        !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {\n")
-W_GATE = ("        vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n"
-          "        introCurveWants();")
+W_GATE = "    if (introCurveWants()) m |= gateHolderBit(GateHolder::IntroCurve);"
 W_DIM = ("            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {\n"
          "                pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);\n            }\n")
 W_DIM_CALL = "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {"
@@ -301,7 +300,7 @@ MUTANTS = [
     wiring("iw-guard-before-the-gate", "guard",
            [(W_GUARD, "    if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) && panelCurveWants() && srv0IsPanelSized(s, kind, count)) {\n")],
            "the guard is read before panelCurveWants(): curvature 0 reads something new"),
-    wiring("iw-gate-unlisted", "gate", [(W_GATE, "        vscreenFootprintWanted();   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n        (")],
+    wiring("iw-gate-unlisted", "gate", [(W_GATE, "    if (false) m |= gateHolderBit(GateHolder::IntroCurve);")],
            "the draw gate does not list the recogniser"),
     wiring("iw-site-before-the-verdict-begin", "strip-site", [(W_BEGIN, ""), (W_OBSERVED, W_BEGIN + W_OBSERVED)],
            "the verdict's Begin runs after the strip: kBackdrop's slot swap is not in place for it"),

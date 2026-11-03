@@ -19,6 +19,12 @@
   key. Reviewed the same day ("Review of the mask design"): about
   0.4 ms, not 0.8-1.2; two bits are wrong; too small for an ABBA flight.
   Decided: "Build 2 as decided" (no key, instruments, one profiled flight).
+- **Build 2 built (2026-11-02, branch `build2/may-want-byte`, #168):** the
+  VS "may-want" byte, the pair test before `GetType`, the stash deleted,
+  `drawPathFast` in the instanced hook, and the instruments. Log lines to
+  read in the flight: `draw gate holders:` (on change), `draw mask:`,
+  `gpu timing queries:` (each window) and the F87c lines' `Unmap copy`
+  figures; `edvr_log.py --perf-windows` lays them beside R1 and the cycle.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?

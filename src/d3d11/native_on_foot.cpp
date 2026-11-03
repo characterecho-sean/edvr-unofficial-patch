@@ -28023,6 +28023,7 @@ std::vector<uint32_t> g_streamFull;                                     // the w
 // F87c: this second's figures per eye: draws named from a window or the whole copy, draws outside every window and how far from the nearest window the nearest of them was.
 struct StreamSecond {
     uint64_t named = 0, outside = 0, fullNamed = 0, copies = 0, escCopies = 0, windowsSum = 0, clustersSum = 0;
+    uint64_t copyBytes = 0, copyTicks = 0;   // the window's Unmap copy: bytes streamed out of the mapped stream and the time it took (the whole-stream copy serves both eyes and counts under eye 0)
     uint32_t nearest = ~0u;
 };
 StreamSecond g_streamSec[2];
@@ -29580,10 +29581,16 @@ void streamUnmapCopy(uint32_t frame) {
     const bool escalated = g_stream.esc.active(frame);
     if (escalated && total) {
         if (g_streamFull.size() != static_cast<size_t>(total) * 2u) g_streamFull.assign(static_cast<size_t>(total) * 2u, 0u);
-        if (streamCopyGuarded(g_streamFull.data(), base, total * drawtag::kStreamStride)) g_stream.fullOk = true;
-        else ++g_win.streamFaults;
+        const uint64_t tFull = f30Qpc();
+        if (streamCopyGuarded(g_streamFull.data(), base, total * drawtag::kStreamStride)) {
+            g_stream.fullOk = true;
+            g_streamSec[0].copyBytes += static_cast<uint64_t>(total) * drawtag::kStreamStride;
+        } else ++g_win.streamFaults;
+        g_streamSec[0].copyTicks += f30Qpc() - tFull;
     }
     for (int e = 0; e < 2; ++e) {
+        const uint64_t tEye = f30Qpc();
+        uint64_t eyeBytes = 0;
         nofoot::f87::WinPlan& plan = g_stream.plan[e];
         g_stream.hist[e].expire(frame);
         nofoot::f87::planWindows(g_stream.hist[e], g_stream.centre[e] != ~0u, g_stream.centre[e], total, &plan);
@@ -29598,9 +29605,12 @@ void streamUnmapCopy(uint32_t frame) {
                 continue;
             }
             ++good;
+            eyeBytes += static_cast<uint64_t>(plan.n[w]) * drawtag::kStreamStride;
         }
         if (good || plan.full) any = true;
         StreamSecond& ss = g_streamSec[e];
+        ss.copyBytes += eyeBytes;
+        ss.copyTicks += f30Qpc() - tEye;
         ++ss.copies;
         if (plan.full) ++ss.escCopies;
         ss.windowsSum += good;
@@ -34871,9 +34881,9 @@ void report(uint64_t nowMs) {
                 char ring[64];
                 if (e == 1 && f44::g_stream.ringHave[1]) std::snprintf(ring, sizeof(ring), "first %u last %u", f44::g_stream.ringFirst[1], f44::g_stream.ringLast[1]);
                 else std::snprintf(ring, sizeof(ring), "%s", e == 1 ? "none yet" : "-");
-                Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); eye-1 first/last ring %s; over %u s",
+                Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1 first/last ring %s; over %u s",
                                 e, pl.windows, pl.f85, pl.history, static_cast<unsigned>(ss.escCopies), ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest,
-                                ring, windowSecs);
+                                ull(ss.copies), ull(ss.copyBytes), double(f30QpcUs(ss.copyTicks)) / 1000.0, ring, windowSecs);
                 ss = StreamSecond{};
             }
         // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks

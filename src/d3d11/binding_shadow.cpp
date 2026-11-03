@@ -122,14 +122,20 @@ void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;
     s.hash = hash;
+    s.mayWant = 0xFF;   // unknown until bindingSetVsMayWant
     ++s.gen;
     noteEyeKeySlot(slot);
+}
+
+void bindingSetVsMayWant(uint8_t mayWant) {
+    slotOf(BindSlot::Vs).mayWant = mayWant;
 }
 
 void bindingForgetAll() {
     for (Slot& s : detail::g_bindingSlots) {
         s.ptr = nullptr;
         s.hash = 0;
+        s.mayWant = 0xFF;
         ++s.gen;
     }
     ++detail::g_bindingEyeKeyGen;   // every slot moved, so the aggregate does, once

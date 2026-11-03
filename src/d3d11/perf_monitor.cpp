@@ -1,6 +1,8 @@
 #include "perf_monitor.h"
 #include "config_refresh_line.h"
 #include "draw_reissue_line.h"
+#include "draw_mask_line.h"
+#include "gpu_query_count.h"
 #include "cross_profile_cost.h"
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
@@ -1260,6 +1262,25 @@ void perfMonitorFrame(ID3D11Device* dev) {
         char refreshLine[320];
         formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);
         Log::get().note("%s", refreshLine);
+        // Beside them, and written every window for the same reason: what the vertex shader's may-want byte skipped (vs_may_want.h) and the GPU timing queries EDVR
+        // issued, by owner. Both counters run from the start; each line is the change since the last one.
+        static DrawMaskCounts lastMask;
+        static GpuQueryCounts lastQueries;
+        const DrawMaskCounts maskNow = vScreenDrawMaskCounts();
+        DrawMaskCounts maskWindow;
+        maskWindow.draws = maskNow.draws - lastMask.draws;
+        for (size_t k = 0; k < kMaskSkips; ++k) maskWindow.skips[k] = maskNow.skips[k] - lastMask.skips[k];
+        lastMask = maskNow;
+        char maskLine[320];
+        formatDrawMaskWindow(maskLine, sizeof(maskLine), s.frameNo, maskWindow);
+        Log::get().note("%s", maskLine);
+        const GpuQueryCounts queriesNow = gpuQueryCountsNow();
+        GpuQueryCounts queriesWindow;
+        for (size_t o = 0; o < kGpuQueryOwners; ++o) queriesWindow.ends[o] = queriesNow.ends[o] - lastQueries.ends[o];
+        lastQueries = queriesNow;
+        char queryLine[448];
+        formatGpuQueryWindow(queryLine, sizeof(queryLine), s.frameNo, 1800u, queriesWindow);
+        Log::get().note("%s", queryLine);
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;

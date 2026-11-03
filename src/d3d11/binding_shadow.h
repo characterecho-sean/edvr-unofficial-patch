@@ -122,6 +122,7 @@ struct BindingSlot {
     void*    ptr = nullptr;
     uint32_t gen = 1;   // starts at 1 so a caller's zero-initialised cache is stale
     uint64_t hash = 0;  // a shader slot's content hash (bindingSetShader)
+    uint8_t  mayWant = 0xFF;   // the vertex shader's may-want byte (vs_may_want.h); all bits while unknown
 };
 extern BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 // The eye draws' aggregate generation (bindingEyeKeyGeneration below), written only by the setters in the .cpp.
@@ -147,7 +148,11 @@ inline uint32_t bindingGeneration(BindSlot slot) {
 inline uint32_t bindingEyeKeyGeneration() {
     return detail::g_bindingEyeKeyGen;
 }
+inline uint8_t bindingVsMayWant() {
+    return detail::g_bindingSlots[static_cast<size_t>(BindSlot::Vs)].mayWant;
+}
 #else
+uint8_t bindingVsMayWant();
 void* bindingGet(BindSlot slot);
 uint32_t bindingGeneration(BindSlot slot);
 uint32_t bindingEyeKeyGeneration();
@@ -171,6 +176,9 @@ void bindingInvalidate(BindSlot slot);
 // hash is 0 for a slot never set; a caller that finds the pointer null falls
 // back to the Get, since the shadow follows the owner context only.
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash);
+// The bound vertex shader's may-want byte (vs_may_want.h), read per draw by bindingVsMayWant. bindingSetShader leaves every bit set (unknown);
+// the vertex shader hook follows it with this.
+void bindingSetVsMayWant(uint8_t mayWant);
 #ifndef EDVR_BINDING_SHADOW_EXTERNAL
 inline uint64_t bindingShaderHash(BindSlot slot) {
     return detail::g_bindingSlots[static_cast<size_t>(slot)].hash;
