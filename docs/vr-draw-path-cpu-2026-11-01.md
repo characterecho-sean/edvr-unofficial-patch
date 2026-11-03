@@ -65,7 +65,10 @@
   the existing draw census (one press after the profile capture, with
   flight-only `census_offscreen` and `census_lines` settings), replacing the
   planned seven-hook counter. A merged-range fault now zeroes the plan
-  windows inside it and is counted. Awaiting the re-review.
+  windows inside it and is counted. Re-reviewed the same day: approved,
+  its eight non-blocking fixes folded in (among them `edvr_log.py --tally
+  offscreen` for the census's non-eye lines). Next: the spec, then the
+  build.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -1331,13 +1334,15 @@ items 1 and 2 take the review's corrections.
    - Copy each merged range once into one flat buffer,
      `g_streamWin[2 * kWinCapEntries * 2]`, the same 512 KB as today's two.
    - `streamEntryX` looks the entry up in `merged` instead of `plan[0]` and
-     `plan[1]`. A hit returns the same value as today: the same bytes of the
-     same Unmap. A miss goes on to `outside`, `nearest` (still
-     `plan[eye].distance`, per eye), the escalation and the whole copy,
-     unchanged.
+     `plan[1]`. The merged lookup skips zero-length ranges. A hit returns the
+     same value as today: the same bytes of the same Unmap. A miss goes on
+     to `outside`, `nearest` (still `plan[eye].distance`, per eye), the
+     escalation and the whole copy, unchanged.
    - **A fault** in a merged range's copy zeroes that range's `n` and the
      `n` of every `plan[e]` window inside it, so `nearest` never measures to
-     a window with no copy. This is the one place the merge differs from
+     a window with no copy. The step is a header function,
+     `MergedPlan::fault(range, &plan[0], &plan[1])`, so the rig tests the
+     shipped code. Each window lies inside exactly one merged range. This is the one place the merge differs from
      today. Today a fault loses only the window it hit; a merged fault
      loses the whole range, which may hold windows whose own bytes would
      have copied. Faults are counted on the new line (item 2), so a flight
@@ -1349,17 +1354,30 @@ items 1 and 2 take the review's corrections.
 2. **The F87c figures.** The two eyes' copy can no longer be split by eye.
    - The per-eye line's `Unmap copy %llu copies, %llu bytes, %.3f ms; eye-1
      first/last ring %s` becomes, exactly, `Unmap copy %llu copies,
-     requested %llu bytes; eye-0 first/last ring %s; eye-1 first/last ring
-     %s`. Requested is that eye's planned window entries times 8. Eye 0's
-     figure no longer carries the whole-stream bytes; those move to the new
-     line.
+     requested %llu bytes; eye-%d first/last ring %s`: each eye's line
+     carries its own eye's ring (eye 0's needs its own `snprintf`; the
+     fields exist). Requested is that eye's planned window entries times 8.
+     Eye 0's figure no longer carries the whole-stream bytes; those move to
+     the new line.
    - A new line per window, exactly: `marker fix (F87c) Unmap copy: %llu
-     copies, requested %llu bytes, copied %llu bytes in %llu ranges (%llu
+     Unmaps, requested %llu bytes, copied %llu bytes in %llu ranges (%llu
      windows joined), whole stream %llu bytes, faults %llu, %.3f ms; over %u
-     s`. Requested is both eyes' planned bytes; copied the merged bytes;
-     ranges the merged ranges summed over the copies; windows joined the
-     planned windows that landed in a range with another (summed); the ms
-     the whole function's time, `g_win.streamCopyTicks`'s span.
+     s`.
+     - Unmaps: every `streamUnmapCopy` call that reached the copy (a new
+       counter; `g_win.streamCopies` counts only calls where something
+       copied).
+     - Requested: both eyes' planned bytes. Copied: the merged bytes.
+       Ranges: the merged ranges, summed over the Unmaps. Windows joined:
+       planned windows that landed in a range with another, summed.
+     - These new sums live in the window's `Window` (`g_win`), not in
+       `StreamSecond`, which each eye's line clears
+       (`native_on_foot.cpp:34887`); `g_win` resets once a window, after
+       every line (`35161`).
+     - Faults: `g_win.streamFaults`, which also counts a whole-stream
+       fault; a merged fault counts once per range.
+     - The ms is `g_win.streamCopyTicks`: the whole function, planning and
+       merge included, so the cut it shows is a lower bound on the copy's
+       own saving.
    - `edvr_log.py`:
      - Keep `PERF_COPY_RE` (line 17249) for build-2 logs such as L2, and add
        a regex for the new line. `--perf-windows` prints the merged copy
@@ -1368,23 +1386,44 @@ items 1 and 2 take the review's corrections.
        new line, so `--health` does not report it as unmatched.
      - The source pin at line 24111 is a literal match: it takes the new
        per-eye text and the new line's text.
+     - The `mark_win` fixture (line 18775) passes the copy arguments to the
+       per-eye format, so it changes with the text.
      - Self-tests for each of these.
-3. **B1, what the non-eye draws are: the existing draw census, no new
-   code.** The review's finding 9 ("reuse the owner"): a census line records
+3. **B1, what the non-eye draws are: the existing draw census, plus a
+   tally of its non-eye lines.** The review's finding 9 ("reuse the
+   owner"): a census line records
    each draw's RTV0 (`r=`) and DSV0 (`d=`) as `texWxHfFMT` or an interned
    `@id` whose size the census's table gives, and its vertex shader hash
    (`vh=`) (`draw_census.cpp:367-387`, `817-818`, `489`). With
-   `census_offscreen` on, the non-eye draws are recorded too (`DCO`), for
-   every draw kind, so the decision to cover all draw hooks holds.
-   - Flight-only settings, in the live `edvr.ini` (edited with the Edit
+   `census_offscreen` on, the non-eye draws are recorded too (`DCO`).
+   - **Which draws:** Draw, DrawIndexed, DrawInstanced and
+     DrawIndexedInstanced reach `DCO` (`vscreen.cpp:2289`). The two
+     indirect draws are written as `DC` lines with `t=i`, and deferred-
+     context draws as `DC` with `t=f`, whatever their target. DrawAuto is
+     not recorded in VR, nor are the sun, desktop-window and coat-pack
+     skips. The tally reports the `t=i` and `t=f` lines apart.
+   - **The tally (new code in `edvr_log.py`):** `--tally vh` today reduces
+     `DCO` lines to one count (lines 557-562), never resolves `@N` tokens
+     and does not parse `d=` (337-339). Add `--tally offscreen`: group the
+     `DCO` lines (and the `t=i`/`t=f` `DC` lines) by `r=` and `d=`, resolve
+     `@N` through the census's `DC id @N tex WxH` table, and list each
+     group's count, draw kinds and top vertex shaders, per census frame.
+     With a self-test.
+   - **Flight-only settings,** in the live `edvr.ini` (edited with the Edit
      tool and diffed, reverted after the flight): `dump_draws` set to a free
-     key, `census_offscreen = 1`, `census_lines = 16384` (L1 had about
-     4,070 non-eye DrawIndexedInstanced draws a frame, so 3 frames need
-     more than the default 4,096).
+     key, `census_offscreen = 1`, `census_frames = 1`, `census_lines =
+     16384`. One frame keeps the burst to about 3 MB under the 16 MB log cap
+     (`log.max_mb` is unset in the live ini; `log.cpp:156`), since the size
+     table is written last and a capped log would lose every `@N` size. The
+     line cap applies to non-eye lines apart from eye lines, but `DCO`
+     shares it with clears, queries, copies, dispatches and indirect draws.
+     L1's 4,070 non-eye DrawIndexedInstanced draws a frame is a lower
+     bound; L2 at the flight's spot counted 514.
    - One press, after the profile capture has stopped, so the census's
      logging is not in the profile.
-   - Read with `edvr_log.py --tally vh` and the `DCO` lines' `r=`/`d=`
-     columns.
+   - **Truncation check:** `DCO` truncation is not in `truncated=`. Compare
+     the `DC frame` line's `off=` with the number of `DCO` lines; the tally
+     prints both.
    - This drops the seven-hook counter and with it the review's findings 5
      (placement after the world route's `g_vrWorldInternal` return), 6
      (line length), 7 (its cost), 8 (top-N and threads) and 10 (the
@@ -1420,8 +1459,12 @@ the header's own `mergePlans` and merged lookup:
 - A synthetic stream (entry i holds x = i): the merged lookup returns the
   same x as today's two-buffer lookup for every entry of the stream, hit or
   miss.
-- A fault in one merged range: that range and every `plan[e]` window inside
-  it read as empty, and every other range still returns its entries.
+- A fault in one merged range (`MergedPlan::fault`): that range and every
+  `plan[e]` window inside it read as empty, the lookup skips the range, and
+  every other range still returns its entries.
+- `edvr_log.py --self-test` for `--tally offscreen`: a fixture census with
+  `DCO` lines, `@N` tokens, the `DC id` table and `t=i`/`t=f` lines groups
+  by resolved target, and reports `off=` against the `DCO` line count.
 - `edvr_log.py --self-test`: the new per-eye text and the new line parse,
   the health rule matches the new line, `--perf-windows` prints the merged
   copy for a new log and the per-eye copy for an L2-style log, and the
@@ -1434,9 +1477,10 @@ the header's own `mergePlans` and merged lookup:
   lines show both eyes' windows. Joined 0 with copied equal to requested is
   possible only when every window is disjoint; the eye-0 and eye-1 rings
   say whether the eyes' entries are far enough apart for that.
-- The census: no `DCO` lines (`edvr_log.py --tally vh` prints `no
-  draw-census lines`), meaning the key was not pressed or the settings did
-  not load.
+- The census: no `DC begin` line (the key was not pressed or not set), or
+  `DC begin ... offscreen=no` (`census_offscreen` did not load;
+  `draw_census.cpp:1730`), or `off=0` on the `DC frame` line
+  (`draw_census.cpp:1175`).
 
 ### Flight
 
@@ -1452,13 +1496,17 @@ First command after: `edvr_log.py --target steam --expect-build HEAD
 
 - **Coverage held:** steady-state F87c lines show `outside 0` and
   `escalated 0` after arrival, as in L2 from 11:26:34 to 11:28:15, `faults
-  0` on the new line, and `named` per copy at 3.0 an eye, as in L2 (for
-  example 831 named in 277 copies at 11:26:34). Named per second rises with
+  0` on the new line, and `named` per Unmap between 2.6 and 3.0 an eye, as
+  in L2's steady windows (831 named in 277 copies at 11:26:34 is 3.0; 819 in
+  313 at 11:28:15, the last window, is 2.62). Named per second rises with
   the frame rate, so it is not the measure.
 - **The cut:** `copied / requested` from the new line. `streamUnmapCopy`'s
   inclusive time in R5 should fall by that ratio from 0.697 ms (the
   build-2 profile, windows 1-20, R5, 2,773 frames; the table's rounded
-  0.70), at the 1.45-1.57 ns a byte seen in both logs.
+  0.70), at the 1.45-1.57 ns a byte seen in both logs. The 0.697 is from
+  analysis notes outside the repo (`%TEMP%\edvr-build1-notes\profile-b2`,
+  the `b2-r5-edvr-w*.json` exports summed per frame); the doc's 0.70 is its
+  rounding.
 - **Nothing else rose:** no EDVR function in the profile up more than
   0.1 ms against the build-2 profile's windows.
 - **B1 answered:** the census's `DCO` lines name the non-eye draws'
@@ -1488,6 +1536,15 @@ blocking findings, both on the non-eye counter. Dispositions:
 | 13 | Copied = requested does not prove the merge never ran | Taken: `windows joined`, the new line's presence (never-ran section) |
 | 14 | 0.697 uncited; use named per copy | Taken (pass criteria) |
 | 15 | No key, right; say VR-only | The census is a developer key already; the merge applies wherever the marker fix does |
+
+**Re-review (2026-11-03, Opus, fresh context, at `2eac9e74`): approve,**
+eight non-blocking findings, all taken: `--tally offscreen` added (the
+existing tally cannot read `DCO` lines); the census's never-ran check uses
+`DC begin ... offscreen=` and `off=`; which draw kinds reach `DCO`;
+`census_frames = 1` for the log cap; the new line's sums in `Window`, its
+`Unmaps` counter, and the ms as a lower bound on the saving; named per
+Unmap 2.6-3.0; `MergedPlan::fault` in the header; the `mark_win` fixture
+and each eye's own ring.
 
 ### Reviews in this arc (checked 2026-11-03)
 
