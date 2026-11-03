@@ -45,6 +45,13 @@
   Ruled out or deferred: the tee trap under DLAA (0.08 ms; only matters with
   AA off), the sub-pixel floor, the EDHM bypass, and offscreen/concourse
   culling until a census/RTV check establishes what those draws are.
+- **Build 3 as agreed (2026-11-03, "Reply to the rebuttal"):** merge both
+  eyes' marker-copy windows and copy each range once; same coverage by
+  construction, so no key. The logs bound its saving only loosely, at 0-86%
+  of the copy (0-0.61 ms); the build 3 flight measures it. Ruled out: skipping the windows during an escalation
+  (escalations only on arrival). Open: what the non-eye-target draws are
+  (the `weapon_motion` skip count: 4,070 a frame in one log, 514 in the
+  other; not `8BC3..` draws). Awaiting Argon's reply.
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen?
@@ -1035,3 +1042,157 @@ solve the coverage problem on **A1 (`streamUnmapCopy`)** without shrinking
      render target / depth buffer (`tw x th`, format, RTV/DSV resource) those
      7M offscreen draws per window are actually rendering into (e.g. holo/avatara
      preview, planar reflection, environment map, or a local shadow map).
+
+### Reply to the rebuttal, and what build 3 carries (2026-11-03)
+
+Every claim below carries its evidence, so it can be checked without trusting
+this section. Code references are at `639904db` (build 2, `277fae1f`, plus
+docs only). Two logs, both from build `277fae1f` (`version
+v0.22.0-rc.4-50-g277fae1f` on line 2 of each), in the Steam game's
+`edvr_logs\`:
+- **L1** = `edvr_gfx_20261103_095211.log`, the unprofiled windows (`--nth 1`).
+- **L2** = `edvr_gfx_20261103_112412.log`, the profiled flight (`--nth 0`).
+
+To reproduce a log figure, run `Select-String` on the log for the quoted
+prefix (`marker fix (F87c) eye`, `draw mask:`, `instance stream`), or use
+`python tools\edvr_log.py --target steam --nth N`.
+
+#### A1-a: two copies from one Unmap (agreed)
+
+- **Claim:** each Unmap of the stream copies both eyes' plans from the same
+  source pointer.
+  **Evidence:** `native_on_foot.cpp:29569` takes `base` once; the loop at
+  29591 runs `e = 0, 1`; 29601 copies `base + plan.lo[w]` into
+  `g_streamWin[e]`. `++ss.copies` at 29614 is inside that loop, so each eye's
+  `copies` counts the same Unmaps.
+- **Claim:** there is one stream Unmap a frame, so each eye's `copies` per
+  second is the frame rate.
+  **Evidence:** L2's `draw mask:` windows ending 14400 (11:26:33.351) and
+  16200 (11:27:36.972) are 1800 frames in 63.6 s, 28.3 frames a second. L2's
+  F87c lines over the same minute show 268-299 copies per eye per 10 s.
+- **Claim:** the lookup does not care which eye's buffer holds an entry.
+  **Evidence:** `streamEntryX`, `native_on_foot.cpp:29665-29673`, loops over
+  both plans and returns the first hit, whatever `eye` is.
+
+#### A1-b: windows overlap within one eye (agreed as possible; size unknown)
+
+- **Claim:** `planWindows` neither merges nor trims windows.
+  **Evidence:** `native_on_foot_f87.h:364` skips a cluster only when `[a, b]`
+  lies wholly in an earlier window. 372-373 place a full `kWinEntries`
+  window about the cluster's middle, with no check against the others. The
+  F85 window at 344-350 is placed the same way.
+- **Claim:** two history windows can share up to about 2000 entries.
+  **Evidence:** `ClusterHist::add` (`native_on_foot_f87.h:263`) joins an
+  entry to an interval within `kWinGap` (2048). So two live intervals are
+  more than 2048 apart, and two 4096 windows centred on single-entry
+  clusters 2049 apart share 4096 - 2049 = 2047 entries.
+- **Claim:** every planned window is copied at full width.
+  **Evidence:** L2 11:26:34, eye 0: `windows 5 ... 277 copies, 54460416
+  bytes`. That is 196,608 bytes a copy = 24,576 entries at 8 bytes = 8192 +
+  4 x 4096. Eye 1: `windows 7 ... 72613888 bytes` = 262,144 a copy = 32,768
+  entries = 8192 + 6 x 4096, the per-eye cap (`kWinCapEntries`, f87.h:249).
+- **Not known:** how much of that is overlap. No log line records where the
+  windows sit. L2 logs only eye 1's ring (first/last entry, 41,261-45,583
+  over the steady minute); eye 0's entries are never logged
+  (`native_on_foot.cpp:34882`).
+
+#### The fix for build 3 (agreed in principle)
+
+Plan each eye exactly as today, then sort and merge both plans' windows and
+copy each merged range once into one buffer.
+- **Coverage is unchanged by construction.** The merged ranges are the union
+  of both plans' ranges, copied from the same Unmap, and the lookup already
+  takes any plan's hit (A1-a). So `named`, `outside`, the escalation and the
+  values read are the same.
+- **No key and no grilling round:** it does not change what the marker fix
+  draws. Narrower windows still need the full process.
+- Keep `plan[e]` per eye for `windows`, `nearest` and `clusters`, so those
+  counters keep their meaning.
+- Log requested entries (both plans summed) beside copied entries (the
+  merge), and eye 0's ring beside eye 1's. `edvr_log.py`'s F87c parser and
+  its self-test follow the line.
+- **Test seam:** a rig test over random histories and centres. It asserts
+  that the merged ranges hold exactly the union of both plans' entries, and
+  that each lookup returns the same value as today's two-buffer path.
+
+#### The size of the saving: not agreed, measured by build 3's flight
+
+- **Claim:** "50-75% (0.40-0.60 ms)" has no data behind it.
+  **Evidence:** the overlap it depends on is not logged (A1-b, "Not known").
+- **Retracted:** my earlier line that F87c's 6-14k shift means eye 1 sits
+  away from eye 0. That shift is eye 1 moving between layouts
+  (`native_on_foot_f87.h:242-243`), not a distance between the eyes.
+- **Claim:** the cost is linear in bytes, so the saving is (1 - copied /
+  requested) of the copy's time.
+  **Evidence:** L2 11:26:34: eye 0 85.514 ms / 54,460,416 bytes = 1.57 ns a
+  byte; eye 1 111.057 ms / 72,613,888 bytes = 1.53 ns a byte. Eye 1 copies a
+  third more bytes and takes a third more time. L1 10:02:17 gives 1.45 and
+  1.49 ns a byte.
+- **Claim:** the logs bound the saving only loosely. In L2 the stream is
+  65,536 entries (line 1930: `524288 bytes, 65536 entries`) and today's two
+  copies are 57,344 entries (24,576 + 32,768), 7/8 of it. The union is at
+  most 57,344 and at least 8,192 (one F85 window; each eye's own windows may
+  overlap, so neither plan alone sets a higher floor). That is a cut of
+  0-86%, 0-0.61 ms at L2's 0.71 ms a copy pair ((85.514 + 111.057) ms / 277
+  Unmaps). Only the build 3 figures narrow it.
+- **Test:** build 3's flight. Its requested/copied entries, and
+  `streamUnmapCopy` in the profile, give the saving. `outside`, `nearest`
+  and `fullNamed` must stay in build 2's range: steady-state L2 shows
+  `outside 0` from 11:26:34 to 11:28:15. Whatever is left is the
+  narrower-window design, priced from `outside`/`nearest` as planned.
+
+#### The escalation's double copy: ruled out
+
+- **Claim:** while an escalation is on, the windows are copied on top of the
+  whole stream. **Evidence:** `native_on_foot.cpp:29582-29590`, then the
+  loop at 29591 runs regardless.
+- ruled out: skipping the windows during an escalation, because escalations
+  happen only on arrival. **Evidence:** L2's F87c lines show `escalated 119`
+  (11:26:13) and `68` (11:26:24), then `escalated 0` in every line from
+  11:26:34 to 11:28:15. L1's last full lines (10:02:17, 10:02:27) are
+  `escalated 0` too.
+
+#### B1: what the "offscreen" draws are (corrected)
+
+- **Claim:** the `weapon_motion` skip count is not `8BC3..` draws.
+  **Evidence:** `vscreen.cpp:5520-5521` counts the skip when RTV0 is not
+  eye-sized (`!g_state->rtv0Eye`) **and** the may-want byte says weapon
+  motion does not want this vertex shader. `weaponMotionWants`
+  (`weapon_motion.cpp:186-189`) is the family test, so a skip is a draw
+  *outside* the weapon family.
+- **Claim:** it includes depth-only draws. **Evidence:** `rtv0Eye` is
+  `targetIsEyeSized(bindingGet(BindSlot::Rtv0))` (`vscreen.cpp:2099`,
+  `2227`), which returns false for a null RTV (`vscreen.cpp:1272`).
+- **Claim:** the count depends heavily on the scene. **Evidence:** L1's
+  steady windows (25200-32400) skip about 7.33M a window, 4,070 a frame, of
+  about 18,290 full-path draws a frame (`32916372` / 1800). L2's window
+  ending 16200 skips `924299`, 514 a frame, of 14,076 full-path draws a
+  frame (`25336198` / 1800). Both were called the concourse.
+- **Why it matters:** a depth-only pass would land in this count, and
+  `engine-render-pipeline.md` found no depth pass at a parked settlement.
+- **Test before any B1 design:** split those draws by RTV0 and DSV size and
+  format, and by vertex shader. The existing logs cannot do it:
+  `edvr_log.py --target steam --nth 1 --tally vh` prints `no draw-census
+  lines (DC/DCO/DC frame) in this log`. So build 3 adds a per-window count of
+  non-eye draws by target size and format. It rides on build 3's flight; it
+  needs no flight of its own.
+
+#### Numbers (corrected)
+
+- **Claim:** "4.06M tee calls / ~180 frames" is wrong; it is about 14,400 a
+  frame. **Evidence:** the 4,063,615 tee calls are from 10 s lines at
+  11:26-11:27 ("Check of that review"), and L2 runs at 28.3 frames a second
+  over that minute (A1-a): 4,063,615 / 283 = 14,359.
+- **Claim:** the full-path baseline differs between the two logs.
+  **Evidence:** 18,290 a frame in L1 and 14,076 in L2 (B1 above). Judge
+  build 3 against L2, the profiled flight, and fly the same spot.
+
+#### Agreed for build 3, if Argon accepts the above
+
+1. The merged marker copy (no key), with the requested/copied entries and
+   eye 0's ring in the F87c line, and the rig test.
+2. The non-eye draw count by target, for B1.
+3. One profiled standing-still flight at L2's spot.
+
+The order after it is unchanged: the bind and map hooks, the post-R1 split
+(desk), the layer-A fade gate (a product decision).
