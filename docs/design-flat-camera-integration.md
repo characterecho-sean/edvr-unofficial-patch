@@ -1561,3 +1561,17 @@ and the second (05:04:15, seated, sealed) are the two draw censuses; the log rec
   stayed certain (expected in a flat-launched session). **T1 is confirmed by** `cause=unmatched-end` with `begins` small and `ms after the first observed call` within the first
   frame or two of the start line after the switch, **refuted by** any other cause, or an unmatched-end late in a session that has seen many Begins. If T1 holds, the fix to
   propose is a grace at adoption (the Ends of brackets opened before the first observed call are not escapes), not a reset of the tracker.
+- **FLOWN 2026-11-03 (log edvr_gfx_20261103_061437, `v0.22.0-rc.5-40-g6af59804` matched; T1 CONFIRMED).** VR launch, live switch to flat at 06:16:34.194. At 06:16:34.225, 31 ms
+  later, the log reads `observing from here (first call End ...)` and in the same millisecond `first escape: cause=unmatched-end call=End query=TIMESTAMP_DISJOINT#3 kind=timing ...
+  seen begins=0 ends=1 open=0, 0 ms after the first observed call`. The first thing the observer ever saw was the End of a timing bracket the game opened in the VR phase.
+  Then every foreground draw was rejected (`UNCERTAIN_BRACKET#100`): 06:16:39 to 06:17:34 on foot in the hangar (checked == rejected in every window, 2,000-2,700 a window),
+  `flat-resolve-foreground-contract-unqualified`, `treated=0`, `last=spatial-fallback`; the cockpit 06:17:34-06:18:09 treated (`treated-jittered-hdr`, checked 0); the disembark at 06:18:09
+  refused again from 06:18:14. Sean: "in the hangar AA still seems disabled after switching to flat, it works in the cockpit"; NumLock at 06:17:14 (on foot, refused) and 06:18:04 (seated, treated).
+  **The unmatched-End rule is stricter than the safety rule.** `FlatReplayQueryTracker::end` escapes on any unmatched End that is not End-only, a timing End included, while `safe()` already
+  ignores an open Timing bracket because a timestamp-disjoint query counts no draws. So a Timing End the observer never saw the Begin of cannot make a replay unsafe, and sets the
+  sticky flag anyway. Why it never shows when launched flat: the observer's first call there is a Begin.
+  **Proposed fix (NOT built, waits on Sean):** an End of a Timing query with no Begin seen is not an escape (counted, not sticky); Count-bearing and Unknown kinds keep the rule. The
+  two instrument lines stay, so if a Count-bearing End also arrives unmatched at adoption (it would have been hidden behind the timing escape) the next flight names it, and the grace
+  at adoption is then designed against that evidence. Expected log after the fix: the start line, no escape line, `rejected=0` with `checked>0` on foot, `treated` rising on foot.
+- `ruled out: a Count-bearing bracket as the first escape, because the first observed call was the End of TIMESTAMP_DISJOINT#3 (kind=timing), begins=0 ends=1, 0 ms after the first observed call.` (A later Count escape is hidden behind it, so this does not say none exists.)
+- `ruled out: a duplicate Begin, a full table, a kind mismatch and a null query as the first escape, because the first escape was unmatched-end.`
