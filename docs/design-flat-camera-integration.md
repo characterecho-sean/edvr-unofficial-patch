@@ -52,7 +52,7 @@
   main-versus-auxiliary camera grouping; c2_coexist C7's unbounded loop
   (a mutation hangs the rig instead of failing it). 2026-10-14, BUILT, NOT FLOWN:
   `flat camera signatures 5s:`; flat owns the relay gate (refresh-calls=0 flight). OPEN
-  on foot: foreground-active-query refusals, 2.5 min; `flat replay query rejected` logs why (last entry).
+  on foot: foreground-active-query refusals; 2026-11-03: UNCERTAIN_BRACKET#100 after a live VR-to-flat switch (last entry).
 - Environment: Windows x64, D3D11 flat mono; headset/runtime N/A. VR
   comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable and
   build identities, backend versions, dimensions, formats and mod chain.
@@ -1519,3 +1519,32 @@ check and logs why, with the tracker's own view of the context (flat_replay_quer
 The decision itself is unchanged (`queriesUnsafe = opaque && bytes && !replayQueriesSafe(ctx)`, pinned). Tests: flat_temporal_test's
 flat_replay_query_reject_tests.h (the words, the counting, the wiring pins). To read on the next flight: which query kind and which VS/PS dominate the
 refused on-foot frames, and whether the first rejection falls at the disembark or at the AA-mode change.
+
+## 2026-11-03 (flight edvr_gfx_20261103_044624): the on-foot refusal is the query tracker, and it follows a live VR-to-flat switch (DIAGNOSED, no change)
+
+Frontier, build 7cc31c5a (`v0.22.0-rc.5-38-g7cc31c5a`, PE `6AE9C874`, `edvr_log.py --expect-build 7cc31c5a` matched). Launched in VR (3D mode 4), live switch
+to flat at 04:51:05.672, DLSS, SS 1.0 (3840x2160 render and output), UI quality 100. Sean's first NumLock (05:03:44, on foot in the hangar, ship in view)
+and the second (05:04:15, seated, sealed) are the two draw censuses; the log records a NumLock only as `flat draw census: armed by NumLock`.
+
+- **What the log shows.** Every on-foot stretch (04:52:07-04:55:27, 05:00:38-05:04:00) refuses `flat-resolve-foreground-contract-unqualified` on
+  nearly every frame (80 five-second windows, 30,823 frames), with `last=spatial-fallback`, `jitter=(0,0)`, `state=warming history-valid=0`, so no DLSS
+  and no temporal AA ran on the hangar frames at marker 1 (`treated` rose 27 frames in 05:02:22-05:04:00; it rose 450 per 5 s in the cockpit at 05:04:02
+  and after). The cause is the query tracker: `flat replay query rejections` shows `checked == rejected` (193,092 of 193,092), every one
+  `UNCERTAIN_BRACKET#100` (`open-brackets=2`, both timing kind, so the open brackets are not the reason). The first rejection is at 04:51:05.744, 72 ms
+  after the switch. `FlatReplayQueryTracker::uncertain` is sticky (flat_replay_query_tracker.h: only `resetForNewContext` clears it), so one unpaired
+  End or duplicate Begin leaves every later foreground draw refused for the session; the cockpit is treated only because no foreground draw reaches the test there.
+- **Across logs (Frontier and Steam, 10-14 on, `replay query rejections` present).** Launched VR and switched live: 5 of 5 sessions with a checked
+  foreground draw rejected all of them (10-14 115326, 10-18 042154, 10-18 043544, 10-23 115856, 11-03 044624). Launched flat: 3 of 3 sessions with
+  checked draws rejected none (10-18 043900: 16,460 checks; 10-18 081908: 57,624; 10-23 093833: 34,201); Steam (119 flat-launched logs since 10-14, 90 with
+  checked draws, 8.7 million checks) rejected none.
+  The other VR-launched logs had no checked foreground draw (not on foot). So the leading cause is state left by the VR phase (as the 10-14 observe-only hook was).
+- **Open: what sets `uncertain`, and whether it is set in the VR phase.** The tracker records no cause. Instrument (log only): keep the first cause (null
+  identity, duplicate Begin, table full, kind mismatch, unmatched End), the D3D11_QUERY, the frame, the thread and whether the game was in VR or flat, and
+  write one line at the first. Expected: a line before 04:51:05 with the VR profile means the VR path sets it; one after means the game does.
+  Do not reset the tracker at the profile switch before the cause is known: a bracket that is really open would then be replayed under.
+- `ruled out: the 2026-11-03 branch (7cc31c5a: the dust and bars recipes, the UI layer's composite) as the cause of the on-foot refusal, because the diff
+  touches no query or foreground-contract code, the first rejection came 72 ms after the switch, and VR-to-flat logs of 10-14 (v0.19.1-238) and 10-18
+  (v0.20.0-rc.2-66) show the same UNCERTAIN_BRACKET#100.`
+- `ruled out: a particular foreground draw (7B0DC42D/0DF03E64, CFCA8FFC/8A08FF78, 88DCF116/494506A6, DFED8E1C/143AAE05) as the trigger, because the tracker
+  rejects every draw it is asked about (checked equals rejected), whatever the pair.`
+- `ruled out: DLSS ghosting of the hangar ship at the first NumLock, because DLSS did not run on those frames (spatial fallback, no jitter); what Sean saw is the untreated frame.`
