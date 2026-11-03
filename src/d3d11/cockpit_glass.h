@@ -8,7 +8,7 @@
 //
 // Both profiles. Render thread, owner context only. The key is read at the frame boundary (live): cockpitGlassFrameBoundary().
 // Log lines (each starts "cockpit glass:"): the key changing, the replacement made or refused, and every 30 s while `legacy` is on a window line
-// with binds=N canopy-seen=M, so a key that is on but never took effect reads differently from one that worked.
+// with binds=N canopy-seen=M ice-overlays=K, so a key that is on but never took effect reads differently from one that worked.
 #include <d3d11.h>
 
 #include <atomic>
@@ -28,7 +28,14 @@ inline bool cockpitGlassLegacyLive() { return detail::g_cockpitGlassLegacy.load(
 // wanted; if that fails, `ps` comes back and the glass is drawn stock.
 ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, uint64_t hash);
 
-// Once a frame from vScreenFrameBoundary: reads the key (live) and prints the 30 s window line while it is on.
-void cockpitGlassFrameBoundary();
+// The ice and condensation draws (docs\cockpit-glass-legacy-port.md section 11). The game draws the canopy with its own ice or condensation shader while they show, so the replacement
+// is not bound and the legacy dirt would vanish. While `legacy`, the draw thunks (owner context) call cockpitGlassOverlayBegin() after the game's draw: when the bound pixel shader is the
+// quality-3 ice or condensation one it binds EDVR's overlay pixel shader, a blend of colour ONE + ONE (alpha untouched) and the streak texture, and returns true; the thunk then issues
+// the same draw again and calls cockpitGlassOverlayEnd(), which puts the game's pixel shader, blend state, blend factor, sample mask and t12 back. False means nothing was changed.
+bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx);
+void cockpitGlassOverlayEnd(ID3D11DeviceContext* ctx);
+
+// Once a frame from vScreenFrameBoundary (the owner context): reads the key (live), gives back t12 and prints the 30 s window line while it is on.
+void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx);
 
 }  // namespace edvr

@@ -5239,6 +5239,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         if (sun.issues()) g_state->realDraw(self, count, start);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        // visual.cockpit_glass = legacy (cockpit_glass.h): over the game's ice or condensation canopy draw, the legacy dirt, drawn again with EDVR's overlay; one relaxed load otherwise
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDraw(self, count, start); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
     }
@@ -5279,6 +5281,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDraw(self, count, start); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'D', count, 1, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
@@ -5324,6 +5327,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
@@ -5364,6 +5368,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'I', count, 1, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
@@ -5407,6 +5412,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
@@ -5457,6 +5463,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
@@ -5488,6 +5495,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                               baseVertex, startInstance);
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
@@ -5620,6 +5628,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return true;  // the original draw was issued
     });
     if (bodyCull) nativeOnFootBodyCullEnd(self);   // F18 (TEMPORARY): the game's rasterizer state back
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
     // The splash's numbers are put away after the draw and the dim have used them (forwardWithVerdict), and the flag with them, on every way out of
@@ -6514,7 +6523,7 @@ void vScreenFrameBoundary() {
         // TEMPORARY (cockpit_glass_probe.h): the key (live), a pending readback, the 30 s window line. Off, a generation compare.
         tkCockpitGlassProbe.run([&] { cockpitGlassProbeFrameBoundary(g_state->ownerCtx); });
         // visual.cockpit_glass (cockpit_glass.h): the key (live) and, while it is legacy, the 30 s window line. Odyssey, a generation compare.
-        tkCockpitGlass.run([&] { cockpitGlassFrameBoundary(); });
+        tkCockpitGlass.run([&] { cockpitGlassFrameBoundary(g_state->ownerCtx); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });

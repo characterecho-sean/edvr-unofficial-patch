@@ -17,6 +17,18 @@ constexpr uint64_t kReplacedPsHash = 0x4E4FF61E8A08FC7Eull;
 // Its vertex shader, which the replacement is linked with.
 constexpr uint64_t kCanopyVsHash = 0x8C091FFD08644E02ull;
 
+// The ice and condensation pixel shaders at quality 3, over which the legacy dirt is drawn as an overlay (their bindings were checked against the intact shader's:
+// docs\cockpit-glass-legacy-port.md section 11). The quality 0-2 variants (F90EA0D834A8B44E, 4BF640EED290C885, 3B4EDBBAF1BA87BF, 2A4B54153FBF97EE) bind other slot layouts
+// and stay as the game draws them. The vertex shaders are the ice one 63C6E375A08C78AA and the condensation one 3245BAA85513D01B.
+constexpr uint64_t kIcePsQ3Hash = 0x7F770D61DEA7CD30ull;
+constexpr uint64_t kCondensationPsQ3Hash = 0x42747CC92CF844C4ull;
+enum class Overlay : int8_t { None = -1, Ice = 0, Condensation = 1 };
+inline Overlay overlayFor(uint64_t psHash) {
+    if (psHash == kIcePsQ3Hash) return Overlay::Ice;
+    if (psHash == kCondensationPsQ3Hash) return Overlay::Condensation;
+    return Overlay::None;
+}
+
 enum class Look : uint8_t { Odyssey, Legacy };
 
 inline bool equalsNoCase(const char* a, const char* b) {
@@ -48,12 +60,12 @@ inline bool swapWanted(Look look, bool haveReplacement, uint64_t boundHash) {
 // A window line is due once the interval has passed since the last.
 inline bool windowDue(uint64_t now, uint64_t last, uint64_t interval) { return now - last >= interval; }
 
-// "cockpit glass: window 30 s legacy binds=N canopy-seen=M replacement=ready". binds is how many canopy pixel-shader binds were handed the replacement;
-// canopy-seen is how many the game made at all. With the key on, binds=0 and canopy-seen>0 is a replacement that was refused or missing; both 0 is a
+// "cockpit glass: window 30 s legacy binds=N canopy-seen=M ice-overlays=K replacement=ready". binds is how many canopy pixel-shader binds were handed the replacement;
+// canopy-seen is how many the game made at all; ice-overlays is how many ice or condensation draws were drawn over with the legacy dirt. With the key on, binds=0 and canopy-seen>0 is a replacement that was refused or missing; both 0 is a
 // canopy the game never drew (or a different shader, which the probe's 'other-ps' says).
-inline int formatWindow(char* out, size_t n, double seconds, uint32_t binds, uint32_t seen, const char* replacement) {
-    return std::snprintf(out, n, "cockpit glass: window %.0f s legacy binds=%u canopy-seen=%u replacement=%s", seconds, binds, seen,
-                         replacement);
+inline int formatWindow(char* out, size_t n, double seconds, uint32_t binds, uint32_t seen, uint32_t overlays, const char* replacement) {
+    return std::snprintf(out, n, "cockpit glass: window %.0f s legacy binds=%u canopy-seen=%u ice-overlays=%u replacement=%s", seconds, binds, seen,
+                         overlays, replacement);
 }
 
 // What the replacement says about itself in the log.
@@ -86,6 +98,17 @@ constexpr InputElement kLiveInputs[] = {
     {"SV_Position", 0, 6, 0xF, false, true},
 };
 constexpr size_t kLiveInputCount = sizeof(kLiveInputs) / sizeof(kLiveInputs[0]);
+
+// The ice and condensation vertex shaders' output (the overlays carry it): the same, but the masks are four components.
+constexpr InputElement kWideInputs[] = {
+    {"__USER_KEY_COCKPITGLASSMASKS", 0, 0, 0xF, false, false},
+    {"__USER_VERTEX_FACEINVARIANT", 0, 1, 0x1, true, false},
+    {"__USER_VERTEX_M_LIGHTINGNORMAL", 0, 2, 0x7, false, false},
+    {"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3, 0x7, false, false},
+    {"__USER_VERTEX_M_LIGHTINGTANGENT", 0, 4, 0x7, false, false},
+    {"__USER_VERTEX_M_TEXCOORD", 0, 5, 0x3, false, false},
+    {"SV_Position", 0, 6, 0xF, false, true},
+};
 
 // The registers the live shader declares: the frame block (b1, 327 registers, dynamically indexed) and the material block (b2, 18).
 constexpr uint32_t kFrameRegisters = 327;

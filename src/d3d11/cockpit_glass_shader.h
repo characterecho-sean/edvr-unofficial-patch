@@ -5,26 +5,27 @@
 // WHAT IT IS. The live canopy (CockpitGlass_Forward, intact, quality 3; the game's PS 4E4FF61E8A08FC7E) lights the glass with GGX, Fresnel and
 // reflection probes. The Horizons 3.8 client lit the same glass far more simply: one directional light as Lambert times shadow, plus a
 // normal-independent glare lobe toward the light, over an ambient the vertex shader took from a cube map. This shader gives the live glass
-// that legacy model. It has the live pixel shader's input signature, so it links with the live vertex shader 8C091FFD08644E02, and it reads only
-// what the game has already bound for that draw:
+// that legacy model, with the legacy client's measured values (docs\cockpit-glass-legacy-port.md section 10). One text, three compiles (the macros in
+// tools/temporal_shader_build/fixed_cockpit_glass_variants.h):
+//   intact        replaces the game's intact PS. Premultiplied legacy blend: alpha a constant base, colour = radiance / alpha under live's straight blend.
+//   ice           overlay for the game's ice PS (7F770D61DEA7CD30): the legacy dirt and glare light alone, added over the game's own ice draw.
+//   condensation  overlay for the condensation PS (42747CC92CF844C4), the same.
+// Each has its game vertex shader's output signature (the ice and condensation vertex shaders pass a fourth mask component, in different orders), so it
+// links with it, and reads only what the game has already bound for that draw:
 //   b1  the frame block (333 registers; this reads 56, 90, 227-228, 245, 253, 261, 277-279, 291-326)
 //   b2  the material block (18 registers)
 //   t0  per-cluster probe lists (raw), t1 the directional light (raw: colour at +0, view-space direction at +16, stride 48),
-//   t2  the light and probe records (raw), t3 the probe cube array, t5 the moment shadow map, t6 the crack normal and alpha, t9 the blemish map
+//   t2  the light and probe records (raw), t3 the probe cube array, t5 the moment shadow map
+//   the crack normal and alpha: t6 (intact) or t7 (ice, condensation); the blemish map: t9 (intact) or t11 (ice, condensation)
 //   s0  the quality sampler (anisotropic wrap), s1 point/clamp for the shadow gathers, s2 the probe cube sampler
-// Nothing else is bound or created. What was taken from the live shader and what was chosen is written out in section 8 of the doc.
+// and EDVR's one texture, the dirt streaks (cockpit_glass_streaks.h), at t12 for every variant: the game binds nothing there on the canopy draw, and the
+// ice and condensation shaders use t10 and t11, so t10 and t11 cannot hold it. The swap binds it each time and puts back what was there.
+// What was taken from the live shader and what was measured or chosen is written out in sections 8 to 11 of the doc.
 //
-// MASKS are the live masks: the crack (vertex mask against its threshold, times the crack texture's alpha), the dirt and the imperfection (vertex masks
-// times the blemish map's x and y channels). They drive the colour and the glare unscaled, as in the legacy client. The factor 1 - saturate(CB2[17].w *
-// 1.0526) (0.075 on the flown ship) scales ALPHA ONLY, as in live. The blemish map is sampled once, as the legacy client did, where live blends three
-// hexagonally tiled taps. The lit normal is the legacy client's: flat glass faces inward (-N), a crack bends it.
+// THE BLEND (intact). The legacy client's blend was premultiplied (ONE, INV_SRC_ALPHA): colour added, alpha a constant 0.02 base. The canopy here
+// draws with straight alpha (SRC_ALPHA, INV_SRC_ALPHA), so the colour written is the legacy radiance divided by the alpha written, and the blend adds the
+// radiance once and darkens what is behind by the same alpha. The overlays add their radiance with ONE, ONE and leave alpha alone.
 //
-// THE BLEND. The canopy draws with straight alpha (SRC_ALPHA, INV_SRC_ALPHA; the probe flight, section 7 of the doc), so the colour written here is the
-// legacy radiance divided by the alpha written, and the blend adds that radiance once. Alpha is the legacy formula (the crack term and the tint alpha) plus
-// the dirt and imperfection coverage; without those two a straight-alpha blend of the legacy output would hide the dirt entirely, since the legacy client's
-// alpha ignored them (its blend took the colour as it was). A pixel with radiance but an alpha below kMinCoverage is written at alpha kMinCoverage.
-//
-// TUNED, NOT MEASURED: the five constants at the top of the second text (section 8 of the doc). The legacy client's values were not recoverable.
 #pragma once
 
 namespace edvr {
@@ -38,14 +39,22 @@ ByteAddressBuffer SunLight : register(t1);
 ByteAddressBuffer ProbeRecords : register(t2);
 TextureCubeArray<float4> Probes : register(t3);
 Texture2D<float4> ShadowMoments : register(t5);
-Texture2D<float4> CrackNormalAlpha : register(t6);
-Texture2D<float4> Blemish : register(t9);
+Texture2D<float4> CrackNormalAlpha : register(EDVR_T_CRACK);
+Texture2D<float4> Blemish : register(EDVR_T_BLEMISH);
+Texture2D<float> Streaks : register(t12);
 SamplerState QualitySampler : register(s0);
 SamplerState ClampSampler : register(s1);
 SamplerState EnvSampler : register(s2);
 
+// The mask component each variant's vertex shader puts the dirt and the imperfection in: intact (crack, dirt, imperfection), ice (crack, ice, dirt,
+// imperfection), condensation (crack, dirt, imperfection, condensation).
+#if EDVR_MASKS4
+#define MaskType float4
+#else
+#define MaskType float3
+#endif
 struct PsIn {
-    float3 masks : __USER_KEY_COCKPITGLASSMASKS;
+    MaskType masks : __USER_KEY_COCKPITGLASSMASKS;
     nointerpolation uint faceInvariant : __USER_VERTEX_FACEINVARIANT;
     float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
     float3 lightingPosition : __USER_VERTEX_M_LIGHTINGPOSITION;
@@ -164,17 +173,23 @@ float sunShadow(float3 pos) {
     return second + w1 * (s1 - second);
 }
 )HLSL" R"HLSL(
-// TUNED, NOT MEASURED (docs\cockpit-glass-legacy-port.md section 8): the legacy client's own values were not recoverable from its archive.
-static const float kImperfectionSpec = 1.0;    // glare strength where the imperfection mask covers
-static const float kImperfectionGloss = 24.0;  // its exponent: a broad smudge, about 12 degrees wide
-static const float kCrackSpec = 1.0;           // glare strength in a crack (times the frame's alpha multiplier)
-static const float kCrackGloss = 64.0;         // its exponent: a tighter glint
-static const float kAmbientScale = 1.0;        // the probe ambient, in the light's own HDR units
+// MEASURED from the legacy client by RenderDoc (docs\cockpit-glass-legacy-port.md section 10).
+static const float kLegacyDirtMask = 0.025;    // the dirt mask multiplier on the vertex colour's blue channel (VS cb0[3].x)
+static const float kLegacyDirtColour = 0.97;   // the dirt colour scale (PS cb0[35].z)
+static const float kLegacyBaseAlpha = 0.02;    // the constant alpha base (PS cb0[35].y: 0.0212, 0.0211, 0.0185)
+static const float kImperfectionSpec = 0.001;  // smudge glare strength (cb0[39].x)
+static const float kImperfectionGloss = 120.0; // and its exponent (cb0[39].y)
+static const float kCrackSpec = 0.02;          // crack glare strength (cb0[38].y), times the frame's alpha multiplier
+static const float kCrackGloss = 450.0;        // and its exponent (cb0[38].z)
+// The streak texture is stored normalised (its brightest texel 1, its mean 0.267); times this, the max is the legacy dirt texture's 0.09 and the mean its 0.024.
+static const float kStreakMax = 0.09;
+// CHOSEN, not measured: the probe ambient in the light's own HDR units.
+static const float kAmbientScale = 1.0;
 // Fixed choices.
 static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
 static const uint kMaxProbes = 16;             // the live loop stops when the weights reach 1; this bounds a cluster that never does
-static const float kMinCoverage = 1.0 / 1024.0;  // the smallest alpha written; a pixel with no alpha and no colour either returns transparent black unlit
+static const float kMinCoverage = 1.0 / 1024.0;  // the overlays skip a pixel whose dirt, smudge and crack are all under this
 
 // The ambient: the game's clustered reflection probes, looked up as the live shader does (the pixel's cluster from its tile and depth, the probes in it
 // weighted by their volumes, summed until the weights reach 1), but sampled once, at the roughest mip, along the normal. That is the stand-in for the
@@ -241,21 +256,26 @@ float4 main(PsIn i) : SV_Target {
     float2 uv = i.texcoord * cb2[15].xy;
     float4 crackTex = CrackNormalAlpha.Sample(QualitySampler, uv);
     float2 blemish = Blemish.Sample(QualitySampler, uv).xy;
+    float streak = Streaks.Sample(QualitySampler, uv) * kStreakMax;
 
-    // Coverage. crackMix drives the normal; crackA (scaled by the material's occlusion scale) drives colour and alpha. dirt and imp are the masks as the
-    // legacy client had them, unscaled, and drive the colour and the glare. k (live's layer cutoff, 0.075 on the flown ship) scales ALPHA ONLY, as in live,
-    // where it appears in the coverage and nowhere else; the legacy client had no such factor.
+    // Coverage. crackMix drives the normal; crackA (scaled by the material's occlusion scale) drives the crack colour and, intact, alpha.
     float crackMix = saturate((cb2[17].z < i.masks.x ? 1.0 : 0.0) * crackTex.w);
     float crackA = saturate(crackMix * cb2[7].z);
-    float k = 1.0 - saturate(cb2[17].w * 1.052632);
-    float dirt = saturate(blemish.x * i.masks.y);
-    float imp = saturate(blemish.y * i.masks.z);
-    float coverage = min(1.0, crackA + k * (dirt + imp));
+    // The dirt mask is the legacy client's: 0.025 times the vertex colour's blue channel. Live's vertex shader passes saturate((B + CB2[6].w) * CB2[6].z) *
+    // CB2[0].x, so B is recovered from it; where live's clamp took it to 0 the legacy mask would be under 0.005 and is taken as 0.
+    float liveDirt = i.masks[EDVR_MASK_DIRT];
+    float denom = cb2[6].z * cb2[0].x;
+    float vertexB = (liveDirt > 0.0 && denom > 0.000001) ? max(liveDirt / denom - cb2[6].w, 0.0) : 0.0;
+    float dirtMask = kLegacyDirtMask * vertexB;
+    // The smudge mask: live's imperfection mask times the blemish map's y channel. The legacy client's was a vertex alpha channel (1.2 A - 0.2), which the
+    // live vertex shader does not pass, so live's own is kept.
+    float imp = saturate(blemish.y * i.masks[EDVR_MASK_IMP]);
+#if EDVR_OVERLAY
+    // Nothing to light: no dirt, no smudge, no crack. (The intact variant always draws: the legacy alpha base darkens the whole pane.)
+    if (crackA + dirtMask + imp < kMinCoverage) return float4(0, 0, 0, 0);
+#endif
     float tint = cb1[56].x;
-    float alpha = coverage + tint * (1.0 - coverage);
-    // Nothing to draw: no alpha and no colour either. A pixel with glare or dirt colour but a tiny alpha is still drawn, at alpha kMinCoverage (below).
-    if (alpha < kMinCoverage && crackA + dirt + imp < kMinCoverage) return float4(0, 0, 0, 0);
-    alpha = max(alpha, kMinCoverage);
+    float alpha = saturate(crackA + max(tint, kLegacyBaseAlpha));
 
     // The lit normal: the legacy client's. Flat glass has the tangent-space normal (0, 0, 1); a crack bends it to the decoded crack normal. The glass is lit
     // from inside, so the vertex-normal share points the other way (Nw = x T + y B - z N). In this slot order (T, N, B) that is w = lerp((0, 1, 0), (nx, nz,
@@ -281,16 +301,20 @@ float4 main(PsIn i) : SV_Target {
     float specAmt = lerp(imp * kImperfectionSpec, kCrackSpec * cb1[56].y, crackA);
     float gloss = lerp(kImperfectionGloss, kCrackGloss, crackA);
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
-    float3 albedo = lerp(dirt * cb1[56].y * cb2[11].xyz, cb2[8].yzw * cb1[56].y, crackA);
+    // The dirt is grey (R = G = B): the streak texture times the mask times the colour scale.
+    float3 albedo = lerp((streak * dirtMask * kLegacyDirtColour).xxx, cb2[8].yzw * cb1[56].y, crackA);
     float3 ambient = probeAmbient(pv, nIn, i.position.xy) * kAmbientScale;
     // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
     float3 direct = shadow * kInvPi * lightColour;
     float3 radiance = (ndl * direct + ambient) * albedo + specAmt * glare * direct;
-
-    // Straight alpha: radiance is the legacy colour, weighted by the legacy masks. Divide by the alpha written and the blend adds it once.
-    float3 rgb = radiance / alpha;
-    if (any(isnan(rgb))) rgb = 0;
-    return float4(min(rgb * cb1[90].y, 60000.0), alpha);
+    if (any(isnan(radiance))) radiance = 0;
+#if EDVR_OVERLAY
+    // Over the game's own ice or condensation draw: the legacy light alone, added (ONE, ONE, alpha untouched). The game's draw did its own coverage.
+    return float4(min(radiance * cb1[90].y, 60000.0), 0.0);
+#else
+    // Straight alpha: the legacy radiance divided by the alpha written, so the blend adds the radiance once.
+    return float4(min(radiance / alpha * cb1[90].y, 60000.0), alpha);
+#endif
 }
 )HLSL";
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **FLOWN TWICE (swap works), CORRECTED TWICE, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
+State 2026-11-03: **FLOWN THREE TIMES (swap works), REBUILT TO MEASURED VALUES, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
 quality-3 canopy shader `4E4FF61E8A08FC7E`, at bind time. What was built, the constants chosen and what the
@@ -37,7 +37,10 @@ cover the same areas by eye (not measured). Where legacy put its dirt cannot be 
 
 Legacy MEASURED by RenderDoc (section 10): premultiplied blend, alpha a 0.02 base, dirt a faint swirled
 streak texture over the whole pane (mask 0.025 x vertex B), smudge and crack glare 1,000x and 50x weaker
-than the port's guesses. Open: the shader brought to those values, and what stands in for legacy's texture.
+than the port's guesses. BUILT (section 11, not flown): the shader takes those values; EDVR's own generated
+streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
+get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
+next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -433,6 +436,83 @@ What differs from the port as flown (0756063a): its dirt mask is live's `saturat
 times live's blemish channel, which sits at the edges, with live's dirt colour 0.27 against legacy's 0.024
 times a mask 8x smaller; its smudge glare is 1,000 times legacy's (1.0 against 0.001) and its crack glare
 50 times; its alpha has no 0.02 base. Legacy's own streak texture is Frontier's and is not shipped.
+
+﻿## 11. Measured values, EDVR's streaks and the ice overlay (built 2026-11-03, not flown)
+
+Sean's choices (2026-11-03): the shader takes the values section 10 measured; the dirt pattern is EDVR's own
+streak texture (legacy's is Frontier's); ice and condensation stay as the game draws them, with the legacy dirt
+still on top.
+
+**Measured values now in the shader.** Alpha is `saturate(crackA + max(CB1[56].x, 0.02))` (the 0.02 base, PS
+cb0[35].y): dirt and smudges no longer occlude, and k and the alpha floor are gone. The colour written is still
+the radiance divided by that alpha, so live's straight blend gives the legacy premultiplied result. The dirt mask
+is legacy's, `0.025 x vertex B` (VS cb0[3].x), with B recovered from live's `masks.y =
+saturate((B + CB2[6].w) x CB2[6].z) x CB2[0].x` (B = masks.y / (CB2[6].z x CB2[0].x) - CB2[6].w; 0 where live's
+clamp took it to 0, where legacy's mask would be under 0.005). Dirt albedo is grey: `streak x mask x 0.97` (cb0[35].z).
+Smudge glare is 0.001 at gloss 120, crack glare 0.02 (times CB1[56].y) at gloss 450. Smudges keep live's
+imperfection mask (`masks.z`) times the blemish map's y channel: the legacy smudge mask was a vertex alpha
+channel (`1.2 A - 0.2`), which live's vertex shader does not pass. The 1/pi on the direct light, the probe
+ambient and the legacy normal are unchanged. The only chosen constant left is the probe ambient scale (1.0).
+
+**The streak texture** (`src\d3d11\cockpit_glass_streaks.h`). An original pattern, not traced from the legacy
+texture (only its two statistics were used, mean 0.024 and max 0.09): white noise smeared along a slowly turning
+flow field (line integral convolution, +-18 texels, a triangular kernel) into long thin curved fibres, contrast
+stretched, broad patches of low-frequency noise deciding where the wipe went, and a power curve found by
+bisection so the stored mean is 0.2667 of the max. Every field is periodic in the size, so it wraps with no seam.
+256 x 256, R8_UNORM, stored normalised (brightest texel 255), the mip chain built on the CPU; the shader scales
+it by 0.09, which gives the legacy max, and the mean comes out at the legacy 0.024. Sampled at `texcoord x
+CB2[15].xy` with s0. Generation takes about 40 ms (build machine, release), so it runs on a worker thread
+started when the key turns on; until it is done the replacement draws without dirt, never stock. The log says
+`dirt streak texture 256x256 generated in N ms on a worker thread` and `... created (R8_UNORM 256x256, 9 mips)
+and bound at t12`. A picture of it: `%LOCALAPPDATA%\EDVR\captures\edvr-streaks.png` (and a 2 x 2 tiling).
+`:rig_cockpit_glass_test` holds it: deterministic, brightest texel 255, mean within 0.005 of the target, contrast,
+neighbouring texels correlated (0.59 of the standard deviation against about 1.3 for white noise), the wrap seam
+no larger than the neighbour difference (0.109 against 0.131), the mip chain and its means.
+
+**Slot t12.** The streak texture is at t12 for every variant. The probe showed t10 and t11 unbound at the
+intact draw, but the ice and condensation pixel shaders use them (ice normal, blemish map). Each time the
+intact replacement is bound the swap saves what is at t12, binds the streaks through the raw call (the
+binding shadow records only the game's slots 0 to 3 and is not told), and gives t12 back at the next pixel
+shader bind of another shader or at the frame boundary.
+
+**Ice and condensation.** While `legacy`, after the game's own draw of the canopy with the quality-3 ice
+(`7F770D61DEA7CD30`) or condensation (`42747CC92CF844C4`) pixel shader, the draw thunks (owner context, flat
+and VR, all four draw kinds) issue the same draw again with EDVR's overlay shader and a blend of colour
+ONE + ONE, write mask RGB (alpha untouched), then put back the game's pixel shader, blend state, blend factor,
+sample mask and t12. The overlay writes the legacy dirt and glare light only: `(ndl x direct + ambient) x
+dirtAlbedo + glare`, premultiplied, no alpha, no crack occlusion (the game's draw did its own coverage). The
+gate is one relaxed load of the key's flag. The window line gains `ice-overlays=N`.
+
+What was read from the disassemblies (`ps_4F30562223470E06` ice q3, `ps_C29EC19DFD3363D2` condensation q3, the ice
+VS `F56EB2F214D17E34` and condensation VS `70673CD0AF4C30D1`):
+
+- Same as the intact PS: CB1 (declared 333 registers against 327; the bound buffer is 336, so the overlay's
+  327 is read in range) and CB2 at b1 and b2, the layouts of t0 (cluster stride 2372, probes at +2212), t1, t2
+  (160 and 48 byte records), t3 (cube array) and t5 (moment map, 16 gathers), and s0 to s2.
+- **Different:** the crack normal and alpha is at t7, not t6, and the blemish map at t11, not t9 (both also use t10 as the ice or condensation normal, and t6 for a map the overlay does not read). The overlay is compiled with those slots.
+- **Different:** the vertex shaders pass four mask components, in other orders. Ice: crack, ice, dirt,
+  imperfection (dirt `.z`, imperfection `.w`). Condensation: crack, dirt, imperfection, condensation (dirt `.y`,
+  imperfection `.z`: the same slots as the intact variant, so two overlay variants, not three). The dirt mask's
+  formula (CB2[6].zw, CB2[0].x) and the crack mask's are the same in all three vertex shaders, so B is
+  recovered the same way. `temporal_shader_build` checks each variant's input signature, its slots and its
+  macros against these.
+- **Not covered:** the quality 0 to 2 ice and condensation shaders (`F90EA0D834A8B44E`, `4BF640EED290C885`,
+  `3B4EDBBAF1BA87BF`, `2A4B54153FBF97EE`) bind another slot layout (the directional light at t0, the shadow map
+  at t1, and so on), which was not verified against the overlay, so those draws stay as the game draws them
+  with no legacy dirt. The test rig drew only quality 3.
+
+**Cost.** The intact variant now shades every pane pixel (the 0.02 base alpha and the mask 0.025 x B never
+reach zero), where before it skipped uncovered pixels; the overlay costs one extra draw of the canopy a frame
+while ice or condensation shows. Both are to be measured on the flight.
+
+**Rig numbers** (WARP, debug layer on): dirt under the sun, vertex B 0.72, rgb 0.09766 at alpha 0.02 (wanted
+0.09769); hangar (probe only) 0.01964 (0.01964); lit crack 0.3728 (0.3730); crack glare 0.3542 (0.3544);
+smudge glare 0.12238 (0.12240) at alpha 0.02; ice and condensation overlays 0.001953 with alpha written 0, equal to
+the intact variant's alpha times colour; no streak texture: no dirt.
+
+**What the flight must check** (after section 8's list): the log lines above; with ice forming, the dirt streaks
+stay on the canopy and the ice looks as the game draws it; `ice-overlays` counts about one a frame while ice
+shows; the streak pattern's look and scale against the legacy client's; frame time with the overlay on.
 
 ## Ruled out
 

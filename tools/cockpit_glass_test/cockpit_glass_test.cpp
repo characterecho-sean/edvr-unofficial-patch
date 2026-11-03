@@ -1,14 +1,15 @@
-// visual.cockpit_glass = legacy (docs\cockpit-glass-legacy-port.md section 8): src\d3d11\cockpit_glass_core.h held to its contract, and the build's bytecode
-// (kCockpitGlassLegacyPsBytecode, from tools\temporal_shader_build) run on a WARP device with the D3D debug layer, drawn with a vertex shader that
-// carries the game's canopy vertex shader's output signature, so the draw links as the game's does. The pixel it draws is compared with the legacy model
-// worked out here, in C++, from the same inputs:
-//   - no coverage: transparent black (the early out);
-//   - dirt under the sun: Lambert on the live shader's lit normal, the dirt colour, divided by the alpha written, scaled by the HDR write scale;
+// visual.cockpit_glass = legacy (docs\cockpit-glass-legacy-port.md sections 8 to 11): src\d3d11\cockpit_glass_core.h held to its contract, the dirt streak generator
+// (src\d3d11\cockpit_glass_streaks.h: deterministic, tileable, the legacy mean and max, streaky) and the build's three pixel shaders (kCockpitGlass*PsBytecode, from
+// tools\temporal_shader_build) run on a WARP device with the D3D debug layer, drawn with a vertex shader that carries the game's canopy vertex shaders' output
+// signature, so the draw links as the game's does. The pixel it draws is compared with the legacy model worked out here, in C++, from the same inputs:
+//   - no mask: the legacy alpha base (0.02) and no colour;
+//   - dirt under the sun (vertex B 0.72): the measured mask, colour scale and streak, Lambert on the legacy normal over pi, divided by the alpha written;
 //   - a cascade whose moment map puts an occluder between the light and the pixel: dark; one with the occluder behind the pixel: lit as without a cascade;
-//   - the reflection probe ambient with the sun off (a hangar): lit by the probe's cube alone, through the cluster lists and the probe records;
-//   - a cluster that lists no probe and a sun that is off: the dirt is dark, and nothing is NaN.
-// Output under obj\ and System32's d3d11.
+//   - the reflection probe ambient with the sun off (a hangar), a lit crack, the glare lobes at the measured values, the tint alpha, no streak texture (no dirt);
+//   - the ice and condensation overlays: the same dirt light, premultiplied, alpha written 0, from their own vertex shaders' mask orders and texture slots.
+// Run with --dump <file> to write the generated streak texture as raw bytes (256 x 256). Output under obj\ and System32's d3d11.
 #include "../../src/d3d11/cockpit_glass_core.h"
+#include "../../src/d3d11/cockpit_glass_streaks.h"
 #include "temporal_shader_bytecode.h"
 
 #include <windows.h>
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -63,12 +65,17 @@ static void testCore() {
 
     check(cg::windowDue(30000, 0, 30000) && !cg::windowDue(29999, 0, 30000), "the window line is due at 30 s");
     char line[200];
-    cg::formatWindow(line, sizeof line, 30.0, 0, 3050, cg::replacementName(cg::Replacement::Refused));
-    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=0 canopy-seen=3050 replacement=refused") == 0, "binds=0 with canopy-seen above 0 reads as it should");
-    cg::formatWindow(line, sizeof line, 30.0, 3050, 3050, cg::replacementName(cg::Replacement::Ready));
-    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=3050 canopy-seen=3050 replacement=ready") == 0, "a working window reads binds equal to canopy-seen");
+    cg::formatWindow(line, sizeof line, 30.0, 0, 3050, 0, cg::replacementName(cg::Replacement::Refused));
+    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=0 canopy-seen=3050 ice-overlays=0 replacement=refused") == 0, "binds=0 with canopy-seen above 0 reads as it should");
+    cg::formatWindow(line, sizeof line, 30.0, 3050, 3050, 90, cg::replacementName(cg::Replacement::Ready));
+    check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=3050 canopy-seen=3050 ice-overlays=90 replacement=ready") == 0, "a working window reads binds equal to canopy-seen");
     check(std::strcmp(cg::replacementName(cg::Replacement::NotTried), "not-made-yet") == 0, "an untried replacement is named");
 
+    check(cg::overlayFor(0x7F770D61DEA7CD30ull) == cg::Overlay::Ice && cg::overlayFor(0x42747CC92CF844C4ull) == cg::Overlay::Condensation, "the quality-3 ice and condensation shaders are overlaid");
+    check(cg::overlayFor(0xF90EA0D834A8B44Eull) == cg::Overlay::None && cg::overlayFor(0x4BF640EED290C885ull) == cg::Overlay::None &&
+              cg::overlayFor(0x3B4EDBBAF1BA87BFull) == cg::Overlay::None && cg::overlayFor(0x2A4B54153FBF97EEull) == cg::Overlay::None &&
+              cg::overlayFor(cg::kReplacedPsHash) == cg::Overlay::None && cg::overlayFor(0) == cg::Overlay::None,
+          "the quality 0-2 ice and condensation shaders (other slot layouts), the intact one and an unhashed bind are not overlaid");
     check(cg::kLiveInputCount == 7 && cg::kLiveInputs[6].isPosition && cg::kLiveInputs[1].isUint, "the signature table has the game's seven inputs");
     for (size_t i = 0; i < cg::kLiveInputCount; ++i) check(cg::kLiveInputs[i].reg == i, "the game's inputs sit in registers 0 to 6 in order");
 }
@@ -110,7 +117,7 @@ struct Rig {
 
 static const char kVs[] = R"HLSL(
 struct VO {
-    float3 masks : __USER_KEY_COCKPITGLASSMASKS;
+    float4 masks : __USER_KEY_COCKPITGLASSMASKS;
     nointerpolation uint faceInvariant : __USER_VERTEX_FACEINVARIANT;
     float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
     float3 lightingPosition : __USER_VERTEX_M_LIGHTINGPOSITION;
@@ -122,7 +129,7 @@ cbuffer Values : register(b0) { float4 masks; float4 normal; float4 position; fl
 VO main(uint id : SV_VertexID) {
     float2 p = id == 0 ? float2(-1, -1) : (id == 1 ? float2(-1, 3) : float2(3, -1));
     VO o;
-    o.masks = masks.xyz;
+    o.masks = masks;
     o.faceInvariant = 0;
     o.lightingNormal = normal.xyz;
     o.lightingPosition = position.xyz;
@@ -154,14 +161,16 @@ static uint16_t floatToHalf(float f) {
     return static_cast<uint16_t>(sign | (exp << 10) | (man >> 13));
 }
 
+enum Variant { kIntact = 0, kIce = 1, kCondensation = 2 };
+
 struct Case {
-    float masks[3] = {0, 0, 0};
+    Variant variant = kIntact;
+    bool streaks = true;      // the streak texture bound at t12 (its texel is 1, so the dirt texture reads the legacy max, 0.09)
+    float masks[4] = {0, 0, 0, 0};   // as the vertex shader of the variant passes them
     float normal[3] = {0, 0, 1}, position[3] = {0, 0, 5}, tangent[3] = {1, 0, 0};
     float tint = 0, alphaMultiplier = 1;
     float sunColour[3] = {0, 0, 0}, sunDir[3] = {0, 0, 1};
     bool sunOn = true;
-    float k = 0;   // CB2[17].w: 0 leaves the whole mask
-    float dirtColour[3] = {0.5f, 0.5f, 0.5f};
     int cascades = 0;
     float occluder = 0.9f;   // the moment map's occluder, in the shader's depth space (1 - clip z)
     bool probe = false;
@@ -177,7 +186,10 @@ public:
         ComPtr<ID3DBlob> vs, err;
         hr(D3DCompile(kVs, sizeof kVs - 1, "test canopy vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs, &err), "the test vertex shader compiles");
         hr(rig.dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vsh), "CreateVertexShader");
-        hr(rig.dev->CreatePixelShader(edvr::kCockpitGlassLegacyPsBytecode, sizeof(edvr::kCockpitGlassLegacyPsBytecode), nullptr, &psh), "the production bytecode creates");
+        hr(rig.dev->CreatePixelShader(edvr::kCockpitGlassLegacyPsBytecode, sizeof(edvr::kCockpitGlassLegacyPsBytecode), nullptr, &psh[kIntact]), "the intact bytecode creates");
+        hr(rig.dev->CreatePixelShader(edvr::kCockpitGlassIceOverlayPsBytecode, sizeof(edvr::kCockpitGlassIceOverlayPsBytecode), nullptr, &psh[kIce]), "the ice overlay bytecode creates");
+        hr(rig.dev->CreatePixelShader(edvr::kCockpitGlassCondensationOverlayPsBytecode, sizeof(edvr::kCockpitGlassCondensationOverlayPsBytecode), nullptr, &psh[kCondensation]),
+           "the condensation overlay bytecode creates");
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; sd.MaxLOD = D3D11_FLOAT32_MAX;
         hr(rig.dev->CreateSamplerState(&sd, &s0), "s0");
@@ -195,6 +207,7 @@ public:
         // t6: no crack (all zero). t9: the blemish map's x (dirt) and y (imperfection) channels full.
         crack = texture1x1(0, 0, 0, 0);
         crackFull = texture1x1(128, 128, 0, 255);
+        streakFull = texture1x1(255, 0, 0, 0);
         blemish = texture1x1(255, 255, 0, 0);
     }
 
@@ -218,12 +231,13 @@ public:
         setu(326, 0, static_cast<uint32_t>(c.cascades));
         frame[326].v[1] = 0.0f; frame[326].v[2] = 0.0f; frame[326].v[3] = 0.0f;
         std::vector<Float4> material(18, Float4{{0, 0, 0, 0}});
+        material[0] = {{0.5f, 0, 0, 0}};   // the dirt alpha multiplier
+        material[6] = {{0, 0, 0.5f, -0.2f}};   // the vertex masks' scale and offset: mask = saturate((B - 0.2) * 0.5) * CB2[0].x
         material[7] = {{0, 0, 1.0f, 0}};   // the crack's occlusion scale
         material[8] = {{0, 0.3f, 0.3f, 0.3f}};   // the crack colour
-        material[11] = {{c.dirtColour[0], c.dirtColour[1], c.dirtColour[2], 0}};
         material[13] = {{0, 0, 0, 0}};
         material[15] = {{1, 1, 0, 0}};
-        material[17] = {{0, 0, 0.5f, c.k}};   // crack threshold 0.5, the layer mask cutoff k
+        material[17] = {{0, 0, 0.5f, 0}};   // crack threshold 0.5
         // t0: the cluster record 0 (count at +28, probe list at +2212), t1: the sun, t2: the probe volume and header.
         std::vector<uint32_t> lists(4096 / 4, 0), sun(48 / 4, 0), records(2048 / 4, 0);
         if (c.probe) {
@@ -240,7 +254,7 @@ public:
         std::memcpy(&sun[0], c.sunColour, 12);
         std::memcpy(&sun[4], c.sunDir, 12);
         ComPtr<ID3D11Buffer> cb1 = constantBuffer(frame.data(), 16 * 336), cb2 = constantBuffer(material.data(), 16 * 18);
-        Float4 vsv[5] = {{{c.masks[0], c.masks[1], c.masks[2], 0}}, {{c.normal[0], c.normal[1], c.normal[2], 0}}, {{c.position[0], c.position[1], c.position[2], 0}},
+        Float4 vsv[5] = {{{c.masks[0], c.masks[1], c.masks[2], c.masks[3]}}, {{c.normal[0], c.normal[1], c.normal[2], 0}}, {{c.position[0], c.position[1], c.position[2], 0}},
                          {{c.tangent[0], c.tangent[1], c.tangent[2], 0}}, {{0.5f, 0.5f, 0, 0}}};
         ComPtr<ID3D11Buffer> vcb = constantBuffer(vsv, sizeof vsv);
         ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 4096), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 2048);
@@ -255,11 +269,14 @@ public:
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(vsh.Get(), nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, vcb.GetAddressOf());
-        ctx->PSSetShader(psh.Get(), nullptr, 0);
+        ctx->PSSetShader(psh[c.variant].Get(), nullptr, 0);
         ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
         ctx->PSSetConstantBuffers(1, 2, cbs);
-        ID3D11ShaderResourceView* srvs[10] = {t0.Get(), t1.Get(), t2.Get(), t3.Get(), nullptr, t5.Get(), c.crack ? crackFull.Get() : crack.Get(), nullptr, nullptr, blemish.Get()};
-        ctx->PSSetShaderResources(0, 10, srvs);
+        ID3D11ShaderResourceView* crackView = c.crack ? crackFull.Get() : crack.Get();
+        const bool overlay = c.variant != kIntact;   // the ice and condensation draws keep the crack map at t7 and the blemish map at t11
+        ID3D11ShaderResourceView* srvs[13] = {t0.Get(), t1.Get(), t2.Get(), t3.Get(), nullptr, t5.Get(), overlay ? nullptr : crackView, overlay ? crackView : nullptr, nullptr,
+                                              overlay ? nullptr : blemish.Get(), nullptr, overlay ? blemish.Get() : nullptr, c.streaks ? streakFull.Get() : nullptr};
+        ctx->PSSetShaderResources(0, 13, srvs);
         ID3D11SamplerState* smp[3] = {s0.Get(), s1.Get(), s2.Get()};
         ctx->PSSetSamplers(0, 3, smp);
         ctx->Draw(3, 0);
@@ -269,8 +286,8 @@ public:
         const uint16_t* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(m.pData) + 2 * m.RowPitch);
         Pixel p{halfToFloat(row[8]), halfToFloat(row[9]), halfToFloat(row[10]), halfToFloat(row[11])};
         ctx->Unmap(staging.Get(), 0);
-        ID3D11ShaderResourceView* none[10] = {};
-        ctx->PSSetShaderResources(0, 10, none);
+        ID3D11ShaderResourceView* none[13] = {};
+        ctx->PSSetShaderResources(0, 13, none);
         return p;
     }
 
@@ -278,11 +295,11 @@ public:
 
 private:
     ComPtr<ID3D11VertexShader> vsh;
-    ComPtr<ID3D11PixelShader> psh;
+    ComPtr<ID3D11PixelShader> psh[3];
     ComPtr<ID3D11SamplerState> s0, s1, s2;
     ComPtr<ID3D11Texture2D> target, staging;
     ComPtr<ID3D11RenderTargetView> rtv;
-    ComPtr<ID3D11ShaderResourceView> crack, crackFull, blemish;
+    ComPtr<ID3D11ShaderResourceView> crack, crackFull, blemish, streakFull;
 
     ComPtr<ID3D11Buffer> constantBuffer(const void* data, UINT bytes) {
         D3D11_BUFFER_DESC bd{};
@@ -376,38 +393,97 @@ private:
 
 static const float kInvPi = 0.318310f;   // live's factor on the direct light, which the port carries
 
-static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-4f; }
+static bool closeTo(float a, float b, float rel) { return std::fabs(a - b) <= rel * std::fabs(b) + 1e-6f; }
 
+// ---- the streak generator ----------------------------------------------------------------------------------------------
+static void testStreaks(const char* dumpPath) {
+    namespace gs = edvr::glass_streaks;
+    const int n = gs::kSize;
+    std::vector<uint8_t> a(static_cast<size_t>(n) * n), b(a.size());
+    const auto t0 = std::chrono::steady_clock::now();
+    gs::generate(a.data());
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    gs::generate(b.data());
+    check(a == b, "the generator is deterministic: two calls give the same bytes");
+    double mean = 0;
+    int max = 0;
+    for (uint8_t v : a) { mean += v; max = v > max ? v : max; }
+    mean /= static_cast<double>(a.size()) * 255.0;
+    check(max == 255, "the brightest texel is 255 (stored normalised)");
+    check(std::fabs(mean - gs::kTargetMean) < 0.005, "the stored mean is the legacy mean over the legacy max (0.024 / 0.09)");
+    check(std::fabs(mean * gs::kStreakMax - gs::kLegacyMean) < 0.0005 && gs::kStreakMax == gs::kLegacyMax, "times the shader's scale, the linear mean is the legacy 0.024 and the max the legacy 0.09");
+    auto at = [&](int x, int y) { return static_cast<double>(a[static_cast<size_t>(((y % n) + n) % n) * n + ((x % n) + n) % n]) / 255.0; };
+    double sd = 0, interior = 0, seam = 0;
+    for (uint8_t v : a) sd += (v / 255.0 - mean) * (v / 255.0 - mean);
+    sd = std::sqrt(sd / static_cast<double>(a.size()));
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n - 1; ++x) interior += std::fabs(at(x, y) - at(x + 1, y));
+    for (int x = 0; x < n; ++x) interior += std::fabs(at(x, 0) - at(x, 1));   // a few rows too, so both axes weigh
+    interior /= static_cast<double>(n) * (n - 1) + n;
+    for (int y = 0; y < n; ++y) seam += std::fabs(at(0, y) - at(n - 1, y));
+    for (int x = 0; x < n; ++x) seam += std::fabs(at(x, 0) - at(x, n - 1));
+    seam /= 2.0 * n;
+    std::printf("streaks: %dx%d generated in %.1f ms, stored mean %.4f, stddev %.3f, neighbour difference %.4f (%.2f of the stddev), seam difference %.4f\n", n, n, ms, mean, sd, interior,
+                interior / sd, seam);
+    check(sd > 0.15, "the texture has contrast (not flat)");
+    check(interior / sd < 0.8, "neighbouring texels are correlated (white noise reads about 1.3): the pattern is fibres, not noise");
+    check(seam <= 1.2 * interior, "it tiles: the difference across the wrap is no larger than between neighbours inside");
+    std::vector<std::vector<uint8_t>> mips;
+    gs::buildMips(a.data(), n, mips);
+    check(static_cast<int>(mips.size()) == gs::kMips && mips.back().size() == 1, "the chain has 9 levels, 256 down to 1");
+    bool means = true;
+    for (const auto& m : mips) {
+        double mm = 0;
+        for (uint8_t v : m) mm += v;
+        means = means && std::fabs(mm / static_cast<double>(m.size()) / 255.0 - mean) < 0.01;
+    }
+    check(means, "every mip level keeps the mean");
+    if (dumpPath) {
+        FILE* f = std::fopen(dumpPath, "wb");
+        if (f) { std::fwrite(a.data(), 1, a.size(), f); std::fclose(f); }
+    }
+}
+
+// ---- the shader ----------------------------------------------------------------------------------------------------------
 // The legacy model's lit normal on flat glass, for a vertex normal (0,0,1) in a view basis that is the identity: the glass is lit from inside, so it is -N.
 static float expectedNdl(const Case& c) {
     const float n[3] = {0.0f, 0.0f, -1.0f};
-    const float len = 1.0f;
-    const float dot = -(n[0] * c.sunDir[0] + n[1] * c.sunDir[1] + n[2] * c.sunDir[2]) / len;
+    const float dot = -(n[0] * c.sunDir[0] + n[1] * c.sunDir[1] + n[2] * c.sunDir[2]);
     return dot < 0 ? 0 : (dot > 1 ? 1 : dot);
 }
 
 static void testShader() {
     Canopy canopy;
+    // The measured values (section 10), as the test has them: the dirt mask multiplier and colour scale, the alpha base, the glare strengths and exponents, the streak max.
+    const float kDirtMask = 0.025f, kDirtColour = 0.97f, kBaseAlpha = 0.02f, kStreakMax = 0.09f;
+    const float vertexB = 0.72f;
+    const float liveMask = std::fmin(std::fmax((vertexB - 0.2f) * 0.5f, 0.0f), 1.0f) * 0.5f;   // what live's vertex shader passes for B = 0.72 (CB2[6] = (.., .., 0.5, -0.2), CB2[0].x = 0.5)
+    const float albedo = kStreakMax * (kDirtMask * vertexB) * kDirtColour;
+    const float sun = 1000.0f;
+
     Case none;   // no mask at all
     const Pixel zero = canopy.draw(none);
-    check(zero.r == 0 && zero.g == 0 && zero.b == 0 && zero.a == 0, "no coverage draws transparent black (the early out)");
+    check(zero.r == 0 && zero.g == 0 && zero.b == 0 && closeTo(zero.a, kBaseAlpha, 0.01f), "no mask draws the legacy alpha base and no colour");
 
-    // Dirt under the sun. masks.y = 0.2 of the blemish map's full x channel with k = 1 is a coverage of 0.2.
+    // Dirt under the sun: the dirt mask from live's mask, the streak texel 1 (so 0.09), Lambert on the legacy normal over pi, divided by the alpha written.
     Case dirt;
-    dirt.masks[1] = 0.2f; dirt.k = 0.0f;
-    dirt.sunColour[0] = dirt.sunColour[1] = dirt.sunColour[2] = 1000.0f;
-    dirt.sunDir[2] = 1.0f;   // the light travels along +z, so its direction toward the light is -z
+    dirt.masks[1] = liveMask;
+    dirt.sunColour[0] = dirt.sunColour[1] = dirt.sunColour[2] = sun;
     dirt.sunDir[1] = -0.5f; dirt.sunDir[2] = 1.0f;
     const Pixel d = canopy.draw(dirt);
-    const float cover = 0.2f;   // k = 1 - saturate(0 * 1.0526) = 1; alpha = k * dirt = 0.2
     const float ndl = expectedNdl(dirt);
-    const float radiance = ndl * 1000.0f * kInvPi * (cover * 1.0f * 0.5f);
-    const float want = radiance / cover / 256.0f;
-    std::printf("dirt under the sun: got (%g %g %g %g), wanted rgb %g alpha %g\n", d.r, d.g, d.b, d.a, want, cover);
-    check(closeTo(d.a, cover, 0.01f), "dirt alpha is its coverage");
-    check(closeTo(d.r, want, 0.02f) && closeTo(d.g, want, 0.02f) && closeTo(d.b, want, 0.02f), "dirt under the sun is Lambert on the lit normal, divided by the alpha, scaled by the HDR write scale");
+    const float dirtRadiance = ndl * sun * kInvPi * albedo;
+    const float dirtWant = dirtRadiance / kBaseAlpha / 256.0f;
+    std::printf("dirt under the sun: got (%g %g %g %g), wanted rgb %g alpha %g (radiance %g)\n", d.r, d.g, d.b, d.a, dirtWant, kBaseAlpha, dirtRadiance);
+    check(closeTo(d.a, kBaseAlpha, 0.01f), "the dirt does not occlude: alpha stays the legacy base");
+    check(closeTo(d.r, dirtWant, 0.02f) && closeTo(d.g, dirtWant, 0.02f) && closeTo(d.b, dirtWant, 0.02f),
+          "dirt under the sun is grey: streak x (0.025 x vertex B) x 0.97, Lambert on the legacy normal over pi, divided by the alpha, scaled by the HDR write scale");
+    Case bare = dirt;
+    bare.streaks = false;
+    const Pixel nb = canopy.draw(bare);
+    check(nb.r == 0 && nb.g == 0 && nb.b == 0 && closeTo(nb.a, kBaseAlpha, 0.01f), "with no streak texture the replacement draws without dirt (never stock)");
 
-    // The same with a cascade whose moment map holds an occluder in front of the pixel (shadowed) and one behind it (lit).
+    // A cascade whose moment map holds an occluder in front of the pixel (shadowed) and one behind it (lit).
     Case shadowed = dirt;
     shadowed.cascades = 1;
     shadowed.position[0] = shadowed.position[1] = 0.1f; shadowed.position[2] = 5.0f;   // clip = (0.1, 0.1, 0.5): inside the cascade, zf = 0.5
@@ -424,80 +500,85 @@ static void testShader() {
     check(s.r < 0.1f * c0.r, "an occluder between the light and the pixel darkens the dirt");
     check(closeTo(l.r, c0.r, 0.02f), "an occluder behind the pixel leaves the dirt as lit as no cascade");
 
-    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = 0.25 * the read scale 256, the albedo 0.2 * 0.5.
+    // A hangar: the sun off (colour 1e-13), a probe in the cluster. The cube is 0.25 grey: ambient = 0.25 * the read scale 256, times the albedo, not scaled by 1/pi.
     Case hangar = dirt;
     hangar.sunColour[0] = hangar.sunColour[1] = hangar.sunColour[2] = 1e-13f;
     hangar.probe = true;
     hangar.probeColour[0] = hangar.probeColour[1] = hangar.probeColour[2] = 0.25f;
     const Pixel h = canopy.draw(hangar);
-    const float hangarWant = (0.25f * 256.0f) * (cover * 0.5f) / cover / 256.0f;
+    const float hangarWant = (0.25f * 256.0f) * albedo / kBaseAlpha / 256.0f;
     std::printf("hangar: got (%g %g %g %g), wanted rgb %g\n", h.r, h.g, h.b, h.a, hangarWant);
-    check(closeTo(h.r, hangarWant, 0.03f) && closeTo(h.a, cover, 0.01f), "a hangar canopy is lit by the probe's cube alone, through the cluster lists and the probe records");
+    check(closeTo(h.r, hangarWant, 0.03f) && closeTo(h.a, kBaseAlpha, 0.01f), "a hangar canopy is lit by the probe's cube alone, through the cluster lists and the probe records");
     Case dark = hangar;
     dark.probe = false;
     const Pixel k = canopy.draw(dark);
-    check(k.r == 0 && k.g == 0 && k.b == 0 && std::isfinite(k.a) && closeTo(k.a, cover, 0.01f), "with the sun off and no probe the dirt is dark and finite, still covering");
+    check(k.r == 0 && k.g == 0 && k.b == 0 && std::isfinite(k.a) && closeTo(k.a, kBaseAlpha, 0.01f), "with the sun off and no probe the dirt is dark and finite");
 
     // A crack: the vertex mask past its threshold and the crack texture's alpha full. The lit normal is the crack's (flat here, so the inward vertex normal),
-    // alpha 1, the crack colour 0.3 lit by the whole sun.
+    // alpha 1 (the crack on the base), the crack colour 0.3 lit by the whole sun over pi.
     Case crack = dirt;
     crack.masks[0] = 1.0f; crack.masks[1] = 0.0f;
     crack.crack = true;
     crack.sunDir[0] = 0.0f; crack.sunDir[1] = 0.0f; crack.sunDir[2] = 1.0f;
     const Pixel cr = canopy.draw(crack);
     std::printf("crack under the sun: got (%g %g %g %g), wanted rgb %g\n", cr.r, cr.g, cr.b, cr.a, 300.0f * kInvPi / 256.0f);
-    check(closeTo(cr.a, 1.0f, 0.01f) && closeTo(cr.r, 300.0f * kInvPi / 256.0f, 0.02f), "a crack is opaque, in the crack colour, lit by the sun on the crack's normal");
-    // The glare lobe: the light straight behind the view axis' far side (toward the light is +z, the pixel is straight ahead), so dot(L, V) is 1 and the lobe is
-    // (64 + 6) / 32; the crack's normal faces the light's far side, so the Lambert term is 0 and the glare is the whole of it.
+    check(closeTo(cr.a, 1.0f, 0.01f) && closeTo(cr.r, 300.0f * kInvPi / 256.0f, 0.02f), "a crack is opaque, in the crack colour, lit by the sun on the crack's normal over pi");
+    // The crack glare at the measured values: strength 0.02, gloss 450, so (450 + 6) / 32 toward the light; the crack's normal faces the light's far side, so Lambert is 0.
     Case glare = crack;
     glare.sunDir[2] = -1.0f;
     const Pixel g = canopy.draw(glare);
-    std::printf("glare in a crack: got (%g %g %g %g), wanted rgb %g\n", g.r, g.g, g.b, g.a, 1000.0f * kInvPi * 70.0f / 32.0f / 256.0f);
-    check(closeTo(g.r, 1000.0f * kInvPi * 70.0f / 32.0f / 256.0f, 0.02f), "the glare lobe is normal-independent: (gloss + 6) / 32 toward the light, at the crack's gloss of 64");
-    // The tint alpha adds to the coverage: 0.2 + 0.5 * (1 - 0.2), and the colour is divided by the alpha written.
+    const float crackGlare = sun * kInvPi * 0.02f * (450.0f + 6.0f) / 32.0f / 256.0f;
+    std::printf("glare in a crack: got (%g %g %g %g), wanted rgb %g\n", g.r, g.g, g.b, g.a, crackGlare);
+    check(closeTo(g.r, crackGlare, 0.02f), "the crack's glare lobe is normal-independent: 0.02 x (450 + 6) / 32 toward the light, over pi");
+    // The smudge glare at the measured values: mask 0.5 of live's imperfection mask, strength 0.001, gloss 120, the light straight ahead (dot(L, V) = 1). It adds light and
+    // does not occlude: alpha stays the base.
+    Case smudge;
+    smudge.masks[2] = 0.5f;
+    smudge.sunColour[0] = smudge.sunColour[1] = smudge.sunColour[2] = sun;
+    smudge.sunDir[2] = -1.0f;
+    const Pixel sm = canopy.draw(smudge);
+    const float smudgeRadiance = 0.5f * 0.001f * (120.0f + 6.0f) / 32.0f * sun * kInvPi;
+    std::printf("smudge glare: got (%g %g %g %g), wanted rgb %g (radiance %g)\n", sm.r, sm.g, sm.b, sm.a, smudgeRadiance / kBaseAlpha / 256.0f, smudgeRadiance);
+    check(closeTo(sm.a, kBaseAlpha, 0.01f) && closeTo(sm.r, smudgeRadiance / kBaseAlpha / 256.0f, 0.03f), "the smudge glare is 0.5 x 0.001 x (120 + 6) / 32 over pi, adds light and does not occlude");
+    // The tint alpha replaces the base when it is larger: alpha = tint, and the colour is divided by it.
     Case tinted = dirt;
     tinted.tint = 0.5f;
     const Pixel ti = canopy.draw(tinted);
-    check(closeTo(ti.a, 0.6f, 0.01f) && closeTo(ti.r, ndl * 1000.0f * kInvPi * 0.1f / 0.6f / 256.0f, 0.02f), "the tint alpha adds to the coverage and the colour is divided by the alpha written");
+    check(closeTo(ti.a, 0.5f, 0.01f) && closeTo(ti.r, dirtRadiance / 0.5f / 256.0f, 0.02f), "a tint alpha above the base is the alpha, and the colour is divided by it");
 
-    // k = 1 - saturate(CB2[17].w * 1.0526) scales ALPHA ONLY. CB2[17].w = 0.8787 is the flown ship's 0.075. The dirt colour and the smudge glare keep the
-    // legacy value (the radiance, alpha times the colour written, is the same as with k = 1) and only the alpha, and so the colour written, changes.
-    const float kShip = 0.075f;
-    Case dirtK = dirt;
-    dirtK.k = 0.8787f;
-    const Pixel dk = canopy.draw(dirtK);
-    std::printf("dirt with k = 0.075: got (%g %g %g %g), wanted rgb %g alpha %g\n", dk.r, dk.g, dk.b, dk.a, ndl * 1000.0f * kInvPi * 0.1f / (kShip * 0.2f) / 256.0f, kShip * 0.2f);
-    check(closeTo(dk.a, kShip * 0.2f, 0.02f) && closeTo(dk.r, ndl * 1000.0f * kInvPi * 0.1f / (kShip * 0.2f) / 256.0f, 0.03f),
-          "with k = 0.075 the alpha is k times the dirt and the colour is the full legacy dirt radiance divided by it");
-    check(closeTo(dk.a * dk.r, d.a * d.r, 0.03f), "the dirt radiance the blend adds (alpha times colour) does not depend on k");
-    // The smudge glare: imperfection mask 0.5, the light straight ahead of the pixel (so dot(L, V) is 1), the gloss 24: strength 0.5 * (24 + 6) / 32 * 1000.
-    Case smudge;
-    smudge.masks[2] = 0.5f;
-    smudge.sunColour[0] = smudge.sunColour[1] = smudge.sunColour[2] = 1000.0f;
-    smudge.sunDir[2] = -1.0f;
-    const float smudgeRadiance = 0.5f * 30.0f / 32.0f * 1000.0f * kInvPi;
-    const Pixel sm1 = canopy.draw(smudge);
-    smudge.k = 0.8787f;
-    const Pixel sm2 = canopy.draw(smudge);
-    std::printf("smudge glare: k=1 got (%g %g) alpha %g, k=0.075 got (%g %g) alpha %g, radiance wanted %g\n", sm1.r, sm1.g, sm1.a, sm2.r, sm2.g, sm2.a, smudgeRadiance);
-    check(closeTo(sm1.a * sm1.r * 256.0f, smudgeRadiance, 0.03f), "the smudge glare is the legacy lobe at full strength (k = 1)");
-    check(closeTo(sm2.a, kShip * 0.5f, 0.02f) && closeTo(sm2.a * sm2.r * 256.0f, smudgeRadiance, 0.03f),
-          "with k = 0.075 the smudge glare is still the full legacy value; only the alpha is k times the mask");
-    // A pixel whose alpha is below the floor but which has glare is drawn at the floor, not dropped.
-    Case faint = smudge;
-    faint.masks[2] = 0.01f;
-    const Pixel fa = canopy.draw(faint);
-    const float faintRadiance = 0.01f * 30.0f / 32.0f * 1000.0f * kInvPi;
-    std::printf("faint smudge: got (%g %g %g %g), alpha floor %g, radiance wanted %g\n", fa.r, fa.g, fa.b, fa.a, 1.0f / 1024.0f, faintRadiance);
-    check(closeTo(fa.a, 1.0f / 1024.0f, 0.02f) && closeTo(fa.a * fa.r * 256.0f, faintRadiance, 0.03f), "glare under an alpha below the floor is written at the floor and keeps its radiance");
+    // The overlays: the same dirt light, premultiplied (no division), alpha written 0, from their own vertex shaders' mask orders and texture slots. The intact pixel's
+    // alpha times colour is what the blend adds, and it is what an overlay writes.
+    const float intactAdded = d.r * d.a;
+    Case ice = dirt;
+    ice.variant = kIce;
+    ice.masks[0] = 0.0f; ice.masks[1] = 0.5f; ice.masks[2] = liveMask; ice.masks[3] = 0.0f;   // (crack, ice, dirt, imperfection)
+    const Pixel io = canopy.draw(ice);
+    std::printf("ice overlay: got (%g %g %g %g), wanted rgb %g alpha 0\n", io.r, io.g, io.b, io.a, dirtRadiance / 256.0f);
+    check(io.a == 0 && closeTo(io.r, dirtRadiance / 256.0f, 0.02f) && closeTo(io.r, intactAdded, 0.02f),
+          "the ice overlay adds the same light as the intact variant's dirt term, with alpha written 0");
+    Case condensation = dirt;
+    condensation.variant = kCondensation;
+    condensation.masks[0] = 0.0f; condensation.masks[1] = liveMask; condensation.masks[2] = 0.0f; condensation.masks[3] = 0.5f;   // (crack, dirt, imperfection, condensation)
+    const Pixel co = canopy.draw(condensation);
+    std::printf("condensation overlay: got (%g %g %g %g), wanted rgb %g alpha 0\n", co.r, co.g, co.b, co.a, dirtRadiance / 256.0f);
+    check(co.a == 0 && closeTo(co.r, dirtRadiance / 256.0f, 0.02f), "the condensation overlay adds the same light from its own mask order, with alpha written 0");
+    Case iceBare = ice;
+    iceBare.masks[2] = 0.0f;
+    const Pixel ib = canopy.draw(iceBare);
+    check(ib.r == 0 && ib.g == 0 && ib.b == 0 && ib.a == 0, "an overlay pixel with no dirt, smudge or crack adds nothing");
+    Case iceNoStreaks = ice;
+    iceNoStreaks.streaks = false;
+    const Pixel ins = canopy.draw(iceNoStreaks);
+    check(ins.r == 0 && ins.g == 0 && ins.b == 0, "with no streak texture the overlay adds no dirt");
 
     const unsigned problems = canopy.rig.problems();
     std::printf("D3D debug layer: %s\n", canopy.rig.debugLayer ? "on" : "not installed here (the signature check in temporal_shader_build still holds the link)");
-    check(problems == 0, "the debug layer reports nothing: the draw links with the game's canopy vertex shader's outputs");
+    check(problems == 0, "the debug layer reports nothing: the draws link with the game's canopy, ice and condensation vertex shaders' outputs");
 }
 
-int main() {
+int main(int argc, char** argv) {
     testCore();
+    testStreaks(argc > 2 && !std::strcmp(argv[1], "--dump") ? argv[2] : nullptr);
     testShader();
     std::printf("cockpit glass test: %s\n", g_failures ? "FAILED" : "passed");
     return g_failures ? 1 : 0;
