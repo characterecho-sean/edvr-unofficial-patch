@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33). Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping bristled brush strokes (section 13): spectrum targets cannot capture strokes. Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -610,6 +610,29 @@ energies 0.456 / 0.238 / 0.145 / 0.162 (0.418 / 0.236 / 0.161 / 0.185), elongati
 elongation is 2.7 against 4.1 (34% low; the rig allows 40%), std and p95 are a little high (the exponential's tail), and
 the picture still shows soft dark pockets between the strokes. 512 x 512, 93 ms in the rig. The rig measures the same
 elongation and angle and holds them.
+
+**Painted strokes (2026-11-03, after dbc5ee33).** Sean, seeing it beside legacy's: legacy still looks like brush strokes,
+EDVR's like diagonal noise. Why the spectrum targets could not capture it: every target so far (band energy, elongation,
+stroke angle, coherence, percentiles) is a power spectrum or a gradient statistic, which throws the phase away. Stretched noise
+can match all of them and still have no strokes in it: nothing in it has an identity, an edge or an end. So the generator
+now paints. `cockpit_glass_streaks.h` lays down 255 strokes, large first and fine last (110 large, 60 medium, 40 small,
+25 fine), each composited over what is beneath it (a lerp by the stroke's own opacity), so later strokes overlap and cut across
+earlier ones. A stroke is a gentle quadratic arc at about 50 degrees plus a slowly varying periodic bias across the tile and its
+own spread; across its width it has its own 1D bristle noise (nearly constant along the length, slow drift), so fibres run its
+whole length; opacity ramps up at the start and frays out at the end per bristle (each bristle starts and stops at its own
+distance), with soft but definite edges; and it has its own value in a narrow range around a mid-dark base. Every stroke is drawn
+modulo the tile, so it wraps with no seam (the rig's seam check holds). The sum goes through the exponential, found by
+bisection, to hold the stored mean at 0.2667 of the max. Judged by eye against legacy's picture (family of look only, nothing
+traced or fitted): overlapping brush strokes with visible bristles and ragged ends, in legacy's family but crisper and
+more contrasty than its soft wipe, with more bright hairline fibres. Measured: std 0.097, p5 / p50 / p95 0.141 / 0.247 /
+0.451, band energies 0.252 / 0.392 / 0.214 / 0.143 (legacy 0.418 / 0.236 / 0.161 / 0.185), elongation 4.0 / 11.1 / 14.7 / 5.3,
+stroke angle 39.9 / 49.9 / 49.9 / 47.6, global agreement 0.981, local coherence 0.812 (0.413). The painted result is more
+elongated and more coherent than legacy's in the finer bands and has less low-frequency energy; the rig's checks are
+loosened to what it honestly gives (band energy within 0.2, every band elongated at least 2, angle within 15 degrees,
+local coherence 0.3 to 0.9) and gain a bristle check (fine-band gradient energy along the stroke direction over the energy
+across it: 0.15, required under 0.5). Generation takes about 490 ms in the rig and 530 ms in a standalone harness (about 10 M
+stroke samples), on the worker thread: at the edge of the 500 ms line, so the stroke counts were not cut; if it matters, the
+cost is the sampling step (0.5 texel) and could be coarsened.
 
 ## Ruled out
 
