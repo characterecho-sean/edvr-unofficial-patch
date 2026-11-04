@@ -2356,9 +2356,10 @@ The L2 spot, standing still, DLAA, HUD bloom on and star glow off as now, one
 
 - **Each item, in the profile, per full-path draw:** `starGlowAfterDraw` and
   `vrStarGlowAfterDraw` gone; `uiDepthOnEyeDraw` own down by at least half;
-  `viewIsSurface` own down; the `engine_velocity.h:175` line down. Judged per
-  item, because the expected total (0.19-0.30 ms a frame at 17,148 draws, about
-  0.15-0.24 at build 3's count) is within two standard errors of the difference
+  `viewIsSurface` own down; the `engine_velocity.h:175` line down;
+  `hookedPSSetConstantBuffers` own down by at least half (item 7). Judged per
+  item, because the expected total (0.25-0.39 ms a frame at 17,148 draws, about
+  0.20-0.31 at build 3's count) is within two standard errors of the difference
   between two flights (about 0.09 ms).
 - **The total:** own time per full-path draw not up; reported against build 4.
 - **Nothing changed on screen:** build 4's lines, judged per frame for `ui
