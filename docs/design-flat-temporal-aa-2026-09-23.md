@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** the live-switch family loss and the capture key are fixed and FLOWN, and the stars on dark surfaces did not return (one flight, by eye, mechanism never explained). The probe reads the game's vehicle rigs true on a Cobra and an SRV. The ship record term never ran in flat (dead gate). BUILT, NOT FLOWN: the gate fixed, the GPU vote removed, near pixels ride the cockpit rig root's pose, taken at the emit, where last frame's depth confirms it. Temporary key `advanced.vehicle_rig_probe`. Open: the Esc menu flicker after a live switch, the capture stalling the route in a moving SRV, a tighter bound on big ships (the Cobra's sphere is 30 m; stencil bit 0x10 is a lead). See the entry "2026-11-04, flight 08:25", last in this file.
+- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** FLOWN on `v0.22.0-rc.6-62-gef407e9c`, on a branch, not merged: the live-switch family loss, the capture key and the vehicle frame (near pixels ride the cockpit rig root's pose, read from the game, where last frame's depth confirms it). Sean: cockpits held up in a Cobra, Vulture, Sidewinder and an SRV, on foot good, stars gone (by eye). Open: pink on the body while hyperspacing (the rig is not emitted there), the Options flicker and the capture stall (their own issues), flat-to-VR live unflown. Temporary key `advanced.vehicle_rig_probe`. See the entry "2026-11-04, flight 10:00", last in this file.
 - **State (2026-10-29, a tool in hand over bare terrain, issue #145):** a tester's `edvr_gfx_20261029_180522` (v0.22.0-rc.3, Steam, DLSS, copy route): on foot, scanner out, panned to bare terrain: 238 frames refused `hdr-camera-changed`, the tool's glow pass (025B4B9F/46F92DC7, first-person camera) against the terrain's first camera. The October pool-less admission needs no source and no first-person draw, and a tool is both (`sources=1 first-person=3`; `overlays-without-named-world=0` all flight). Fix `ebd8c755` on branch `claude/aa-terrain-disengagement-793fa4`: admit when the target's first camera is the last world's and the drawing camera is not. FLOWN OK 2026-10-29 16:29 on Steam (`edvr_gfx_20261029_162800`): 1,478 frames on the path, all treated and selected source-free on the world camera, zero `hdr-camera-changed`. Last entry.
 - **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
@@ -18993,3 +18993,29 @@ Temporary key: `advanced.vehicle_rig_probe`, which now also gates the frame.
 4. Go on foot in flat: `gate=off(on-foot)` and on-foot as before.
 
 **Not to merge until flown:** the frame is unproven under motion.
+
+
+## 2026-11-04, flight 10:00: the vehicle frame holds on four vehicles (issue #186), FLOWN
+
+Flight `edvr_gfx_20261104_100057` (`v0.22.0-rc.6-62-gef407e9c`, `--expect-build HEAD` passed), started in VR, switched to flat at 10:02:45. Sean: cockpits held up in the ships and SRV tested, on foot looked good, and the only pink was on the commander's body while hyperspacing. The stars on dark surfaces are not reported back. That is by eye; no capture holds a moving vehicle on this build.
+
+**Measured.**
+
+| Rig | Sphere r | Resolves with a frame |
+|---|---|---|
+| `TestBuggy_Cockpit` | 4.691 | 9,431 of 9,431 |
+| `Vulture_Cockpit` | 21.192 | 6,141 of 6,141 |
+| `CobraMkV_Cockpit` | 29.950 | 4,306 of 7,504 |
+| `Sidewinder_Cockpit` | 11.455 | 11,947 of 15,327 |
+
+- `gate=on` in a vehicle and `gate=off(on-foot)` on foot from 10:12:00. `faults_caught=0`, `vtable_mismatch=0`, `rigs_not_ready=0`, across 20 targets. Emit tap 126 ns (sampled), refresh .8 us.
+- The Cobra's misses fall in windows with camera step 0 (a ship swap or hangar, `no-scene-spatial` nearby). The moving windows read 450 of 450.
+- The Sidewinder's misses, and so the hyperspace pink: `vehicle_rig emits` shows ship, cockpit and module all at 0 from 10:10:35 to 10:10:45 and 10:10:55 to 10:11:00, with `missing` near 450 a window. The rig is not evaluated through the emit in those windows, so there is no frame, and a stale pixel falls back to a camera term that fails. Inferred to be the jump from Sean's report and the near-zero camera step; no line in the log names it. It shows raw, not smeared, for as long as it lasts. Not fixed.
+- A cockpit rig's largest record is about the whole ship, and the next is a fraction of it: Cobra 29.95 then 4.52, Vulture 21.19 then 4.19, Sidewinder 11.45 then 2.13, SRV 4.69 twice. So a tighter bound from the game's data looks available if the wall case needs it: inference from the radii alone, centres not checked.
+- Sean's station screenshot 10:09:17 (view on, inside a station): the dim wall is no slot on the camera term, the blue truss a pool surface on the camera term, and he reports it looked fine. Those classes are upscaled; a smear there is what to watch, in a rotating station.
+
+ruled out: the debug view as the Options flicker, because the view was off during the recording at 10:03:03 (issue filed separately).
+
+**Not shown by this flight.** `flat refusal census` ran only at 10:09:40-45 and read `vehicle-frame=0` there, looking ahead in a station, so no number confirms the term keeping pixels; the evidence is Sean's eye. The pose join under motion is still unmeasured: Shift+NumLock at 10:09:36 ended `expired-arm` with the route stopped. Flat-to-VR live was not flown. A wall within 10 m while turning was not called out.
+
+**Temporary key:** `advanced.vehicle_rig_probe` gates the hook and the frame. Proposed for removal, with the probe's log volume trimmed, before merging.
