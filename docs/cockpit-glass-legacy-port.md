@@ -46,7 +46,7 @@ Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. 
 15619672 flown: too faint, no visible difference from `odyssey`; film 0.4 and edge 0.3 flown 25cb4723, "looks better" (end of section 13). CB2[17].w behaves like per-ship wear driving Odyssey's dirt; Horizons' glass shader has no such term, and Sean decided on 2026-11-04 that EDVR's grime stays fixed (section 16). A dashed bright line under the top strut turned out not to be the glass, it shows with `odyssey` too (section 15). Whether the film and patches read naturally is still Sean's call.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
-`:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Default off, kept on main while users try `legacy` (Sean, 2026-11-04), so a report can turn it on. Remove all of it once that feedback is in.
+`:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Default off, kept on main while users try `legacy` (Sean, 2026-11-04), so a report can turn it on. Remove all of it once that feedback is in. Pre-merge review follow-ups, none seen in a flight: issue #188.
 
 Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt` (312425) and `..._live.txt` (334925),
 filed 2026-11-03: permutation tables, the cb0 layout, the legacy PS written out. `..._live_mapping.txt` holds
