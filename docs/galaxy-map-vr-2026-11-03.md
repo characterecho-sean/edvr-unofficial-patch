@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Two reports from that flight, both BUILT on branch `claude/galaxy-map-motion-cursor-e864cb`, full build green, NOT FLOWN, not merged: panels back at the game's depth with the arrow choosing its depth by a panel mask; icons and labels facing the eye (see "After the first flight").
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Next build proposed, NOT BUILT: every map quad fixed in the world, and the arrow bridging gaps between panels (see "After the second flight"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -19,9 +19,10 @@ Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` 
 
 Temporary: none left. The self-check, the F111 map probe and the stillness bounds are gone. No new keys.
 
-Next: the flight (card below, the second card). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: Sean's word on the two proposals, then build and one flight. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
+- ruled out: spanning the map's quads on the eye's axes (build bf17a80a), because that locks them to the eye. Dump 110152762001: every icon's top edge measures 0.00 degrees in the image while the head turns from yaw 19.6 to 4.7. Sean: "the icons and text yaw with my head".
 - ruled out: panels at star depth, because they clip through the map's content in stereo (flight of 09:50, Sean).
 - ruled out: K's camera following the head, because the self-check printed its view rows equal to the head-free map camera's, with projection 0.939 on both axes.
 - ruled out: a second test of the pointer at click time, because the only other near caller of K was +0x3ADE868, the stars' own call in 0x3ADE6F0, and selection worked.
@@ -140,7 +141,19 @@ Deciding it needs the panels' coverage, which no signal gives (see Fix 3). Each 
 
 The hover is unchanged: it follows the arrow's direction over panels too.
 
-## Flight card, second build (VR, cockpit, Galaxy Map open)
+## After the second flight
+
+Log edvr_gfx_20261104_105921, build bf17a80a, dump 110152762001. Sean: "the icons and text yaw with my head"; "The alpha mask works well, when the cursor is on the panel depth, it's great"; "lots of gaps between the panels": moving the mouse down the left rail drops it to star depth between the buttons.
+
+**Correction to "After the first flight".** That reading of dump 095453560001 was backwards. The orange icons matched the world-fixed prediction because they were the stable ones. The ones locked to the eye were the n=12 triangles, spanned on rows 277 and 278: their top edges measure 0.00 degrees in frames 6 to 15, while the orange icons went from -1.6 to -3.0. So that build mixed two behaviours, and bf17a80a moved everything to the wrong one.
+
+**Proposed: every map quad fixed in the world (NOT BUILT).** A quad's axes take nothing from the head's rotation: ray = normalize(quad - eye), right = cross(mapUp, ray), up = cross(ray, right), mapUp = stage 0's rows[1], where the tracked up lands. It applies to the n=6 icons and labels (the same faces test), the b span of the n=12 triangles, and the rings (94EA991C3A03DBD9, which also span on 277 and 278). The stems already build their width from the eye's position. Turning the head then changes nothing in the world, only moving it does, by parallax (6.7 cm at 53 units is 0.07 degrees). A quad is square-on when looked at, which the game's parallel planes are not off the map's forward. It stays level with the world when the head rolls, and the head does roll: -5.0 degrees at yaw 19.6 in this dump, an 11 to 16 degree tilt of the yaw axis in both dumps. Falls back to the eye's right within about a degree of mapUp, where there is no defined right.
+
+**Proposed: the arrow bridges gaps between panels (NOT BUILT).** "On a panel" becomes: the mask covers the tip, or it covers a point within reach on both opposite sides along any of four axes (horizontal, vertical, two diagonals). The panels' outer edges stay exact, because a tip outside a panel has panel on one side only, and a gap up to twice the reach closes. Reach about 0.05 tan (110 layer pixels at 4508), so the rail's gaps and the rail-to-panel gap close and open map between panels stays star depth. It lives in the probe's pixel shader alone, so about 64 mask reads on one pixel. Rejected: a dilated mask, which also pushes every outer edge out; a time hold, which fails on a slow move along the rail; bounding boxes per panel group, which would need grouping the panels and cover open map at corners.
+
+Other readings of this log: the arrow flipped depth 16 times in its first 4.2 s on the panels; panel draws after the eye's probe 22, 8, 0 in the first three windows (`maskLate`), so the mask is nearly always complete and a miss costs one frame's answer; the pointer's call ran 708, 2128, 502, 0 times per 30 s, where the first flight ran it every frame. Not explained, and no symptom reported: the map mode or a game gate in 0x3B91D80 (doc above, RE note 20261104-gm-hover section 3) are the candidates.
+
+## Flight card, second build (flown 11:00; the card for the next build follows the design above)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 
