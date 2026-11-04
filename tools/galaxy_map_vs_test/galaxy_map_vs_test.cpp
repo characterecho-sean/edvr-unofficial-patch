@@ -1,10 +1,14 @@
 // The VR Galaxy Map's replacement shaders (src\d3d11\galaxy_map_vs.h) on a WARP device with the D3D debug layer, through stream output:
 //   G1 the icons' transcription (C31238331D8AC3D4, and 12382D2EA45E9632 with its b2 uv) against the formula in that header, on every class of record: the UI frame's, the
-//      quads flat on the galactic plane, the identity quaternion, and the map's records that face the eye; both position encodings and a bone-indexed record
-//   G2 the faces case with the eye equal to the map camera gives the game's own maths (the signs -v.x, +v.y, -v.z), and with the head turned the quad turns with it
-//   G3 the arrow's transcription: the game's maths for a positive scale, the eye origin taken out for a negative one
-//   G4 the probe on the GPU: a point at the arrow's tip is counted by an occlusion query where the mask is set and not where it is clear, a record with a positive scale
-//      rasterizes nothing, and the layer's pixels do not change (write mask 0)
+//      quads flat on the galactic plane, the identity quaternion, and the map's records that face along the ray; both position encodings and a bone-indexed record
+//   G2 every map quad fixed in the world: the same record with the eye turned (0.5 rad of yaw, 0.2 rad of pitch about the eye's position) gives the same world position at
+//      every corner, for a facing icon, a label, an identity-quaternion triangle spanned by b, and a ring
+//   G3 square-on and level: the eye looking along the ray with its up in the plane of mapUp and the ray, and rows 277 and 278 equal to its axes, gives a level top edge and the
+//      game's own maths for the icon, the b span and the ring; negated rows keep the game's on-screen orientation; a ray within a degree of mapUp uses the eye's right and writes no NaN
+//   G4 the ring's transcription against its formula, random instances
+//   G5 the arrow's transcription: the game's maths for a positive scale, the eye origin taken out for a negative one
+//   G6 the probe on the GPU: a point at the arrow's tip is counted by an occlusion query where the mask is set, or set on both sides of it along an axis within reach, and not
+//      where it is clear or set on one side only, a record with a positive scale rasterizes nothing, and the layer's pixels do not change (write mask 0)
 // The same shaders against the GAME's bytecode (the vs_*.dxbc of the shader dump) are compared by hand, with a one-off program that includes this file (GALAXY_MAP_VS_TEST_NO_MAIN):
 // for the records the transcription leaves as the game draws them, every output agrees. The game's bytecode is not in the repository.
 #ifndef WIN32_LEAN_AND_MEAN
@@ -134,6 +138,7 @@ struct Consts {
     float cb0[12][4] = {};
     float cb1[279][4] = {};
     float cb2[2][4] = {};
+    float cb10[1][4] = {};   // MapCam: mapUp
 };
 struct Scene {
     std::vector<Vert> verts;
@@ -177,18 +182,18 @@ inline ComPtr<ID3D11ShaderResourceView> makeSrv(Rig& rig, ID3D11Buffer* b, UINT 
 }
 
 // One stream-output run of `prog` over the scene's vertices.
-inline std::vector<float> run(Rig& rig, const Prog& prog, ID3D11InputLayout* il, const Scene& sc) {
-    const UINT n = static_cast<UINT>(sc.verts.size());
-    ComPtr<ID3D11Buffer> vb = makeBuf(rig, sc.verts.data(), n * sizeof(Vert), D3D11_BIND_VERTEX_BUFFER);
-    ComPtr<ID3D11Buffer> cb0 = makeBuf(rig, sc.c.cb0, sizeof sc.c.cb0, D3D11_BIND_CONSTANT_BUFFER);
-    ComPtr<ID3D11Buffer> cb1 = makeBuf(rig, sc.c.cb1, sizeof sc.c.cb1, D3D11_BIND_CONSTANT_BUFFER);
-    ComPtr<ID3D11Buffer> cb2 = makeBuf(rig, sc.c.cb2, sizeof sc.c.cb2, D3D11_BIND_CONSTANT_BUFFER);
+inline std::vector<float> runRaw(Rig& rig, const Prog& prog, ID3D11InputLayout* il, const void* vdata, UINT n, UINT vstride, const std::vector<Rec>& recs, const std::vector<Bone>& bones, const Consts& cc) {
+    ComPtr<ID3D11Buffer> vb = makeBuf(rig, vdata, n * vstride, D3D11_BIND_VERTEX_BUFFER);
+    ComPtr<ID3D11Buffer> cb0 = makeBuf(rig, cc.cb0, sizeof cc.cb0, D3D11_BIND_CONSTANT_BUFFER);
+    ComPtr<ID3D11Buffer> cb1 = makeBuf(rig, cc.cb1, sizeof cc.cb1, D3D11_BIND_CONSTANT_BUFFER);
+    ComPtr<ID3D11Buffer> cb2 = makeBuf(rig, cc.cb2, sizeof cc.cb2, D3D11_BIND_CONSTANT_BUFFER);
+    ComPtr<ID3D11Buffer> cb10 = makeBuf(rig, cc.cb10, sizeof cc.cb10, D3D11_BIND_CONSTANT_BUFFER);
     Bone zeroBone{};
-    const void* boneData = sc.bones.empty() ? &zeroBone : sc.bones.data();
-    const UINT boneCount = sc.bones.empty() ? 1u : static_cast<UINT>(sc.bones.size());
-    ComPtr<ID3D11Buffer> t33 = makeBuf(rig, sc.recs.data(), static_cast<UINT>(sc.recs.size() * sizeof(Rec)), D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(Rec));
+    const void* boneData = bones.empty() ? &zeroBone : bones.data();
+    const UINT boneCount = bones.empty() ? 1u : static_cast<UINT>(bones.size());
+    ComPtr<ID3D11Buffer> t33 = makeBuf(rig, recs.data(), static_cast<UINT>(recs.size() * sizeof(Rec)), D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(Rec));
     ComPtr<ID3D11Buffer> t38 = makeBuf(rig, boneData, boneCount * static_cast<UINT>(sizeof(Bone)), D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(Bone));
-    ComPtr<ID3D11ShaderResourceView> s33 = makeSrv(rig, t33.Get(), static_cast<UINT>(sc.recs.size())), s38 = makeSrv(rig, t38.Get(), boneCount);
+    ComPtr<ID3D11ShaderResourceView> s33 = makeSrv(rig, t33.Get(), static_cast<UINT>(recs.size())), s38 = makeSrv(rig, t38.Get(), boneCount);
     D3D11_BUFFER_DESC sod{};
     sod.ByteWidth = n * static_cast<UINT>(prog.outFloats) * 4;
     sod.Usage = D3D11_USAGE_DEFAULT;
@@ -198,12 +203,13 @@ inline std::vector<float> run(Rig& rig, const Prog& prog, ID3D11InputLayout* il,
 
     rig.ctx->IASetInputLayout(il);
     ID3D11Buffer* vbs[1] = {vb.Get()};
-    UINT stride = sizeof(Vert), offset = 0;
+    UINT stride = vstride, offset = 0;
     rig.ctx->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
     rig.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
     rig.ctx->VSSetShader(prog.vs.Get(), nullptr, 0);
     ID3D11Buffer* raw[3] = {cb0.Get(), cb1.Get(), cb2.Get()};
     rig.ctx->VSSetConstantBuffers(0, 3, raw);
+    rig.ctx->VSSetConstantBuffers(10, 1, cb10.GetAddressOf());
     ID3D11ShaderResourceView* r33[1] = {s33.Get()};
     ID3D11ShaderResourceView* r38[1] = {s38.Get()};
     rig.ctx->VSSetShaderResources(33, 1, r33);
@@ -233,6 +239,32 @@ inline std::vector<float> run(Rig& rig, const Prog& prog, ID3D11InputLayout* il,
     std::vector<float> out(static_cast<float*>(m.pData), static_cast<float*>(m.pData) + n * prog.outFloats);
     rig.ctx->Unmap(stage.Get(), 0);
     return out;
+}
+inline std::vector<float> run(Rig& rig, const Prog& prog, ID3D11InputLayout* il, const Scene& sc) {
+    return runRaw(rig, prog, il, sc.verts.data(), static_cast<UINT>(sc.verts.size()), sizeof(Vert), sc.recs, sc.bones, sc.c);
+}
+
+// The rings' vertex (94EA991C3A03DBD9): TEXCOORD0 (4), POSITION0 (3), POSITION2 (4), TEXCOORD3 (4), POSITION4 (4), all float.
+struct RingVert { float v0[4]; float v1[3]; float v2[4]; float v3[4]; float v4[4]; };
+static_assert(sizeof(RingVert) == 76, "the rings' vertex stride");
+struct RingScene {
+    std::vector<RingVert> verts;
+    Consts c;
+};
+inline ComPtr<ID3D11InputLayout> makeRingLayout(Rig& rig, const std::vector<uint8_t>& code) {
+    const D3D11_INPUT_ELEMENT_DESC el[5] = {
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 44, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 60, D3D11_INPUT_PER_VERTEX_DATA, 0}};
+    ComPtr<ID3D11InputLayout> il;
+    hr(rig.dev->CreateInputLayout(el, 5, code.data(), code.size(), &il), "CreateInputLayout (ring)");
+    return il;
+}
+inline std::vector<float> runRing(Rig& rig, const Prog& prog, ID3D11InputLayout* il, const RingScene& sc) {
+    const std::vector<Rec> dummy(1);   // the ring reads no record; the rig binds one
+    return runRaw(rig, prog, il, sc.verts.data(), static_cast<UINT>(sc.verts.size()), sizeof(RingVert), dummy, std::vector<Bone>(), sc.c);
 }
 
 // ---- small double-precision maths -------------------------------------------------------------------------------------
@@ -302,6 +334,15 @@ inline V3 refSkin(const Rec& r, const Vert& vert, const std::vector<Bone>& bones
 }
 struct Ref { double uv[2]; double pos[4]; bool faces; };
 inline double dp4(const float row[4], V3 p) { return row[0] * p.x + row[1] * p.y + row[2] * p.z + row[3]; }
+inline double dp3(const float row[4], V3 p) { return row[0] * p.x + row[1] * p.y + row[2] * p.z; }
+// galaxy_map_vs.h mapAxes, in double
+inline void refAxes(V3 ray, V3 up, V3 Fe, V3 Re, V3& F, V3& R, V3& U) {
+    F = dot(ray, ray) > 1e-12 ? normalize(ray) : Fe;
+    const V3 c = cross(up, F);
+    const double cl = std::sqrt(dot(c, c));
+    R = cl > 0.02 ? c * (1.0 / cl) : normalize(Re - F * dot(Re, F));
+    U = cross(F, R);
+}
 // mode 0: the icon (C31238), 1: the icon with b2 (12382D), 2: the arrow (4EF6DD, replaced)
 inline Ref reference(int mode, const Scene& sc, size_t i) {
     const Vert& vert = sc.verts[i];
@@ -331,16 +372,29 @@ inline Ref reference(int mode, const Scene& sc, size_t i) {
     const V3 n = rotate(q, {0, 0, 1});
     o.faces = dot(W, W) > 1e6 && std::fabs(n.y) < 0.9995 && n.z < 0.9995;
     V3 pp;
-    if (o.faces) {
-        const V3 F = normalize({c.cb1[270][3], c.cb1[271][3], c.cb1[272][3]});
+    const bool world = dot(W, W) > 1e6;
+    const V3 pcf{dp4(c.cb0[9], center), dp4(c.cb0[10], center), dp4(c.cb0[11], center)};
+    const V3 r277{c.cb1[277][0], c.cb1[277][1], c.cb1[277][2]}, r278{c.cb1[278][0], c.cb1[278][1], c.cb1[278][2]};
+    V3 F{0, 0, 0}, R{0, 0, 0}, U{0, 0, 0};
+    double sx = 1.0, sy = 1.0;
+    if (world) {
+        const V3 Fe = normalize({c.cb1[270][3], c.cb1[271][3], c.cb1[272][3]});
         const V3 Rx{c.cb1[270][0], c.cb1[271][0], c.cb1[272][0]}, Ry{c.cb1[270][1], c.cb1[271][1], c.cb1[272][1]};
-        const V3 R = normalize(Rx - F * dot(Rx, F)), U = normalize(Ry - F * dot(Ry, F));
-        pp = V3{dp4(c.cb0[9], center), dp4(c.cb0[10], center), dp4(c.cb0[11], center)} + (R * -v.x + U * v.y - F * v.z) * s;
+        const V3 Re = normalize(Rx - Fe * dot(Rx, Fe)), Ue = normalize(Ry - Fe * dot(Ry, Fe));
+        const V3 mu{c.cb10[0][0], c.cb10[0][1], c.cb10[0][2]};
+        const V3 up{dp3(c.cb0[9], mu), dp3(c.cb0[10], mu), dp3(c.cb0[11], mu)};
+        refAxes(pcf, up, Fe, Re, F, R, U);
+        sx = dot(r277, Re) < 0 ? -1.0 : 1.0;
+        sy = dot(r278, Ue) < 0 ? -1.0 : 1.0;
+    }
+    if (o.faces) {
+        pp = pcf + (R * -v.x + U * v.y - F * v.z) * s;
     } else {
         const V3 p = rotate(q, v) * s + center;
         pp = {dp4(c.cb0[9], p), dp4(c.cb0[10], p), dp4(c.cb0[11], p)};
     }
-    pp = pp + V3{c.cb1[277][0], c.cb1[277][1], c.cb1[277][2]} * bx + V3{c.cb1[278][0], c.cb1[278][1], c.cb1[278][2]} * by;
+    if (world) pp = pp + R * (bx * sx * std::sqrt(dot(r277, r277))) + U * (by * sy * std::sqrt(dot(r278, r278)));
+    else pp = pp + r277 * bx + r278 * by;
     for (int r = 0; r < 4; ++r) o.pos[r] = pp.x * c.cb1[270][r] + pp.y * c.cb1[271][r] + pp.z * c.cb1[272][r] + c.cb1[273][r];
     return o;
 }
@@ -374,6 +428,8 @@ inline void setEye(Gen& g, Consts& c, V3 R, V3 U, V3 F, bool identityWorld) {
     setRow(c.cb1[278], g.u(-0.02, 0.02), g.u(-0.02, 0.02), g.u(-0.02, 0.02), 0);
     setRow(c.cb2[0], 0, 0, 0, 0);
     setRow(c.cb2[1], g.u(0.2, 1.5), g.u(0.2, 1.5), g.u(-0.5, 0.5), g.u(-0.5, 0.5));
+    const V3 mu = normalize({g.u(-0.3, 0.3), g.u(0.7, 1.0), g.u(-0.3, 0.3)});   // the map camera's up (MapCam)
+    setRow(c.cb10[0], mu.x, mu.y, mu.z, 0);
 }
 inline void randomEye(Gen& g, Consts& c, bool identityWorld = false) {
     Q q = g.randomQ();
@@ -482,9 +538,9 @@ inline void runIconTests(Rig& rig, const Prog& icon, const Prog& iconUv, ID3D11I
         {"galactic plane", Cls::kPlane, false, false, false},
         {"galactic plane, exponent", Cls::kPlane, true, false, false},
         {"identity quaternion", Cls::kIdentity, false, false, false},
-        {"map, faces the eye, fixed-point", Cls::kFaces, false, false, true},
-        {"map, faces the eye, exponent", Cls::kFaces, true, false, true},
-        {"map, faces the eye, skinned", Cls::kFacesSkinned, false, true, true},
+        {"map, faces along the ray, fixed-point", Cls::kFaces, false, false, true},
+        {"map, faces along the ray, exponent", Cls::kFaces, true, false, true},
+        {"map, faces along the ray, skinned", Cls::kFacesSkinned, false, true, true},
     };
     for (int variant = 0; variant < 2; ++variant) {
         const Prog& prog = variant ? iconUv : icon;
@@ -503,83 +559,391 @@ inline void runIconTests(Rig& rig, const Prog& icon, const Prog& iconUv, ID3D11I
     }
 }
 
-inline void runFacesAsGame(Rig& rig, const Prog& icon, ID3D11InputLayout* il) {
-    Gen g;
-    // the eye IS the map camera: the faces case reproduces the game's own maths (rows (1,0,0), (0,.7071,.7071), (0,-.7071,.7071))
-    const V3 R{1, 0, 0}, U{0, 0.70710678, 0.70710678}, F{0, -0.70710678, 0.70710678};
-    Scene sc;
-    for (int i = 0; i < 800; ++i) addVertex(g, sc, Cls::kFaces, i & 1, false);
-    // the quaternion of the CPU's records: rotate(q, ex) = -R, rotate(q, ey) = U, rotate(q, ez) = -F
-    const Q q = quatFromColumns(R * -1.0, U, F * -1.0);
-    for (Rec& r : sc.recs) writeQ(r, q);
-    setEye(g, sc.c, R, U, F, true);
-    gather(g, sc, V3{49996.0, 41070.0, 23990.0});
-    const std::vector<float> out = run(rig, icon, il, sc);
-    // the game's maths for the same inputs: the reference with faces forced off
-    double worst = 0, mag = 0;
-    int faces = 0;
-    for (size_t i = 0; i < sc.verts.size(); ++i) {
-        Ref viaFaces = reference(0, sc, i);
-        if (viaFaces.faces) ++faces;
-        const Vert& vert = sc.verts[i];
-        const Rec& rec = sc.recs[vert[0]];
-        const V3 v = refVertex(vert);
-        float s; std::memcpy(&s, &rec.a[1], 4);
-        const V3 center = V3{rec.p[0], rec.p[1], rec.p[2]} - V3{sc.c.cb1[275][0], sc.c.cb1[275][1], sc.c.cb1[275][2]};
-        const V3 p = rotate(readQ(rec), v) * s + center;
-        V3 pp{dp4(sc.c.cb0[9], p), dp4(sc.c.cb0[10], p), dp4(sc.c.cb0[11], p)};
-        const uint32_t v2z = vert[8];
-        const double bx = static_cast<double>(static_cast<float>(v2z & 0xFFFFu) * asf(0x38000100u) - 1.0f) * 16.0, by = static_cast<double>(static_cast<float>(v2z >> 16) * asf(0x38000100u) - 1.0f) * 16.0;
-        pp = pp + V3{sc.c.cb1[277][0], sc.c.cb1[277][1], sc.c.cb1[277][2]} * bx + V3{sc.c.cb1[278][0], sc.c.cb1[278][1], sc.c.cb1[278][2]} * by;
-        for (int k = 0; k < 4; ++k) {
-            const double game = pp.x * sc.c.cb1[270][k] + pp.y * sc.c.cb1[271][k] + pp.z * sc.c.cb1[272][k] + sc.c.cb1[273][k];
-            worst = std::fmax(worst, std::fabs(out[i * icon.outFloats + icon.posAt + k] - game));
-            mag = std::fmax(mag, std::fabs(game));
+// ---- every map quad fixed in the world --------------------------------------------------------------------------------------
+struct Frame { V3 R, U, F; };
+// The eye looking along f, its up in the plane of `up` and f: right x up = forward.
+inline Frame frameAlong(V3 f, V3 up) {
+    const V3 F = normalize(f);
+    const V3 U = normalize(up - F * dot(up, F));
+    return {cross(U, F), U, F};
+}
+inline V3 rodrigues(V3 v, V3 axis, double ang) {
+    const double c = std::cos(ang), s = std::sin(ang);
+    return v * c + cross(axis, v) * s + axis * (dot(axis, v) * (1.0 - c));
+}
+inline void mat4Mul(const double m[4][4], const double x[4], double out[4]) {
+    for (int r = 0; r < 4; ++r) out[r] = m[r][0] * x[0] + m[r][1] * x[1] + m[r][2] * x[2] + m[r][3] * x[3];
+}
+inline bool mat4Inv(const double m[4][4], double inv[4][4]) {
+    double a[4][8];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 8; ++c) a[r][c] = c < 4 ? m[r][c] : (c - 4 == r ? 1.0 : 0.0);
+    for (int col = 0; col < 4; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < 4; ++r) if (std::fabs(a[r][col]) > std::fabs(a[piv][col])) piv = r;
+        if (std::fabs(a[piv][col]) < 1e-12) return false;
+        for (int c = 0; c < 8; ++c) std::swap(a[col][c], a[piv][c]);
+        const double d = a[col][col];
+        for (int c = 0; c < 8; ++c) a[col][c] /= d;
+        for (int r = 0; r < 4; ++r) {
+            if (r == col) continue;
+            const double f = a[r][col];
+            for (int c = 0; c < 8; ++c) a[r][c] -= f * a[col][c];
         }
     }
-    char label[160];
-    std::snprintf(label, sizeof label, "G2: with the eye equal to the map camera the faces case gives the game's maths: worst %.2e over %zu vertices (largest %.1f), %d facing", worst, sc.verts.size(), mag, faces);
-    std::printf("%s\n", label);
-    check(faces == static_cast<int>(sc.verts.size()) && worst < 1e-2, label);
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) inv[r][c] = a[r][c + 4];
+    return true;
+}
+// The constants of a clean eye at E looking with axes `fr`: the clip rows in b0 [4..7] (the rings'), the identity frame in b0 [9..11], the projection in b1 [270..273] (the icons'),
+// the eye origin at b1 [275], rows 277 and 278 the eye's right and up scaled by lx and ly (negative values negate them), the exponent factor 1 and the uv scale 1, mapUp in b10.
+inline Consts cleanEye(const Frame& fr, V3 E, V3 mapUp, double lx, double ly) {
+    Consts c{};
+    const double fx = 0.94, fy = 0.94, za = 1.0, zb = -0.1;
+    setRow(c.cb0[4], fx * fr.R.x, fx * fr.R.y, fx * fr.R.z, -fx * dot(fr.R, E));
+    setRow(c.cb0[5], fy * fr.U.x, fy * fr.U.y, fy * fr.U.z, -fy * dot(fr.U, E));
+    setRow(c.cb0[6], za * fr.F.x, za * fr.F.y, za * fr.F.z, -za * dot(fr.F, E) + zb);
+    setRow(c.cb0[7], fr.F.x, fr.F.y, fr.F.z, -dot(fr.F, E));
+    setRow(c.cb0[9], 1, 0, 0, 0); setRow(c.cb0[10], 0, 1, 0, 0); setRow(c.cb0[11], 0, 0, 1, 0);
+    setRow(c.cb1[270], fx * fr.R.x, fy * fr.U.x, za * fr.F.x, fr.F.x);
+    setRow(c.cb1[271], fx * fr.R.y, fy * fr.U.y, za * fr.F.y, fr.F.y);
+    setRow(c.cb1[272], fx * fr.R.z, fy * fr.U.z, za * fr.F.z, fr.F.z);
+    setRow(c.cb1[273], 0, 0, zb, 0);
+    setRow(c.cb1[275], E.x, E.y, E.z, 0);
+    setRow(c.cb1[277], fr.R.x * lx, fr.R.y * lx, fr.R.z * lx, 0);
+    setRow(c.cb1[278], fr.U.x * ly, fr.U.y * ly, fr.U.z * ly, 0);
+    setRow(c.cb2[0], 1, 0, 0, 0);
+    setRow(c.cb2[1], 1, 1, 0, 0);
+    setRow(c.cb10[0], mapUp.x, mapUp.y, mapUp.z, 0);
+    return c;
+}
+// clip = M (position, 1): the icons' M from b1 [270..273] and the rings' from b0 [4..7].
+inline bool iconUndo(const Consts& c, const float* clip, V3& pos) {
+    double m[4][4], inv[4][4];
+    for (int r = 0; r < 4; ++r) { for (int j = 0; j < 3; ++j) m[r][j] = c.cb1[270 + j][r]; m[r][3] = c.cb1[273][r]; }
+    if (!mat4Inv(m, inv)) return false;
+    const double x[4] = {clip[0], clip[1], clip[2], clip[3]};
+    double h[4];
+    mat4Mul(inv, x, h);
+    pos = {h[0] / h[3], h[1] / h[3], h[2] / h[3]};
+    return true;
+}
+inline bool ringUndo(const Consts& c, const float* clip, V3& pos) {
+    double m[4][4], inv[4][4];
+    for (int r = 0; r < 4; ++r) for (int j = 0; j < 4; ++j) m[r][j] = c.cb0[4 + r][j];
+    if (!mat4Inv(m, inv)) return false;
+    const double x[4] = {clip[0], clip[1], clip[2], clip[3]};
+    double h[4];
+    mat4Mul(inv, x, h);
+    pos = {h[0] / h[3], h[1] / h[3], h[2] / h[3]};
+    return true;
+}
 
-    // and with the head turned the quad turns with it: one icon's corners, the eye yawed about its own up axis. The quad's edge on screen times clip w is 2 s fx whatever the yaw
-    // (the game's fixed plane would foreshorten by the cosine).
-    double edge[2] = {};
-    const double yaw[2] = {0.0, 0.5};
-    for (int e = 0; e < 2; ++e) {
-        Scene sc2;
-        Rec rec{};
-        rec.p[0] = 49996.0f; rec.p[1] = 41070.0f; rec.p[2] = 23990.0f; rec.p[3] = 1.0f;
-        const float one = 1.0f;
-        std::memcpy(&rec.a[1], &one, 4);
-        writeQ(rec, q);
-        sc2.recs.push_back(rec);
-        for (int k = 0; k < 2; ++k) {
-            Vert v{};
-            const uint32_t kind = 4;
-            const double scale = 1.0 / ((1 << (20 - kind)) - 1), off = static_cast<double>(1 << kind);
-            const double cx = k ? 1.0 : -1.0;
-            const uint32_t tx = static_cast<uint32_t>(std::llround((cx + off) / scale)), ty = static_cast<uint32_t>(std::llround(off / scale)), tz = ty;
-            v[2] = (tx & 0x1FFFFFu) | ((ty & 0x7FFu) << 21);
-            v[3] = ((ty >> 11) & 0x3FFu) | ((tz & 0x1FFFFFu) << 10);
-            v[4] = kind << 24;
-            v[8] = 32768u | (32768u << 16);   // b = 0 (to within the packing)
-            sc2.verts.push_back(v);
-        }
-        const V3 Ry = R * std::cos(yaw[e]) - F * std::sin(yaw[e]), Fy = F * std::cos(yaw[e]) + R * std::sin(yaw[e]);
-        setEye(g, sc2.c, Ry, U, Fy, true);
-        setRow(sc2.c.cb1[275], 49996.0 + 0.3, 41070.0 + 0.2, 23990.0 - 2.0, 0);
-        setRow(sc2.c.cb1[277], 0, 0, 0, 0);
-        setRow(sc2.c.cb1[278], 0, 0, 0, 0);
-        const std::vector<float> o2 = run(rig, icon, il, sc2);
-        const float* a0 = &o2[0 * icon.outFloats + icon.posAt];
-        const float* a1 = &o2[1 * icon.outFloats + icon.posAt];
-        edge[e] = std::hypot(a1[0] / a1[3] - a0[0] / a0[3], a1[1] / a1[3] - a0[1] / a0[3]) * a0[3];
+constexpr V3 kCam{49996.0, 41070.0, 23990.0};   // an eye origin near the map's records: exact in float, so W - cam is exact
+constexpr V3 kRingEye{120.0, -60.0, 340.0};   // the rings read absolute positions through the clip rows: an eye near the origin keeps the float cancellation small
+inline uint32_t packB(double b) { return static_cast<uint32_t>(std::floor((b / 16.0 + 1.0) / static_cast<double>(asf(0x38000100u)) + 0.5)); }
+inline double decodeB(uint32_t field) { return static_cast<double>(static_cast<float>(field) * asf(0x38000100u) - 1.0f) * 16.0; }
+inline void packFixed(Vert& v, V3 p) {   // the fixed-point encoding, kind 4: 16 fraction bits, offset 16
+    const uint32_t kind = 4;
+    const double scale = 1.0 / ((1 << (20 - kind)) - 1), off = static_cast<double>(1 << kind);
+    const uint32_t tx = static_cast<uint32_t>(std::llround((p.x + off) / scale)), ty = static_cast<uint32_t>(std::llround((p.y + off) / scale)), tz = static_cast<uint32_t>(std::llround((p.z + off) / scale));
+    v[2] = (tx & 0x1FFFFFu) | ((ty & 0x7FFu) << 21);
+    v[3] = ((ty >> 11) & 0x3FFu) | ((tz & 0x1FFFFFu) << 10);
+    v[4] = kind << 24;
+}
+struct Corner { V3 v; double bx, by; };
+// One record (quaternion q, scale s) at cam + center with these corners.
+inline Scene iconScene(const Consts& c, Q q, V3 center, float s, const std::vector<Corner>& corners) {
+    Scene sc;
+    sc.c = c;
+    Rec rec{};
+    rec.p[0] = static_cast<float>(kCam.x + center.x); rec.p[1] = static_cast<float>(kCam.y + center.y); rec.p[2] = static_cast<float>(kCam.z + center.z); rec.p[3] = 1.0f;
+    std::memcpy(&rec.a[1], &s, 4);
+    writeQ(rec, q);
+    sc.recs.push_back(rec);
+    for (const Corner& k : corners) {
+        Vert v{};
+        packFixed(v, k.v);
+        v[8] = packB(k.bx) | (packB(k.by) << 16);
+        sc.verts.push_back(v);
     }
-    char label2[200];
-    std::snprintf(label2, sizeof label2, "G2b: yawing the eye 0.5 rad leaves the icon's edge (screen size times w) at %.5f against %.5f (2 s fx = 1.88000)", edge[0], edge[1]);
-    std::printf("%s\n", label2);
-    check(std::fabs(edge[0] - 1.88) < 2e-3 && std::fabs(edge[1] - 1.88) < 2e-3, label2);
+    return sc;
+}
+inline V3 iconDecodedB(const Vert& v) { return {decodeB(v[8] & 0xFFFFu), decodeB(v[8] >> 16), 0}; }
+// The game's own maths for an icon vertex in the identity frame: rotate(q, v) * s + center + cb1[277] * b.x + cb1[278] * b.y, through the projection.
+inline void gameIconClip(const Scene& sc, size_t i, double out[4]) {
+    const Vert& vert = sc.verts[i];
+    const Rec& rec = sc.recs[vert[0]];
+    float s; std::memcpy(&s, &rec.a[1], 4);
+    const V3 center = V3{rec.p[0], rec.p[1], rec.p[2]} - V3{sc.c.cb1[275][0], sc.c.cb1[275][1], sc.c.cb1[275][2]};
+    const V3 b = iconDecodedB(vert);
+    const V3 pp = rotate(readQ(rec), refVertex(vert)) * s + center + V3{sc.c.cb1[277][0], sc.c.cb1[277][1], sc.c.cb1[277][2]} * b.x + V3{sc.c.cb1[278][0], sc.c.cb1[278][1], sc.c.cb1[278][2]} * b.y;
+    for (int r = 0; r < 4; ++r) out[r] = pp.x * sc.c.cb1[270][r] + pp.y * sc.c.cb1[271][r] + pp.z * sc.c.cb1[272][r] + sc.c.cb1[273][r];
+}
+inline Q mapCameraQ() {   // the CPU's record quaternion facing the head-free map camera: rotate(q, ex) = -R, rotate(q, ey) = U, rotate(q, ez) = -F
+    const V3 R{1, 0, 0}, U{0, 0.70710678, 0.70710678}, F{0, -0.70710678, 0.70710678};
+    return quatFromColumns(R * -1.0, U, F * -1.0);
+}
+inline RingScene ringScene(const Consts& c, V3 v1, const std::vector<std::array<double, 2>>& bs, float k) {
+    RingScene sc;
+    sc.c = c;
+    for (const auto& b : bs) {
+        RingVert r{};
+        r.v0[0] = 0.25f; r.v0[1] = -0.5f; r.v0[2] = static_cast<float>(b[0]); r.v0[3] = static_cast<float>(b[1]);
+        r.v1[0] = static_cast<float>(v1.x); r.v1[1] = static_cast<float>(v1.y); r.v1[2] = static_cast<float>(v1.z);
+        r.v2[0] = 0.3f; r.v2[1] = 0.4f; r.v2[2] = 0.5f; r.v2[3] = 0.6f;
+        r.v3[2] = k;
+        r.v4[0] = 0.5f; r.v4[1] = 0.25f; r.v4[2] = 0.8f; r.v4[3] = 1.0f;
+        sc.verts.push_back(r);
+    }
+    return sc;
+}
+inline double ndcY(const float* clip) { return clip[1] / clip[3]; }
+
+struct WorldProgs { const Prog* icon; const Prog* label; const Prog* ring; ID3D11InputLayout* ilIcon; ID3D11InputLayout* ilLabel; ID3D11InputLayout* ilRing; };
+
+// G2: the same record under three eyes (A, A yawed 0.5 rad about its own up, A pitched 0.2 rad about its own right, all at the same position) has the same world position at
+// every corner, for the four kinds; the clip outputs do change (the test sees the eye move).
+inline void runWorldStability(Rig& rig, const WorldProgs& w) {
+    const V3 mapUp = normalize({0.05, 0.97, 0.12});
+    const Frame a = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});   // a rolled head
+    const Frame b{rodrigues(a.R, a.U, 0.5), a.U, rodrigues(a.F, a.U, 0.5)};
+    const Frame c{a.R, rodrigues(a.U, a.R, 0.2), rodrigues(a.F, a.R, 0.2)};
+    const Frame eyes[3] = {a, b, c};
+    const char* names[3] = {"the eye as it was", "yawed 0.5 rad", "pitched 0.2 rad"};
+    const V3 center{7, -20, 15};
+    struct Kind { const char* name; bool ring; bool label; Q q; std::vector<Corner> corners; std::vector<std::array<double, 2>> bs; };
+    const Q mq = mapCameraQ(), idq{0, 0, 0, 1};
+    std::vector<Corner> quad, tri;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) {
+            quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.7, -0.4});
+            tri.push_back({{0, 0, 0}, 2.0 * sx, 2.0 * sy});
+        }
+    const Kind kinds[] = {
+        {"a facing icon", false, false, mq, quad, {}},
+        {"a facing label", false, true, mq, quad, {}},
+        {"an identity-quaternion triangle spanned by b", false, false, idq, tri, {}},
+        {"a ring", true, false, idq, {}, {{-2, -2}, {2, -2}, {-2, 2}, {2, 2}}},
+    };
+    for (const Kind& k : kinds) {
+        std::vector<V3> pos[3];
+        double clipDelta = 0;
+        std::vector<float> clip0;
+        for (int e = 0; e < 3; ++e) {
+            const V3 E = k.ring ? kRingEye : kCam;
+            const Consts cc = cleanEye(eyes[e], E, mapUp, 0.013, 0.011);
+            std::vector<float> out;
+            const Prog* prog = k.ring ? w.ring : (k.label ? w.label : w.icon);
+            if (k.ring) {
+                const RingScene sc = ringScene(cc, E + center, k.bs, 2.0f);
+                out = runRing(rig, *prog, w.ilRing, sc);
+            } else {
+                const Scene sc = iconScene(cc, k.q, center, 1.3f, k.corners);
+                out = run(rig, *prog, k.label ? w.ilLabel : w.ilIcon, sc);
+            }
+            const size_t n = out.size() / prog->outFloats;
+            for (size_t i = 0; i < n; ++i) {
+                V3 p{};
+                const float* clip = &out[i * prog->outFloats + prog->posAt];
+                const bool ok = k.ring ? ringUndo(cc, clip, p) : iconUndo(cc, clip, p);
+                check(ok && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z), std::string("G2.finite: ") + k.name);
+                pos[e].push_back(p);
+                if (e == 0) clip0.push_back(clip[0]);
+                if (e == 1) clipDelta = std::fmax(clipDelta, std::fabs(clip[0] - clip0[i]));
+            }
+        }
+        double worst = 0;
+        for (int e = 1; e < 3; ++e)
+            for (size_t i = 0; i < pos[0].size(); ++i) worst = std::fmax(worst, std::sqrt(dot(pos[e][i] - pos[0][i], pos[e][i] - pos[0][i])));
+        // the ring's position is absolute (the eye at kCam), the icons' relative to the eye: the undo above is each shader's own frame, and both are fixed under the eye's turn
+        char label[200];
+        std::snprintf(label, sizeof label, "G2.%s: world position moved by at most %.2e under %s and %s (the clip x moved by %.3f)", k.name, worst, names[1], names[2], clipDelta);
+        std::printf("%s\n", label);
+        check(worst < 2e-4 && clipDelta > 1e-2, label);
+    }
+}
+
+inline bool allFinite(const std::vector<float>& v) {
+    for (float f : v) if (!std::isfinite(f)) return false;
+    return true;
+}
+
+// G3: square-on and level, the game's maths when the eye looks along the ray, the signs, and a ray at the up.
+inline void runSquareOn(Rig& rig, const WorldProgs& w) {
+    // (a) the map camera is the eye and the record sits on its forward: the facing icon is the game's maths within the quaternion's quantisation, and its top edge is level
+    {
+        const V3 R{1, 0, 0}, U{0, 0.70710678, 0.70710678}, F{0, -0.70710678, 0.70710678};
+        const Frame fr{R, U, F};
+        const Consts cc = cleanEye(fr, kCam, U, 0.02, 0.02);
+        std::vector<Corner> quad;
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.9 * sx, -0.6 * sy});
+        const Scene sc = iconScene(cc, mapCameraQ(), {0, -24, 24}, 1.7f, quad);
+        const std::vector<float> out = run(rig, *w.icon, w.ilIcon, sc);
+        double worst = 0;
+        for (size_t i = 0; i < quad.size(); ++i) {
+            double g[4];
+            gameIconClip(sc, i, g);
+            for (int k = 0; k < 4; ++k) worst = std::fmax(worst, std::fabs(out[i * w.icon->outFloats + w.icon->posAt + k] - g[k]));
+        }
+        // quad order: (-1,-1), (-1,+1), (+1,-1), (+1,+1): the top corners are 1 and 3
+        const double top = std::fabs(ndcY(&out[1 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[3 * w.icon->outFloats + w.icon->posAt]));
+        char label[200];
+        std::snprintf(label, sizeof label, "G3.icon square-on: corners within %.2e of the game's maths (quaternion quantisation), top edge level to %.2e in NDC", worst, top);
+        std::printf("%s\n", label);
+        check(worst < 2e-3 && top < 1e-4, label);
+    }
+    // (b) a general ray: the facing icon's top edge is level when the eye looks along the ray with its up in the plane of mapUp and the ray
+    const V3 mapUp = normalize({0.1, 0.9, 0.2});
+    const V3 ray{7, -20, 15};
+    const Frame fr = frameAlong(ray, mapUp);
+    {
+        const Consts cc = cleanEye(fr, kCam, mapUp, 0.02, 0.02);
+        std::vector<Corner> quad;
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.0, 0.0});
+        const Scene sc = iconScene(cc, mapCameraQ(), ray, 1.7f, quad);
+        const std::vector<float> out = run(rig, *w.icon, w.ilIcon, sc);
+        const double top = std::fabs(ndcY(&out[1 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[3 * w.icon->outFloats + w.icon->posAt]));
+        const double bottom = std::fabs(ndcY(&out[0 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[2 * w.icon->outFloats + w.icon->posAt]));
+        char label[200];
+        std::snprintf(label, sizeof label, "G3.icon level on a general ray: top edge %.2e and bottom edge %.2e in NDC", top, bottom);
+        std::printf("%s\n", label);
+        check(top < 1e-4 && bottom < 1e-4, label);
+    }
+    // (c) the b span of an identity-quaternion triangle and (d) the ring: level, and the game's maths with rows 277 and 278 equal to the eye's axes; (e) the same with both rows negated
+    for (int neg = 0; neg < 2; ++neg) {
+        const double lx = neg ? -0.5 : 0.5, ly = neg ? -0.7 : 0.7;
+        const Consts cc = cleanEye(fr, kCam, mapUp, lx, ly);
+        std::vector<Corner> tri;
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) tri.push_back({{0, 0, 0}, 3.0 * sx, 3.0 * sy});
+        const Scene sc = iconScene(cc, Q{0, 0, 0, 1}, ray, 1.0f, tri);
+        const std::vector<float> out = run(rig, *w.icon, w.ilIcon, sc);
+        double worst = 0;
+        for (size_t i = 0; i < tri.size(); ++i) {
+            double g[4];
+            gameIconClip(sc, i, g);
+            for (int k = 0; k < 4; ++k) worst = std::fmax(worst, std::fabs(out[i * w.icon->outFloats + w.icon->posAt + k] - g[k]));
+        }
+        const double top = std::fabs(ndcY(&out[1 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[3 * w.icon->outFloats + w.icon->posAt]));
+        char label[220];
+        std::snprintf(label, sizeof label, "G3.b span%s: within %.2e of the game's maths, top edge level to %.2e in NDC", neg ? " with rows 277 and 278 negated" : "", worst, top);
+        std::printf("%s\n", label);
+        check(worst < 2e-3 && top < 1e-4, label);
+
+        const Consts ccr = cleanEye(fr, kRingEye, mapUp, lx, ly);
+        const RingScene rs = ringScene(ccr, kRingEye + ray, {{-3, -3}, {-3, 3}, {3, -3}, {3, 3}}, 1.0f);
+        const std::vector<float> ro = runRing(rig, *w.ring, w.ilRing, rs);
+        double rworst = 0;
+        for (size_t i = 0; i < rs.verts.size(); ++i) {
+            const V3 v1{rs.verts[i].v1[0], rs.verts[i].v1[1], rs.verts[i].v1[2]};
+            const V3 p = v1 + V3{ccr.cb1[277][0], ccr.cb1[277][1], ccr.cb1[277][2]} * rs.verts[i].v0[2] + V3{ccr.cb1[278][0], ccr.cb1[278][1], ccr.cb1[278][2]} * rs.verts[i].v0[3];
+            for (int k = 0; k < 4; ++k) rworst = std::fmax(rworst, std::fabs(ro[i * w.ring->outFloats + w.ring->posAt + k] - dp4(ccr.cb0[4 + k], p)));
+        }
+        const double rtop = std::fabs(ndcY(&ro[1 * w.ring->outFloats + w.ring->posAt]) - ndcY(&ro[3 * w.ring->outFloats + w.ring->posAt]));
+        std::snprintf(label, sizeof label, "G3.ring%s: within %.2e of the game's maths, top edge level to %.2e in NDC", neg ? " with rows 277 and 278 negated" : "", rworst, rtop);
+        std::printf("%s\n", label);
+        check(rworst < 2e-3 && rtop < 1e-4, label);
+    }
+    // (f) a ray at the up, and within a degree of it: no NaN anywhere, the basis stays orthonormal, and the right is the eye's right made orthogonal to the ray
+    for (const double deg : {0.0, 0.5, 1.0}) {
+        const V3 up{0, 1, 0};
+        const double r = deg * 3.14159265358979 / 180.0;
+        const V3 rayN{30.0 * std::sin(r), 30.0 * std::cos(r), 0.0};
+        const Frame eye = frameAlong({0.3, -0.2, 0.9}, {0.1, 1.0, 0.0});
+        const Consts cc = cleanEye(eye, kCam, up, 0.5, 0.5);
+        std::vector<Corner> quad;
+        quad.push_back({{1, 0, 0}, 0, 0});
+        quad.push_back({{0, 1, 0}, 0, 0});
+        quad.push_back({{0, 0, 1}, 0, 0});
+        const Scene sc = iconScene(cc, mapCameraQ(), rayN, 2.0f, quad);
+        const std::vector<float> out = run(rig, *w.icon, w.ilIcon, sc);
+        const V3 cen{sc.recs[0].p[0] - kCam.x, sc.recs[0].p[1] - kCam.y, sc.recs[0].p[2] - kCam.z};   // the record is stored as floats
+        bool ok = allFinite(out);
+        // the offsets from the centre: -R, U, -F times the scale
+        V3 off[3];
+        for (int i = 0; i < 3; ++i) {
+            V3 p{};
+            ok = ok && iconUndo(cc, &out[i * w.icon->outFloats + w.icon->posAt], p);
+            off[i] = p - cen;
+        }
+        const V3 R = off[0] * (-0.5), U = off[1] * 0.5, F = off[2] * (-0.5);
+        const V3 Fx = normalize(cen);
+        const V3 reye = normalize(eye.R - Fx * dot(eye.R, Fx));
+        const double orth = std::fmax(std::fabs(dot(R, U)), std::fmax(std::fabs(dot(R, F)), std::fabs(dot(U, F))));
+        const double lens = std::fabs(dot(R, R) - 1.0) + std::fabs(dot(U, U) - 1.0) + std::fabs(dot(F, F) - 1.0);
+        const double fallback = dot(R, reye);   // within the threshold (about 1.15 degrees) the right is the eye's, made orthogonal to the ray
+        char label[220];
+        std::snprintf(label, sizeof label, "G3.up: a ray %.1f degrees from mapUp: finite %d, orthonormal to %.1e (lengths %.1e), right . eye's right %.6f", deg, allFinite(out) ? 1 : 0, orth, lens, fallback);
+        std::printf("%s\n", label);
+        check(ok && orth < 2e-4 && lens < 2e-3 && fallback > 0.9999, label);
+        // the b span and the ring on the same ray
+        const Scene tri = iconScene(cc, Q{0, 0, 0, 1}, rayN, 1.0f, {{{0, 0, 0}, 3, 0}, {{0, 0, 0}, 0, 3}});
+        const RingScene rs = ringScene(cleanEye(eye, kRingEye, up, 0.5, 0.5), kRingEye + rayN, {{3, 0}, {0, 3}}, 1.0f);
+        check(allFinite(run(rig, *w.icon, w.ilIcon, tri)) && allFinite(runRing(rig, *w.ring, w.ilRing, rs)), "G3.up: the b span and the ring write no NaN on a ray at the up");
+    }
+}
+
+// G4: the ring's transcription against its formula, every output, random instances and eyes (rows 277 and 278 near the eye's right and up with random signs and sizes).
+inline void runRingTests(Rig& rig, const WorldProgs& w) {
+    Gen g;
+    double worst = 0, mag = 0;
+    unsigned n = 0, fallbacks = 0;
+    for (int scene = 0; scene < 6; ++scene) {
+        const Q qe = g.randomQ();
+        const Frame fr{rotate(qe, {1, 0, 0}), rotate(qe, {0, 1, 0}), rotate(qe, {0, 0, 1})};
+        const V3 E{std::round(g.u(-300, 300)), std::round(g.u(-300, 300)), std::round(g.u(-300, 300))};
+        const V3 mapUp = normalize({g.u(-0.3, 0.3), g.u(0.7, 1.0), g.u(-0.3, 0.3)});
+        Consts cc = cleanEye(fr, E, mapUp, g.u(-0.03, 0.03), g.u(-0.03, 0.03));
+        setRow(cc.cb2[0], g.u(0.5, 2.0), 0, 0, 0);
+        RingScene sc;
+        sc.c = cc;
+        for (int i = 0; i < 400; ++i) {
+            RingVert r{};
+            for (float& f : r.v0) f = static_cast<float>(g.u(-3, 3));
+            const V3 pos = E + V3{g.u(-60, 60), g.u(-60, 60), g.u(-60, 60)};
+            r.v1[0] = static_cast<float>(pos.x); r.v1[1] = static_cast<float>(pos.y); r.v1[2] = static_cast<float>(pos.z);
+            for (float& f : r.v2) f = static_cast<float>(g.u(-1, 1));
+            for (float& f : r.v3) f = static_cast<float>(g.u(0.2, 2.5));
+            for (float& f : r.v4) f = static_cast<float>(g.u(0.1, 3));
+            sc.verts.push_back(r);
+        }
+        const std::vector<float> out = runRing(rig, *w.ring, w.ilRing, sc);
+        for (size_t i = 0; i < sc.verts.size(); ++i) {
+            const RingVert& r = sc.verts[i];
+            const float* o = &out[i * w.ring->outFloats];
+            const V3 v1{r.v1[0], r.v1[1], r.v1[2]};
+            const V3 Fe = normalize({cc.cb0[7][0], cc.cb0[7][1], cc.cb0[7][2]});
+            const V3 Rx{cc.cb0[4][0], cc.cb0[4][1], cc.cb0[4][2]}, Ry{cc.cb0[5][0], cc.cb0[5][1], cc.cb0[5][2]};
+            const V3 Re = normalize(Rx - Fe * dot(Rx, Fe)), Ue = normalize(Ry - Fe * dot(Ry, Fe));
+            V3 F, R, U;
+            const V3 ray = v1 - E;
+            refAxes(ray, mapUp, Fe, Re, F, R, U);
+            const V3 r277{cc.cb1[277][0], cc.cb1[277][1], cc.cb1[277][2]}, r278{cc.cb1[278][0], cc.cb1[278][1], cc.cb1[278][2]};
+            const double sx = dot(r277, Re) < 0 ? -1.0 : 1.0, sy = dot(r278, Ue) < 0 ? -1.0 : 1.0;
+            const double bx = static_cast<double>(r.v0[2]) * r.v3[2], by = static_cast<double>(r.v0[3]) * r.v3[2];
+            if (std::sqrt(dot(cross(mapUp, normalize(ray)), cross(mapUp, normalize(ray)))) <= 0.02) ++fallbacks;
+            const V3 pos = v1 + R * (bx * sx * std::sqrt(dot(r277, r277))) + U * (by * sy * std::sqrt(dot(r278, r278)));
+            double ref[20];
+            ref[0] = r.v1[0]; ref[1] = r.v1[1]; ref[2] = r.v1[2]; ref[3] = r.v3[2];
+            for (int k = 0; k < 3; ++k) ref[4 + k] = std::exp2(std::log2(static_cast<double>(r.v4[k])) * cc.cb2[0][0]);
+            ref[7] = r.v4[3];
+            ref[8] = pos.x; ref[9] = pos.y; ref[10] = pos.z;
+            ref[11] = r.v2[0]; ref[12] = r.v2[1];
+            ref[13] = r.v0[0]; ref[14] = r.v0[1]; ref[15] = r.v2[3];
+            for (int k = 0; k < 4; ++k) ref[16 + k] = dp4(cc.cb0[4 + k], pos);
+            for (int k = 0; k < 20; ++k) {
+                worst = std::fmax(worst, std::fabs(o[k] - ref[k]));
+                mag = std::fmax(mag, std::fabs(ref[k]));
+            }
+            ++n;
+        }
+    }
+    char label[200];
+    std::snprintf(label, sizeof label, "G4.ring: worst %.2e over %u instances, 20 outputs each (largest output %.1f, %u within the up's threshold)", worst, n, mag, fallbacks);
+    std::printf("%s\n", label);
+    check(w.ring->outFloats == 20 && worst < 2e-5 * std::fmax(1.0, mag), label);
 }
 
 inline void runArrowTests(Rig& rig, const Prog& arrow, ID3D11InputLayout* il) {
@@ -596,7 +960,7 @@ inline void runArrowTests(Rig& rig, const Prog& arrow, ID3D11InputLayout* il) {
             const std::vector<float> out = run(rig, arrow, il, sc);
             const Diff d = compareRef(2, out, arrow, sc, false, false);
             char label[160];
-            std::snprintf(label, sizeof label, "G3.%s.%s: worst %.2e over %zu vertices (largest output %.1f)", sign ? "negative scale" : "positive scale", enc ? "exponent" : "fixed-point", d.worst, sc.verts.size(), d.mag);
+            std::snprintf(label, sizeof label, "G5.%s.%s: worst %.2e over %zu vertices (largest output %.1f)", sign ? "negative scale" : "positive scale", enc ? "exponent" : "fixed-point", d.worst, sc.verts.size(), d.mag);
             std::printf("%s\n", label);
             check(d.worst < 2e-5 * std::fmax(1.0, d.mag), label);
         }
@@ -611,7 +975,7 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
     const D3D11_INPUT_ELEMENT_DESC el[1] = {{"INSTANCEANDMODELDATAINDEX", 0, DXGI_FORMAT_R32G32_UINT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0}};
     ComPtr<ID3D11InputLayout> il;
     hr(rig.dev->CreateInputLayout(el, 1, vsCode.data(), vsCode.size(), &il), "probe layout");
-    const UINT W = 8;
+    const UINT W = 8, BIG = 1024;
     D3D11_TEXTURE2D_DESC td{};
     td.Width = td.Height = W;
     td.MipLevels = td.ArraySize = 1;
@@ -619,18 +983,23 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
     td.Usage = D3D11_USAGE_DEFAULT;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.BindFlags = D3D11_BIND_RENDER_TARGET;
-    ComPtr<ID3D11Texture2D> layer, mask;
+    ComPtr<ID3D11Texture2D> layer, mask, bigLayer;
     hr(rig.dev->CreateTexture2D(&td, nullptr, &layer), "layer");
+    td.Width = td.Height = BIG;
+    hr(rig.dev->CreateTexture2D(&td, nullptr, &bigLayer), "big layer");
+    td.Width = td.Height = W;
     td.Format = DXGI_FORMAT_A8_UNORM;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     hr(rig.dev->CreateTexture2D(&td, nullptr, &mask), "mask");
-    ComPtr<ID3D11RenderTargetView> layerRtv, maskRtv;
+    ComPtr<ID3D11RenderTargetView> layerRtv, bigRtv, maskRtv;
     ComPtr<ID3D11ShaderResourceView> maskSrv;
     hr(rig.dev->CreateRenderTargetView(layer.Get(), nullptr, &layerRtv), "layer rtv");
+    hr(rig.dev->CreateRenderTargetView(bigLayer.Get(), nullptr, &bigRtv), "big layer rtv");
     hr(rig.dev->CreateRenderTargetView(mask.Get(), nullptr, &maskRtv), "mask rtv");
     hr(rig.dev->CreateShaderResourceView(mask.Get(), nullptr, &maskSrv), "mask srv");
     const float clearLayer[4] = {0.2f, 0.4f, 0.6f, 1.0f}, clearMask[4] = {0, 0, 0, 0};
     rig.ctx->ClearRenderTargetView(layerRtv.Get(), clearLayer);
+    rig.ctx->ClearRenderTargetView(bigRtv.Get(), clearLayer);
     rig.ctx->ClearRenderTargetView(maskRtv.Get(), clearMask);
     // the mask: one pixel set, by the accumulating blend (a source alpha of 1 written through a one-pixel scissor)
     const D3D11_BLEND_DESC mbd = edvr::mapui::maskBlendDesc(), pbd = edvr::mapui::probeBlendDesc();
@@ -678,22 +1047,20 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
         const int a33 = row[3 * m.RowPitch + 3], a00 = row[0], a44 = row[4 * m.RowPitch + 4];
         rig.ctx->Unmap(stage.Get(), 0);
         char label[160];
-        std::snprintf(label, sizeof label, "G4.mask: the accumulating blend leaves 1 - 0.1 * 0.1 = 0.99 (252.5) in the pixel drawn twice and nothing around it: %d, %d, %d", a33, a00, a44);
+        std::snprintf(label, sizeof label, "G6.mask: the accumulating blend leaves 1 - 0.1 * 0.1 = 0.99 (252.5) in the pixel drawn twice and nothing around it: %d, %d, %d", a33, a00, a44);
         std::printf("%s\n", label);
         check(a33 >= 252 && a33 <= 253 && a00 == 0 && a44 == 0, label);
     }
-    // the probe: records at the pixel (3, 3) with a negative scale, at (3, 3) with a positive scale, and at (5, 5)
-    struct Case { const char* name; float s; float ndcX, ndcY; uint64_t expect; };
-    const float cx = ((3.5f / W) * 2.0f - 1.0f), cy = 1.0f - (3.5f / W) * 2.0f, ox = ((5.5f / W) * 2.0f - 1.0f), oy = 1.0f - (5.5f / W) * 2.0f;
-    const Case cases[3] = {{"the tip on the mask", -0.4f, cx, cy, 1}, {"a positive scale (not the arrow)", 0.4f, cx, cy, 0}, {"the tip off the mask", -0.4f, ox, oy, 0}};
+    // the probe: one record, its tip at a pixel of a layer of `size` pixels, the mask at t0
     Consts c{};
     setRow(c.cb0[4], 1, 0, 0, 0); setRow(c.cb0[5], 0, 1, 0, 0); setRow(c.cb0[6], 0, 0, 1, 0); setRow(c.cb0[7], 0, 0, 0, 1);
     setRow(c.cb1[275], 0.5, 0.25, 0, 0);
     ComPtr<ID3D11Buffer> cb0 = makeBuf(rig, c.cb0, 8 * 16, D3D11_BIND_CONSTANT_BUFFER), cb1 = makeBuf(rig, c.cb1, 276 * 16, D3D11_BIND_CONSTANT_BUFFER);
-    for (const Case& k : cases) {
+    auto probe = [&](ID3D11RenderTargetView* target, UINT size, ID3D11ShaderResourceView* maskView, float scale, int px, int py, bool& done) -> UINT64 {
         Rec rec{};
-        std::memcpy(&rec.a[1], &k.s, 4);
-        rec.p[0] = k.ndcX + 0.5f; rec.p[1] = k.ndcY + 0.25f; rec.p[2] = 0.5f; rec.p[3] = 1;
+        std::memcpy(&rec.a[1], &scale, 4);
+        const float ndcX = ((px + 0.5f) / size) * 2.0f - 1.0f, ndcY2 = 1.0f - ((py + 0.5f) / size) * 2.0f;
+        rec.p[0] = ndcX + 0.5f; rec.p[1] = ndcY2 + 0.25f; rec.p[2] = 0.5f; rec.p[3] = 1;
         ComPtr<ID3D11Buffer> t33 = makeBuf(rig, &rec, sizeof rec, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof rec);
         ComPtr<ID3D11ShaderResourceView> s33 = makeSrv(rig, t33.Get(), 1);
         const uint32_t vtx[2] = {0, 0};
@@ -701,9 +1068,9 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
         D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION, 0};
         ComPtr<ID3D11Query> q;
         hr(rig.dev->CreateQuery(&qd, &q), "query");
-        ID3D11RenderTargetView* rt[1] = {layerRtv.Get()};
+        ID3D11RenderTargetView* rt[1] = {target};
         rig.ctx->OMSetRenderTargets(1, rt, nullptr);
-        const D3D11_VIEWPORT vp{0, 0, (float)W, (float)W, 0, 1};
+        const D3D11_VIEWPORT vp{0, 0, (float)size, (float)size, 0, 1};
         rig.ctx->RSSetViewports(1, &vp);
         rig.ctx->RSSetState(nullptr);
         rig.ctx->OMSetBlendState(probeBlend.Get(), nullptr, 0xFFFFFFFFu);
@@ -718,7 +1085,7 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
         ID3D11ShaderResourceView* r33[1] = {s33.Get()};
         rig.ctx->VSSetShaderResources(33, 1, r33);
         rig.ctx->PSSetShader(ps.Get(), nullptr, 0);
-        ID3D11ShaderResourceView* m[1] = {maskSrv.Get()};
+        ID3D11ShaderResourceView* m[1] = {maskView};
         rig.ctx->PSSetShaderResources(0, 1, m);
         rig.ctx->Begin(q.Get());
         rig.ctx->Draw(1, 0);
@@ -726,29 +1093,118 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
         UINT64 samples = 99;
         HRESULT h = S_FALSE;
         for (int spin = 0; spin < 100000 && h == S_FALSE; ++spin) h = rig.ctx->GetData(q.Get(), &samples, sizeof samples, 0);
-        char label[160];
-        std::snprintf(label, sizeof label, "G4.probe.%s: %llu sample(s)", k.name, static_cast<unsigned long long>(samples));
-        std::printf("%s\n", label);
-        check(h == S_OK && samples == k.expect, label);
+        done = h == S_OK;
         ID3D11ShaderResourceView* none[1] = {nullptr};
         rig.ctx->PSSetShaderResources(0, 1, none);
         rig.ctx->VSSetShaderResources(33, 1, none);
+        return samples;
+    };
+    // the old cases, on the 8-pixel mask (the reach is a fraction of a pixel there): records at the pixel (3, 3) with a negative scale, at (3, 3) with a positive scale, and at (5, 5)
+    struct Case { const char* name; float s; int px, py; uint64_t expect; };
+    const Case cases[3] = {{"the tip on the mask", -0.4f, 3, 3, 1}, {"a positive scale (not the arrow)", 0.4f, 3, 3, 0}, {"the tip off the mask", -0.4f, 5, 5, 0}};
+    for (const Case& k : cases) {
+        bool done = false;
+        const UINT64 samples = probe(layerRtv.Get(), W, maskSrv.Get(), k.s, k.px, k.py, done);
+        char label[160];
+        std::snprintf(label, sizeof label, "G6.probe.%s: %llu sample(s)", k.name, static_cast<unsigned long long>(samples));
+        std::printf("%s\n", label);
+        check(done && samples == k.expect, label);
     }
-    // the layer is untouched: write mask 0
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    ComPtr<ID3D11Texture2D> stage;
-    hr(rig.dev->CreateTexture2D(&td, nullptr, &stage), "layer staging");
-    rig.ctx->CopyResource(stage.Get(), layer.Get());
-    D3D11_MAPPED_SUBRESOURCE m{};
-    hr(rig.ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "map layer");
-    bool same = true;
-    for (UINT y = 0; y < W; ++y)
-        for (UINT x = 0; x < W; ++x) {
-            const uint8_t* px = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch + x * 4;
-            same = same && px[0] == 51 && px[1] == 102 && px[2] == 153 && px[3] == 255;
+    // the gaps: a 1024-pixel mask (reach 0.0235 * 1024 = 24.06 pixels, a step of 3.01) built on the CPU
+    const double reach = 0.0235 * BIG;
+    const int TX = 512, TY = 512;
+    struct Axis { const char* name; double x, y; };
+    const double r2 = std::sqrt(0.5);
+    const Axis axes[4] = {{"horizontal", 1, 0}, {"vertical", 0, 1}, {"diagonal /", r2, r2}, {"diagonal \\", r2, -r2}};
+    auto makeMask = [&](const std::vector<uint8_t>& px) {
+        D3D11_TEXTURE2D_DESC md{};
+        md.Width = md.Height = BIG;
+        md.MipLevels = md.ArraySize = 1;
+        md.SampleDesc.Count = 1;
+        md.Usage = D3D11_USAGE_DEFAULT;
+        md.Format = DXGI_FORMAT_A8_UNORM;
+        md.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init{px.data(), BIG, 0};
+        ComPtr<ID3D11Texture2D> t;
+        hr(rig.dev->CreateTexture2D(&md, &init, &t), "big mask");
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr(rig.dev->CreateShaderResourceView(t.Get(), nullptr, &v), "big mask srv");
+        return v;
+    };
+    // a band at distance [lo, lo + thick) from the tip along the axis, on both sides or on the positive side only
+    auto band = [&](const Axis& a, double lo, double thick, bool both) {
+        std::vector<uint8_t> px(static_cast<size_t>(BIG) * BIG, 0);
+        for (int y = 0; y < static_cast<int>(BIG); ++y)
+            for (int x = 0; x < static_cast<int>(BIG); ++x) {
+                const double u = (x - TX) * a.x + (y - TY) * a.y;
+                const double au = std::fabs(u);
+                if (au >= lo && au < lo + thick && (both || u > 0)) px[static_cast<size_t>(y) * BIG + x] = 255;
+            }
+        return px;
+    };
+    for (const Axis& a : axes) {
+        struct G { const char* what; double lo; bool both; uint64_t expect; };
+        const G gs[] = {
+            {"a gap of 2 * reach - 10 pixels between two strips", reach - 5.0, true, 1},
+            {"a gap of 2 * reach + 10 pixels between two strips", reach + 5.0, true, 0},
+            {"mask on one side only", reach - 5.0, false, 0},
+        };
+        for (const G& g : gs) {
+            const ComPtr<ID3D11ShaderResourceView> mv = makeMask(band(a, g.lo, 6.0, g.both));
+            bool done = false;
+            const UINT64 samples = probe(bigRtv.Get(), BIG, mv.Get(), -0.4f, TX, TY, done);
+            char label[200];
+            std::snprintf(label, sizeof label, "G6.probe.%s, %s: %llu sample(s)", a.name, g.what, static_cast<unsigned long long>(samples));
+            std::printf("%s\n", label);
+            check(done && samples == g.expect, label);
         }
-    rig.ctx->Unmap(stage.Get(), 0);
-    check(same, "G4.layer: the probe's write mask 0 leaves every pixel of the layer as it was");
+    }
+    {
+        // the tip on the mask: one pixel; and a tip 5 pixels outside the edge of a large panel, which stays off it (a panel on one side only)
+        std::vector<uint8_t> one(static_cast<size_t>(BIG) * BIG, 0), half(static_cast<size_t>(BIG) * BIG, 0), edge(static_cast<size_t>(BIG) * BIG, 0);
+        one[static_cast<size_t>(TY) * BIG + TX] = 255;
+        for (int y = 0; y < static_cast<int>(BIG); ++y)
+            for (int x = TX + 5; x < static_cast<int>(BIG); ++x) half[static_cast<size_t>(y) * BIG + x] = 255;
+        // a strip right of the tip, the tip 5 pixels from the left edge of the texture: the left side reads outside the texture, which is 0 on D3D11
+        for (int y = 0; y < static_cast<int>(BIG); ++y)
+            for (int x = 5 + 19; x < 5 + 25; ++x) edge[static_cast<size_t>(y) * BIG + x] = 255;
+        struct S { const char* what; const std::vector<uint8_t>* px; int tx, ty; float s; uint64_t expect; };
+        const S ss[] = {
+            {"the tip on the mask", &one, TX, TY, -0.4f, 1},
+            {"a tip 5 pixels outside a large panel's edge", &half, TX, TY, -0.4f, 0},
+            {"a strip on one side, the other side outside the texture", &edge, 5, TY, -0.4f, 0},
+            {"a positive scale, the tip on the mask", &one, TX, TY, 0.4f, 0},
+        };
+        for (const S& s : ss) {
+            const ComPtr<ID3D11ShaderResourceView> mv = makeMask(*s.px);
+            bool done = false;
+            const UINT64 samples = probe(bigRtv.Get(), BIG, mv.Get(), s.s, s.tx, s.ty, done);
+            char label[200];
+            std::snprintf(label, sizeof label, "G6.probe.%s: %llu sample(s)", s.what, static_cast<unsigned long long>(samples));
+            std::printf("%s\n", label);
+            check(done && samples == s.expect, label);
+        }
+    }
+    // the layers are untouched: write mask 0
+    for (int which = 0; which < 2; ++which) {
+        const UINT size = which ? BIG : W;
+        td.Width = td.Height = size;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> stage;
+        hr(rig.dev->CreateTexture2D(&td, nullptr, &stage), "layer staging");
+        rig.ctx->CopyResource(stage.Get(), which ? bigLayer.Get() : layer.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        hr(rig.ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "map layer");
+        bool same = true;
+        for (UINT y = 0; y < size; ++y)
+            for (UINT x = 0; x < size; ++x) {
+                const uint8_t* px = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch + x * 4;
+                same = same && px[0] == 51 && px[1] == 102 && px[2] == 153 && px[3] == 255;
+            }
+        rig.ctx->Unmap(stage.Get(), 0);
+        check(same, which ? "G6.layer: the probe's write mask 0 leaves every pixel of the 1024-pixel layer as it was" : "G6.layer: the probe's write mask 0 leaves every pixel of the layer as it was");
+    }
 }
 
 inline int runAll() {
@@ -756,12 +1212,19 @@ inline int runAll() {
     std::printf("galaxy_map_vs_test: debug layer %s\n", rig.debugLayer ? "ON" : "not installed (messages not checked)");
     const std::vector<uint8_t> icon = compile(edvr::kMapIconFacingVS, "vs_5_0"), iconUv = compile(edvr::kMapIconUvFacingVS, "vs_5_0"), arrow = compile(edvr::kMapArrowDepthVS, "vs_5_0");
     const std::vector<uint8_t> probeVs = compile(edvr::kMapProbeVS, "vs_5_0"), probePs = compile(edvr::kMapProbePS, "ps_5_0");
+    const std::vector<uint8_t> ring = compile(edvr::kMapRingVS, "vs_5_0");
     const Prog pIcon = makeProg(rig, icon), pIconUv = makeProg(rig, iconUv), pArrow = makeProg(rig, arrow);
+    const Prog pRing = makeProg(rig, ring);
     ComPtr<ID3D11InputLayout> il = makeLayout(rig, icon), ilUv = makeLayout(rig, iconUv), ilArrow = makeLayout(rig, arrow);
+    ComPtr<ID3D11InputLayout> ilRing = makeRingLayout(rig, ring);
     check(pIcon.uvAt == 0 && pIcon.posAt == 2 && pIconUv.uvAt == 0 && pIconUv.posAt == 2 && pArrow.uvAt == 0 && pArrow.posAt == 2,
           "G0: the outputs are TEXCOORD0.xy at o0 and SV_POSITION at o1, as the game's");
     runIconTests(rig, pIcon, pIconUv, il.Get());
-    runFacesAsGame(rig, pIcon, il.Get());
+    const WorldProgs wp{&pIcon, &pIconUv, &pRing, il.Get(), ilUv.Get(), ilRing.Get()};
+    check(pRing.posAt == 16 && pRing.outFloats == 20, "G0: the ring's outputs are the game's six (TEXCOORD0, 1, 2, 4, 5 and SV_POSITION) in 20 floats");
+    runWorldStability(rig, wp);
+    runSquareOn(rig, wp);
+    runRingTests(rig, wp);
     runArrowTests(rig, pArrow, ilArrow.Get());
     runProbeTest(rig, probeVs, probePs);
     check(rig.problems() == 0, "the debug layer reported nothing");
@@ -776,7 +1239,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("galaxy_map_vs_test: G0-G4, WARP with the debug layer; reads nothing, writes nothing");
+        std::puts("galaxy_map_vs_test: G0-G6, WARP with the debug layer; reads nothing, writes nothing");
         return 0;
     }
     if (mode != "--self-test") return 2;

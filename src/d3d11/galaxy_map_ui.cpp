@@ -13,6 +13,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "flat_compute_readback.h"   // FlatComputeInternalScope: EDVR's own calls do not reach the game's tees
+#include "flat_stationary_camera_capture.h"   // mapCameraPose, mapCameraChanges: the head-free up the icons, labels and rings are fixed to
 #include "shader_swap.h"
 #include "vscreen.h"                 // the raw VS/PS/SRV setters: the binding shadow keeps naming the game's
 
@@ -28,6 +29,7 @@ using Microsoft::WRL::ComPtr;
 constexpr uint32_t kRing = 4;       // eye-frames in flight per eye
 constexpr uint32_t kPerFrame = 4;   // probes per eye-frame (the arrow's shader draws other sprites some frames; each is a probe and only the arrow's can count)
 constexpr unsigned kMaxFlipNotes = 16;
+constexpr UINT kCamSlot = 10;      // vertex constant slot of MapCam (galaxy_map_vs.h): the game's vertex shaders declare only 0, 1, 2, 3, 12 and 13
 
 struct Group {
     uint64_t seq = 0;
@@ -54,6 +56,10 @@ struct State {
     bool failed = false;
     const char* said[4] = {};
     unsigned flips = 0;
+    ComPtr<ID3D11Buffer> camBuf;      // MapCam at vertex slot 10: the map camera's up (stage 0 rows[1])
+    bool camWritten = false;
+    uint64_t camChanges = 0;          // mapCameraChanges() at the last write
+    bool camBoundSaid = false, camFailedSaid = false;
     std::atomic<bool> resetPending{false};
 };
 
@@ -64,10 +70,10 @@ State& st() {
     return *g_st;
 }
 
-const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode};
-const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode)};
-const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs"};
-const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)"};
+const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode, kMapRingVsBytecode};
+const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode), sizeof(kMapRingVsBytecode)};
+const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs", "map_ring_vs"};
+const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)", "94EA991C3A03DBD9 (rings)"};
 
 // A new device drops everything made for the old one.
 void bindDevice(State& s, ID3D11DeviceContext* ctx) {
@@ -84,9 +90,65 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     s.probeTried = false;
     s.savedVs.Reset();
     s.bound = false;
+    s.camBuf.Reset();
+    s.camWritten = false;
     for (EyeRing& r : s.eye) r = EyeRing{};
     s.device = dev;
     if (dev) dev->Release();   // identity only
+}
+
+// The map camera's up in the MapCam buffer, bound at slot 10. The buffer is written when mapCameraChanges() has moved since the last write (the first write included), and
+// slot 10 is read and set only when it does not hold ours: there can be 500 such draws a frame, and the read catches a game call that cleared the slots. False until the pose
+// has answered once; after that the last answer stands when the camera's reader has none.
+bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
+    const uint64_t changes = mapCameraChanges();
+    float up[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    if (!s.camBuf || !s.camWritten || changes != s.camChanges) {
+        MapCameraPose pose;
+        if (mapCameraPose(pose)) {
+            up[0] = pose.rows[1][0];
+            up[1] = pose.rows[1][1];
+            up[2] = pose.rows[1][2];
+            if (!s.camBuf) {
+                ComPtr<ID3D11Device> dev;
+                ctx->GetDevice(&dev);
+                D3D11_BUFFER_DESC bd{};
+                bd.ByteWidth = sizeof(up);
+                bd.Usage = D3D11_USAGE_DEFAULT;
+                bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                D3D11_SUBRESOURCE_DATA init{up, 0, 0};
+                if (!dev || FAILED(dev->CreateBuffer(&bd, &init, &s.camBuf))) {
+                    s.camBuf.Reset();
+                    if (!s.camFailedSaid) {
+                        s.camFailedSaid = true;
+                        Log::get().note("galaxy map: the map camera's up buffer could not be made: the icons, labels and rings are drawn as the game made them");
+                    }
+                    return false;
+                }
+            } else {
+                ctx->UpdateSubresource(s.camBuf.Get(), 0, nullptr, up, 0, 0);
+            }
+            s.camWritten = true;
+            s.camChanges = changes;
+            g_counters.camWrites.fetch_add(1, std::memory_order_relaxed);
+        } else if (!s.camWritten) {
+            return false;
+        }
+    }
+    if (!s.camBuf) return false;
+    ID3D11Buffer* held = nullptr;
+    ctx->VSGetConstantBuffers(kCamSlot, 1, &held);
+    if (held != s.camBuf.Get()) {
+        ID3D11Buffer* ours = s.camBuf.Get();
+        ctx->VSSetConstantBuffers(kCamSlot, 1, &ours);
+        if (!s.camBoundSaid) {
+            s.camBoundSaid = true;
+            Log::get().note("galaxy map: the map camera's up is bound at vertex constant slot %u for the icons, labels and rings (slot held %s before; first value %.3f %.3f %.3f)", kCamSlot,
+                            held ? "another buffer" : "nothing", up[0], up[1], up[2]);
+        }
+    }
+    if (held) held->Release();
+    return true;
 }
 
 void refreshOver(State& s) {
@@ -170,6 +232,7 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     if (vs == kVsIconA) which = kSwapIconA;
     else if (vs == kVsIconB) which = kSwapIconB;
     else if (vs == kVsArrow) which = kSwapArrow;
+    else if (vs == kVsRing) which = kSwapRing;
     else return false;
     if (!ctx) return false;
     State& s = st();
@@ -195,6 +258,10 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     }
     ID3D11VertexShader* ours = s.swapVs[which].Get();
     if (!ours) return false;
+    if (which != kSwapArrow && !bindMapCam(s, ctx)) {
+        g_counters.noPose.fetch_add(1, std::memory_order_relaxed);   // the pose never answered: the draw is the game's
+        return false;
+    }
     ctx->VSGetShader(&s.savedVs, nullptr, nullptr);
     vScreenVSSetShaderRaw(ctx, ours, nullptr, 0);
     s.bound = true;

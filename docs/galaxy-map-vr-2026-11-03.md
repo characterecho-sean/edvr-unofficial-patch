@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Next build proposed, NOT BUILT: every map quad fixed in the world, and the arrow bridging gaps between panels (see "After the second flight"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build BUILT, full build green, NOT FLOWN: every map quad fixed in the world, and the arrow bridging gaps between panels (see "After the second flight"). Proposed for after that flight, NOT BUILT: a depth test for the map's sprites (see "Sprite order"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -19,7 +19,7 @@ Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` 
 
 Temporary: none left. The self-check, the F111 map probe and the stillness bounds are gone. No new keys.
 
-Next: Sean's word on the two proposals, then build and one flight. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: the flight (third card below), then the sprite depth test on Sean's word of 2026-11-04 ("After this flight"). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: spanning the map's quads on the eye's axes (build bf17a80a), because that locks them to the eye. Dump 110152762001: every icon's top edge measures 0.00 degrees in the image while the head turns from yaw 19.6 to 4.7. Sean: "the icons and text yaw with my head".
@@ -147,13 +147,31 @@ Log edvr_gfx_20261104_105921, build bf17a80a, dump 110152762001. Sean: "the icon
 
 **Correction to "After the first flight".** That reading of dump 095453560001 was backwards. The orange icons matched the world-fixed prediction because they were the stable ones. The ones locked to the eye were the n=12 triangles, spanned on rows 277 and 278: their top edges measure 0.00 degrees in frames 6 to 15, while the orange icons went from -1.6 to -3.0. So that build mixed two behaviours, and bf17a80a moved everything to the wrong one.
 
-**Proposed: every map quad fixed in the world (NOT BUILT).** A quad's axes take nothing from the head's rotation: ray = normalize(quad - eye), right = cross(mapUp, ray), up = cross(ray, right), mapUp = stage 0's rows[1], where the tracked up lands. It applies to the n=6 icons and labels (the same faces test), the b span of the n=12 triangles, and the rings (94EA991C3A03DBD9, which also span on 277 and 278). The stems already build their width from the eye's position. Turning the head then changes nothing in the world, only moving it does, by parallax (6.7 cm at 53 units is 0.07 degrees). A quad is square-on when looked at, which the game's parallel planes are not off the map's forward. It stays level with the world when the head rolls, and the head does roll: -5.0 degrees at yaw 19.6 in this dump, an 11 to 16 degree tilt of the yaw axis in both dumps. Falls back to the eye's right within about a degree of mapUp, where there is no defined right.
+**Every map quad fixed in the world (BUILT, NOT FLOWN).** A quad's axes take nothing from the head's rotation: ray = normalize(quad - eye), right = cross(mapUp, ray), up = cross(ray, right), mapUp = stage 0's rows[1], where the tracked up lands. It applies to the n=6 icons and labels (the same faces test), the b span of the n=12 triangles, and the rings (94EA991C3A03DBD9, which also span on 277 and 278). The stems already build their width from the eye's position. Turning the head then changes nothing in the world, only moving it does, by parallax (6.7 cm at 53 units is 0.07 degrees). A quad is square-on when looked at, which the game's parallel planes are not off the map's forward. It stays level with the world when the head rolls, and the head does roll: -5.0 degrees at yaw 19.6 in this dump, an 11 to 16 degree tilt of the yaw axis in both dumps. Falls back to the eye's right within about a degree of mapUp, where there is no defined right. mapUp reaches the shaders at vertex constant slot 10, which none of the 329 vertex shaders in the game's dump declares. The rig holds every corner of an icon, a label, a triangle and a ring still to 2.6e-5 under 0.5 rad of yaw and 0.2 rad of pitch. Against the game's own bytecode: UI-frame records of the icon shaders exact over 4000 vertices; the ring's other outputs exact over 3200 instances, and its position within 1.19e-7 on an eye looking along the ray.
 
-**Proposed: the arrow bridges gaps between panels (NOT BUILT).** "On a panel" becomes: the mask covers the tip, or it covers a point within reach on both opposite sides along any of four axes (horizontal, vertical, two diagonals). The panels' outer edges stay exact, because a tip outside a panel has panel on one side only, and a gap up to twice the reach closes. Reach about 0.05 tan (110 layer pixels at 4508), so the rail's gaps and the rail-to-panel gap close and open map between panels stays star depth. It lives in the probe's pixel shader alone, so about 64 mask reads on one pixel. Rejected: a dilated mask, which also pushes every outer edge out; a time hold, which fails on a slow move along the rail; bounding boxes per panel group, which would need grouping the panels and cover open map at corners.
+**The arrow bridges gaps between panels (BUILT, NOT FLOWN).** "On a panel" becomes: the mask covers the tip, or it covers a point within reach on both opposite sides along any of four axes (horizontal, vertical, two diagonals). The panels' outer edges stay exact, because a tip outside a panel has panel on one side only, and a gap up to twice the reach closes. Reach about 0.05 tan (110 layer pixels at 4508), so the rail's gaps and the rail-to-panel gap close and open map between panels stays star depth. It lives in the probe's pixel shader alone, so about 64 mask reads on one pixel. Rejected: a dilated mask, which also pushes every outer edge out; a time hold, which fails on a slow move along the rail; bounding boxes per panel group, which would need grouping the panels and cover open map at corners.
 
 Other readings of this log: the arrow flipped depth 16 times in its first 4.2 s on the panels; panel draws after the eye's probe 22, 8, 0 in the first three windows (`maskLate`), so the mask is nearly always complete and a miss costs one frame's answer; the pointer's call ran 708, 2128, 502, 0 times per 30 s, where the first flight ran it every frame. Not explained, and no symptom reported: the map mode or a game gate in 0x3B91D80 (doc above, RE note 20261104-gm-hover section 3) are the candidates.
 
-## Flight card, second build (flown 11:00; the card for the next build follows the design above)
+## Flight card, third build (VR, cockpit, Galaxy Map open)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
+
+1. Turn and tilt the head with the mouse still, looking at icons, labels, triangles and the rings' arcs. Expect: none of them moves in the world, and each is square-on when looked at. Insert dump. The dump's icon edges should now follow the head's roll (world level), not read 0.00.
+2. Run the mouse slowly down the left rail, and across from the rail to the Trade Routes panel. Expect: the arrow stays at panel depth across the gaps, then just off the rail's outer edge it drops to star depth.
+3. Pan and orbit fast, and look straight up the map's up axis if it can be reached: no pops.
+
+Log: `galaxy map: the map camera's up is bound at vertex constant slot 10`; the 30 s `map pointer:` line with ring swaps, `noPose` at 0 and `camWrites` rising only while the map moves. `galaxy map: the arrow's tip` flips should be far fewer than the 16 in 4.2 s of the last flight. If these are missing, the code never ran.
+
+## Sprite order (proposed for after that flight, NOT BUILT)
+
+Sean, on the crop of dump 095453560001: "that orange bookmark is deep below the large green triangle and yet it appears drawn on top". The numbers agree: bookmark record 282 at 155 units, triangle records 513 and 514 at 6 units. In the enlarged crop the triangle's rim and fill show through the bookmark's dark veil and its orange is untinted, so the bookmark was painted after the triangle.
+
+The game does sort. Dump 110152762001's list runs from 18470 units to about 10, and 2.8% of pairs are out of order by more than 5 units. The draw capture matched to dump 095453560001 has the bookmark at position 58 and the triangle at 315, which is the opposite of the image. The captures and the pool dump are not the same frame (the positions move frame to frame in `inst_*`), so that position is not evidence. OPEN: why this pair is painted out of depth order.
+
+Proposed, not depending on the answer: a real depth test in the HDR layer for the map's sprites. Each draw tests depth with no write, then a colourless second issue writes depth only where the sprite's alpha is over 0.5 (a small transcription of ps 964221955A9E77E7 and 855C469156AB997F with a clip). So a nearer solid part hides anything farther drawn after it, the see-through parts block nothing, and equal depths fall back to the game's order. Rings and stems test only. Cost: about 700 more draws a frame, which dropping the existing stencil write-backs could offset if nothing on the map tests stencil bit 0x04 (to check), and a D16 target at the layer's size, about 40 MB an eye, let go when the map shuts. Left wrong: a far sprite after a near one still shows over the near one's soft edges.
+
+## Flight card, second build (flown 11:00)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 

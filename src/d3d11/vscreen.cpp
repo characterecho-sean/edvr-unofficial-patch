@@ -98,7 +98,7 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
-#include "galaxy_map_ui.h"         // the Galaxy Map's icons facing the eye, its arrow at the stars' depth, the panel mask and the arrow's probe
+#include "galaxy_map_ui.h"         // the Galaxy Map's icons, labels and rings fixed in the world, its arrow at the stars' depth, the panel mask and the arrow's probe
 #include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
@@ -4356,7 +4356,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
     } rollFreeScope{self};
     if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
-    // The Galaxy Map's replacement vertex shaders (galaxy_map_ui.h, docs/galaxy-map-vr-2026-11-03.md Fix 3): while the map is open in VR, the icons' and labels' shaders face the eye and the arrow's
+    // The Galaxy Map's replacement vertex shaders (galaxy_map_ui.h, docs/galaxy-map-vr-2026-11-03.md Fix 3): while the map is open in VR, the icons', labels' and rings' shaders fix the quads in the world and the arrow's
     // is at the stars' depth when its tip is off the panels. The shader goes in for this draw and every re-issue of it (raw, so the binding shadow still names the game's) and the game's comes
     // back on every way out. Declared after the roll-free scope, so it restores first. Off the map this is one relaxed load.
     struct MapSwapScope {

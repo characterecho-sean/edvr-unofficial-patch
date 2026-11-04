@@ -1,4 +1,4 @@
-// The VR Galaxy Map's drawn UI (docs/galaxy-map-vr-2026-11-03.md, Fix 3): the icons and labels facing the eye, the mouse arrow at the stars' depth when its tip is not on a
+// The VR Galaxy Map's drawn UI (docs/galaxy-map-vr-2026-11-03.md, Fix 3 and "After the second flight"): the icons, labels and rings fixed in the world, the mouse arrow at the stars' depth when its tip is not on a
 // panel, and the probe that says so.
 //
 // THE DESIGN. The panels (vertex shaders C4B4B334B26E81A9, B10B032BDFD46700, 5DAD41AA66757CE3) are drawn as the game made them, at about 1 m in the UI frame, and the
@@ -10,7 +10,13 @@
 //   * the probe. At each arrow-shader draw the layer takes, after its issue, one point is drawn at the arrow's tip in the game's own depth (galaxy_map_vs.h kMapProbeVS) with
 //     a pixel shader that discards where the mask is clear, inside an occlusion query. A pixel counted means the tip is on a panel in that eye. The result is read at a later
 //     probe, never waited for: over = over[0] || over[1], read by the arrow's swap decision. Before any answer over is false; if the mask or the query cannot be made it is
-//     true (the game's arrow).
+//     true (the game's arrow). "On a panel" is the mask under the tip, or under a point within reach on both opposite sides along one of four axes (kMapProbePS), so the
+//     gaps between panels close.
+//
+// THE MAP CAMERA'S UP. The icons', labels' and rings' replacement shaders (C31238, 12382D, 94EA99) take a head-free up from a 16-byte constant buffer at vertex slot 10 (MapCam),
+// written from mapCameraPose's stage 0 rows[1] when mapCameraChanges() has moved since the last write. A draw is swapped only once the pose has answered; before that it is the
+// game's, counted (Counters::noPose). The buffer is bound at the first swap of each draw when slot 10 does not already hold it, and left bound after the map closes: no
+// vertex shader of the game declares slot 10.
 #pragma once
 
 #include <d3d11.h>
@@ -21,7 +27,7 @@
 namespace edvr {
 namespace mapui {
 
-constexpr uint64_t kVsIconA = 0xC31238331D8AC3D4ull, kVsIconB = 0x12382D2EA45E9632ull, kVsArrow = 0x4EF6DDB075A927FAull;
+constexpr uint64_t kVsIconA = 0xC31238331D8AC3D4ull, kVsIconB = 0x12382D2EA45E9632ull, kVsArrow = 0x4EF6DDB075A927FAull, kVsRing = 0x94EA991C3A03DBD9ull;
 constexpr uint64_t kVsPanelA = 0xC4B4B334B26E81A9ull, kVsPanelB = 0xB10B032BDFD46700ull, kVsPanelC = 0x5DAD41AA66757CE3ull;
 
 inline bool isPanelVs(uint64_t vs) { return vs == kVsPanelA || vs == kVsPanelB || vs == kVsPanelC; }
@@ -57,11 +63,13 @@ inline D3D11_BLEND_DESC probeBlendDesc() {
     return d;
 }
 
-enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapCount };
+enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapCount };
 
 // Counters, since the last 30 s line (galaxy_map_pointer.cpp reads and clears them). Atomics: the line is said on the frame thread, the draws run on the render thread.
 struct Counters {
     std::atomic<uint64_t> swapped[kSwapCount];
+    std::atomic<uint64_t> noPose;           // an icon, label or ring draw left as the game made it because the map camera had never published a pose
+    std::atomic<uint64_t> camWrites;        // writes of the map camera's up into the slot-10 buffer
     std::atomic<uint64_t> arrowKept;        // arrow draws left as the game made them because the tip was over a panel (or the probe could not say)
     std::atomic<uint64_t> maskIssued[3];    // panel draws issued into the mask, by shader (C4B4B3, B10B03, 5DAD41)
     std::atomic<uint64_t> maskLate;         // a panel draw reaching the mask after the eye's probe of the same frame (the mask was not complete at the probe)
@@ -75,7 +83,7 @@ struct Counters {
 };
 extern Counters g_counters;
 
-// Set by mapPointerFrame (galaxy_map_pointer.cpp): the VR profile and the Galaxy Map open (the icons face the eye), and that with the pointer hooks armed (the arrow and the
+// Set by mapPointerFrame (galaxy_map_pointer.cpp): the VR profile and the Galaxy Map open (the icons, labels and rings are fixed in the world), and that with the pointer hooks armed (the arrow and the
 // mask). One relaxed load each on the draw path.
 inline std::atomic<bool> g_vrOpen{false};   // inline: ui_layer.cpp reads them and is linked whole into rigs that do not link galaxy_map_ui.cpp
 inline std::atomic<bool> g_pointerOpen{false};

@@ -637,8 +637,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 95 && coreLegacy.size() + 48 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes the SRV turret HUD's eleven geometry shaders and the VR Galaxy Map's five (three transcribed vertex shaders, the probe's vertex and pixel shader) are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 96 && coreLegacy.size() + 49 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes the SRV turret HUD's eleven geometry shaders and the VR Galaxy Map's six (four transcribed vertex shaders, the probe's vertex and pixel shader) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1269,17 +1269,18 @@ static void selfTest() {
 
     // The VR Galaxy Map's replacement shaders (src/d3d11/galaxy_map_vs.h): new, held to their own contract -- the symbol, source name, entry, profile and flags, the
     // text each compiles, the stage, and the resources the DXBC reflects (the game's own b0, b1 (and b2 for the uv form) at the sizes the originals declare, the record
-    // buffer at t33 with its 336-byte stride and the bones at t38 with 48 where the original reads them). The probe's pair reads the record at t33 and the mask at t0.
+    // buffer at t33 with its 336-byte stride and the bones at t38 with 48 where the original reads them, and the map camera's up at b10 where the icons and rings read it). The probe's pair reads the record at t33 and the mask at t0; the rings read only their vertex inputs.
     {
-        struct MapShader { const char* symbol; const char* sourceName; const char* source; const char* profile; UINT b0, b1, b2; bool bones; };
-        const MapShader maps[5] = {
-            {"kMapIconFacingVsBytecode", "map_icon_facing_vs", edvr::kMapIconFacingVS, "vs_5_0", 12, 279, 0, true},
-            {"kMapIconUvFacingVsBytecode", "map_icon_uv_facing_vs", edvr::kMapIconUvFacingVS, "vs_5_0", 12, 279, 2, true},
-            {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, true},
-            {"kMapProbeVsBytecode", "map_probe_vs", edvr::kMapProbeVS, "vs_5_0", 8, 276, 0, false},
-            {"kMapProbePsBytecode", "map_probe_ps", edvr::kMapProbePS, "ps_5_0", 0, 0, 0, false},
+        struct MapShader { const char* symbol; const char* sourceName; const char* source; const char* profile; UINT b0, b1, b2, b10; bool bones; int input; };   // input: 0 the records at t33, 1 the mask at t0, 2 vertex inputs only
+        const MapShader maps[6] = {
+            {"kMapIconFacingVsBytecode", "map_icon_facing_vs", edvr::kMapIconFacingVS, "vs_5_0", 12, 279, 0, 1, true, 0},
+            {"kMapIconUvFacingVsBytecode", "map_icon_uv_facing_vs", edvr::kMapIconUvFacingVS, "vs_5_0", 12, 279, 2, 1, true, 0},
+            {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, 0, true, 0},
+            {"kMapProbeVsBytecode", "map_probe_vs", edvr::kMapProbeVS, "vs_5_0", 8, 276, 0, 0, false, 0},
+            {"kMapProbePsBytecode", "map_probe_ps", edvr::kMapProbePS, "ps_5_0", 0, 0, 0, 0, false, 1},
+            {"kMapRingVsBytecode", "map_ring_vs", edvr::kMapRingVS, "vs_5_0", 8, 279, 1, 1, false, 2},
         };
-        for (size_t i = 0; i < 5; ++i) {
+        for (size_t i = 0; i < 6; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 43 + i];
             check(!std::strcmp(shader.symbol, maps[i].symbol) && !std::strcmp(shader.sourceName, maps[i].sourceName) && !std::strcmp(shader.entry, "main") &&
                   !std::strcmp(shader.profile, maps[i].profile) && shader.alternate == maps[i].source && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -1294,7 +1295,7 @@ static void selfTest() {
                 bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == want && D3D11_SHVER_GET_MAJOR(desc.Version) == 5;
                 UINT expected = 0;
                 struct Cb { const char* name; UINT slot, rows; };
-                const Cb cbs[] = {{"CB0", 0, maps[i].b0}, {"CB1", 1, maps[i].b1}, {"CB2", 2, maps[i].b2}};
+                const Cb cbs[] = {{"CB0", 0, maps[i].b0}, {"CB1", 1, maps[i].b1}, {"CB2", 2, maps[i].b2}, {"MapCam", 10, maps[i].b10}};
                 for (const Cb& c : cbs) {
                     if (!c.rows) continue;
                     ++expected;
@@ -1304,11 +1305,11 @@ static void selfTest() {
                     ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName(c.name, &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == c.slot && cb &&
                          SUCCEEDED(cb->GetDesc(&bd)) && bd.Size == c.rows * 16;
                 }
-                if (i < 4) {
+                if (maps[i].input == 0) {
                     ++expected;
                     D3D11_SHADER_INPUT_BIND_DESC bind{};
                     ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("T33", &bind)) && bind.Type == D3D_SIT_STRUCTURED && bind.BindPoint == 33;
-                } else {
+                } else if (maps[i].input == 1) {
                     ++expected;
                     D3D11_SHADER_INPUT_BIND_DESC bind{};
                     ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("Mask", &bind)) && bind.Type == D3D_SIT_TEXTURE && bind.BindPoint == 0;

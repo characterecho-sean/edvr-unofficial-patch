@@ -217,6 +217,7 @@ void thirtySecondLine(State& s, uint64_t now) {
     uint64_t swapped[kSwapCount], swappedTotal = 0, maskIssued[3], maskTotal = 0;
     for (uint32_t i = 0; i < kSwapCount; ++i) { swapped[i] = g_counters.swapped[i].exchange(0, std::memory_order_relaxed); swappedTotal += swapped[i]; }
     for (int i = 0; i < 3; ++i) { maskIssued[i] = g_counters.maskIssued[i].exchange(0, std::memory_order_relaxed); maskTotal += maskIssued[i]; }
+    const uint64_t noPose = g_counters.noPose.exchange(0, std::memory_order_relaxed), camWrites = g_counters.camWrites.exchange(0, std::memory_order_relaxed);
     const uint64_t arrowKept = g_counters.arrowKept.exchange(0, std::memory_order_relaxed), maskLate = g_counters.maskLate.exchange(0, std::memory_order_relaxed);
     const uint64_t probes = g_counters.probes.exchange(0, std::memory_order_relaxed), answered = g_counters.answered.exchange(0, std::memory_order_relaxed);
     const uint64_t framesOver = g_counters.framesOver.exchange(0, std::memory_order_relaxed), framesClear = g_counters.framesClear.exchange(0, std::memory_order_relaxed);
@@ -236,13 +237,14 @@ void thirtySecondLine(State& s, uint64_t now) {
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: Galaxy Map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
-                    "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu); "
+                    "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu (icons, labels and rings left the game's for want of the map camera's pose: %llu; its up written %llu times); "
                     "panel draws issued into the mask: C4B4B3 %llu, B10B03 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu)",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
                     s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
+                    static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(noPose), static_cast<unsigned long long>(camWrites),
                     static_cast<unsigned long long>(maskIssued[0]), static_cast<unsigned long long>(maskIssued[1]), static_cast<unsigned long long>(maskIssued[2]),
                     static_cast<unsigned long long>(probes), static_cast<unsigned long long>(answered), static_cast<unsigned long long>(framesOver),
                     static_cast<unsigned long long>(framesClear), over() ? "yes" : "no", static_cast<unsigned long long>(declinesTotal), static_cast<unsigned long long>(ringFull),
@@ -276,7 +278,7 @@ void mapPointerFrame() noexcept {
     const uint64_t now = GetTickCount64();
     const bool open = mapCameraGalaxyOpen();
     if (!s.armed.load(std::memory_order_acquire)) {
-        mapui::setGates(open, false);   // the icons face the eye whether or not the pointer's hooks can be had
+        mapui::setGates(open, false);   // the icons, labels and rings are fixed in the world whether or not the pointer's hooks can be had
         if (s.stood) return;
         if (s.tries && now - s.lastTryMs < 1000) return;
         s.lastTryMs = now;
@@ -285,7 +287,7 @@ void mapPointerFrame() noexcept {
         if (!tryInstall(s, transient)) {
             if (!transient || s.tries >= kMaxTries) {
                 s.stood = true;
-                Log::get().note("map pointer: stands down after %u tries (%s): the hover, the arrow's depth and the panel mask stay as the game made them (the icons still face the eye)%s", s.tries, s.why,
+                Log::get().note("map pointer: stands down after %u tries (%s): the hover, the arrow's depth and the panel mask stay as the game made them (the icons, labels and rings are still fixed in the world)%s", s.tries, s.why,
                                 s.cursor.hook.installed() ? "; the cursor capture stays in as a harmless store of one register" : "");
             }
             return;
@@ -302,7 +304,7 @@ void mapPointerFrame() noexcept {
         s.open = open;
         if (s.edgeNotes < 16) {
             ++s.edgeNotes;
-            Log::get().note("map pointer: the Galaxy Map %s: the hover reads the arrow's direction, the icons and labels face the eye, the arrow is at star depth off the panels and the game's on them, and the panel mask is %s",
+            Log::get().note("map pointer: the Galaxy Map %s: the hover reads the arrow's direction, the icons, labels and rings are fixed in the world, the arrow is at star depth off the panels and the game's on them, and the panel mask is %s",
                             open ? "opened" : "closed", open ? "kept" : "let go");
         }
     }
