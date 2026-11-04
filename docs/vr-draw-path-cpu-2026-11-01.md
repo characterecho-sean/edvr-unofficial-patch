@@ -6,8 +6,8 @@
   Draw path), and how much can go without changing what reaches the screen?
   Earlier investigation: `docs\stereo-cpu-sharing-2026-10-16.md`.
 - **Build 1 (flown 2026-11-02, `53c965cd`, draft PR #166):** failed the total
-  criterion. Shipped items 1 and 3 and the re-issue counter; removed the
-  rest and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
+  criterion. Shipped items 1 and 3 and the re-issue counter; removed the rest
+  and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
 - **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair test
   before `GetType`, `drawPathFast` in the instanced hook, instruments read with
   `edvr_log.py --perf-windows`. Its targets fell about 0.6 ms a frame, nothing
@@ -43,9 +43,9 @@
   was the cost). S2 cleared: 40% of eye-memo misses, 0 disagreements in 8.1M.
   #184 undetermined (no blocked return), as expected.
 - **Build 6 (draft 2026-11-04, "Build 6: one interest mask"):** S1 as a
-  write-through mask, S2, #184 with the pending flags (yes, 2026-11-04),
-  build 5's items 2-3 removed, the temporary lines retired. Next: Argon and
-  Opus review.
+  write-through mask, S2, #184 with the pending flags (yes, 2026-11-04), build
+  5's items 2-3 removed, the temporary lines retired. Antigravity reviewed
+  ("Review of the build 6 plan (2026-11-04, Antigravity)"); next: Opus review.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2282,19 +2282,19 @@ S2) would save. A code survey (Opus, read-only, notes outside the repo:
 In VR every PS constant-buffer bind runs
 `cross_profile::enterSite(Site::FlatPsConstantBuffers, true).stop()`
 (`vscreen.cpp:3223`, 0.096 ms a frame own): a `lock xadd` on one counter
-(`cross_profile_cost.h:83`) and, one call in 64, two
-`QueryPerformanceCounter` calls around an empty stretch. No feature reads it;
-it is the instrument of `docs\design-unified-install-2026-10-12.md` section
-3.3. Of the three options (remove the site, a plain count, keep it), the
-maintainer took the recommendation, the plain count: this one site gets a
-`Probe` begin that does a relaxed load and store of `calls` in place of the
-`fetch_add` (`cross_profile_cost.h:83`). The sampling test, the timing and
-the report are unchanged, and every other site keeps the `fetch_add`.
-Exact for everything a feature decides (nothing reads it). The count is
-exact on one thread; a PS constant-buffer bind from a deferred context on
-another thread at the same moment can lose one count, which the report
-tolerates. Expected 0.06-0.09. Test seam: `tools\cross_profile_test`, the
-site's count over a run of calls on one thread equals the calls.
+(`cross_profile_cost.h:83`) and, one call in 64, two `QueryPerformanceCounter`
+calls around an empty stretch. No feature reads it; it is the instrument of
+`docs\design-unified-install-2026-10-12.md` section 3.3. Of the three options
+(remove the site, a plain count, keep it), the maintainer took the
+recommendation, the plain count: this one site gets a `Probe` begin that does a
+relaxed load and store of `calls` in place of the `fetch_add`
+(`cross_profile_cost.h:83`). The sampling test, the timing and the report are
+unchanged, and every other site keeps the `fetch_add`. Exact for everything a
+feature decides (nothing reads it). The count is exact on one thread; a PS
+constant-buffer bind from a deferred context on another thread at the same
+moment can lose one count, which the report tolerates. Expected 0.06-0.09. Test
+seam: `tools\cross_profile_test`, the site's count over a run of calls on one
+thread equals the calls.
 
 ### Left for build 6, each needing build 5's counts or a design
 
@@ -2582,23 +2582,22 @@ Full consensus reached on Build 5 (`c86670bd`):
 
 Build 5 is ready to implement and fly.
 
-**Consensus noted (2026-11-04).** Agreed on every point. One anchor
-corrected for the implementer: at `c86670bd` the eye and hologram memos are
-stored at `ui_depth.cpp:2902` and `:3623` and invalidated only at
-`:4592-4593`; `:3506-3507` is the HUD scene restore, not a memo site. The
-shadow memos mirror those four lines, in the miss path only, which is exact
-for the reason Argon gives: the pointer-only key moves on a subset of the
-events that move today's key, so every real hit is also a shadow hit.
+**Consensus noted (2026-11-04).** Agreed on every point. One anchor corrected
+for the implementer: at `c86670bd` the eye and hologram memos are stored at
+`ui_depth.cpp:2902` and `:3623` and invalidated only at `:4592-4593`;
+`:3506-3507` is the HUD scene restore, not a memo site. The shadow memos mirror
+those four lines, in the miss path only, which is exact for the reason Argon
+gives: the pointer-only key moves on a subset of the events that move today's
+key, so every real hit is also a shadow hit.
 
 ### Review of the build 5 design (Opus, 2026-11-04), and dispositions
 
 **Changes required** (fresh context, against `c86670bd`; notes outside the
-repo: `b5-opus-review.md`). The production changes in items 1-4, 6 and 7
-hold up as exact on every path traced, except one wrap-around gap in item 4.
-Four test seams could not run as written, and the #184 counters could not
-tell "never ran" from "never happened". Each finding was checked against
-the code; all are taken. Where this table and the item text above differ,
-the table wins.
+repo: `b5-opus-review.md`). The production changes in items 1-4, 6 and 7 hold
+up as exact on every path traced, except one wrap-around gap in item 4. Four
+test seams could not run as written, and the #184 counters could not tell
+"never ran" from "never happened". Each finding was checked against the code;
+all are taken. Where this table and the item text above differ, the table wins.
 
 | # | Finding | Disposition |
 |---|---|---|
@@ -2615,31 +2614,30 @@ the table wins.
 | 11 | Zero disagreements in one 100 s standing flight cannot settle the recycled-address case. | Taken: build 6 words it "none observed in N lookups", and S2's case rests on that plus the frame bound, stated as such. |
 | 12 | The total's lower bound leans on items 3 and 7, the least supported. | Agreed: the 0.25-0.39 ms total is a guide; the per-item criteria decide. |
 
-**Re-review (Opus, fresh context, against `c86670bd`): approved.** All
-twelve findings resolved, each checked in the code. Its five non-blocking
-notes are taken:
+**Re-review (Opus, fresh context, against `c86670bd`): approved.** All twelve
+findings resolved, each checked in the code. Its five non-blocking notes are
+taken:
 - A. Item 3's front entry reads `g_classifierEpoch` after `viewIsSurface`
   returns, as it reads `putSeq`: `surfaceMatches` can bump the epoch
   (`ui_depth.cpp:772`) before the put at `:869`.
 - B. Item 1: `g_t0` and `g_mode` sit in an anonymous namespace
-  (`vr_star_glow.cpp:45`, `:102-106`), and `FirstLevelBind` holds a
-  `ComPtr`. The single storage of `active` moves out of the struct into
+  (`vr_star_glow.cpp:45`, `:102-106`), and `FirstLevelBind` holds a `ComPtr`.
+  The single storage of `active` moves out of the struct into
   `detail::g_vrStarT0Active`, and the mode becomes `detail::g_vrStarMode`
   (other files have their own `g_mode`); no new writer.
-- C. Item 4's summed fake goes in `lifecycle_tests.h`, which
-  `skin_engine_test` also includes (`build.bat:1521-1527`), and the
-  aggregate's reader is declared in `binding_shadow.h`'s external-shadow
-  branch (`:156-161`).
+- C. Item 4's summed fake goes in `lifecycle_tests.h`, which `skin_engine_test`
+  also includes (`build.bat:1521-1527`), and the aggregate's reader is declared
+  in `binding_shadow.h`'s external-shadow branch (`:156-161`).
 - D. For build 6: the F157 coat-pack skip (`vscreen.cpp:2135`) is another
   return before the flag clears; build 5's stamp, bumped at entry, covers it.
 - E. Item 4's slow-half count is an equivalence check, not a never-ran
   signature: build 4 never logged it. The source pin and the two rigs show it
   ran.
 
-Item 7 re-sized from build 4's own log: `psConstantBuffers=2598726/78.97`
-over 805 frames, about 3,230 PS constant-buffer binds a frame, so the 0.096
-ms is about 30 ns a call, of which the locked add is part. Expected
-0.03-0.06 ms; the build's total 0.22-0.36.
+Item 7 re-sized from build 4's own log: `psConstantBuffers=2598726/78.97` over
+805 frames, about 3,230 PS constant-buffer binds a frame, so the 0.096 ms is
+about 30 ns a call, of which the locked add is part. Expected 0.03-0.06 ms; the
+build's total 0.22-0.36.
 
 ## Flight 2026-11-04 (build 5)
 
@@ -2666,8 +2664,8 @@ Expected 0.22-0.36 ms. Map and Unmap own fell 0.631 to 0.606 ms a frame.
 **Per item**, ns per full-path draw (ms a frame at 16,308), each caller grouped
 with its callees:
 - **Item 1, star glow: passed.** `starGlowAfterDraw` 7.25 and
-  `vrStarGlowAfterDraw` 2.38 to 0, 0.157 ms. The draw-thunk lambdas (renamed
-  by the compiler, grouped by file) fell 59.1 to 51.4 ns, 0.125 ms, mostly the
+  `vrStarGlowAfterDraw` 2.38 to 0, 0.157 ms. The draw-thunk lambdas (renamed by
+  the compiler, grouped by file) fell 59.1 to 51.4 ns, 0.125 ms, mostly the
   call they no longer make.
 - **Item 2, `uiDepthOnEyeDraw` inline: no saving.** Build 4's cost in the
   callee sat on one line, `ui_depth.cpp:2895` (4.99 ns, the load of
@@ -2682,11 +2680,11 @@ with its callees:
   cache-hot repeats; the cost was the cold ones, which still miss.
 - **Item 4, engine velocity: passed.** `engineVelocityBeforeDraw` 8.59 to 5.55
   ns (0.05 ms), its compare line 4.32 to 2.74.
-- **Item 7, the plain count: passed, small.** `hookedPSSetConstantBuffers`
-  6.46 to 5.65 ns (0.013 ms; expected 0.03-0.06).
+- **Item 7, the plain count: passed, small.** `hookedPSSetConstantBuffers` 6.46
+  to 5.65 ns (0.013 ms; expected 0.03-0.06).
 
-**Nothing else rose more than 0.1 ms**, grouped as above. New in the profile:
-a `std::unordered_map` lookup keyed on pixel shaders, 0.057 ms, mostly under
+**Nothing else rose more than 0.1 ms**, grouped as above. New in the profile: a
+`std::unordered_map` lookup keyed on pixel shaders, 0.057 ms, mostly under
 `hookedUnmap` through `uiDepthMotionResourceWrittenImpl`. It is an inlining
 change, not new work: build 4's engine-velocity hash (0.058) left the profile,
 and Map and Unmap's own time fell.
@@ -2695,33 +2693,33 @@ and Map and Unmap's own time fell.
 - Composites left in the scene: 0 in every window.
 - `ui depth totals:` wrote depth for 9.0 interface draws a frame (left alone
   36.9), outside build 4's 5.9-6.6. It is the scene, not the build: at this
-  spot, standing still, every flight in the arc has ranged from 3.8 to 14.0
-  a frame (build 3: 6.0), and the share written (20%) is
-  within build 4's 17-26%. Build 4's two windows set too narrow a range for the
-  criterion; future flights judge against the arc's spread.
+  spot, standing still, every flight in the arc has ranged from 3.8 to 14.0 a
+  frame (build 3: 6.0), and the share written (20%) is within build 4's 17-26%.
+  Build 4's two windows set too narrow a range for the criterion; future
+  flights judge against the arc's spread.
 - `--health`: one NEVER APPLIED, prompt label draws (F87p). It is not new: all
-  six earlier logs since `e1606a23` in which a prompt's focus key was set
-  drew 0 label groups; build 4's flight never set one.
+  six earlier logs since `e1606a23` in which a prompt's focus key was set drew
+  0 label groups; build 4's flight never set one.
 
 **Item 6: the counts for build 6** (window ending 19800, a frame):
 - **S2: cleared to build.** The eye memo missed 2,859 times a frame. The
   pointer-only key would have hit on 1,133 of those (40%), with 0
-  disagreements; over the flight, 0 in 8,089,837 eye and 11,199 hologram shadow lookups. Shadow
-  lookups equal real misses in every window. The hologram memo: 3 misses a
-  frame, 0 would-hits, so S2 does nothing there.
+  disagreements; over the flight, 0 in 8,089,837 eye and 11,199 hologram shadow
+  lookups. Shadow lookups equal real misses in every window. The hologram memo:
+  3 misses a frame, 0 would-hits, so S2 does nothing there.
 - **#184: undetermined**, as expected: 0 blocked owner returns in 29,354,697
   scope constructions.
-- `viewIsSurface` calls 3,746, front-cache lookups 10,312 (hits 6,566),
-  engine velocity's slow half 1,710.
+- `viewIsSurface` calls 3,746, front-cache lookups 10,312 (hits 6,566), engine
+  velocity's slow half 1,710.
 
 **What items 2 and 3 say about build 6.** Both moved work without removing a
 cold load, and the cold load was the cost. That is S1's premise: what an
-unclaimed draw pays for is the cache lines it touches, not the instructions.
-S2 attacks the other half of item 3: it removes whole classifier runs, and
-with them the cold `viewIsSurface` misses inside.
+unclaimed draw pays for is the cache lines it touches, not the instructions. S2
+attacks the other half of item 3: it removes whole classifier runs, and with
+them the cold `viewIsSurface` misses inside.
 
-- ruled out: inlining `uiDepthOnEyeDraw`'s fast path as a cut, because its
-  cost is the first load of the ui-depth state, which moved with it into
+- ruled out: inlining `uiDepthOnEyeDraw`'s fast path as a cut, because its cost
+  is the first load of the ui-depth state, which moved with it into
   `beginPanelOverride`.
 - ruled out: a per-slot front cache for `viewIsSurface` as a cut, because it
   takes only the cache-hot repeat lookups; the cost is in the misses, which it
@@ -2729,26 +2727,26 @@ with them the cold `viewIsSurface` misses inside.
 
 ## Build 6: one interest mask, S2 by its counts, #184, and the arc's temporary lines retired (designed 2026-11-04, draft)
 
-The arc's last planned build. Its items wait on build 5's flight where
-marked; the design is written now so the review can run in parallel. A code
-survey (Opus, read-only, notes outside the repo: `b6-survey.md`) supplied
-the anchors, at `c86670bd`; build 5 moves some of them, so the spec re-anchors.
+The arc's last planned build. Its items wait on build 5's flight where marked;
+the design is written now so the review can run in parallel. A code survey
+(Opus, read-only, notes outside the repo: `b6-survey.md`) supplied the anchors,
+at `c86670bd`; build 5 moves some of them, so the spec re-anchors.
 
-**Evidence.** An unclaimed eye draw under DLAA reads 34 module-scope flag
-sites across about 22 cache lines (one or two per module), plus about 7
-fixed lines (`g_state`, `DrawHot`, the binding shadow, the TLS block); build
-4's own-time lines in `beginPanelOverride` and `forwardWithVerdict` sit on
-those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
+**Evidence.** An unclaimed eye draw under DLAA reads 34 module-scope flag sites
+across about 22 cache lines (one or two per module), plus about 7 fixed lines
+(`g_state`, `DrawHot`, the binding shadow, the TLS block); build 4's own-time
+lines in `beginPanelOverride` and `forwardWithVerdict` sit on those loads (the
+0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
 
 ### Changes
 
 1. **S1: a write-through interest mask** (exact; keyless). A `uint64_t
-   interest` at bytes 56-63 of `DrawHot` (`vscreen.cpp:415-432` uses 53 of
-   64). One bit per stored flag the ladder reads, about 31: the survey's
-   sites 3-6, 8-11, 12 (the flag, not its per-draw tail), 13-23, 25-27 and
-   29-33, each bit equal to the flag's whole expression (for example
-   `g_uiDepthOn && !g_uiDepthStoodDown`). Each ladder load becomes a bit test
-   in place; no rung moves.
+   interest` at bytes 56-63 of `DrawHot` (`vscreen.cpp:415-432` uses 53 of 64).
+   One bit per stored flag the ladder reads, about 31: the survey's sites 3-6,
+   8-11, 12 (the flag, not its per-draw tail), 13-23, 25-27 and 29-33, each bit
+   equal to the flag's whole expression (for example `g_uiDepthOn &&
+   !g_uiDepthStoodDown`). Each ladder load becomes a bit test in place; no rung
+   moves.
    - **Writers:** an out-of-line `drawInterestSet(bit, bool)` in
      `vscreen.cpp`, null-safe for `g_state` (null before install and in
      transport-only mode, `:6230`). Install recomputes every bit from the
@@ -2784,51 +2782,50 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
      bit. Zero mismatches over a flight is part of the pass.
    - Expected: about 29 lines touched per unclaimed eye draw down to about
      7. Ms: 0.05-0.15 (S1's earlier bound was 0.5; the flight decides).
-2. **S2, if build 5's counts allow it** (exact only on the flight's
-   evidence). In `bindingSet` (`binding_shadow.cpp:112-118`), call
-   `noteEyeKeySlot` for PsSrv0-3 only when `s.ptr != ptr`; per-slot `gen`
-   still moves on every set, so `srv0IsPanelSized` (`vscreen.cpp:1450`), the
-   scrim cache (`scrim_fix.h:108`, `scrim_fix.cpp:114`) and engine velocity's
-   PsSrv3 compare are unchanged. The key's readers are the eye memo
+2. **S2, if build 5's counts allow it** (exact only on the flight's evidence).
+   In `bindingSet` (`binding_shadow.cpp:112-118`), call `noteEyeKeySlot` for
+   PsSrv0-3 only when `s.ptr != ptr`; per-slot `gen` still moves on every set,
+   so `srv0IsPanelSized` (`vscreen.cpp:1450`), the scrim cache
+   (`scrim_fix.h:108`, `scrim_fix.cpp:114`) and engine velocity's PsSrv3
+   compare are unchanged. The key's readers are the eye memo
    (`ui_depth.cpp:2898`) and the hologram memo (`:3619`); the hologram
-   classifier reads no PS SRV (`:3579-3612`), so S2 cannot change its
-   answers. The eye classifier's plain decline loses one input on a
-   same-pointer re-set: `viewIsSurface` of the re-set view. The exposure is
-   a view freed after a silent D3D unbind and re-created at the same address
-   over an already-learned surface, with its view-memo entry evicted earlier
-   in the same frame; the per-frame bumps of the key
-   (`binding_shadow.cpp:157`) and the classifier epoch (`ui_depth.cpp:4363`)
-   end it at the frame. **Gate:** `ptr_would_disagree` is 0 in build 5's
-   flight, and `ptr_would_hit` is large enough to matter (each hit saves
-   one classifier run, up to four `viewIsSurface` calls). Otherwise S2 is
-   ruled out. Rig: `scrim_metadata_test.cpp:121-123` asserts that a
-   same-pointer re-set moves the key for all eight slots; it splits, PsSrv0-3
-   asserting the key stays and the per-slot `gen` moves.
-3. **#184: the per-draw flags become the draw's own** (a BEHAVIOUR CHANGE;
-   the maintainer said yes on 2026-11-04, the two pending flags below
-   included). Today: an owner draw blocked at
-   `vscreen.cpp:4308` leaves its flags in TLS. The fence that blocks it is
-   raised only on a failed hologram-binding restore (`ui_layer.cpp:1865-1867`)
-   and holds to the frame boundary (`:6792`), so every owner draw for the
-   rest of that frame does the same. The next draws then consume them:
-   (1) a foreign-context draw on the render thread passes `:4308` and runs
-   the UI-depth and hologram re-issue Begins on the foreign context, reading
-   the mode the blocked draw left (`:4675`, `:4692`; the hazard the comment
-   at `:4662-4667` says the TLS exists to prevent); (2) the first
-   non-eye owner draw after the fence clears re-issues into the hologram
+   classifier reads no PS SRV (`:3579-3612`), so S2 cannot change its answers.
+   The eye classifier's plain decline loses one input on a same-pointer re-set:
+   `viewIsSurface` of the re-set view. The exposure is a view freed after a
+   silent D3D unbind and re-created at the same address over an already-learned
+   surface, with its view-memo entry evicted earlier in the same frame; the
+   per-frame bumps of the key (`binding_shadow.cpp:157`) and the classifier
+   epoch (`ui_depth.cpp:4363`) end it at the frame. **Gate:**
+   `ptr_would_disagree` is 0 in build 5's flight, and `ptr_would_hit` is large
+   enough to matter (each hit saves one classifier run, up to four
+   `viewIsSurface` calls). Otherwise S2 is ruled out. Rig:
+   `scrim_metadata_test.cpp:121-123` asserts that a same-pointer re-set moves
+   the key for all eight slots; it splits, PsSrv0-3 asserting the key stays and
+   the per-slot `gen` moves.
+3. **#184: the per-draw flags become the draw's own** (a BEHAVIOUR CHANGE; the
+   maintainer said yes on 2026-11-04, the two pending flags below included).
+   Today: an owner draw blocked at `vscreen.cpp:4308` leaves its flags in TLS.
+   The fence that blocks it is raised only on a failed hologram-binding restore
+   (`ui_layer.cpp:1865-1867`) and holds to the frame boundary (`:6792`), so
+   every owner draw for the rest of that frame does the same. The next draws
+   then consume them: (1) a foreign-context draw on the render thread passes
+   `:4308` and runs the UI-depth and hologram re-issue Begins on the foreign
+   context, reading the mode the blocked draw left (`:4675`, `:4692`; the
+   hazard the comment at `:4662-4667` says the TLS exists to prevent); (2) the
+   first non-eye owner draw after the fence clears re-issues into the hologram
    scratch targets, gated only on `g_holoEye >= 0` (`ui_depth.cpp:3638`,
-   `:3755`); (3) a kSkip from `:2096-2135` (the F157 coat-pack skip at `:2135` among them) offers stale flags to the blend
-   probe. The fix: `struct DrawCallFlags { bool uiDepth, holoDepth,
-   composite; }` filled by `beginPanelOverride` (all false on every early
-   return by construction; `:2536-2550` write it; `:2143-2144` go) and passed
-   to `forwardWithVerdict` at the four thunks' call pairs (`:5277/5291`,
-   `:5360/5373`, `:5440/5462`, `:5526/5554`, the only callers); the scope
-   builds from it and the TLS goes. Plus `if (flags.uiDepth)
-   uiDepthEnd(self);` on the `:4308` return, so the mode does not outlive
-   it. This also removes build 5's deferred item 5 cost (about 11 TLS
-   accesses a draw, 0.02-0.04 ms). Build 5's counter will most likely read
-   0 (the fence is a fault path); the case rests on the code, which is why
-   it is put to the maintainer rather than gated on the count.
+   `:3755`); (3) a kSkip from `:2096-2135` (the F157 coat-pack skip at `:2135`
+   among them) offers stale flags to the blend probe. The fix: `struct
+   DrawCallFlags { bool uiDepth, holoDepth, composite; }` filled by
+   `beginPanelOverride` (all false on every early return by construction;
+   `:2536-2550` write it; `:2143-2144` go) and passed to `forwardWithVerdict`
+   at the four thunks' call pairs (`:5277/5291`, `:5360/5373`, `:5440/5462`,
+   `:5526/5554`, the only callers); the scope builds from it and the TLS goes.
+   Plus `if (flags.uiDepth) uiDepthEnd(self);` on the `:4308` return, so the
+   mode does not outlive it. This also removes build 5's deferred item 5 cost
+   (about 11 TLS accesses a draw, 0.02-0.04 ms). Build 5's counter will most
+   likely read 0 (the fence is a fault path); the case rests on the code, which
+   is why it is put to the maintainer rather than gated on the count.
    - **Included (maintainer, 2026-11-04):** `planetPending` and
      `worldScreenPending` (`ui_depth.cpp:2675`, `:2688`) leak past the same
      returns (consumed only at `vscreen.cpp:4703`, `:4709`, reset by the next
@@ -2845,8 +2842,7 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
      VS-bit gates working; in build 5's profile its call-site lines total
      under 0.02 ms a frame (the draw count 0.002), gate tests included.
 5. **Build 5's items 2 and 3 removed** (maintainer, 2026-11-04; exact both
-   ways). Each saved nothing ("Flight 2026-11-04 (build 5)"), so the code
-   goes:
+   ways). Each saved nothing ("Flight 2026-11-04 (build 5)"), so the code goes:
    - Item 2: `uiDepthOnEyeDraw` back out of line in `ui_depth.cpp`, in build
      4's form (`c86670bd`, `:2890-2904`): the reset, `g_holoDraw = draw`, the
      gate, then the memo. `g_uiDepthDrawDirty` and its sets go. S2's key
@@ -2859,18 +2855,17 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
 
 ### Left out
 
-- Star glow's decline with star glow on; B1 (the 512x512 pass); the
-  `mapMemo` size (17% misses, its cost not measured).
+- Star glow's decline with star glow on; B1 (the 512x512 pass); the `mapMemo`
+  size (17% misses, its cost not measured).
 - The blend probe, `gpu_pass_profile` and the F44/F45/F47/F18 instruments:
   TEMPORARY, but other arcs'.
 
 ### Test seams
 
 - Item 1: a pure header holding the bit layout and an `interestFrom(...)`
-  function, tested in `tools\aa_off_test` against each accessor; a
-  source-text check in the `gate_test.cpp:803` style that every mirrored
-  flag's writer function calls its module's recompute; the drift check in
-  flight.
+  function, tested in `tools\aa_off_test` against each accessor; a source-text
+  check in the `gate_test.cpp:803` style that every mirrored flag's writer
+  function calls its module's recompute; the drift check in flight.
 - Item 2: the split `scrim_metadata_test` cases; `ui_depth_test`: a
   same-pointer re-set keeps the eye memo valid, a pointer change does not.
 - Item 3: the struct and a pure "which re-issues for these flags and this
@@ -2891,10 +2886,211 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
 The L2 spot, standing still, DLAA, one 100 s capture.
 - `beginPanelOverride` and `forwardWithVerdict` own time per full-path draw
   down; the drift check logs no mismatch.
-- With S2: eye-memo misses per eye draw down by about build 5's
-  `ptr_would_hit` share; `ui depth totals:` and the composites line within
-  build 5's range.
+- With S2: eye-memo misses per eye draw down by about build 5's `ptr_would_hit`
+  share; `ui depth totals:` and the composites line within build 5's range.
 - Nothing else up more than 0.1 ms; `--health` with no new NEVER APPLIED.
-- If the code never ran: no drift line ever and no change in the two
-  functions' own time (item 1); eye-memo misses unchanged (item 2); a
-  `thread_local` flag still in the binary's symbols (item 3).
+- If the code never ran: no drift line ever and no change in the two functions'
+  own time (item 1); eye-memo misses unchanged (item 2); a `thread_local` flag
+  still in the binary's symbols (item 3).
+
+### Review of the build 6 plan (2026-11-04, Antigravity)
+
+Reviewed against commit `85006708` (`PR #187`).
+
+#### 1. Build 5 flight analysis and conclusions (`:2644-2729`)
+
+Agree with the Build 5 attribution and conclusions:
+- **What paid:** Item 1 (`starGlowOnDraw` gated inline on `starGlowActive()`,
+  `vscreen.cpp:2591`, `-0.157 ms/frame`), Item 4 (one engine-velocity
+  generation `bindingEngineVelGeneration()`, `binding_shadow.h:76-78`, `-0.05
+  ms/frame`), and Item 7 (`psCbProbeCount` replacing the popcount loop,
+  `ui_depth.cpp:3297`, `-0.013 ms/frame`) together lowered R1 own time per
+  full-path draw from `304.1 ns` to `283.4 ns` (`-20.7 ns/draw`, `-0.34
+  ms/frame` at 16,308 draws without `Map`/`Unmap`).
+- **What did not pay (and why):** Item 2 (`uiDepthOnEyeDraw` inline in
+  `ui_depth.h:161-171`) and Item 3 (`viewIsSurfaceFront` in
+  `ui_depth.cpp:898-915`) confirmed the cache-line rule: moving instructions
+  into `beginPanelOverride` without removing the first cold touch into a
+  module's data line (`detail::g_uiDepthOn` for Item 2; `g_viewMemo` on probe
+  misses for Item 3) shifts sample attribution without reducing total own time.
+  Removing both in Build 6 Item 5 (`:2847-2858`) is the right call.
+- **S2 cleared:** `1,133 / 2,859` eye-memo misses per frame (`39.6%`) were
+  same-pointer SRV re-sets (`ptr_would_hit = 3,205,721` across 2,830 frames)
+  with **0 disagreements** across `8,089,837` eye and `11,199` hologram shadow
+  lookups (`:2696-2700`).
+
+#### 2. Item 1 (`DrawHot::interest` write-through mask) — writer-thread audit and test-rig linkage
+
+The design asks (`:2765-2770`) to verify writer by writer that every mirrored
+flag is written only on the render thread, and to leave any off-render-thread
+writer unmirrored. Auditing all candidate gates in `beginPanelOverride`,
+`forwardWithVerdict`, and the 4 draw hooks surfaced **two off-render-thread
+writers**, **one composite accessor (`flatTemporalCapturing`)**, and **one
+test-rig linker seam**:
+
+1. **Catch 1A (off-render-thread writer) — `fssResActive()` (`vscreen.cpp:2379,
+   4774`):**
+   - `fssResActive()` (`src\d3d11\fss_res.h:101-104`) reads
+     `detail::g_fssResCount != 0`.
+   - `detail::g_fssResCount` is incremented in `fssResNoteCreated`
+     (`src\d3d11\fss_res.cpp:101-110`), called from `hookedCreateTexture2D`
+     (`src\d3d11\device_hook.cpp`), and decremented in `fssResNoteDestroyed`
+     (`fss_res.cpp:113-124`). As `fss_res.h:77-78` documents:
+     *"CreateTexture2D runs on the game's streaming threads."*
+   - If `fssResNoteCreated` on a streaming thread did a non-atomic
+     read-modify-write on `g_state->interest` while the render thread was
+     updating `g_state->interest` mid-draw (e.g. `uiDepthWorldScreenBegin` at
+     `ui_depth.cpp:3488` or `uiLayerBeginCapture` at `ui_layer.cpp`), the two
+     RMWs would race and could drop a bit (or trip the 1-in-1024 drift check
+     at `:2782`).
+   - **Fix:** Either:
+     - *(a)* Leave `fssResActive()` unmirrored at `vscreen.cpp:2379` (it is
+       already nested inside `if (!s->rtv0Eye)` at `vscreen.cpp:2373`, which
+       runs only on the ~676 offscreen draws/frame, never on the ~16,000 eye
+       draws) and `:4774` (reached only when `verdict == kFssTarget`), **or**
+     - *(b)* Store `DrawHot::interest` as `std::atomic<uint64_t>` updated via
+       `fetch_or` / `fetch_and` (`std::memory_order_relaxed`) in
+       `drawInterestSet`, and read via
+       `s->interest.load(std::memory_order_relaxed)` once at the top of the
+       draw. On x86-64, a `memory_order_relaxed` load compiles to the exact
+       same single `mov` instruction as a plain `uint64_t` read, while
+       `lock or` / `lock and` on the cold writer path makes `drawInterestSet`
+       race-free even if called from a streaming/update thread. (Even with
+       *(b)*, leaving `fssResActive()` out of the drift check or out of the
+       mask avoids a benign TOCTOU between `s->interest` loaded at draw entry
+       and `fssResNoteCreated` firing on a streaming thread mid-draw.)
+2. **Catch 1B (off-render-thread writer, if included) —
+   `nativeOnFootBodyCullWanted()` (`vscreen.cpp:5550`):**
+   - In `hookedDrawIndexedInstanced` (`vscreen.cpp:5550`),
+     `nativeOnFootBodyCullWanted()` (`src\d3d11\native_on_foot.h:329-332`)
+     evaluates:
+     `g_nativeOnFootBodyCull.load(relaxed) != 0 && nativeOnFootActive() && !nativeOnFootCameraExternal()`.
+   - While `g_nativeOnFootBodyCull` (`native_on_foot.cpp:35428`) and
+     `g_nativeOnFootState` (`native_on_foot.cpp:35334, 36746, 36846`) are
+     written on the render thread, `g_nativeOnFootCamExternal` is written in
+     `nativeOnFootCameraPublish` (`native_on_foot.h:138-148`) from
+     `controllerHooked -> nativeCamAfterUpdate`
+     (`src\d3d11\native_on_foot_hooks.cpp:365-388`), which runs **on the
+     game's update thread** (`native_on_foot.h:123-124, 136`).
+   - **Fix:** Keep `nativeOnFootBodyCullWanted()` at `vscreen.cpp:5550` out of
+     the mirrored bitmask (or mirror only the render-thread terms
+     `g_nativeOnFootBodyCull != 0 && nativeOnFootActive()`, leaving
+     `!nativeOnFootCameraExternal()` behind the bit).
+3. **Catch 1C (composite accessor) — `flatTemporalCapturing()`
+   (`vscreen.cpp:2143`):**
+   - `flatTemporalCapturing()` (`src\d3d11\flat_temporal.h:26-37`) is not a
+     pure flag read: it checks
+     `detail::g_flatTemporalCapturing && !detail::g_flatTemporalPaused && !g_flatComputeInternal && flatObserveAsOwner(...)`,
+     where `flatObserveAsOwner` calls `GetCurrentThreadId()` and increments
+     `g_flatTemporalForeignCalls` when called off the owner thread.
+   - **Fix:** Mirror only the stored state
+     (`detail::g_flatTemporalCapturing && !detail::g_flatTemporalPaused`, which
+     is always `false` in VR) into `kBitFlatTemporal`, gate `vscreen.cpp:2143`
+     as `if ((interest & kBitFlatTemporal) && flatTemporalCapturing())`, and
+     have `interestFrom(...)` in the test/drift header compute `kBitFlatTemporal`
+     from `detail::g_flatTemporalCapturing && !detail::g_flatTemporalPaused`
+     rather than calling `flatTemporalCapturing()`.
+4. **Catch 1D (test-rig linker seam) — `drawInterestSet` must be header-inline,
+   not an out-of-line symbol in `vscreen.cpp`:**
+   - The draft states (`:2751-2753`): *"A new header declares the bit enum and
+     `void drawInterestSet(uint64_t bit, bool on) noexcept`; `vscreen.cpp`
+     implements it on `g_state->interest` (null-safe before install)."*
+   - Over a dozen unit-test rigs in `build.bat` compile module `.cpp` files
+     **without** `vscreen.cpp` — for example `tools\ui_depth_test` and
+     `tools\hologram_depth_test` compile `src\d3d11\ui_depth.cpp` alone;
+     `tools\screen_motion_test` compiles `src\d3d11\screen_motion.cpp` alone;
+     `tools\particle_capture_test` compiles `src\d3d11\particle_fix.cpp` alone;
+     `tools\ui_quality_test` compiles `src\d3d11\ui_layer.cpp` alone.
+   - If `ui_depth.cpp`, `screen_motion.cpp`, `particle_fix.cpp`,
+     `ui_layer.cpp`,
+     etc. call an out-of-line `drawInterestSet` defined only in `vscreen.cpp`,
+     every one of those test rigs will fail to link (`LNK2019: unresolved
+     external symbol drawInterestSet`).
+   - **Fix:** Define `drawInterestSet` as `inline` in the new pure header
+     (`draw_interest.h`), writing through a C++17 `inline` pointer (or
+     `inline uint64_t g_drawInterest = 0;` mirrored into `g_state->interest` /
+     pointed to by `inline uint64_t* g_drawInterestPtr = nullptr;` that
+     `vscreen.cpp` sets to `&g_state->interest` at `new State()` in
+     `vscreen.cpp:7349` and clears before `delete s` in `vscreen.cpp:7406`).
+     Then `drawInterestSet` is a zero-dependency inline write in every module
+     and a no-op (`g_drawInterestPtr == nullptr`) in standalone test rigs
+     unless a rig points `g_drawInterestPtr` at a local `uint64_t` to test it!
+5. **Verified render-thread-only writers and the `particleSteady()` invariant
+   (`:2776-2781`):**
+   - Verified `particle_fix.cpp:672, 681, 690, 697, 724, 739-743, 950`:
+     `g_rollFreePending` is only set inside `particleOnDraw` (`:672, :681`),
+     which is only called when `particleSteady()` is true (`vscreen.cpp:2223`),
+     and is cleared when leaving `kSteady` (`:950`). `g_rollFreeEngaged` is
+     only set inside `particleRollFreeBegin` (`:697, :724`, gated on
+     `detail::g_particleMode == Mode::kSteady` at `:690`) and cleared in
+     `particleRollFreeEnd` (`:740`) at the end of the same draw
+     (`~RollFreeScope` at `vscreen.cpp:4363`). Because `particleConfigure`
+     only runs between draws, gating `:2009`, `:4363`, and `:4365` on the
+     single `particleSteady` bit is exact.
+   - Verified that all other candidate writers run on the render thread:
+     `ui_depth` (`ui_depth.cpp:3245, 3260, 3488, 3500`), `ui_layer`
+     (`ui_layer.cpp`), `depth_probe` (`depth_probe.cpp`), `panel_curve`
+     (`panel_curve.cpp`), `quad_probe` (`quad_probe.cpp`), `draw_census`
+     (`draw_census.cpp`), `object_probe` (`object_probe.cpp`), `remlok_fix`
+     (`remlok_fix.cpp`), `holo_fix` (`holo_fix.cpp`), `target_sharp`
+     (`target_sharp.cpp`), `scrim_fix` (`scrim_fix.cpp`), `backdrop_fix`
+     (`backdrop_fix.cpp`), `fss_panel` (`fss_panel.cpp`), `wake_pulse`
+     (`wake_pulse.cpp`), `loader_panel` (`loader_panel.cpp`),
+     `celestial_motion` (`celestial_motion.cpp`), `blend_probe`
+     (`blend_probe.cpp`), `screen_motion` (`screen_motion.cpp`),
+     `vr_camera_census` (`vr_camera_census.cpp`), `vscreen_footprint`
+     (`vscreen_footprint.cpp`), `optimized_station` (`optimized_station.cpp`),
+     `desktop_window` (`desktop_window.cpp`), and `native_on_foot`
+     (`native_on_foot.cpp:35334, 35412, 35417, 36746, 36846` — excluding
+     `g_nativeOnFootCamExternal` in Catch 1B).
+
+#### 3. Item 2 (S2 on `g_bindingEyeKeyGen`)
+
+Verified against `src\d3d11\binding_shadow.cpp:48-55, 127-134` and
+`tools\scrim_metadata_test\scrim_metadata_test.cpp:121-123, 154-200`:
+- In `bindingSet` (`binding_shadow.cpp:127-134`), `const bool ptrMoved = (s.ptr
+  != ptr);` is computed before `s.ptr = ptr; ++s.gen;`, so per-slot `s.gen`
+  still advances on every bind call while `noteEyeKeySlot(slot, ptrMoved)`
+  skips bumping `g_bindingEyeKeyGen` when `slot` is `PsSrv0..3` and
+  `!ptrMoved`.
+- **Note for `ui_depth_test.cpp` when executing Item 5 (`:2857-2858`):** When
+  removing Build 5 Item 2/3's rig cases from
+  `tools\ui_depth_test\ui_depth_test.cpp:212-405`, keep the `rigfake` state in
+  `ui_depth_test.cpp:51-73` (`rigfake::on`, `rigfake::eyeKeyGen`, etc.) so Item
+  2's new `ui_depth_test` seam (`:2874-2875`, testing same-pointer SRV re-set
+  vs pointer change on `g_eyeMemo`) can run `uiDepthOnEyeDraw` misses without
+  hitting the `std::abort()` stubs.
+
+#### 4. Item 3 (`#184` `DrawCallFlags` with `planetPending` and `worldScreenPending`)
+
+Verified against `vscreen.cpp:2540-2559, 4307-4745` and
+`ui_depth.cpp:2715-2731, 3144-3152, 3420-3495`:
+- Folding `planetPending` (`vscreen.cpp:4720`) and `worldScreenPending`
+  (`vscreen.cpp:4726`) into `DrawCallFlags` alongside `uiDepth`, `holoDepth`,
+  and `composite` closes the exact same stale-flag window on early returns,
+  because `classifyEyeDraw` (`ui_depth.cpp:2716-2730`) returns `false` when it
+  sets `planetPending` or `worldScreenPending`, meaning `flags.uiDepth` is
+  `false` on those draws and `uiDepthEnd` (`ui_depth.cpp:3144-3152`) never
+  cleared them anyway.
+- **One detail on `uiDepthPlanetBegin` (`ui_depth.cpp:3421`) and the `:4313`
+  blocked return (`:2826-2827`):**
+  - Inside `uiDepthPlanetBegin` (`ui_depth.cpp:3421`), it reads
+    `detail::g_uiDepthDraw.planetSolarPending`. Because `flags.planetPending`
+    is local to the `DrawCallFlags` of the exact eye draw whose
+    `uiDepthOnEyeDraw` just set `g_uiDepthDraw.planetPending` and
+    `g_uiDepthDraw.planetSolarPending`, `planetSolarPending` is always fresh
+    when `flags.planetPending` gates `uiDepthPlanetBegin(self)` at `:4720`.
+  - On the `:4313` (`:4308` in Build 4) `uiLayerIssueBlocked()` return in
+    `forwardWithVerdict`, in addition to `if (flags.uiDepth) uiDepthEnd(self);`,
+    having `uiDepthEnd(self)` (or that return path) also clear
+    `detail::g_uiDepthDraw.planetPending`, `planetSolarPending`, and
+    `worldScreenPending` ensures the module accessors `uiDepthPlanetPending()`
+    and `uiDepthWorldScreenPending()` also read `false` immediately after a
+    blocked draw, matching `uiDepthWantsReissue()`.
+
+#### 5. Items 4 and 5 (retiring temporary lines and removing Build 5's Items 2 and 3)
+
+Agree in full. Keeping `draw mask:` (`src\d3d11\draw_mask_line.h`) as a
+standing log line (`:2842-2846`) is well-justified at `< 0.02 ms/frame` total
+and gives every future log the full-path draw denominator and VS-bit skip
+counts.
