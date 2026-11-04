@@ -435,7 +435,7 @@ void testDrawInterest() {
     check(g_drawInterestPtr == nullptr, "interest: the pointer is null before install, so a write does nothing");
     drawInterestSet(kInterestUiDepth, true);   // must not crash, must not write anywhere
     drawInterestStore(kInterestUiDepthModule, kInterestUiDepthModule);
-    uint64_t mask = 0;
+    std::atomic<uint64_t> mask{0};
     g_drawInterestPtr = &mask;
     drawInterestSet(kInterestUiDepth, true);
     check(mask == interestMask(kInterestUiDepth), "interest: a set raises exactly its bit");

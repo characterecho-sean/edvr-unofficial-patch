@@ -434,9 +434,10 @@ struct alignas(64) DrawHot {
     bool     distanceEnabled = false;
     // Build 6, item 1 (draw_interest.h): one bit per module-scope flag (or stored first test) the ladder reads, written through by the modules that own them. Every read is
     // `s->interest` where the site stands, never a copy held across a call.
-    uint64_t interest = 0;
+    std::atomic<uint64_t> interest{0};   // atomic: teardown writers may run off the render thread; every access is relaxed (draw_interest.h)
 };
 static_assert(sizeof(DrawHot) == 64 && alignof(DrawHot) == 64, "DrawHot is one 64-byte cache line: growing it spills the per-draw fields onto a second line");
+static_assert(std::atomic<uint64_t>::is_always_lock_free, "the interest mask is read and written without a lock");
 
 struct State : DrawHot {
     VTableHook hook;
@@ -1703,16 +1704,17 @@ void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
     {
         const uint64_t expected = drawInterestExpected();
         ++g_drift.checks;
-        g_drift.bitsSet = interestPopcount(s->interest);
-        const uint64_t diff = expected ^ s->interest;
+        g_drift.bitsSet = interestPopcount(s->interest.load(std::memory_order_relaxed));
+        const uint64_t held = s->interest.load(std::memory_order_relaxed);
+        const uint64_t diff = expected ^ held;
         if (diff) {
             ++g_drift.mismatches;
             if (!g_driftNoted) {
                 g_driftNoted = true;
                 const unsigned bit = interestLowestBit(diff);
                 Log::get().note("draw interest: DRIFT -- the mask held 0x%llX where the modules' expressions give 0x%llX; the lowest differing bit is %u (%s), %s in the mask. Said once.",
-                                static_cast<unsigned long long>(s->interest), static_cast<unsigned long long>(expected), bit, interestBitName(bit),
-                                (s->interest >> bit) & 1u ? "set" : "clear");
+                                static_cast<unsigned long long>(held), static_cast<unsigned long long>(expected), bit, interestBitName(bit),
+                                (held >> bit) & 1u ? "set" : "clear");
             }
         }
     }
@@ -1923,7 +1925,7 @@ __forceinline const ResourceInfo* rtv0Resolved(State* s) {
 
 // Build 6, item 1 (draw_interest.h): one interest bit, read from the State where the site stands. Never hold the mask in a local across a call: the UI layer's fence rises in the middle
 // of a draw (ui_layer.cpp, a failed hologram restore) and forwardWithVerdict reads it again later in the same call.
-__forceinline bool interestHas(const State* s, DrawInterestBit b) { return (s->interest & interestMask(b)) != 0; }
+__forceinline bool interestHas(const State* s, DrawInterestBit b) { return (s->interest.load(std::memory_order_relaxed) & interestMask(b)) != 0; }
 
 // visual.desktop_window (desktop_window.h): a draw whose render target 0 is the swap chain's buffer 0 is Elite's own desktop mirror, which the feature replaces while it
 // draws the eye image there. The cost on the draw path is one relaxed load while the feature is off; while it draws, the compare reads the answer the binding shadow already
@@ -7406,7 +7408,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     // Build 6, item 1: every bit from the real expressions now, after the configure sweep (modules that no configure above touches carry state from before this install).
-    g_state->interest = drawInterestExpected();
+    g_state->interest.store(drawInterestExpected(), std::memory_order_relaxed);
 
     // The panel size is NOT read from config here.
     //

@@ -16,6 +16,7 @@
 // THREADS. Every writer that is mirrored runs on the render thread (Present, the tk ticks, the config refresh, menu actions, mid-draw), and the ladder reads on it, so the
 // mask is a plain field. Flags with a writer on another thread are not mirrored: drawGateWanted, fssResActive(), nativeOnFootBodyCullWanted(); nor are computed wants
 // (introPanelWants, introCurveWants, sunglareWantsDraws).
+#include <atomic>
 #include <cstdint>
 
 namespace edvr {
@@ -85,21 +86,23 @@ static_assert((kInterestOptimizedStation | kInterestDesktopWindow | kInterestNat
               "every bit belongs to a module");
 
 // State::interest's address while hooks are installed; null otherwise (see the header comment).
-inline uint64_t* g_drawInterestPtr = nullptr;
+inline std::atomic<uint64_t>* g_drawInterestPtr = nullptr;
+
+// Replace a module's bits with the ones its expressions give now. A no-op while the pointer is null. A compare-exchange loop with relaxed ordering, so no reader ever sees a
+// transient value and a concurrent writer of ANOTHER module's bits is never overwritten. Teardown writers (the shutdown recomputes) may run off the render thread under the
+// loader lock, hence the atomic CAS store; two writers of the SAME module on two threads can still leave its bits reflecting the earlier read, which is only possible on the
+// abnormal-unload path.
+inline void drawInterestStore(uint64_t moduleMask, uint64_t bits) {
+    std::atomic<uint64_t>* const p = g_drawInterestPtr;
+    if (!p) return;
+    uint64_t old = p->load(std::memory_order_relaxed);
+    while (!p->compare_exchange_weak(old, (old & ~moduleMask) | (bits & moduleMask), std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
 
 // Set or clear one bit. A no-op while the pointer is null.
 inline void drawInterestSet(DrawInterestBit b, bool on) {
-    uint64_t* const p = g_drawInterestPtr;
-    if (!p) return;
-    if (on) *p |= interestMask(b);
-    else *p &= ~interestMask(b);
-}
-
-// Replace a module's bits with the ones its expressions give now. A no-op while the pointer is null.
-inline void drawInterestStore(uint64_t moduleMask, uint64_t bits) {
-    uint64_t* const p = g_drawInterestPtr;
-    if (!p) return;
-    *p = (*p & ~moduleMask) | (bits & moduleMask);
+    drawInterestStore(interestMask(b), on ? interestMask(b) : 0);
 }
 
 // One bit of a computed mask: `cond` as the bit when set.

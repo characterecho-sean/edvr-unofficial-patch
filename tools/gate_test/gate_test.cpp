@@ -1775,11 +1775,12 @@ int interestSourceChecks(const std::string& root) {
             allCleared = allCleared && vs.substr(from, at - from).find("g_drawInterestPtr = nullptr;") != std::string::npos;
         }
         verify(deletes == 2 && allCleared, "g_drawInterestPtr is cleared before BOTH deletes of g_state");
-        verify(vs.find("uint64_t interest = 0;") != std::string::npos, "DrawHot carries the 64-bit mask");
+        verify(vs.find("std::atomic<uint64_t> interest{0};") != std::string::npos, "DrawHot carries the 64-bit mask");
         const std::string noSpace = withoutSpaces(vs);
         // A copy of the mask into anything (`= g_state->interest;`, `= s->interest;`) is the held local the fence forbids; the only reads are the bit tests.
         const bool heldLocal = noSpace.find("=g_state->interest;") != std::string::npos || noSpace.find("=s->interest;") != std::string::npos ||
-                               noSpace.find("{g_state->interest}") != std::string::npos || noSpace.find("{s->interest}") != std::string::npos;
+                               noSpace.find("{g_state->interest}") != std::string::npos || noSpace.find("{s->interest}") != std::string::npos ||
+                               noSpace.find("=g_state->interest.load(") != std::string::npos || countOf(noSpace, "=s->interest.load(") > 1;   // the drift check holds one, by design
         verify(!heldLocal, "no local copy of the mask is held across a call: every site reads State::interest where it stands");
         verify(vs.find("thread_local bool t_uiDepthThisDraw") == std::string::npos && vs.find("thread_local bool t_holoDepthThisDraw") == std::string::npos &&
                    vs.find("thread_local bool t_compositeThisDraw") == std::string::npos,

@@ -1494,7 +1494,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     // drive are shutdown (below) and the recompute itself, over every combination of the three flags; the stood-down writer (uiDepthReissueBegin's budget) and the two
     // configure writers are covered by gate_test's source-text check. The bits outside this module's mask must never be touched.
     {
-        uint64_t mask = kInterestAllBits;
+        std::atomic<uint64_t> mask{kInterestAllBits};
         g_drawInterestPtr = &mask;
         bool allOk = true;
         for (unsigned f = 0; f < 8; ++f) {

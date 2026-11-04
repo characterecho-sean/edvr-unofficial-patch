@@ -1867,7 +1867,7 @@ int main(int argc, char** argv) {
         // (ui_layer.cpp, a failed hologram restore) needs a hologram binding that fails to put EDVR's shader back, which this rig has no way to stage, so the raise is pinned by
         // gate_test's source-text check (every write of g_uiLayerIssueBlocked is followed by uiLayerRecomputeInterest() with no D3D call between) and the rig drives its other
         // writers: the recompute after a raise made by hand, the lift at the frame boundary, and refreshLive through uiLayerConfigure.
-        uint64_t mask = 0;
+        std::atomic<uint64_t> mask{0};
         g_drawInterestPtr = &mask;
         const auto bit = [](DrawInterestBit b) { return interestMask(b); };
         const auto matches = [&](const char* what) {
