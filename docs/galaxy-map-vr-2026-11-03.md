@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build BUILT, full build green, NOT FLOWN: sprites pointing down the grid's vertical, the hover halo out of the panel mask, and a depth test for the map's sprites (see "After the third flight" and "Sprite order"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build BUILT, full build green, NOT FLOWN: the frame rate back by dropping the sprites' stencil write-backs, overlays held steady against the game's rounded eye, text parallel to the grid (see "After the fourth flight"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -19,7 +19,7 @@ Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` 
 
 Temporary: none left. The self-check, the F111 map probe and the stillness bounds are gone. No new keys.
 
-Next: the flight (fourth card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: the flight (fifth card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: B10B032BDFD46700 as a panel, because its n=6 records sit in the UI frame at their own depth: the hover halo round the hovered star (dump 123832862001, record 1258) and the heading text. In the mask, the halo put the arrow at panel depth whenever a star was hovered.
@@ -165,7 +165,45 @@ Log edvr_gfx_20261104_123510, build 6a12ef42, dumps 123832862001 and 12384539600
 
 Also read: the "another caller" line named only the stars' own call (see Ruled out), so it is gone. `its up written` runs 246 to 2309 times in 30 s while the map moves.
 
-## Flight card, fourth build (VR, cockpit, Galaxy Map open)
+## After the fourth flight
+
+Log edvr_gfx_20261104_132124, build 759ec617, dump 132601814001, Pimax Crystal Super, 2016x2017 in, 4032x4034 out. Sean: "I think this basically works"; "the system icons seem to wobble"; "performance while in the galaxy map drops precipitously on my 5090. From 90 fps down to sub 45"; "Could we also normalize the text so it's parallel to the flat grid below?"
+
+### The frame rate
+
+MEASURED. `native timing CPU`: 450 frames in 10 s on the map against 900 on the build before; transfer 5 ms against 0.2 ms, so the GPU was behind, and `draw hook CPU` rose only from about 1.1 to 1.56 ms. A micro-benchmark on this RTX 5090 (560 sprites a frame at 4032x4034, GPU ms by timestamps):
+
+| Pattern | GPU ms |
+|---|---|
+| Colour, stencil write-back on the game's depth-stencil (third build) | 0.361 |
+| Colour with D16 test, write-back, depth issue with no target (fourth build) | 5.530 |
+| Colour with D16 test, depth issue with no target, no write-back | 0.494 |
+| Colour with D16 test, depth issue with the target kept at write mask 0 | 0.484 |
+| The same with the write-back | 5.561 |
+
+Alternating the private D16 with the game's depth-stencil per draw is the whole cost. The write-backs are off for the map's sprites in VR: the only draws that test stencil are FC1193AFFC596F74 at #1 and #2, and each eye's depth-stencil is cleared, stencil included, immediately before them (`D dsv=@44 f=3 z=0 s=0 q=127`, then q=128), so the bit a sprite writes is cleared before anything can read it. The depth issue keeps the target bound, which also costs less CPU (0.27 against 0.40 ms).
+
+### The wobble
+
+The game's eye in the map frame is float32 at about 50000 units, one step 0.0039, and moves in several-step jumps: x steps of -0.0078, +0.0118, -0.0079 between frames, peak 0.006 against a smooth fit, which is 2.8 pixels at 5 units on the 4032 image, 1.4 at 10, 0.7 at 20. Image motion measured by phase correlation on an icon at 3.8 units swings up to ±4 pixels between frames (a smooth eye gives ±2), and the size matches the rounding (3.25 pixels rms). The frame-by-frame signs do not all match the dump's `now` rows, whose rounding need not be the draw's, and icons at 12 to 16 units fit the smooth eye better than the rounded one. So the amplitude is MEASURED and the mechanism is INFERRED.
+
+The precise parts exist. Stage 0's position is constant at rest, and the UI frame's two cameras hold each eye's offset in float32 near zero (camera+0x50 in the refresh hook, kind 5): map eye = position + o.x*rows[0] + o.y*rows[1] + o.z*rows[2] within 0.0015 for both eyes in this dump. The icons, labels, rings and stems now position from (W - position) - offset, exact for near values, whenever the game's eye is within 0.04 units of one of the two (rest), else from the game's own eye (a moving map, whose pose can lag a frame). Stems needed their own transcription (3028E7C6E0E097F9). Rig, with 3 steps of noise on the eye 4 units away: spread 0 NDC, against 2.9e-3 to 3.8e-3 with the game's formula. Stars and sky stay the game's, so a very near star's glow can still jitter under its steady icon.
+
+### Text parallel to the grid
+
+The labels take the same up as the icons, so a baseline's direction, cross(gridUp, ray), lies in the grid's plane; rig: its y component is at most 1e-6 of its length. Labels on the plane stay on it. The cost is the one named when this was first decided the other way: text fans out by about 26 degrees at tan 0.5, with the grid's own lines.
+
+## Flight card, fifth build (VR, cockpit, Galaxy Map open)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
+
+1. Open the map, read the fps. Expect 90 as on the third build. Pan and orbit.
+2. Hold still and move the head slowly near a close star (zoom in till one is about 4 units off). Expect: its icon, label, ring and stem steady together. Insert dump.
+3. Look across the view at labels. Expect: baselines run with the grid. Check they still read comfortably at the sides, and that nothing is lost: the bookmark behind the triangle stays hidden, stacked icons stay whole.
+
+Log: `galaxy map: the stencil write-backs ... are off`; `galaxy map: the two eyes' offsets ... are published`; the 30 s `map pointer:` line with stems swapped, eyes written, declined write-backs; `native timing CPU` frames in 10 s and transfer back near 0.2 ms.
+
+## Flight card, fourth build (flown 13:21)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 
@@ -185,7 +223,7 @@ Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-bu
 
 Log: `galaxy map: the map camera's up is bound at vertex constant slot 10`; the 30 s `map pointer:` line with ring swaps, `noPose` at 0 and `camWrites` rising only while the map moves. `galaxy map: the arrow's tip` flips should be far fewer than the 16 in 4.2 s of the last flight. If these are missing, the code never ran.
 
-## Sprite order (BUILT in the fourth build, NOT FLOWN)
+## Sprite order (FLOWN in the fourth build, 13:21)
 
 Sean, on the crop of dump 095453560001: "that orange bookmark is deep below the large green triangle and yet it appears drawn on top". The numbers agree: bookmark record 282 at 155 units, triangle records 513 and 514 at 6 units. In the enlarged crop the triangle's rim and fill show through the bookmark's dark veil and its orange is untinted, so the bookmark was painted after the triangle.
 
@@ -193,7 +231,7 @@ The game does sort. Dump 110152762001's list runs from 18470 units to about 10, 
 
 Built, not depending on the answer: a real depth test in the HDR layer for the map's sprites (Sean: "After this flight"). Each draw tests depth (GREATER_EQUAL, the game's depth being reversed) with no write, then a colourless second issue writes depth only where the sprite's alpha is at least 0.3, with a clip pixel shader and a bias of 4 steps so a later quad in the same plane is not lost to rounding. So a nearer solid part hides anything farther drawn after it, the see-through parts block nothing, and equal depths fall back to the game's order. Rings and stems test only. Everything beyond about 6500 units collapses to depth 0 in D16 and also falls back to the game's order.
 
-Cost: a D16 target at the layer's size, 20 MB an eye at 4508x4510, let go when the map shuts, and about 700 more draws a frame, to read in `draw hook CPU`. The stencil write-backs stay: draws FC1193AFFC596F74 and E8FDC0D92EEBA6D7 at the frame's start read or write the stencil, and whether they depend on last frame's bit 0x04 cannot be proved from the census. Left wrong: a far sprite after a near one still shows over the near one's soft edges.
+Cost: a D16 target at the layer's size, 20 MB an eye at 4508x4510, let go when the map shuts, and a second issue per sprite. As first built it kept the stencil write-backs, on the reasoning that draws FC1193AFFC596F74 at the frame's start might read last frame's bit, and that halved the frame rate; see "The frame rate" for why they went. Left wrong: a far sprite after a near one still shows over the near one's soft edges.
 
 ## Flight card, second build (flown 11:00)
 

@@ -11,6 +11,9 @@
 //      vertical (a stem's direction) and the label's does not; a ray within 16 degrees of the vertical takes the camera's up; no NaN at the vertical
 //   G8 the sprites' depth with the real states and pixel shaders: reversed depth (a nearer clip position is larger), a far quad drawn after a near one is rejected where the near one's
 //      alpha is at or over kMapDepthAlpha and shows where it is under, near over far in either order, a second quad in the same plane draws whole at D16, the bias is four steps farther
+//   G10 text parallel to the grid: a label's baseline has no y component in the world (away from the hand-over), and the icon's corners are the label's
+//   G11 the wobble: three steps of float32 noise in the game's eye (at 50000 units) move an icon, a label, a triangle, a ring and a stem 4 units away by at most 2e-5 NDC with the precise parts and
+//       10 times that or more with the game's formula; the right one of the two eyes is picked; with the parts absent, or the game's eye 0.1 units from them, the output is the game's formula
 //   G6 the probe on the GPU: a point at the arrow's tip is counted by an occlusion query where the mask is set, or set on both sides of it along an axis within reach, and not
 //      where it is clear or set on one side only, a record with a positive scale rasterizes nothing, and the layer's pixels do not change (write mask 0)
 // The same shaders against the GAME's bytecode (the vs_*.dxbc of the shader dump) are compared by hand, with a one-off program that includes this file (GALAXY_MAP_VS_TEST_NO_MAIN):
@@ -142,7 +145,7 @@ struct Consts {
     float cb0[12][4] = {};
     float cb1[279][4] = {};
     float cb2[2][4] = {};
-    float cb10[1][4] = {};   // MapCam: mapUp
+    float cb10[4][4] = {};   // MapCam: mapUp, mapPos (w 1 when the eyes are valid), the two eyes' offsets
 };
 struct Scene {
     std::vector<Vert> verts;
@@ -355,7 +358,7 @@ inline V3 refIconUp(V3 ray, V3 gridUp, V3 cameraUp) {
     return normalize(gridUp * (1.0 - t) + cameraUp * t);
 }
 // mode 0: the icon (C31238), 1: the icon with b2 (12382D), 2: the arrow (4EF6DD, replaced)
-inline Ref reference(int mode, const Scene& sc, size_t i) {
+inline Ref reference(int mode, const Scene& sc, size_t i, const V3* camOverride = nullptr) {
     const Vert& vert = sc.verts[i];
     const Rec& rec = sc.recs[vert[0]];
     const Consts& c = sc.c;
@@ -371,7 +374,7 @@ inline Ref reference(int mode, const Scene& sc, size_t i) {
     float s;
     std::memcpy(&s, &rec.a[1], 4);
     const V3 W{rec.p[0], rec.p[1], rec.p[2]};
-    const V3 cam{c.cb1[275][0], c.cb1[275][1], c.cb1[275][2]};
+    const V3 cam = camOverride ? *camOverride : V3{c.cb1[275][0], c.cb1[275][1], c.cb1[275][2]};   // the eye, in double when a test holds a position float32 cannot
     const Q q = readQ(rec);
     if (mode == 2) {
         const V3 center = W - (s < 0 ? V3{0, 0, 0} : cam);
@@ -395,7 +398,7 @@ inline Ref reference(int mode, const Scene& sc, size_t i) {
         const V3 mu{c.cb10[0][0], c.cb10[0][1], c.cb10[0][2]};
         const V3 up{dp3(c.cb0[9], mu), dp3(c.cb0[10], mu), dp3(c.cb0[11], mu)};
         const V3 gridUp{c.cb0[9][1], c.cb0[10][1], c.cb0[11][1]};   // dot(float4(0, 1, 0, 0), cb0[9..11])
-        refAxes(pcf, mode == 0 ? refIconUp(pcf, gridUp, up) : up, Fe, Re, F, R, U);   // the label (mode 1) keeps the camera's up
+        refAxes(pcf, refIconUp(pcf, gridUp, up), Fe, Re, F, R, U);   // the icon (mode 0) and the label (mode 1) are spanned on the same up
         sx = dot(r277, Re) < 0 ? -1.0 : 1.0;
         sy = dot(r278, Ue) < 0 ? -1.0 : 1.0;
     }
@@ -817,8 +820,8 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
     // (b) a general ray: the facing icon's top edge is level when the eye looks along the ray with its up in the plane of mapUp and the ray
     const V3 mapUp = normalize({0.1, 0.9, 0.2});
     const V3 gridUp{0, 1, 0};
-    const V3 ray{7, -20, 15};   // 37 degrees from the vertical: the icons and rings are spanned on the grid's up here, the labels on the map camera's
-    const Frame fr = frameAlong(ray, mapUp), frg = frameAlong(ray, gridUp);
+    const V3 ray{7, -20, 15};   // 37 degrees from the vertical: the icons, labels and rings are spanned on the grid's up here
+    const Frame frg = frameAlong(ray, gridUp);
     {
         const Consts cc = cleanEye(frg, kCam, mapUp, 0.02, 0.02);
         std::vector<Corner> quad;
@@ -834,7 +837,7 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         check(top < 1e-4 && bottom < 1e-4, label);
     }
     {
-        const Consts cc = cleanEye(fr, kCam, mapUp, 0.02, 0.02);
+        const Consts cc = cleanEye(frg, kCam, mapUp, 0.02, 0.02);
         std::vector<Corner> quad;
         for (int sx = -1; sx <= 1; sx += 2)
             for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.0, 0.0});
@@ -843,7 +846,7 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         const double top = std::fabs(ndcY(&out[1 * w.label->outFloats + w.label->posAt]) - ndcY(&out[3 * w.label->outFloats + w.label->posAt]));
         const double bottom = std::fabs(ndcY(&out[0 * w.label->outFloats + w.label->posAt]) - ndcY(&out[2 * w.label->outFloats + w.label->posAt]));
         char label[200];
-        std::snprintf(label, sizeof label, "G3.label level on a general ray (eye up in the plane of the map camera's up and the ray): top edge %.2e and bottom edge %.2e in NDC", top, bottom);
+        std::snprintf(label, sizeof label, "G3.label level on a general ray (eye up in the plane of the grid's up and the ray: the labels are spanned on it as the icons are): top edge %.2e and bottom edge %.2e in NDC", top, bottom);
         std::printf("%s\n", label);
         check(top < 1e-4 && bottom < 1e-4, label);
     }
@@ -1262,7 +1265,7 @@ inline void runIconUpTests(Rig& rig, const WorldProgs& w) {
     const V3 mapUp = normalize({0, 0.70710678, 0.70710678});   // the map camera's up
     const V3 grid{0, 1, 0};
     // (a) away from the map camera's forward: the quad's up edge (the corners (0, 1, 0) and (0, -1, 0) of the record) runs along the grid vertical's image through its centre,
-    // which is a stem's direction; the label's up edge, on the camera's up, does not. The eye looks off to one side (a general eye, the record well off its axis).
+    // which is a stem's direction, and so does the label's (text parallel to the grid). The eye looks off to one side (a general eye, the record well off its axis).
     const Frame eye = frameAlong({0.35, -0.4, 0.85}, {0.04, 1.0, 0.05});
     const Consts cc = cleanEye(eye, kCam, mapUp, 0.02, 0.02);
     for (const V3 center : {V3{-9, -20, 12}, V3{14, -28, 20}, V3{-20, -12, 25}}) {
@@ -1286,9 +1289,9 @@ inline void runIconUpTests(Rig& rig, const WorldProgs& w) {
         ds[1] = p1[1] - p0[1];
         const double aIcon = imageAngle(di, ds), aLabel = imageAngle(dl, ds);
         char text[240];
-        std::snprintf(text, sizeof text, "G7.stem: ray (%g, %g, %g), |cos| with the vertical %.2f: the icon's up edge is %.2e rad from the grid vertical's image, the label's %.3f rad", center.x, center.y, center.z, cosV, aIcon, aLabel);
+        std::snprintf(text, sizeof text, "G7.stem: ray (%g, %g, %g), |cos| with the vertical %.2f: the icon's up edge is %.2e rad from the grid vertical's image, the label's %.2e rad", center.x, center.y, center.z, cosV, aIcon, aLabel);
         std::printf("%s\n", text);
-        check(cosV < 0.82 && aIcon < 1e-3 && aLabel > 0.02, text);
+        check(cosV < 0.82 && aIcon < 1e-3 && aLabel < 1e-3, text);
     }
     // (b) a ray within 16 degrees of the vertical (|cos| >= 0.96) takes the camera's up: the icon's corners are the label's; in between they hand over without a jump
     for (const double deg : {0.0, 5.0, 10.0, 15.9}) {
@@ -1331,7 +1334,7 @@ inline void runIconUpTests(Rig& rig, const WorldProgs& w) {
 // ---- G8: the sprites' depth ---------------------------------------------------------------------------------------------------
 // The real states (mapui::depthStateDesc, depthRasterDesc), the real pixel shaders (kMapDepthSpritePS) and a D16 depth at 16x16, through WARP with the debug layer. The quads are the
 // game's clip positions: clip.z = 0.1 and clip.w the distance (a constant-distance quad), or a tilted plane for the same-plane case. A quad's colour issue tests the depth and writes
-// none (a colour pixel shader of the test's); its depth issue is the sprite's real depth pixel shader, no render target, depth write on, the biased rasterizer.
+// none (a colour pixel shader of the test's); its depth issue is the sprite's real depth pixel shader with the render target kept under write mask 0, depth write on, the biased rasterizer.
 inline void runDepthTests(Rig& rig) {
     const UINT N = 16;
     const char* vsText = R"HLSL(
@@ -1441,7 +1444,8 @@ float4 main(float2 uv : TEXCOORD0) : SV_TARGET { return col; }
             rig.ctx->OMSetBlendState(bsOpaque.Get(), nullptr, 0xFFFFFFFFu);
             rig.ctx->PSSetShader(colourPsO.Get(), nullptr, 0);
         } else {
-            rig.ctx->OMSetRenderTargets(0, nullptr, dsv.Get());
+            ID3D11RenderTargetView* rt[1] = {rtv.Get()};   // the layer's target is kept, under the probe's write mask 0
+            rig.ctx->OMSetRenderTargets(1, rt, dsv.Get());
             rig.ctx->OMSetDepthStencilState(testWrite.Get(), 0);
             rig.ctx->RSSetState(withBias ? rsBias.Get() : rsGame.Get());
             rig.ctx->OMSetBlendState(bsNone.Get(), nullptr, 0xFFFFFFFFu);
@@ -1524,6 +1528,16 @@ float4 main(float2 uv : TEXCOORD0) : SV_TARGET { return col; }
         std::printf("%s\n", text);
         check(steps == -edvr::mapui::kDepthBias, text);
     }
+    // the depth issue keeps the layer's target under write mask 0: the layer's pixels are what the colour issue left, byte for byte, while the depth is written
+    {
+        std::vector<uint8_t> c1, c2;
+        std::vector<uint16_t> dw;
+        clearAll(); drawQuad(nearQ, false, true); readColour(c1);
+        clearAll(); drawQuad(nearQ, false, true); drawQuad(nearQ, true, true); readColour(c2); readDepth(dw);
+        std::snprintf(text, sizeof text, "G8.target-kept: the layer is unchanged by the depth issue (%s) and the depth is written (%u of 65535 at the middle)", c1 == c2 ? "identical" : "DIFFERENT", dw[N * 8 + 8]);
+        std::printf("%s\n", text);
+        check(c1 == c2 && dw[N * 8 + 8] > 0 && id(c2, 8, 8) == 'N', text);
+    }
     // near first, then far: the far quad is rejected everywhere the near one is solid
     pair(nearQ, farQ, c);
     std::snprintf(text, sizeof text, "G8.near-then-far: near %u far %u of 256", count('N', 0, N), count('F', 0, N));
@@ -1572,6 +1586,228 @@ float4 main(float2 uv : TEXCOORD0) : SV_TARGET { return col; }
     }
 }
 
+// ---- G10: text parallel to the grid ---------------------------------------------------------------------------------------
+// A label's baseline (the record's x axis, corners (-1, 0, 0) and (+1, 0, 0)) lies in the grid's plane: its world direction has no y component, away from the hand-over; the icon's agrees.
+inline void runTextParallelTests(Rig& rig, const WorldProgs& w) {
+    const V3 mapUp = normalize({0.1, 0.9, 0.2});
+    const std::vector<Corner> base = {{{-1, 0, 0}, 0, 0}, {{1, 0, 0}, 0, 0}};
+    for (const V3 center : {V3{7, -20, 15}, V3{-9, -20, 12}, V3{14, -28, 20}, V3{-20, -12, 25}, V3{30, -9, -14}}) {
+        const double cosV = std::fabs(center.y) / std::sqrt(dot(center, center));
+        const Frame fr = frameAlong(center, {0.1, 1.0, 0.2});
+        const Consts cc = cleanEye(fr, kCam, mapUp, 0.02, 0.02);
+        const Scene sc = iconScene(cc, mapCameraQ(), center, 1.7f, base);
+        const std::vector<float> lab = run(rig, *w.label, w.ilLabel, sc), icon = run(rig, *w.icon, w.ilIcon, sc);
+        V3 p0{}, p1{};
+        const bool ok = iconUndo(cc, &lab[0 * w.label->outFloats + w.label->posAt], p0) && iconUndo(cc, &lab[1 * w.label->outFloats + w.label->posAt], p1);
+        const V3 d = p1 - p0;
+        const double len = std::sqrt(dot(d, d));
+        double same = 0;
+        for (size_t i = 0; i < base.size(); ++i)
+            for (int k = 0; k < 4; ++k) same = std::fmax(same, std::fabs(lab[i * w.label->outFloats + w.label->posAt + k] - icon[i * w.icon->outFloats + w.icon->posAt + k]));
+        char text[300];
+        std::snprintf(text, sizeof text, "G10.text: ray (%g, %g, %g), |cos| with the vertical %.2f: the label's baseline is %.3f long and has y component %.2e of it; the icon's corners are the label's to %.2e", center.x, center.y, center.z,
+                      cosV, len, ok ? std::fabs(d.y) / len : 1.0, same);
+        std::printf("%s\n", text);
+        check(ok && cosV < 0.82 && len > 3.0 && std::fabs(d.y) / len < 1e-3 && same < 1e-4, text);
+    }
+}
+
+// ---- G11: the wobble --------------------------------------------------------------------------------------------------------
+// The game's eye at about 50000 units is float32 and moves in several-step jumps. With the precise parts in MapCam (stage 0's position and each eye's offset, mapPos.w 1) the clip
+// position of an icon, a label, a triangle, a ring and a stem 4 units away does not move with that noise, and with the parts absent (w 0) it follows the game's formula.
+struct StemVert { float v0[4]; float v1; float v2[3]; float v3[3]; float v4[4]; float v5[4]; float v6[4]; };
+static_assert(sizeof(StemVert) == 92, "the stems' vertex stride");
+inline ComPtr<ID3D11InputLayout> makeStemLayout(Rig& rig, const std::vector<uint8_t>& code) {
+    const D3D11_INPUT_ELEMENT_DESC el[7] = {
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 44, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"POSITION", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 60, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 76, D3D11_INPUT_PER_VERTEX_DATA, 0}};
+    ComPtr<ID3D11InputLayout> il;
+    hr(rig.dev->CreateInputLayout(el, 7, code.data(), code.size(), &il), "CreateInputLayout (stem)");
+    return il;
+}
+inline std::vector<float> runStem(Rig& rig, const Prog& prog, ID3D11InputLayout* il, const std::vector<StemVert>& verts, const Consts& c) {
+    const std::vector<Rec> dummy(1);
+    return runRaw(rig, prog, il, verts.data(), static_cast<UINT>(verts.size()), sizeof(StemVert), dummy, std::vector<Bone>(), c);
+}
+// A stem's four vertices: the line from a to b, both ends (v1.x above 1.5 for the end at b), a width in v0.w * v4.z.
+inline std::vector<StemVert> stemVerts(V3 origin, V3 a, V3 b) {
+    std::vector<StemVert> v;
+    for (int end = 0; end < 2; ++end)
+        for (int side = 0; side < 2; ++side) {
+            StemVert s{};
+            s.v0[1] = 0.5f; s.v0[3] = side ? 0.12f : -0.12f;
+            s.v1 = end ? 2.0f : 0.0f;
+            s.v2[0] = static_cast<float>(origin.x + a.x); s.v2[1] = static_cast<float>(origin.y + a.y); s.v2[2] = static_cast<float>(origin.z + a.z);
+            s.v3[0] = static_cast<float>(origin.x + b.x); s.v3[1] = static_cast<float>(origin.y + b.y); s.v3[2] = static_cast<float>(origin.z + b.z);
+            s.v4[2] = 1.0f;
+            s.v5[0] = 0.5f; s.v5[1] = 0.5f; s.v5[2] = 0.5f; s.v5[3] = 1.0f;
+            s.v6[0] = 1.0f; s.v6[1] = 2.0f; s.v6[2] = 0.25f; s.v6[3] = 0.1f;
+            v.push_back(s);
+        }
+    return v;
+}
+inline Consts wobbleConsts(const Frame& fr, V3 origin, V3 eyeGame, const V3 off[2], bool valid) {
+    Consts c = cleanEye(fr, eyeGame, normalize({0.05, 0.97, 0.12}), 0.013, 0.011);
+    setRow(c.cb0[6], 0, 0, 0, 0.025);   // the game's clip z row is the constant near plane (reversed depth), not a function of the eye
+    setRow(c.cb10[1], origin.x, origin.y, origin.z, valid ? 1.0 : 0.0);
+    setRow(c.cb10[2], off[0].x, off[0].y, off[0].z, 0);
+    setRow(c.cb10[3], off[1].x, off[1].y, off[1].z, 0);
+    return c;
+}
+// The game's eye: float32, plus n steps of its spacing per axis.
+inline V3 roundedEye(V3 e, int nx, int ny, int nz) {
+    auto step = [](double v, int n) { float f = static_cast<float>(v); for (; n > 0; --n) f = std::nextafterf(f, 1e30f); for (; n < 0; ++n) f = std::nextafterf(f, -1e30f); return static_cast<double>(f); };
+    return {step(e.x, nx), step(e.y, ny), step(e.z, nz)};
+}
+enum WKind { kWIcon, kWLabel, kWTriangle, kWRing, kWStem, kWKinds };
+inline const char* wKindName(int k) { return k == kWIcon ? "icon" : k == kWLabel ? "label" : k == kWTriangle ? "triangle" : k == kWRing ? "ring" : "stem"; }
+
+inline void runWobbleTests(Rig& rig, const WorldProgs& w, const Prog& stemProg, ID3D11InputLayout* ilStem) {
+    const V3 P = kCam;
+    const V3 off[2] = {{static_cast<double>(-0.0559f), static_cast<double>(0.0046f), static_cast<double>(-0.0112f)},
+                       {static_cast<double>(-0.0075f), static_cast<double>(0.0108f), static_cast<double>(0.0143f)}};
+    const Frame fr = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});
+    const V3 center{1.6, -1.7, 3.3};   // 4 units from the eye, along its view
+    const V3 zero{0, 0, 0};
+    std::vector<Corner> quad, tri;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) {
+            quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.3, -0.2});
+            tri.push_back({{0, 0, 0}, 1.5 * sx, 1.5 * sy});
+        }
+    const std::vector<std::array<double, 2>> ringBs = {{-2, -2}, {2, -2}, {-2, 2}, {2, 2}};
+    // One kind's streamed outputs for these constants; `origin` is where the scene's records sit (the map's position, or the origin for the exact reference).
+    auto outputsOf = [&](int kind, const Consts& cc, V3 origin, Scene* keep, const Prog** progOut) {
+        const Prog* prog = kind == kWRing ? w.ring : kind == kWStem ? &stemProg : kind == kWLabel ? w.label : w.icon;
+        std::vector<float> out;
+        // the records sit where float32 puts them at the map's position; the exact reference (origin zero) holds those same positions relative to it
+        auto at = [&](V3 v) {
+            if (origin.x != 0 || origin.y != 0 || origin.z != 0) return origin + v;
+            return V3{static_cast<double>(static_cast<float>(P.x + v.x)) - P.x, static_cast<double>(static_cast<float>(P.y + v.y)) - P.y, static_cast<double>(static_cast<float>(P.z + v.z)) - P.z};
+        };
+        if (kind == kWRing) {
+            out = runRing(rig, *prog, w.ilRing, ringScene(cc, at(center), ringBs, 2.0f));
+        } else if (kind == kWStem) {
+            out = runStem(rig, *prog, ilStem, stemVerts(zero, at(center), at(center + V3{0.3, -6.0, 0.2})), cc);
+        } else {
+            Scene sc = iconScene(cc, kind == kWTriangle ? Q{0, 0, 0, 1} : mapCameraQ(), center, 1.3f, kind == kWTriangle ? tri : quad);
+            out = run(rig, *prog, kind == kWLabel ? w.ilLabel : w.ilIcon, sc);
+            if (keep) *keep = sc;
+        }
+        if (progOut) *progOut = prog;
+        return out;
+    };
+    auto clipOf = [&](int kind, const Consts& cc, V3 origin, Scene* keep) {
+        const Prog* prog = nullptr;
+        const std::vector<float> out = outputsOf(kind, cc, origin, keep, &prog);
+        std::vector<float> clip;
+        for (size_t i = 0; i < out.size() / static_cast<size_t>(prog->outFloats); ++i)
+            for (int k = 0; k < 4; ++k) clip.push_back(out[i * prog->outFloats + prog->posAt + k]);
+        return clip;
+    };
+    auto ndc = [](const std::vector<float>& clip) {
+        std::vector<double> n;
+        for (size_t i = 0; i + 3 < clip.size(); i += 4) { n.push_back(clip[i] / clip[i + 3]); n.push_back(clip[i + 1] / clip[i + 3]); }
+        return n;
+    };
+    const int noise[5][3] = {{0, 0, 0}, {3, -2, 1}, {-3, 3, -2}, {1, 1, 3}, {-2, -3, -3}};
+    const V3 trueEye[2] = {P + off[0], P + off[1]};
+    char text[300];
+    for (int kind = 0; kind < kWKinds; ++kind) {
+        // (a) the noise: the precise parts hold the position still, and the game's formula moves with it
+        double spreadOn = 0, spreadOff = 0;
+        std::vector<double> first[2];
+        for (int s = 0; s < 5; ++s) {
+            const V3 e = roundedEye(trueEye[0], noise[s][0], noise[s][1], noise[s][2]);
+            for (int valid = 0; valid < 2; ++valid) {
+                const std::vector<double> n = ndc(clipOf(kind, wobbleConsts(fr, P, e, off, valid != 0), P, nullptr));
+                if (s == 0) { first[valid] = n; continue; }
+                double& spread = valid ? spreadOn : spreadOff;
+                for (size_t i = 0; i < n.size(); ++i) spread = std::fmax(spread, std::fabs(n[i] - first[valid][i]));
+            }
+        }
+        std::snprintf(text, sizeof text, "G11.noise.%s: three steps of the game's eye move the clip position by at most %.2e NDC with the parts and %.2e with the game's formula", wKindName(kind), spreadOn, spreadOff);
+        std::printf("%s\n", text);
+        check(spreadOn <= 2e-5 && spreadOff >= 10.0 * 2e-5 && spreadOff >= 10.0 * spreadOn, text);
+        // (b) the right eye of two: the exact position, for each offset
+        double worstEye = 0;
+        for (int j = 0; j < 2; ++j) {
+            const V3 e = roundedEye(trueEye[j], noise[1 + j][0], noise[1 + j][1], noise[1 + j][2]);
+            Scene sc;
+            const std::vector<float> got = clipOf(kind, wobbleConsts(fr, P, e, off, true), P, &sc);
+            std::vector<double> want;
+            if (kind == kWRing || kind == kWStem) {
+                // the same scene relative to the origin, the eye at its offset: small numbers, so the game's formula is exact
+                const std::vector<float> ex = clipOf(kind, wobbleConsts(fr, zero, off[j], off, false), zero, nullptr);
+                for (float f : ex) want.push_back(f);
+            } else {
+                for (size_t i = 0; i < sc.verts.size(); ++i) {
+                    const Ref r = reference(kind == kWLabel ? 1 : 0, sc, i, &trueEye[j]);
+                    for (int k = 0; k < 4; ++k) want.push_back(r.pos[k]);
+                }
+            }
+            check(got.size() == want.size(), std::string("G11.eye: sizes agree, ") + wKindName(kind));
+            for (size_t i = 0; i < got.size() && i < want.size(); ++i) worstEye = std::fmax(worstEye, std::fabs(got[i] - want[i]) / std::fmax(1.0, std::fabs(want[i])));
+        }
+        std::snprintf(text, sizeof text, "G11.eye.%s: with the game's eye at either of the two offsets the clip position is the exact one, worst %.2e (a wrong pick would be 4e-2)", wKindName(kind), worstEye);
+        std::printf("%s\n", text);
+        check(worstEye < 5e-4, text);
+        // (c) the parts absent, and the game's eye 0.1 units from them: the game's formula, exactly
+        {
+            const V3 e = roundedEye(trueEye[0], 1, -1, 2);
+            const V3 farE{e.x + 0.1015625, e.y, e.z};   // 26 steps of the x spacing: beyond the band, nearer to neither eye
+            const std::vector<float> noParts = clipOf(kind, wobbleConsts(fr, P, farE, off, false), P, nullptr);
+            const std::vector<float> farParts = clipOf(kind, wobbleConsts(fr, P, farE, off, true), P, nullptr);
+            std::snprintf(text, sizeof text, "G11.fallback.%s: mapPos.w 0, and the game's eye 0.1 units from the parts, give the same bits (%s)", wKindName(kind), noParts == farParts ? "identical" : "DIFFERENT");
+            std::printf("%s\n", text);
+            check(noParts == farParts, text);
+            // the game's formula itself: icons, labels and triangles against the double maths, rings and stems against the clip rows applied to the world position they stream out
+            double dev = 0;
+            Scene sc;
+            const Consts cc = wobbleConsts(fr, P, farE, off, false);
+            const Prog* prog = nullptr;
+            const std::vector<float> o = outputsOf(kind, cc, P, &sc, &prog);
+            const size_t n = o.size() / static_cast<size_t>(prog->outFloats);
+            if (kind == kWRing || kind == kWStem) {
+                for (size_t i = 0; i < n; ++i) {
+                    const float* world = &o[i * prog->outFloats + 8];   // o2 of both: the world position
+                    for (int k = 0; k < 4; ++k) dev = std::fmax(dev, std::fabs(o[i * prog->outFloats + prog->posAt + k] - dp4(cc.cb0[4 + k], V3{world[0], world[1], world[2]})));
+                }
+                std::snprintf(text, sizeof text, "G11.formula.%s: with the parts absent the clip position is the clip rows on the world position, within %.2e (float32 at 50000)", wKindName(kind), dev);
+                std::printf("%s\n", text);
+                check(dev < 0.05, text);
+            } else {
+                for (size_t i = 0; i < sc.verts.size(); ++i) {
+                    const Ref r = reference(kind == kWLabel ? 1 : 0, sc, i);
+                    for (int k = 0; k < 4; ++k) dev = std::fmax(dev, std::fabs(o[i * prog->outFloats + prog->posAt + k] - r.pos[k]) / std::fmax(1.0, std::fabs(r.pos[k])));
+                }
+                std::snprintf(text, sizeof text, "G11.formula.%s: with the parts absent the position is the game's maths, within %.2e", wKindName(kind), dev);
+                std::printf("%s\n", text);
+                check(dev < 2e-4, text);
+            }
+        }
+        // (d) the band: 0.031 units off the eye's part is still in it (the same bits as at rest), 0.051 is out of it (the game's formula)
+        {
+            const V3 base = roundedEye(trueEye[0], 0, 0, 0);
+            const std::vector<float> rest = clipOf(kind, wobbleConsts(fr, P, base, off, true), P, nullptr);
+            const std::vector<float> inside = clipOf(kind, wobbleConsts(fr, P, {base.x, base.y + 0.03125, base.z}, off, true), P, nullptr);
+            const V3 outE{base.x, base.y + 0.05078125, base.z};
+            const std::vector<float> outside = clipOf(kind, wobbleConsts(fr, P, outE, off, true), P, nullptr);
+            const std::vector<float> game = clipOf(kind, wobbleConsts(fr, P, outE, off, false), P, nullptr);
+            std::snprintf(text, sizeof text, "G11.band.%s: 0.031 units off is still the parts' position (%s), 0.051 is the game's (%s)", wKindName(kind), rest == inside ? "same bits" : "DIFFERENT", outside == game ? "same bits" : "DIFFERENT");
+            std::printf("%s\n", text);
+            check(rest == inside && outside == game, text);
+        }
+    }
+    // the shader's band is the constant the header names
+    check(std::fabs(edvr::kMapEyeBand - 0.04f) < 1e-7f, "G11.band: kMapEyeBand is 0.04 units");
+}
+
 inline int runAll() {
     Rig rig;
     std::printf("galaxy_map_vs_test: debug layer %s\n", rig.debugLayer ? "ON" : "not installed (messages not checked)");
@@ -1582,18 +1818,22 @@ inline int runAll() {
     const std::vector<uint8_t> probeVs = compile(edvr::kMapProbeVS, "vs_5_0"), probePs = compile(edvr::kMapProbePS, "ps_5_0");
     const std::vector<uint8_t> ring = compile(edvr::kMapRingVS, "vs_5_0");
     const Prog pIcon = makeProg(rig, icon), pIconUv = makeProg(rig, iconUv), pArrow = makeProg(rig, arrow);
-    const Prog pRing = makeProg(rig, ring);
+    const std::vector<uint8_t> stem = compile(edvr::kMapStemVS, "vs_5_0");
+    const Prog pRing = makeProg(rig, ring), pStem = makeProg(rig, stem);
     ComPtr<ID3D11InputLayout> il = makeLayout(rig, icon), ilUv = makeLayout(rig, iconUv), ilArrow = makeLayout(rig, arrow);
-    ComPtr<ID3D11InputLayout> ilRing = makeRingLayout(rig, ring);
+    ComPtr<ID3D11InputLayout> ilRing = makeRingLayout(rig, ring), ilStem = makeStemLayout(rig, stem);
     check(pIcon.uvAt == 0 && pIcon.posAt == 2 && pIconUv.uvAt == 0 && pIconUv.posAt == 2 && pArrow.uvAt == 0 && pArrow.posAt == 2,
           "G0: the outputs are TEXCOORD0.xy at o0 and SV_POSITION at o1, as the game's");
     runIconTests(rig, pIcon, pIconUv, il.Get());
     const WorldProgs wp{&pIcon, &pIconUv, &pRing, il.Get(), ilUv.Get(), ilRing.Get()};
     check(pRing.posAt == 16 && pRing.outFloats == 20, "G0: the ring's outputs are the game's six (TEXCOORD0, 1, 2, 4, 5 and SV_POSITION) in 20 floats");
+    check(pStem.posAt == 13 && pStem.outFloats == 17, "G0: the stem's outputs are the game's five (TEXCOORD2, 3, 4, 6 and SV_POSITION) in 17 floats");
     runWorldStability(rig, wp);
     runSquareOn(rig, wp);
     runRingTests(rig, wp);
     runIconUpTests(rig, wp);
+    runTextParallelTests(rig, wp);
+    runWobbleTests(rig, wp, pStem, ilStem.Get());
     runArrowTests(rig, pArrow, ilArrow.Get());
     runProbeTest(rig, probeVs, probePs);
     runDepthTests(rig);
@@ -1609,7 +1849,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("galaxy_map_vs_test: G0-G9, WARP with the debug layer; reads nothing, writes nothing");
+        std::puts("galaxy_map_vs_test: G0-G11, WARP with the debug layer; reads nothing, writes nothing");
         return 0;
     }
     if (mode != "--self-test") return 2;

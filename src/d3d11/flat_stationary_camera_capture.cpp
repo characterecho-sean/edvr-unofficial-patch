@@ -113,6 +113,7 @@ struct State {
     // profileDropped on the watch's account.
     std::atomic<bool> mapWatch{false}, mapWatchEver{false};
     mapcam::Publisher map;
+    mapcam::Eyes mapEyes;
     std::atomic<bool> mapGalaxyOpen{false}, mapAnyOpen{false};
     // Frame thread only.
     mapcam::Hold mapGalaxyHold, mapSystemHold;
@@ -939,6 +940,28 @@ bool mapCameraAnyOpen() noexcept {
 uint64_t mapCameraChanges() noexcept {
     const State* s = stateOrNull();
     return s ? s->map.changes() : 0;
+}
+// The refresh hook's callback (flat_camera_inject.cpp refreshPre), on whichever game thread refreshed the camera: while a map is open, a kind 5 camera's origin at camera+0x50 is offered to
+// the eyes' pair (map_camera_core.h Eyes), which keeps it when it is short enough to be a UI-frame eye's offset. One atomic load while no map is open; two guarded loads, no I/O,
+// nothing written to the camera.
+void mapCameraNoteEye(uintptr_t camera) noexcept {
+    State* s = stateOrNull();
+    if (!camera || !s || !s->mapAnyOpen.load(std::memory_order_acquire)) return;
+    uint32_t kind = 0;
+    float o[3] = {};
+    __try {
+        kind = *reinterpret_cast<const uint32_t*>(camera + 0x264);
+        if (kind == 5u) std::memcpy(o, reinterpret_cast<const void*>(camera + 0x50), sizeof(o));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (kind != 5u) return;
+    s->mapEyes.observe(o);
+}
+bool mapCameraEyes(float out[2][3], uint64_t* generation) noexcept {
+    const State* s = stateOrNull();
+    if (!s || !s->mapAnyOpen.load(std::memory_order_acquire)) return false;
+    return s->mapEyes.read(out, generation);
 }
 bool mapCameraPose(MapCameraPose& out) noexcept {
     static_assert(sizeof(MapCameraPose) == sizeof(mapcam::Pose), "MapCameraPose is map_camera_core.h's Pose");

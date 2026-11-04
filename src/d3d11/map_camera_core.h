@@ -134,4 +134,71 @@ private:
     float namePos_[kMaxNames][3]{};
 };
 
+// The two eyes' offsets from stage 0's position (docs\galaxy-map-vr-2026-11-03.md, "The wobble"). The game keeps its eye position in the map frame in float32 at about 50000 units,
+// where one step is 0.0039 and the eye moves in several-step jumps; the UI frame's two cameras hold each eye's offset near zero (camera+0x50, the refresh hook's
+// stored_negative_origin), where float32 is exact to 1e-8. The renderer hook's refresh callback offers every camera's origin here; this keeps the two most recent distinct ones that are
+// short enough to be an eye's offset. Written by any game thread behind a try-lock (a busy writer is skipped, the next call carries the same origin), read behind a seqlock.
+class Eyes {
+public:
+    // An origin shorter than this is a UI-frame eye's offset; a scene camera's origin is tens of thousands of units.
+    static constexpr double kMaxLength = 100.0;
+
+    // One offered origin. A new origin equal (bit for bit) to either slot changes nothing; a different one replaces the older slot. False when busy.
+    bool observe(const float o[3]) noexcept {
+        const double l2 = double(o[0]) * o[0] + double(o[1]) * o[1] + double(o[2]) * o[2];
+        if (!(l2 < kMaxLength * kMaxLength)) return true;   // too long, or not a number
+        uint32_t w[3];
+        std::memcpy(w, o, sizeof(w));
+        if (busy_.exchange(true, std::memory_order_acquire)) return false;
+        const bool same0 = known_ >= 1 && std::memcmp(slot_[0], w, sizeof(w)) == 0;
+        const bool same1 = known_ >= 2 && std::memcmp(slot_[1], w, sizeof(w)) == 0;
+        if (!same0 && !same1) {
+            const unsigned at = known_ < 2 ? known_ : older_;
+            std::memcpy(slot_[at], w, sizeof(w));
+            if (known_ < 2) ++known_;
+            older_ = 1u - at;
+            const uint32_t s = seq_.load(std::memory_order_relaxed);
+            seq_.store(s + 1, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_release);
+            for (unsigned i = 0; i < 3; ++i) words_[at][i].store(w[i], std::memory_order_relaxed);
+            valid_.store(known_ == 2, std::memory_order_relaxed);
+            gen_.store(gen_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            seq_.store(s + 2, std::memory_order_release);
+        }
+        busy_.store(false, std::memory_order_release);
+        return true;
+    }
+    // Slot writes so far (each one counts): the generation the readers compare.
+    uint64_t generation() const noexcept { return gen_.load(std::memory_order_acquire); }
+    // Both slots known: the two offsets and the generation they belong to. False before the second distinct origin, or when the seqlock could not settle.
+    bool read(float out[2][3], uint64_t* generation) const noexcept {
+        for (int tries = 0; tries < 8; ++tries) {
+            const uint32_t s1 = seq_.load(std::memory_order_acquire);
+            if (s1 & 1u) continue;
+            uint32_t w[2][3];
+            for (unsigned k = 0; k < 2; ++k)
+                for (unsigned i = 0; i < 3; ++i) w[k][i] = words_[k][i].load(std::memory_order_relaxed);
+            const bool valid = valid_.load(std::memory_order_relaxed);
+            const uint64_t g = gen_.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (seq_.load(std::memory_order_relaxed) != s1) continue;
+            if (!valid) return false;
+            std::memcpy(out, w, sizeof(w));
+            if (generation) *generation = g;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    std::atomic<bool> busy_{false};
+    std::atomic<uint32_t> seq_{0};
+    std::atomic<uint32_t> words_[2][3]{};
+    std::atomic<bool> valid_{false};
+    std::atomic<uint64_t> gen_{0};
+    // Under the try-lock only.
+    uint32_t slot_[2][3]{};
+    unsigned known_ = 0, older_ = 0;
+};
+
 } }  // namespace edvr::mapcam

@@ -2979,6 +2979,34 @@ void testSupercruiseLines() {
         fourth[3] = 123.0f;   // lanes outside the rows and the position are not the map's pose
         pub.observe("GalaxyMapView", fourth);
         check(pub.changes() == 5, "MC14: a fourth lane is not part of the pose");
+        // The eyes' pair (mapcam::Eyes, "The wobble"): the two most recent distinct short origins.
+        mapcam::Eyes eyes;
+        float got[2][3] = {};
+        uint64_t gen = 0;
+        const float e0[3] = {-0.0559f, 0.0046f, -0.0112f}, e1[3] = {-0.0075f, 0.0108f, 0.0143f}, sceneOrigin[3] = {49996.656f, 41092.668f, 23990.863f}, e0b[3] = {-0.0561f, 0.0047f, -0.0111f};
+        const float nan3[3] = {std::nanf(""), 0.0f, 0.0f}, edge[3] = {99.0f, 0.0f, 0.0f}, over[3] = {100.0f, 0.0f, 0.0f};
+        check(!eyes.read(got, &gen) && eyes.generation() == 0, "MC15: before an origin there are no eyes");
+        eyes.observe(sceneOrigin);
+        eyes.observe(nan3);
+        eyes.observe(over);
+        check(eyes.generation() == 0 && !eyes.read(got, &gen), "MC16: a scene camera's origin (tens of thousands of units), a NaN and 100 units are not an eye's offset");
+        eyes.observe(e0);
+        check(eyes.generation() == 1 && !eyes.read(got, &gen), "MC17: one distinct origin is not a pair");
+        eyes.observe(e0);
+        check(eyes.generation() == 1, "MC18: the same origin again changes nothing");
+        eyes.observe(e1);
+        check(eyes.generation() == 2 && eyes.read(got, &gen) && gen == 2 && got[0][0] == e0[0] && got[1][0] == e1[0] && got[1][2] == e1[2],
+              "MC19: a second distinct origin makes the pair, in the order seen, with the generation");
+        eyes.observe(e0);
+        eyes.observe(e1);
+        eyes.observe(e0);
+        check(eyes.generation() == 2, "MC20: the two eyes alternating, as the refresh hook offers them, change nothing");
+        eyes.observe(e0b);
+        check(eyes.generation() == 3 && eyes.read(got, &gen) && got[0][0] == e0b[0] && got[1][0] == e1[0],
+              "MC21: a moved eye replaces the older slot and the generation steps");
+        eyes.observe(e0b);
+        eyes.observe(edge);
+        check(eyes.generation() == 4 && eyes.read(got, &gen) && got[1][0] == 99.0f && got[0][0] == e0b[0], "MC22: an origin just under 100 units is an offset, and replaces the older slot");
     }
 
     // The Galaxy Map hover's far point and the relays' bytes (src\d3d11\galaxy_map_pointer_core.h, docs\galaxy-map-vr-2026-11-03.md Fix 3).
@@ -3111,6 +3139,17 @@ void testSupercruiseLines() {
                   ui.find("guarded(\"galaxy map depth issue restore\"") != std::string::npos && ui.find("vScreenPSSetShaderRaw(ctx, ps0, nullptr, 0);", ui.find("galaxy map depth issue restore")) != std::string::npos &&
                   pointer.find("depth issues made") != std::string::npos && pointer.find("the depth never ran") != std::string::npos && pointer.find("textures made") != std::string::npos,
               "GP24: the depth issue is the last second issue (after the write-back, the mask and the probe), swaps the pixel shader through the raw setter and puts the game's back after a fault; the 30 s line says the depth made, tested, issued and not made, and when it never ran");
+        // The write-back and the depth issue's target (docs\galaxy-map-vr-2026-11-03.md, "The frame rate"): the map's sprites and canvases make no stencil write-back while the map is open in VR (flat keeps
+        // it: vrOpen is false there), the depth issue keeps the HDR layer's target under the probe's write mask 0, and the 30 s line counts both and the eyes.
+        const size_t wbBegin = layer.find("bool uiLayerWriteBackBegin("), wbDecline = layer.find("if (mapui::vrOpen() && (g_draw.family == UiLayerFamily::kMapCanvas || g_draw.family == UiLayerFamily::kMapSprite)) {", wbBegin),
+                     wbBind = layer.find("OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.wbRtv", wbBegin);
+        check(wbBegin != std::string::npos && wbDecline > wbBegin && wbDecline < wbBind && layer.find("g_writeBackDeclined.fetch_add", wbDecline) < wbBind &&
+                  layer.find("which == 4 ? e.hdrRtv.Get()") != std::string::npos && layer.find("vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);") != std::string::npos &&
+                  layer.find("vScreenSetRenderTargetsRaw(ctx, mapDepthIssue ? 0 : 1") == std::string::npos && layer.find("if (!target) return false;") != std::string::npos &&
+                  pointer.find("stencil write-backs of the map's sprites and canvases declined") != std::string::npos && pointer.find("stems 3028E7") != std::string::npos &&
+                  pointer.find("NO write carried the eyes") != std::string::npos && pointer.find("with the two eyes' offsets, which changed") != std::string::npos &&
+                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 5 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
+              "GP25: the write-back is declined for the map's sprites and canvases while the map is open in VR and before anything is bound, the depth issue keeps the layer's target under write mask 0, and the 30 s line counts the declined write-backs, the stems swapped and the eyes");
     }
 
     UiDsState normalDs;  // depth tested, no write; no stencil

@@ -204,7 +204,7 @@ struct UiMapIssue {
 UiMapBegin uiLayerMapMaskBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 UiMapBegin uiLayerMapProbeBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 // And the sprites' depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH), for a Galaxy Map sprite or canvas draw (pixel shader 964221955A9E77E7 or 855C469156AB997F) the layer took into the HDR
-// layer while the map is open in VR: the layer's bracket with no render target, the eye's D16 depth bound with its test and write on, the biased rasterizer, the layer's viewports and
+// layer while the map is open in VR: the layer's bracket with the HDR layer's render target kept (write mask 0), the eye's D16 depth bound with its test and write on, the biased rasterizer, the layer's viewports and
 // scissor (closed by uiLayerEnd); the caller issues the draw with the pixel shader swapped (mapui::depthIssue). kNoDepth: the draw is one of these but the depth could not be made.
 UiMapBegin uiLayerMapDepthBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 

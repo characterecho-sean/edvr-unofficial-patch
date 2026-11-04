@@ -4226,7 +4226,7 @@ void mapSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT inst
     }
 }
 
-// The VR Galaxy Map's sprite depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH): a sprite or canvas draw the layer took into the HDR layer, once more after the write-back, into the eye's
+// The VR Galaxy Map's sprite depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH): a sprite or canvas draw the layer took into the HDR layer, once more after the colour issue (the stencil write-back is not made for it), into the eye's
 // D16 depth only, with the pixel shader that clips its see-through parts (mapui::depthIssue). A no-op for any other draw; the depth that could not be made is counted and said where it failed.
 struct MapDepthDraw {
     ID3D11DeviceContext* self;

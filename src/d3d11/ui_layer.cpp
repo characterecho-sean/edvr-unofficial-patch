@@ -1636,7 +1636,7 @@ ID3D11RasterizerState* mapDepthRaster(ID3D11DeviceContext* ctx, ID3D11Rasterizer
 inline bool mapDepthTests(UiLayerFamily f) { return f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kMapMarks; }
 inline bool mapDepthWrites(UiLayerFamily f) { return f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite; }
 
-// The two blend states of the Galaxy Map's issues (galaxy_map_ui.h): [0] the mask's accumulating alpha, [1] the probe's write mask 0, which the depth issue (no target) takes too.
+// The two blend states of the Galaxy Map's issues (galaxy_map_ui.h): [0] the mask's accumulating alpha, [1] the probe's write mask 0, which the depth issue (its target kept) takes too.
 Ptr<ID3D11BlendState> g_mapBlend[2];
 ID3D11BlendState* mapBlend(ID3D11DeviceContext* ctx, int which) {
     Ptr<ID3D11BlendState>& b = g_mapBlend[which == 2 ? 0 : 1];
@@ -2398,12 +2398,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // The Galaxy Map's own issues (which 2: into the panel mask, which 3: the arrow's probe into the layer with nothing written) take their own blend and test no depth.
     const bool mapIssue = which >= 2;
     // The Galaxy Map's sprite depth (galaxy_map_ui.h, THE SPRITES' DEPTH): a map sprite's colour issue into the HDR layer binds the eye's D16 depth and tests it (which 0), and which 4 is the
-    // depth issue, with no render target, that writes it. Both only while a Galaxy Map is open in VR.
+    // depth issue that writes it. The depth issue keeps the HDR layer's render target bound with the probe's write mask 0, so the two issues share one set of targets and the GPU does
+    // not change them between the colour issue and the depth issue (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"). Both only while a Galaxy Map is open in VR.
     const bool mapDepthIssue = which == 4;
     const bool mapDepthColour = which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && mapDepthTests(g_draw.family) && mapui::vrOpen();
     ID3D11RenderTargetView* target =
-        which == 2 ? e.maskRtv.Get() : which == 3 ? e.rtv.Get() : which == 4 ? nullptr : which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
-    if (!target && !mapDepthIssue) return false;
+        which == 2 ? e.maskRtv.Get() : which == 3 ? e.rtv.Get() : which == 4 ? e.hdrRtv.Get() : which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
+    if (!target) return false;
     LayerDs& lds = g_draw.hdr ? e.hdrDs : e.ds;
     const uint32_t layerW = rp ? e.dW : (wl ? e.wW : (g_draw.hdr ? e.hdrW : e.w));
     const uint32_t layerH = rp ? e.dH : (wl ? e.wH : (g_draw.hdr ? e.hdrH : e.h));
@@ -2689,8 +2690,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         layerDsv = lds.dsv.Get();
         if (g_draw.ds.tests() && !g_draw.counted) ++g_win.dsTested;
     }
-    // A map sprite's issue binds the eye's sprite depth in the layer's depth place. The game's own state on these is depth off and a stencil write; that stays with the write-back into the
-    // game's buffer (uiLayerWriteBackBegin), and the layer's seeded stencil, which no map draw tests, is not written for them.
+    // A map sprite's issue binds the eye's sprite depth in the layer's depth place. The game's own state on these is depth off and a stencil write; that write is not made while the
+    // map is open in VR (uiLayerWriteBackBegin declines it), and the layer's seeded stencil, which no map draw tests, is not written for them.
     if (mapDsv) layerDsv = mapDsv;
     // The map (the game's eye target onto the layer) and the jitter cancel.
     const UiLayerMap m = uiLayerMapFromRegion(0.0f, 0.0f, static_cast<float>(g_draw.targetW),
@@ -2736,7 +2737,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
-    vScreenSetRenderTargetsRaw(ctx, mapDepthIssue ? 0 : 1, &target, layerDsv);
+    vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
     if (mapDsv) {
         // The game's depth-stencil state (and, for the depth issue, rasterizer state) is held and put back at restore; the layer's own go in through the raw setters.
         ctx->OMGetDepthStencilState(&g_draw.dsState, &g_draw.dsRef);
@@ -4821,6 +4822,18 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
     if (!g_draw.holoRestoreOk) return false;
     if (!g_draw.decided || !g_draw.counted || !g_draw.ds.writes() || g_draw.active || !ctx)
         return false;
+    // The Galaxy Map's sprites and canvases write the stencil's bit 0x04 and nothing reads it: in the census of all three captured frames the only draws that test stencil are
+    // FC1193AFFC596F74 at #1 and #2, and each eye's depth-stencil is cleared with depth and stencil immediately before them. Going back to the game's buffer for every sprite
+    // while the map's private D16 is in play costs 5.5 ms of GPU a frame against 0.5 ms without (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"). Flat keeps its write-backs.
+    if (mapui::vrOpen() && (g_draw.family == UiLayerFamily::kMapCanvas || g_draw.family == UiLayerFamily::kMapSprite)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("galaxy map: the stencil write-backs of the map's sprites and canvases are off while the map is open in VR (nothing reads the bit they write; the 30 s line counts them)");
+        }
+        mapui::g_writeBackDeclined.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     bool ok = false;
     guarded("uiLayer.writeBack", [&] {
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.wbRtv, &g_draw.wbDsv);

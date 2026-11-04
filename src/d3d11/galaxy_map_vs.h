@@ -1,7 +1,8 @@
-// The VR Galaxy Map's replacement shaders (docs/galaxy-map-vr-2026-11-03.md, Fix 3 and "After the second flight"): the icons', labels' and rings' vertex shaders with every
-// quad fixed in the world, the mouse arrow's vertex shader at the stars' depth, and the arrow probe's vertex and pixel shaders.
+// The VR Galaxy Map's replacement shaders (docs/galaxy-map-vr-2026-11-03.md, Fix 3 and "After the second flight"): the icons', labels', rings' and stems' vertex shaders with every
+// quad fixed in the world and the overlays' positions held steady against the game's rounded eye, the mouse arrow's vertex shader at the stars' depth, and the arrow probe's vertex and
+// pixel shaders.
 //
-// THE FOUR TRANSCRIPTIONS (C31238331D8AC3D4, 12382D2EA45E9632, 4EF6DDB075A927FA, 94EA991C3A03DBD9) ARE TRANSCRIPTIONS, NOT REWRITES, AND EACH IS GRANTED TO ONE EXACT HASH
+// THE FIVE TRANSCRIPTIONS (C31238331D8AC3D4, 12382D2EA45E9632, 4EF6DDB075A927FA, 94EA991C3A03DBD9, 3028E7C6E0E097F9) ARE TRANSCRIPTIONS, NOT REWRITES, AND EACH IS GRANTED TO ONE EXACT HASH
 // (billboard_facing_vs.h says why that is the rule). Each was written from the disassembly of the game's own shader from `vs_5_0` down, and every float immediate was
 // taken from the token hex, never from the text: the disassembler prints 1/32767 (0x38000100), 1/32767.5 (0x38000080), 1/4095.9 (0x39800080) and 1/255 (0x3B808081) all
 // as 0.000031, 0.000031, 0.000244 and 0.003922 (visor_axis_vs.h learned that on F121). tools/galaxy_map_vs_test runs the transcriptions through stream output on WARP
@@ -20,7 +21,8 @@
 //     F = normalize(ray);  c = cross(up, F);  R = length(c) > 0.02 ? c / length(c) : the eye's right made orthogonal to F;  U = cross(F, R)
 // (right x up = forward in this game's frame; with the map camera's rows (1,0,0), (0,.7071,.7071), (0,-.7071,.7071) these are the map camera's axes when the ray is its
 // forward and `up` is its up). `up` is stage 0's rows[1] of the map camera's pose (flat_stationary_camera_capture.h mapCameraPose), the direction the tracked up lands in; it
-// reaches the shaders in a 16-byte constant buffer at vertex slot 10 (MapCam; galaxy_map_ui.cpp binds it; the game's 329 vertex shaders declare only slots 0, 1, 2, 3, 12, 13).
+// reaches the shaders in a 64-byte constant buffer at vertex slot 10 (MapCam: mapUp, mapPos and the two eyes' offsets, see THE WOBBLE; galaxy_map_ui.cpp binds it; the game's 329 vertex
+// shaders declare only slots 0, 1, 2, 3, 12, 13).
 // Turning the head changes nothing in the world, only moving it does, by parallax. Spanning the quads on the eye's axes (build bf17a80a) locked them to the eye, and so does
 // the game's own b span: the n=12 triangles, whose quaternion is the identity, are spanned by b alone.
 //
@@ -35,15 +37,26 @@
 // signs of their dots with the eye's right and up (the eye's axes from cb1[270..272]: the x and y columns made orthogonal to the w column). The game's scale and sign stay,
 // only the direction changes.
 //
-// THE ICONS POINT DOWN AT THE GRID (docs/galaxy-map-vr-2026-11-03.md, "Icons point down at the grid"). The up handed to mapAxes is not the same for every quad. A label's is the map
-// camera's up, so text stays level and readable. An icon's (C31238331D8AC3D4, and the rings, 94EA991C3A03DBD9) is mapIconUp: the grid's vertical, galactic up, because a triangle's
-// record sits on the plane (y of about 41070) with its apex at the star's foot, so its axis is the grid's vertical and it leans in the image by the grid's perspective like the stems
-// beside it. A ray within about 35 degrees of the vertical has no usable lean (the quad would spin about the nadir), so the up hands over to the camera's, fully at 16 degrees.
-// At the map camera's own forward both ups give the same axes: cross((0,1,0), forward) and cross(up, forward) point the same way, so R is the camera's right, and U = cross(F, R)
-// is the camera's up either way (tools/galaxy_map_vs_test G3 holds the icon's corners equal to the label's there).
+// THE ICONS AND LABELS POINT DOWN AT THE GRID (docs/galaxy-map-vr-2026-11-03.md, "After the third flight"). The up handed to mapAxes is mapIconUp for the icons (C31238331D8AC3D4), the
+// labels (12382D2EA45E9632) and the rings (94EA991C3A03DBD9): the grid's vertical, galactic up, because a triangle's record sits on the plane (y of about 41070) with its apex at the
+// star's foot, so its axis is the grid's vertical and it leans in the image by the grid's perspective like the stems beside it. A ray within about 35 degrees of the vertical has no
+// usable lean (the quad would spin about the nadir), so the up hands over to the camera's, fully at 16 degrees. At the map camera's own forward both ups give the same axes:
+// cross((0,1,0), forward) and cross(up, forward) point the same way, so R is the camera's right, and U = cross(F, R) is the camera's up either way (tools/galaxy_map_vs_test G3 holds
+// the icon's corners equal to the label's there). The labels took the camera's up until the fifth build (text fanned out by 26 degrees at tan 0.5 reads badly); the pilot's request
+// that the text lie parallel to the flat grid below ("Text parallel to the grid") put them on the grid's up: R = cross(gridUp, ray) has no y component, so a label's baseline lies in
+// the grid's plane, away from the hand-over.
 //
 // THE RINGS (94EA991C3A03DBD9) span a per-instance world position v1 on cb1[277] and cb1[278] and take the clip rows cb0[4..7]; only the span's directions change: ray = v1 -
-// cb1[275].xyz, up = mapUp, and the eye's axes from cb0[4].xyz, cb0[5].xyz and cb0[7].xyz. The stems (3028E7C6E0E097F9) build their width from cb1[275] already and stay the game's.
+// cb1[275].xyz, up = mapUp, and the eye's axes from cb0[4].xyz, cb0[5].xyz and cb0[7].xyz.
+//
+// THE WOBBLE (docs/galaxy-map-vr-2026-11-03.md, "The wobble"). The game's eye position in the map frame, cb1[275].xyz, is a float32 at about 50000 units where one step is
+// 0.0039, and it moves in jumps of several steps; every quad's position is W - cb1[275].xyz, so an overlay 4 units from the eye shifts by pixels from frame to frame. The precise parts
+// exist: stage 0's position (MapCam.mapPos.xyz, constant at rest) and each eye's offset from it (MapCam.mapEye[i].xyz, from the UI frame's two cameras, held near zero in float32).
+// mapEyeRel puts the position relative to the eye as (W - mapPos) - mapEye[i], where W - mapPos is exact for near values. It applies only while the game's eye is within kMapEyeBand of
+// one of the two parts' eyes (the map is at rest, or the parts agree with the game); otherwise, and when mapPos.w is 0 (the parts are not valid), the result is the game's own W -
+// cb1[275].xyz. The icons and labels take their centre from it for a world record; the rings and the stems take their clip position from it (the game's clip rows carry a translation
+// of about -36615, which rounds the same way), with the span added to the exact relative position rather than to the world one, which would round it to the grid again. The stars and
+// the sky stay the game's: only the overlays are steadied.
 //
 // THE ARROW (4EF6DDB075A927FA): the game's own, except that W - cb1[275].xyz becomes W - ((s < 0) ? 0 : cb1[275].xyz). The arrow's record is the only one with a negative
 // scale (-0.402 in the dump); the same shader draws other sprites some frames (the loader's), which keep the game's depth. Drawn with the eye origin taken out, the arrow
@@ -138,12 +151,38 @@ float3 mapIconUp(float3 ray, float3 gridUp, float3 cameraUp) {
 }
 )HLSL"
 
-// C31238331D8AC3D4. EDVR_MAP_ICON_UV is the uv statement; 12382D2EA45E9632 adds b2. EDVR_MAP_ICON_UP(ray, gridUp, cameraUp) is the up the quad is spanned on: mapIconUp for the
-// icons, the camera's up as it is for the labels.
+// The map camera's constants at vertex slot 10, and the precise position relative to the eye (see THE WOBBLE). mapUp.xyz is stage 0's up; mapPos.xyz its position and mapPos.w 1 when the
+// two eyes' offsets are valid, 0 when not; mapEye[i].xyz is eye i's offset from mapPos in the map frame. kMapEyeBand is the distance in units, 0.04, within which the game's rounded
+// eye has to be of one of the two parts' eyes for the parts to be used: several steps of float32 at 50000 units (0.0039 each), more than the game's rounding ever shows at rest; while the
+// map moves its pose can lag a frame behind the eye, and the game's own eye is right then.
+#define EDVR_MAP_EYE_BAND 0.04
+#define EDVR_MAP_STR2(x) #x
+#define EDVR_MAP_STR(x) EDVR_MAP_STR2(x)
+#define EDVR_MAP_CAM_HLSL \
+    "static const float kMapEyeBand = " EDVR_MAP_STR(EDVR_MAP_EYE_BAND) ";" \
+    R"HLSL(
+cbuffer MapCam : register(b10) { float4 mapUp; float4 mapPos; float4 mapEye[2]; };
+
+// eyeGame is the game's rounded eye. False when the precise parts do not apply, and rel is then the game's W - eyeGame.
+bool mapEyeRel(float3 W, float3 eyeGame, out float3 rel) {
+    rel = W - eyeGame;
+    if (mapPos.w == 0.0) return false;
+    float3 g = eyeGame - mapPos.xyz;
+    float3 a = g - mapEye[0].xyz, b = g - mapEye[1].xyz;
+    bool first = dot(a, a) <= dot(b, b);
+    float3 d = first ? a : b;
+    if (dot(d, d) > kMapEyeBand * kMapEyeBand) return false;
+    rel = (W - mapPos.xyz) - (first ? mapEye[0].xyz : mapEye[1].xyz);
+    return true;
+}
+)HLSL"
+
+constexpr float kMapEyeBand = static_cast<float>(EDVR_MAP_EYE_BAND);
+
+// C31238331D8AC3D4. EDVR_MAP_ICON_UV is the uv statement; 12382D2EA45E9632 adds b2. Both are spanned on mapIconUp.
 #define EDVR_MAP_ICON_MAIN_HLSL R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[12]; };
 cbuffer CB1 : register(b1) { float4 cb1[279]; };
-cbuffer MapCam : register(b10) { float4 mapUp; };
 
 void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
           out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
@@ -158,11 +197,12 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
     v = mapSkin(a, v3.xy, v);
     float s = asfloat(a.y);
     float3 W = rec.p.xyz;
+    bool world = dot(W, W) > 1000000.0;
     float3 center = W - cb1[275].xyz;
+    if (world) mapEyeRel(W, cb1[275].xyz, center);
     float4 q = mapQuat(a);
     float3 pp;
     float3 n = mapRotate(q, float3(0.0, 0.0, 1.0));
-    bool world = dot(W, W) > 1000000.0;
     bool faces = world && abs(n.y) < 0.9995 && n.z < 0.9995;
     float4 pc = float4(center, 1.0);
     float3 F = 0, R = 0, U = 0;
@@ -178,7 +218,7 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
         float3 ray = float3(dot(pc, cb0[9]), dot(pc, cb0[10]), dot(pc, cb0[11]));
         float3 cameraUp = float3(dot(up4, cb0[9]), dot(up4, cb0[10]), dot(up4, cb0[11]));
         float3 gridUp = float3(dot(grid4, cb0[9]), dot(grid4, cb0[10]), dot(grid4, cb0[11]));
-        mapAxes(ray, EDVR_MAP_ICON_UP(ray, gridUp, cameraUp), Fe, Re, F, R, U);
+        mapAxes(ray, mapIconUp(ray, gridUp, cameraUp), Fe, Re, F, R, U);
         sx = (dot(cb1[277].xyz, Re) < 0.0) ? -1.0 : 1.0;
         sy = (dot(cb1[278].xyz, Ue) < 0.0) ? -1.0 : 1.0;
     }
@@ -204,20 +244,18 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
 
 #define EDVR_MAP_ICON_UV_PLAIN "o0 = uv * 16.0;"
 #define EDVR_MAP_ICON_UV_SCALED "o0 = (uv * cb2[1].xy) * 16.0 + cb2[1].zw;"
-#define EDVR_MAP_ICON_UP_GRID "mapIconUp(ray, gridUp, cameraUp)"
-#define EDVR_MAP_ICON_UP_CAMERA "(cameraUp)"
 
 constexpr char kMapIconFacingVS[] =
     EDVR_MAP_COMMON_HLSL
+    EDVR_MAP_CAM_HLSL
     "#define EDVR_MAP_ICON_UV " EDVR_MAP_ICON_UV_PLAIN "\n"
-    "#define EDVR_MAP_ICON_UP(ray, gridUp, cameraUp) " EDVR_MAP_ICON_UP_GRID "\n"
     EDVR_MAP_ICON_MAIN_HLSL;
 
 constexpr char kMapIconUvFacingVS[] =
     EDVR_MAP_COMMON_HLSL
+    EDVR_MAP_CAM_HLSL
     "cbuffer CB2 : register(b2) { float4 cb2[2]; };\n"
     "#define EDVR_MAP_ICON_UV " EDVR_MAP_ICON_UV_SCALED "\n"
-    "#define EDVR_MAP_ICON_UP(ray, gridUp, cameraUp) " EDVR_MAP_ICON_UP_CAMERA "\n"
     EDVR_MAP_ICON_MAIN_HLSL;
 
 // 4EF6DDB075A927FA: the game's, with the eye origin taken out of a negative-scale record.
@@ -244,14 +282,16 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
 }
 )HLSL";
 
-// 94EA991C3A03DBD9: the rings. The game's shader, with the span's two directions (cb1[277] and cb1[278], the eye's right and up) put on the ray's axes (see the header).
+// 94EA991C3A03DBD9: the rings. The game's shader, with the span's two directions (cb1[277] and cb1[278], the eye's right and up) put on the ray's axes (see the header), and the clip
+// position from the eye-relative position when mapEyeRel holds: the clip rows' xyw take the eye to (0, 0, 0) (their translation is minus the rows . the eye), and the z row is the
+// constant cb0[6].w. o2 stays the game's world position.
 constexpr char kMapRingVS[] =
     EDVR_MAP_COMMON_HLSL
+    EDVR_MAP_CAM_HLSL
     R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[8]; };
 cbuffer CB1 : register(b1) { float4 cb1[279]; };
 cbuffer CB2 : register(b2) { float4 cb2[1]; };
-cbuffer MapCam : register(b10) { float4 mapUp; };
 
 void main(float4 v0 : TEXCOORD0, float3 v1 : POSITION0, float4 v2 : POSITION2, float4 v3 : TEXCOORD3, float4 v4 : POSITION4,
           out float4 o0 : TEXCOORD0, out float4 o1 : TEXCOORD1, out float3 o2 : TEXCOORD2, out float2 o3 : TEXCOORD4, out float3 o4 : TEXCOORD5,
@@ -267,17 +307,77 @@ void main(float4 v0 : TEXCOORD0, float3 v1 : POSITION0, float4 v2 : POSITION2, f
     float3 Ry = cb0[5].xyz;
     float3 Ue = normalize(Ry - dot(Ry, Fe) * Fe);
     float3 F, R, U;
-    float3 ray = v1 - cb1[275].xyz;
+    float3 ray;
+    const bool steady = mapEyeRel(v1, cb1[275].xyz, ray);
     mapAxes(ray, mapIconUp(ray, float3(0.0, 1.0, 0.0), mapUp.xyz), Fe, Re, F, R, U);
     float sx = (dot(cb1[277].xyz, Re) < 0.0) ? -1.0 : 1.0;
     float sy = (dot(cb1[278].xyz, Ue) < 0.0) ? -1.0 : 1.0;
-    float3 r0 = R * (b.x * sx * length(cb1[277].xyz)) + v1;
-    r0 = U * (b.y * sy * length(cb1[278].xyz)) + r0;
+    float3 spanR = R * (b.x * sx * length(cb1[277].xyz));
+    float3 spanU = U * (b.y * sy * length(cb1[278].xyz));
+    float3 r0 = spanR + v1;
+    r0 = spanU + r0;
     o2 = r0;
     o3 = v2.xy;
     o4 = float3(v0.xy, v2.w);
-    float4 p = float4(r0, 1.0);
-    o5 = float4(dot(cb0[4], p), dot(cb0[5], p), dot(cb0[6], p), dot(cb0[7], p));
+    if (steady) {
+        float3 rel = (ray + spanR) + spanU;
+        o5 = float4(dot(cb0[4].xyz, rel), dot(cb0[5].xyz, rel), dot(cb0[6].xyz, rel) + cb0[6].w, dot(cb0[7].xyz, rel));
+    } else {
+        float4 p = float4(r0, 1.0);
+        o5 = float4(dot(cb0[4], p), dot(cb0[5], p), dot(cb0[6], p), dot(cb0[7], p));
+    }
+}
+)HLSL";
+
+// 3028E7C6E0E097F9: the stems (the lines from a star to its foot on the grid), vs_5_0 down from the disassembly. A line from v2 to v3 is widened across its length towards the eye:
+// the width axis is cross(eye - v2, v2 -> v3) normalised, and the vertex is v3 or v2 pushed by it (v1.x above 1.5 for the end at v3). The game's shader, with the eye - v2 and the
+// clip position from the eye-relative position when mapEyeRel holds; o2 stays the game's world position, and every other output is the game's. Its pixel shader is 6C28D59784CC493D
+// (additive, in the map-marks family). The only immediates are 1.5 and 1, and the operations run in the order the bytecode has them.
+constexpr char kMapStemVS[] =
+    EDVR_MAP_COMMON_HLSL
+    EDVR_MAP_CAM_HLSL
+    R"HLSL(
+cbuffer CB0 : register(b0) { float4 cb0[8]; };
+cbuffer CB1 : register(b1) { float4 cb1[276]; };
+
+void main(float4 v0 : TEXCOORD0, float v1 : TEXCOORD1, float3 v2 : POSITION0, float3 v3 : POSITION1, float4 v4 : TEXCOORD3, float4 v5 : POSITION4, float4 v6 : TEXCOORD5,
+          out float4 o0 : TEXCOORD2, out float4 o1 : TEXCOORD3, out float3 o2 : TEXCOORD4, out float2 o3 : TEXCOORD6, out float4 o4 : SV_POSITION)
+{
+    float3 rel2, rel3;
+    const bool steady = mapEyeRel(v2, cb1[275].xyz, rel2);
+    mapEyeRel(v3, cb1[275].xyz, rel3);
+    float3 e = -rel2;                                  // eye - v2: the game's, or the exact one
+    float3 r0 = v3.yzx - v2.yzx;
+    r0 = rsqrt(dot(r0, r0)) * r0;
+    float3 r1 = e.zxy;
+    r1 = rsqrt(dot(r1, r1)) * r1;
+    // precise keeps the cross product's two products as the bytecode has them: left alone the compiler swaps which of them is fused, and 25 of 1200 random instances then differ by an ULP or three
+    precise float3 r2 = r0 * r1;
+    precise float3 c = r1.zxy * r0.yzx - r2;
+    r0 = c;
+    r0 = rsqrt(dot(r0, r0)) * r0;
+    o3.y = v0.y / v6.y + v6.x / v6.y;
+    float3 rel;
+    if (1.5 < v1) {
+        float w = v0.w * v4.z;
+        r1 = r0 * w + v3;
+        rel = rel3 + r0 * w;
+        o3.x = sqrt(dot(v2 - v3, v2 - v3)) * v6.z + v6.w;
+    } else {
+        float w = v0.w * v4.z;
+        r1 = r0 * w + v2;
+        rel = rel2 + r0 * w;
+        o3.x = v6.w;
+    }
+    o0 = float4(cb1[275].xyz, sqrt(dot(cb1[275].xyz, cb1[275].xyz)));
+    if (steady) {
+        o4 = float4(dot(cb0[4].xyz, rel), dot(cb0[5].xyz, rel), dot(cb0[6].xyz, rel) + cb0[6].w, dot(cb0[7].xyz, rel));
+    } else {
+        float4 p = float4(r1, 1.0);
+        o4 = float4(dot(cb0[4], p), dot(cb0[5], p), dot(cb0[6], p), dot(cb0[7], p));
+    }
+    o1 = v5;
+    o2 = r1;
 }
 )HLSL";
 
@@ -333,13 +433,11 @@ float4 main(float4 pos : SV_POSITION) : SV_TARGET
 )HLSL";
 
 // THE DEPTH ISSUE'S PIXEL SHADERS (docs/galaxy-map-vr-2026-11-03.md, "Sprite order"). The sprites' colour issue tests the map's own D16 depth and writes none; a second issue after the
-// game's write-back writes it, where the sprite is solid. Each shader below stands in for the game's pixel shader of that issue, bound over the swap scope's vertex shader, and does
+// colour issue writes it (no stencil write-back comes between them), where the sprite is solid. Each shader below stands in for the game's pixel shader of that issue, bound over the swap scope's vertex shader, and does
 // the game's alpha and a clip: 964221955A9E77E7 (the Galaxy Map's icon sprite) has alpha t0.a * cb2[1].w and 855C469156AB997F (the canvas composite) t0.a (disassembled; the
 // colour and the game's own discard of an all-zero result are not needed, the depth alone is written). kMapDepthAlpha is the alpha at which a sprite is solid for the depth: the
 // see-through parts of a sprite block nothing, its solid parts block what is drawn after them.
 #define EDVR_MAP_DEPTH_ALPHA 0.3
-#define EDVR_MAP_STR2(x) #x
-#define EDVR_MAP_STR(x) EDVR_MAP_STR2(x)
 constexpr float kMapDepthAlpha = static_cast<float>(EDVR_MAP_DEPTH_ALPHA);
 
 // 964221955A9E77E7

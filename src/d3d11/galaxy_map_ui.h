@@ -1,4 +1,4 @@
-// The VR Galaxy Map's drawn UI (docs/galaxy-map-vr-2026-11-03.md, Fix 3 and "After the second flight"): the icons, labels and rings fixed in the world, the mouse arrow at the stars' depth when its tip is not on a
+// The VR Galaxy Map's drawn UI (docs/galaxy-map-vr-2026-11-03.md, Fix 3 and "After the second flight"): the icons, labels, rings and stems fixed in the world, the mouse arrow at the stars' depth when its tip is not on a
 // panel, and the probe that says so.
 //
 // THE DESIGN. The panels (vertex shaders C4B4B334B26E81A9 and 5DAD41AA66757CE3) are drawn as the game made them, at about 1 m in the UI frame, and the
@@ -13,10 +13,11 @@
 //     true (the game's arrow). "On a panel" is the mask under the tip, or under a point within reach on both opposite sides along one of four axes (kMapProbePS), so the
 //     gaps between panels close.
 //
-// THE MAP CAMERA'S UP. The icons', labels' and rings' replacement shaders (C31238, 12382D, 94EA99) take a head-free up from a 16-byte constant buffer at vertex slot 10 (MapCam),
-// written from mapCameraPose's stage 0 rows[1] when mapCameraChanges() has moved since the last write. A draw is swapped only once the pose has answered; before that it is the
-// game's, counted (Counters::noPose). The buffer is bound at the first swap of each draw when slot 10 does not already hold it, and left bound after the map closes: no
-// vertex shader of the game declares slot 10.
+// THE MAP CAMERA'S CONSTANTS. The icons', labels', rings' and stems' replacement shaders (C31238, 12382D, 94EA99, 3028E7) take a head-free up, the map camera's position and the two eyes'
+// offsets from a 64-byte constant buffer at vertex slot 10 (MapCam), written from mapCameraPose's stage 0 (rows[1], position) and mapCameraEyes (flat_stationary_camera_capture.h) when
+// mapCameraChanges() has moved since the last write or the eyes' pair has changed. A draw is swapped only once the pose has answered; before that it is the game's, counted
+// (Counters::noPose). Before the eyes' pair is whole the buffer says so (mapPos.w 0) and the shaders keep the game's eye. The buffer is bound at the first swap of each draw when
+// slot 10 does not already hold it, and left bound after the map closes: no vertex shader of the game declares slot 10.
 #pragma once
 
 #include <d3d11.h>
@@ -27,7 +28,7 @@
 namespace edvr {
 namespace mapui {
 
-constexpr uint64_t kVsIconA = 0xC31238331D8AC3D4ull, kVsIconB = 0x12382D2EA45E9632ull, kVsArrow = 0x4EF6DDB075A927FAull, kVsRing = 0x94EA991C3A03DBD9ull;
+constexpr uint64_t kVsIconA = 0xC31238331D8AC3D4ull, kVsIconB = 0x12382D2EA45E9632ull, kVsArrow = 0x4EF6DDB075A927FAull, kVsRing = 0x94EA991C3A03DBD9ull, kVsStem = 0x3028E7C6E0E097F9ull;
 // The panels, whose alpha is the mask: the shell meshes (C4B4B3) and the movie (5DAD41). B10B032BDFD46700 is not one. Its n=6 records sit in the UI frame at their own depth, and one is
 // the hover halo round the hovered star (flight 12:35, dump 123832862001, record 1258: scale 11.8, W (-0.308, 0.956, 6.554), tan (-0.047, 0.146) against the arrow's tan (-0.042, 0.148)),
 // so with it in the mask a hovered star put the halo under the tip and the arrow flipped between the stars' depth and the panels' about every frame, a shift of 0.027 tan (about 25
@@ -69,8 +70,10 @@ inline D3D11_BLEND_DESC probeBlendDesc() {
 }
 
 // THE SPRITES' DEPTH (docs/galaxy-map-vr-2026-11-03.md, "Sprite order"). The game draws the map's sprites with depth off, so a far sprite drawn late paints over a near one. While a Galaxy
-// Map is open in VR the layer gives each eye a D16_UNORM depth at the HDR layer's size and the sprites' colour issue tests it (no write); a second issue, after the write-back that keeps
-// the game's own stencil, writes it where the sprite is solid (kMapDepthAlpha, galaxy_map_vs.h). The game's depth is reversed (clip.z 0.1, clip.w the distance, nearer larger:
+// Map is open in VR the layer gives each eye a D16_UNORM depth at the HDR layer's size and the sprites' colour issue tests it (no write); a second issue, with the HDR layer's render
+// target kept at write mask 0 (the probe's blend), writes it where the sprite is solid (kMapDepthAlpha, galaxy_map_vs.h). The stencil write-back into the game's depth-stencil is not made
+// for the map's sprites and canvases while the map is open in VR (ui_layer.cpp uiLayerWriteBackBegin): alternating the private D16 with the game's depth-stencil per draw cost 5.5 ms
+// of GPU a frame against 0.5 ms (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"), and nothing reads the bit. The game's depth is reversed (clip.z 0.1, clip.w the distance, nearer larger:
 // fixed_shader_source.h, dlaa.cpp), so the test is GREATER_EQUAL, the clear 0, and the bias that pulls a written value farther is negative.
 constexpr uint64_t kPsSprite = 0x964221955A9E77E7ull, kPsCanvas = 0x855C469156AB997Full;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D16_UNORM;
@@ -109,14 +112,18 @@ struct DepthCounters {
     std::atomic<uint64_t> faults;        // a depth issue that faulted
 };
 inline DepthCounters g_depth;
+// Stencil write-backs declined for the map's sprites and canvases while the map is open in VR (ui_layer.cpp uiLayerWriteBackBegin), since the last 30 s line.
+inline std::atomic<uint64_t> g_writeBackDeclined{0};
 
-enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapCount };
+enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapCount };
 
 // Counters, since the last 30 s line (galaxy_map_pointer.cpp reads and clears them). Atomics: the line is said on the frame thread, the draws run on the render thread.
 struct Counters {
     std::atomic<uint64_t> swapped[kSwapCount];
     std::atomic<uint64_t> noPose;           // an icon, label or ring draw left as the game made it because the map camera had never published a pose
-    std::atomic<uint64_t> camWrites;        // writes of the map camera's up into the slot-10 buffer
+    std::atomic<uint64_t> camWrites;        // writes of the map camera's constants into the slot-10 buffer
+    std::atomic<uint64_t> eyeGenSteps;      // changes of the eyes' pair that the buffer's writes picked up (mapCameraEyes' generation)
+    std::atomic<uint64_t> eyesValid;       // buffer writes that carried the two eyes' offsets (mapPos.w 1); the rest carried the game's eye only
     std::atomic<uint64_t> arrowKept;        // arrow draws left as the game made them because the tip was over a panel (or the probe could not say)
     std::atomic<uint64_t> maskIssued[2];    // panel draws issued into the mask, by shader (C4B4B3, 5DAD41)
     std::atomic<uint64_t> maskLate;         // a panel draw reaching the mask after the eye's probe of the same frame (the mask was not complete at the probe)
@@ -157,7 +164,7 @@ void noteMaskIssue(uint64_t vs, int eye, uint64_t seq);
 // The mask or the query cannot be made: the arrow stays the game's (over = true), said once per cause.
 void noteUnavailable(const char* what);
 
-// The depth issue (see THE SPRITES' DEPTH). `draw` issues the game's draw again as it was; this swaps in the pixel shader for `ps` (kPsSprite or kPsCanvas), calls it, and puts the
+// The depth issue (see THE SPRITES' DEPTH), after the colour issue. `draw` issues the game's draw again as it was; this swaps in the pixel shader for `ps` (kPsSprite or kPsCanvas), calls it, and puts the
 // game's pixel shader back on every way out. The layer's bracket (ui_layer.cpp) has bound the depth, the depth state, the rasterizer and the viewports. False when the shader could not
 // be made or the issue faulted.
 struct DepthDraw {

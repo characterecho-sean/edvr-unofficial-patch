@@ -606,6 +606,7 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
     g_inject.lastP2.store(p2, std::memory_order_relaxed);
     g_inject.lastCamera.store(camera, std::memory_order_relaxed);
     noteCameraFov(camera);   // S0: both profiles, every thread, before the gate and the VR branch
+    mapCameraNoteEye(camera);   // the Galaxy Map's eye offsets: one atomic load while no map is open
 
     // The thread first. The phase machine, the decision, the census and the
     // set of injected cameras belong to the thread that runs Present; a call
