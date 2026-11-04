@@ -9,9 +9,8 @@
   criterion. Shipped items 1 and 3 and the re-issue counter; removed the rest
   and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
 - **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair test
-  before `GetType`, `drawPathFast` in the instanced hook, instruments read with
-  `edvr_log.py --perf-windows`. Its targets fell about 0.6 ms a frame, nothing
-  rose more than 0.2 ms.
+  before `GetType`, `drawPathFast` in the instanced hook, `--perf-windows`.
+  Its targets fell about 0.6 ms a frame.
 - **Post-build-2 review (2026-11-03):** ruled out the tee trap (0.08 ms), the
   EDHM bypass.
 - **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
@@ -44,8 +43,9 @@
   #184 undetermined (no blocked return), as expected.
 - **Build 6 ("Build 6: one interest mask"):** S1 as a write-through mask; S2
   and #184 with the pending flags (both approved 2026-11-04); build 5's items
-  2-3 removed. Argon agreed; Opus asked for 13 changes, all taken, and approved on
-  re-review. Next: spec, implementation.
+  2-3 removed. Argon agreed; Opus approved on re-review. Spec #191;
+  `d5135e52` built (the mask is atomic: teardown writes off-thread). Next:
+  flight.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3244,3 +3244,25 @@ pure headers only (`build.bat:3795-3804`) and `ui_quality_test` scans
 are `ui_layer_world_test` (`:3706`) and `ui_layer_device_test` (`:3717`), so
 the fence case goes there or falls back to the source-text check. The spec
 carries the corrected list.
+
+**Built (2026-11-04, `d5135e52`, spec #191).** Sonnet implemented it
+(`3a0cb70e`); full gated build green, then the review below, then green again
+on the committed tree.
+- **R3 reversed on the code.** Eleven shutdown functions recompute their
+  bits (`flatTemporalStop`, `uiDepthShutdown`, `uiLayerShutdown` and others),
+  and `shutdownDeviceHooks` can run on another thread under the loader lock
+  (`device_hook.cpp:3313-3318`). A plain read-modify-write of the whole mask
+  could then drop another module's bit. The mask is now a
+  `std::atomic<uint64_t>`, read with relaxed loads in place (a plain `mov`)
+  and written by a compare-exchange loop (`80c10127`), so no reader sees a
+  transient and no module's write overwrites another's. Left open: two
+  writers of the same module on two threads, possible only on an abnormal
+  unload.
+- **Departures:** the fence raise (`ui_layer.cpp:1867`) could not be staged
+  in `ui_layer_world_test` or `ui_layer_device_test`, so it rests on
+  `gate_test`'s source-text check, as the spec allows; `ui_depth_test` asserts
+  the mask over `uiDepthShutdown` and the recompute's eight combinations, not
+  `uiDepthConfigure` (the rig aborts on Config). 30 bits are mirrored.
+- **Environment:** a profile-symbols build needs `EDVR_TRACE_EVENT_DIR` set
+  to the Build Tools' `Common7\IDE\PrivateAssemblies`; `cpu_profile.py
+  --build-analyzer` looks only under `C:\Program Files`.
