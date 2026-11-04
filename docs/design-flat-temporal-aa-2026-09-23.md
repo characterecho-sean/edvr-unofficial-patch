@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** the live-switch family loss and the capture key are fixed and FLOWN, and the stars on dark surfaces did not return (one flight, by eye, mechanism never explained). Body, seat and controls had camera vectors of 640-850 px at flight speed. BUILT, NOT FLOWN: near pixels ride the frame's ship record where last frame's depth confirms it, and a read-only probe (temporary key `advanced.vehicle_rig_probe`) tests the RE route to the vehicle's own records and bound, which is to replace the 10 m test and the GPU vote; do not merge the 10 m test on its own. See the entries "2026-11-04, flight 06:43" and "later still", last in this file.
+- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** the live-switch family loss and the capture key are fixed and FLOWN, and the stars on dark surfaces did not return (one flight, by eye, mechanism never explained). The probe reads the game's vehicle rigs true on a Cobra and an SRV. The ship record term never ran in flat (dead gate). BUILT, NOT FLOWN: the gate fixed, the GPU vote removed, near pixels ride the cockpit rig root's pose, taken at the emit, where last frame's depth confirms it. Temporary key `advanced.vehicle_rig_probe`. Open: the Esc menu flicker after a live switch, the capture stalling the route in a moving SRV, a tighter bound on big ships (the Cobra's sphere is 30 m; stencil bit 0x10 is a lead). See the entry "2026-11-04, flight 08:25", last in this file.
 - **State (2026-10-29, a tool in hand over bare terrain, issue #145):** a tester's `edvr_gfx_20261029_180522` (v0.22.0-rc.3, Steam, DLSS, copy route): on foot, scanner out, panned to bare terrain: 238 frames refused `hdr-camera-changed`, the tool's glow pass (025B4B9F/46F92DC7, first-person camera) against the terrain's first camera. The October pool-less admission needs no source and no first-person draw, and a tool is both (`sources=1 first-person=3`; `overlays-without-named-world=0` all flight). Fix `ebd8c755` on branch `claude/aa-terrain-disengagement-793fa4`: admit when the target's first camera is the last world's and the drawing camera is not. FLOWN OK 2026-10-29 16:29 on Steam (`edvr_gfx_20261029_162800`): 1,478 frames on the path, all treated and selected source-free on the world camera, zero `hdr-camera-changed`. Last entry.
 - **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
@@ -18952,3 +18952,44 @@ The note first had `R = I+0x2F0`; the disassembly shows `R = *(u64*)(I+0x2F0)`, 
 4. Check a station wall within 10 m while turning, for the known failure of the 10 m test.
 
 Refuted, by stage: no `vehicle_rig target` line (`no target seen` on the 30 s line) means SetTarget is not the route; a `VTABLE-MISMATCH` flag means the token or handle read is wrong; `status=not-ready` for good means the wrong entity; `absurd-count` means the record read is wrong; `vehicle_rig emits` all `other` means the records are not in those arrays or the target is not what is drawn; the ship's pool record joining nothing means the identity is incomplete; several `distinct_this` leaves open which camera target to trust.
+
+
+## 2026-11-04, flight 08:25: the rigs read true, the gate was dead, and the vehicle frame replaces the vote (issue #186), BUILT, NOT FLOWN
+
+Flight `edvr_gfx_20261104_082541` (`v0.22.0-rc.6-59-gd6edf197`, build matched), started in VR, switched to flat at 08:29:13, Cobra Mk V then a training SRV.
+
+**Measured.**
+
+- The probe reads the game's rigs with `faults_caught=0` and `vtable_mismatch=0`: `CobraMkV` (34 records), `CobraMkV_Cockpit` (7), `Buggy` (94), `TestBuggy_Cockpit` (89), `Vehicle_TurretGun` (11). `SetTarget` is the change event.
+- Root spheres: SRV ship 4.51, SRV cockpit 4.69, Cobra ship 29.97, Cobra cockpit 29.95. The sphere is tight on the SRV and not on a big ship.
+- In the parked SRV capture (`flat_pixels\20261104_153700_738_25956_1`) rig records join the pool by exact pose bits: ship 84 of 94, cockpit 85 of 89, both roots included. Parked, so this says nothing about timing under motion. The eye did not move in that pair.
+- In that frame 99.0% of near pixels have no slot. One joined record owns the rest, 7,774 pixels, about 30 grid samples against the vote's minimum of 32. The cabin's main pairs are `6A19A6E5/E5B29066`, `4435F2E5/026709B5` and `01DA82F8/2C3ADCD2`, which are in no keyed family.
+- Replay of the logged root sphere on that frame: of the near pixels sampled, 66.7% are inside; the rest reach 14 m and include the ground, so the sphere does exclude terrain.
+- Stencil, Cobra frame 14401 (`resolve_inputs_406878125_36592_2`, the depth plane is 8 bytes a texel): 0x05 57.7% (1.1% with depth), 0x90 22.9%, 0x94 10.6%, 0x10 6.6% (the nearest, depth p50 .0299), 0x95 2.0%, 0x14 .13%. Every surface with depth but that 1.1% has bit 0x10. A lead for "is this pixel the vehicle's": this frame has no other ship or station, and older notes say NPCs carry the bit too.
+- Sean moving in the SRV: artifacts in the cockpit. `flat refusal census` refused about .03-.05%, all `range`, with `ship-record=0`.
+
+**The gate was dead.** `shipRecordTerm` asked `journalOnFootKnown()`, which goes through `journalWatchActive()`, false in the flat profile by design. So the ship record term of the 06:43 entry never ran in flat, and the artifacts are the unchecked camera term, not a verdict on the term. The 11-04 message saying it ran on foot was wrong as well. The flat reader is `journalFlatOnFoot`. Rigs set the field directly, which is how every test passed.
+
+- ruled out: "not much green" as the upscaler not running, because the parked SRV's census has refused 0.0000%: green marks an exact record, and a dim pixel is still resolved by the backend.
+
+**Capture defect, not fixed.** Shift+NumLock in the moving SRV stops the route for the capture's life: at 08:45:36 `flat runtime: treated=` froze at 86175 until `flat pixels: summary status=expired-arm` at 08:45:49, then a reset with `delta-ms=12625`; at 08:41:51 the same, `cancelled-resize-or-stop`, `delta-ms=9984`. Presses in a moving ship and in the parked SRV worked. Cause unknown. So no moving SRV frames exist. Also, resolve inputs came back `expired-arm` on the copy route twice, so the stencil plane needs the HDR route.
+
+**Open, not diagnosed.** The game's Esc menu flickers after the live switch, perhaps only with the Motion source view on; Sean is to check with the view off. Nothing in the log explains it.
+
+**Built** (one commit; `tools\flat_mono_resolve_test` `vehicleFrameGpuTests`, 7 of 7 mutations caught; WARP and synthetic frames only). The vote and its kernels are gone.
+
+1. The gate reads `journalFlatOnFoot` (`vframe::gate`, pinned in `tools\flat_temporal_test`), and `flat vehicle frame 5s: gate=.. rig=.. sphereR=.. asked=.. with-frame=.. no-frame[..]` prints every window, so a dead gate shows.
+2. The emit tap records the current cockpit rig root's position and packed quaternion in a ring keyed by the present-frame clock; the resolve takes this frame's and the previous stamp's, and passes the pair and the root's sphere in the prep's constants.
+3. A pixel inside the sphere and within 10 m with no motion of its own rides that pose where last frame's depth confirms it (class skinned, teal, `vehicle-frame=` in the census). A kind-0 pixel in that volume that does not keep it needs the check on the camera term too, or is refused as class camera. With no frame this resolve, the old path exactly.
+4. `vehicle_rig record role=cockpit i= c= r=` logs each cockpit record's sphere, to show what makes the Cobra's 30 m.
+
+Temporary key: `advanced.vehicle_rig_probe`, which now also gates the frame.
+
+**Flight (Epic, flat, view on; no capture key in the moving SRV).**
+
+1. SRV moving: `flat vehicle frame 5s` reads `gate=on`, `with-frame` close to `asked`. Cabin, body and controls paint teal and the artifacts are gone with the view off. `no-frame[missing]` high means the root is not emitted before the resolve; refuted if it stays near `asked`.
+2. Ship moving, looking down: body, seat and controls teal; `vehicle-frame=` in the millions, `range` far below the 06:46:00 window's. Shift+NumLock there gives the pose join under motion.
+3. A station wall within 10 m while turning, on a big ship: the known risk of the loose sphere.
+4. Go on foot in flat: `gate=off(on-foot)` and on-foot as before.
+
+**Not to merge until flown:** the frame is unproven under motion.
