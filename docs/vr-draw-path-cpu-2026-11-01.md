@@ -9,23 +9,15 @@
   criterion. Shipped items 1 and 3 and the re-issue counter; removed items 2
   and 4 and all three temporary keys. Its DLAA items were worth 0.2-0.4 ms
   against a 0.8 ms noise floor.
-- **Build 2 (#168, branch `build2/may-want-byte`; flown 2026-11-03):** the VS
-  "may-want" byte and pair test before `GetType`, the stash deleted,
-  `drawPathFast` in the instanced hook, instruments (`draw gate holders:`,
-  `draw mask:`, `gpu timing queries:`, the F87c `Unmap copy` figures; read with
-  `edvr_log.py --perf-windows`). The byte's targets fell about 0.6 ms a frame,
-  nothing rose more than 0.2 ms. The marker fix's Unmap copy is the next
-  target: 0.80 ms a frame, about 230 KB of write-combined memory per eye.
+- **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair
+  test before `GetType`, `drawPathFast` in the instanced hook, instruments
+  read with `edvr_log.py --perf-windows`. Its targets fell about 0.6 ms a
+  frame, nothing rose more than 0.2 ms.
 - **Post-build-2 review (2026-11-03, "Review of build 2's flight and next
-  targets", checked in "Check of that review" and "Rebuttal & code trace on A1,
-  A2 and B1"):** track A, EDVR-internal cuts (`streamUnmapCopy`,
-  `hookedPSSetShaderResources`, `hookedMap`/`hookedUnmap`, `flushIaObserved`,
-  the F100 tee's eye-0 trap); track B, engine and hook-chain draw reductions.
-  Kept: the marker copy (duplicate eye copies, overlapping windows), the bind
-  and map hooks, the post-R1 split, the layer-A fade gate. Ruled out or
+  targets" and the replies after it):** kept the marker copy, the bind and
+  map hooks, the post-R1 split, the layer-A fade gate. Ruled out or
   deferred: the tee trap under DLAA (0.08 ms), the sub-pixel floor, the EDHM
-  bypass, offscreen/concourse culling until a census/RTV check says what those
-  draws are.
+  bypass, offscreen/concourse culling until a census says what those draws are.
 - **Build 3 (#180, `cfa5e806`; flown 2026-11-03, "Flight 2026-11-03 (build
   3)"):** both eyes' marker windows merged and copied once per Unmap, no key.
   Passed: coverage held (`outside 0`, `escalated 0`, `faults 0`, named 3.0),
@@ -45,7 +37,13 @@
   a hot `State` block, the map bounce gated on its own `open_` test, shape
   and hash before flag, the hologram pass by VS bit, counters for build 5,
   own time in the analyzer. Expected 0.34-0.51 ms. Item 3 dropped (#184).
-  Temporary: item 7's line. Spec #185; `c86670bd` installed. Next: flight.
+  Temporary: item 7's line. Spec #185, `c86670bd`.
+- **Build 4 flown (2026-11-03, "Flight 2026-11-03 (build 4)"):** passed.
+  Own time per full-path draw 349 to 304 ns; 0.45 ms a frame at build 3's
+  draw count without Map/Unmap (0.60 with). Heavier scene (17,148 draws a
+  frame against 13,480). Ruled out: item 4's map-bounce calls as a cost
+  (under 0.02 ms). Item 7: PS SRV re-sets 53-63% of sets, RTV0/DSV0 6-7%;
+  `mapMemo` misses 17%. Next: build 5's design from these counts.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2090,3 +2088,75 @@ the hologram rig's `g_holoEye` uses, the enum position and token,
 `kNullPsMesh` in the test, `bindingInvalidate` resetting `mayWant`, and the
 contradictory "flight-to-flight spread" phrase removed. Notes outside the
 repo: `b4-rereview2.md`.
+
+## Flight 2026-11-03 (build 4)
+
+Build `c86670bd` (log `edvr_gfx_20261103_225315.log`, `--expect-build HEAD`
+matches), the L2 spot, standing still, DLAA, one 100 s capture (20 windows of
+5 s, no events lost, coverage complete). `--health`: no NEVER APPLIED. Notes
+outside the repo: `profile-b4\own_cmp.py`, `fn_cmp.py`, `subtree.py`,
+`perdraw.py`.
+
+**The scene was heavier than build 3's.** Full-path draws a frame, from
+`draw mask:`: 17,148 in the log window 22:56:32-22:57:38, which spans profile
+windows 7-20 (build 3: 13,339 and 13,620). Of them, `ui_family` skipped 79%
+(build 3: 95%) and `weapon_motion` 3,450 a frame (build 3: 513), so the extra
+draws are mostly ones that reach more of the path. Runtime cycle 36.5 ms
+(build 3: 33.8). Windows 1-6 sit in a log window that began 25 s before the
+capture, so its 14,099 is not their count; their own time a frame (5.13 ms)
+equals windows 7-20's (5.22), so the draw count was likely the same
+throughout. Windows 7-20 only are used per draw.
+
+**The cut: passed.** EDVR's total own time in R1 (the analyzer's own total,
+which equals its uncapped leaf):
+
+| | Build 3 (w3-20) | Build 4 (w7-20) |
+|---|---|---|
+| Own, ms a frame | 4.699 (SE 0.068) | 5.215 (SE 0.052) |
+| Own per full-path draw | 348.6 ns | 304.1 ns |
+| At build 3's draw count (13,480) | 4.699 | 4.100, cut **0.60 ms** |
+| Without Map/Unmap own (per-frame, not per-draw) | 300.5 ns | 267.3 ns, cut **0.45 ms** |
+| Draw-hook subtree own (capped chains) | 3.293 ms, 244 ns | 3.781 ms, 220 ns, cut 0.32 ms |
+
+The criterion (0.2 ms) holds on every reading; 0.45 ms is the fair one,
+since Map/Unmap cost does not scale with draws. It assumes the extra draws
+cost the same per draw as build 3's; they reach more of the path, which
+would understate the cut rather than inflate it.
+
+**Item 4 saved nothing measurable.** Own a frame under `hookedMap` 0.255 to
+0.242 ms and `hookedUnmap` 0.393 to 0.389 ms. Ruled out: the map bounce's
+calls as a cost while nothing is open (under 0.02 ms a frame).
+
+**Where the draw path's cut came from** (draw-hook subtree, build 4 scaled to
+build 3's draw count): `beginPanelOverride` -0.08, `uiDepthOnEyeDraw` -0.05,
+`viewIsSurface` -0.03, `objectProbeOnEyeDraw` -0.03; the item 1 and item 9
+callees gone from the profile, 0.21 together (`uiDepthHologramOnEyeDraw`
+0.06, `pixelProbeAfterEye` 0.05, `pixelProbeBefore` 0.04,
+`gpuFrameCommandIfLive`, `objectProbeCandidateDrawIssued`, `uiLayerTargetKind`,
+`blendProbeWantsDraws`, 0.02 each).
+
+**Nothing else rose more than 0.1 ms**, grouping each caller with its former
+callees. The forward lambdas plus those callees: 0.84 ms to 0.81. The
+`observedDraw` lambda (`vscreen.cpp:4387`) rose from 0.087 with its callee to
+0.139, mostly at `:4394`, after the inlined ledger test. `starGlowAfterDraw`
++0.04 and `hookedDrawIndexedInstanced` +0.04 (both scaled) are within the
+limit, and both depend on the scene.
+
+**Nothing changed on screen.** Composites left in the scene: 0 in every
+window (build 3: 0-6). `vscreen footprint:` is in neither log. `ui depth
+totals:` wrote depth for 6.6 and 5.9 interface draws a frame (build 3: 6.0
+and 6.0); left alone 18.6 and 28.4 (20.5-33.1). Per full-path draw, the
+letter of the criterion, 6.6 and 5.9 fall just outside build 3's two
+windows (4.68e-4 and 3.44e-4 against 4.41e-4 to 4.50e-4). Interface draws
+do not scale with world draws, so per frame is the right ruler here, and per
+frame they are within 10%. The rigs check item 5's resets exactly.
+
+**Item 7: the counts for build 5** (last window, a frame):
+- `mapMemo`: 1,935 lookups, 324 misses (17%).
+- `bindingSet` re-setting the pointer already bound: PS SRV 0 63%, SRV 1
+  57%, SRV 2 53%, SRV 3 55%, about 6,900 calls a frame; RTV0 6%, DSV0 7%.
+  `bindingSet`'s own time is 0.06 ms a frame, so S2's worth is in the caches
+  keyed on generations, not in the set itself. RTV0 and DSV0 change on
+  nearly every set, so a cache keyed on them gains little from S2.
+- Item 9 skipped the hologram call for 13,650 draws a frame (`hologram_depth`
+  24,578,362 of 30,867,090).
