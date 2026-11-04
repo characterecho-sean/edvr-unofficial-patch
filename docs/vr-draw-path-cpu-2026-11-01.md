@@ -42,8 +42,8 @@
   `uiDepthOnEyeDraw`'s memo hit inline, a `viewIsSurface` front cache, one
   engine-velocity generation; temporary counts for #184 (all three flags) and
   S2 (would-hit and would-disagree); the cross-profile probe's count without
-  a locked add. Expected 0.25-0.39 ms. Argon agreed; the Opus review asked
-  for four rig and counter fixes, taken. Next: Opus re-review, then build.
+  a locked add. Expected 0.22-0.36 ms. Argon agreed; Opus asked for four
+  rig and counter fixes, taken, and approved on re-review. Next: spec, build.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2612,3 +2612,29 @@ the table wins.
 | 10 | Never-ran signatures missing for item 4; item 3 and item 6 should print what they measure against. | Taken: the item 6 line also prints engine velocity's slow-half entries, `viewIsSurface` calls, and shadow lookups (which must equal the real misses). |
 | 11 | Zero disagreements in one 100 s standing flight cannot settle the recycled-address case. | Taken: build 6 words it "none observed in N lookups", and S2's case rests on that plus the frame bound, stated as such. |
 | 12 | The total's lower bound leans on items 3 and 7, the least supported. | Agreed: the 0.25-0.39 ms total is a guide; the per-item criteria decide. |
+
+**Re-review (Opus, fresh context, against `c86670bd`): approved.** All
+twelve findings resolved, each checked in the code. Its five non-blocking
+notes are taken:
+- A. Item 3's front entry reads `g_classifierEpoch` after `viewIsSurface`
+  returns, as it reads `putSeq`: `surfaceMatches` can bump the epoch
+  (`ui_depth.cpp:772`) before the put at `:869`.
+- B. Item 1: `g_t0` and `g_mode` sit in an anonymous namespace
+  (`vr_star_glow.cpp:45`, `:102-106`), and `FirstLevelBind` holds a
+  `ComPtr`. The single storage of `active` moves out of the struct into
+  `detail::g_vrStarT0Active`, and the mode becomes `detail::g_vrStarMode`
+  (other files have their own `g_mode`); no new writer.
+- C. Item 4's summed fake goes in `lifecycle_tests.h`, which
+  `skin_engine_test` also includes (`build.bat:1521-1527`), and the
+  aggregate's reader is declared in `binding_shadow.h`'s external-shadow
+  branch (`:156-161`).
+- D. For build 6: the F157 coat-pack skip (`vscreen.cpp:2135`) is another
+  return before the flag clears; build 5's stamp, bumped at entry, covers it.
+- E. Item 4's slow-half count is an equivalence check, not a never-ran
+  signature: build 4 never logged it. The source pin and the two rigs show it
+  ran.
+
+Item 7 re-sized from build 4's own log: `psConstantBuffers=2598726/78.97`
+over 805 frames, about 3,230 PS constant-buffer binds a frame, so the 0.096
+ms is about 30 ns a call, of which the locked add is part. Expected
+0.03-0.06 ms; the build's total 0.22-0.36.
