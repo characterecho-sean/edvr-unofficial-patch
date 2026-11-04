@@ -2747,11 +2747,26 @@ lines in `beginPanelOverride` and `forwardWithVerdict` sit on those loads (the
    equal to the flag's whole expression (for example `g_uiDepthOn &&
    !g_uiDepthStoodDown`). Each ladder load becomes a bit test in place; no rung
    moves.
-   - **Writers:** an out-of-line `drawInterestSet(bit, bool)` in
-     `vscreen.cpp`, null-safe for `g_state` (null before install and in
-     transport-only mode, `:6230`). Install recomputes every bit from the
-     real accessors after `new State` (`:7331`) and the configure sweep
+   - **Writers** (amended on review, R1): `drawInterestSet(bit, bool)` is
+     inline in a new pure header, `draw_interest.h`, writing through `inline
+     uint64_t* g_drawInterestPtr = nullptr`. `vscreen.cpp` points it at
+     `g_state->interest` after `new State` (`:7331`) and clears it before
+     the `State` is deleted, so it is null before install, in transport-only
+     mode (`:6230`) and in every rig that compiles a module without
+     `vscreen.cpp` (`ui_depth_test` includes `ui_depth.cpp` alone,
+     `build.bat:2093`); there the call is a no-op, and a rig that tests a
+     module's recompute points it at a local. Install recomputes every bit
+     from the real accessors after `new State` and the configure sweep
      (`:7344-7367`).
+   - **A bit mirrors stored state only** (R2). Where the ladder calls an
+     accessor that does more than read a flag, the bit covers its first
+     stored test and the rest stays behind the bit, unchanged. Site 6:
+     `flatTemporalCapturing()` (`flat_temporal.h:34-37`) is a relaxed load of
+     `g_flatTemporalCapturing`, then `flatTemporalCapturingSlow()` (the pause,
+     `g_flatComputeInternal`, and the owner-thread test, which counts foreign
+     calls). The bit is `g_flatTemporalCapturing`; `vscreen.cpp:2143` becomes
+     `if ((interest & kBitFlatTemporal) && flatTemporalCapturingSlow())`, the
+     same tests in the same order.
    - **The rule that makes it exact:** each module recomputes its bits from
      its real expressions at the end of every function that writes one of
      its flags. That covers the writes through aliases and reference
@@ -2771,6 +2786,14 @@ lines in `beginPanelOverride` and `forwardWithVerdict` sit on those loads (the
      `g_aaOffDraw`); `introPanelWants`, `introCurveWants` and
      `sunglareWantsDraws` (computed, not stored, and behind shape tests); the
      depth probe's per-draw tail; the per-draw outputs of `g_uiDepthDraw`.
+     Also, named so no implementer adds them (R3): `fssResActive()`
+     (`vscreen.cpp:2379`, `:4774`; `g_fssResCount` moves on the streaming
+     threads, `fss_res.h:77-78`) and `nativeOnFootBodyCullWanted()`
+     (`:5550`; `g_nativeOnFootCamExternal` is written on the game's update
+     thread, `native_on_foot.h:123-148`). Neither is on an unclaimed eye
+     draw's path: the first is behind `!s->rtv0Eye` or the FSS verdict, the
+     second in the instanced thunk after the verdict. Only render-thread
+     writers are mirrored, so the mask stays a plain field.
    - **Gated by an invariant:** `g_rollFreePending` is set only behind
      `particleSteady()` (`particle_fix.cpp:672`, `:681`, reached from
      `vscreen.cpp:2218`) and cleared on leaving steady (`:950`);
@@ -2822,7 +2845,12 @@ lines in `beginPanelOverride` and `forwardWithVerdict` sit on those loads (the
    at the four thunks' call pairs (`:5277/5291`, `:5360/5373`, `:5440/5462`,
    `:5526/5554`, the only callers); the scope builds from it and the TLS goes.
    Plus `if (flags.uiDepth) uiDepthEnd(self);` on the `:4308` return, so the
-   mode does not outlive it. This also removes build 5's deferred item 5 cost
+   mode does not outlive it, and (R4) the same return clears
+   `g_uiDepthDraw`'s `planetPending`, `planetSolarPending` and
+   `worldScreenPending`, so the module's accessors agree with the flags after
+   a blocked draw. Their only readers today are `:4720` and `:4726`, which
+   move to the flags, so this changes nothing a draw does; it keeps a later
+   reader of the accessors from seeing a blocked draw's state. This also removes build 5's deferred item 5 cost
    (about 11 TLS accesses a draw, 0.02-0.04 ms). Build 5's counter will most
    likely read 0 (the fence is a fault path); the case rests on the code, which
    is why it is put to the maintainer rather than gated on the count.
@@ -3094,3 +3122,28 @@ Agree in full. Keeping `draw mask:` (`src\d3d11\draw_mask_line.h`) as a
 standing log line (`:2842-2846`) is well-justified at `< 0.02 ms/frame` total
 and gives every future log the full-path draw denominator and VS-bit skip
 counts.
+
+### Reply to the build 6 review (2026-11-04)
+
+Each point was checked against the code at HEAD (the source is `85006708`'s;
+only docs moved since). Four are taken and folded into the changes above as
+R1-R4. Where this reply and the changes differ, the changes win.
+
+| # | Point | Disposition |
+|---|---|---|
+| R1 | 1D: an out-of-line `drawInterestSet` in `vscreen.cpp` breaks every rig that compiles a module alone. | Taken. Checked: `ui_depth_test` builds from `ui_depth_test.cpp`, which includes `ui_depth.cpp`, plus two timing files, no `vscreen.cpp` (`build.bat:2085-2095`). The writer is inline in `draw_interest.h`, through a pointer that is null until install and in rigs. |
+| R2 | 1C: `flatTemporalCapturing()` is not a plain flag read. | Taken, narrower than proposed. The bit is `g_flatTemporalCapturing` alone; the pause stays in `flatTemporalCapturingSlow()` with the other tests, so its writer (`flat_temporal.cpp:932`) needs no audit and the order is unchanged. The general rule is written down: a bit mirrors stored state only. |
+| R3 | 1A, 1B: `fssResActive()` and `nativeOnFootBodyCullWanted()` have off-thread writers. | Agreed they must not be mirrored; neither was on the list (the survey's sites 3-33 are an unclaimed eye draw's reads, and these sit behind `!s->rtv0Eye`, the FSS verdict, or in the instanced thunk). Both are now named under "Not mirrored". Option (b), an atomic mask, is not taken: with no off-thread writer mirrored, a plain field is exact, and the drift check would catch a drift. |
+| R4 | 3: clear the pending flags on the blocked return too. | Taken. A fault-path store of three bools; it changes nothing a draw does, since the accessors' only readers move to `DrawCallFlags`. |
+| - | 2.5: the render-thread audit of the other writers and the `particleSteady()` invariant. | Thanks; it is the check the draft asked for. |
+| - | 3: keep `rigfake` when build 5's item 2 and 3 cases go. | Agreed: S2's `ui_depth_test` case runs eye-memo misses and needs it. Only the front-cache and inline-only cases go. |
+
+**Corrections to section 1**, so the record is right:
+- **Wrong names:** the functions it names do not exist; `starGlowOnDraw`, `starGlowActive()`, `bindingEngineVelGeneration()` and `psCbProbeCount` match nothing in `src`. Build 5 had:
+  - `vrStarGlowAfterMayAct()` gating `starGlowAfterDraw` at the four thunks;
+  - `bindingEvKeyGeneration()`;
+  - a plain count in `cross_profile_cost.h` at the PS constant-buffer site, in place of a locked add (not a popcount loop).
+- **The would-hit total:** `eye_ptr_would_hit` over the flight is 3,035,059 (79,803 + 58,883 + 856,856 + 2,039,517), not 3,205,721. It is a sum of four log windows, not of 2,830 frames.
+- The 1,133 a frame (40%) is from the one full on-foot window and stands.
+
+**Consensus:** on this reply, Argon is asked to confirm or object. With its agreement, build 6 goes to a fresh Opus review.
