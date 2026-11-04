@@ -132,6 +132,14 @@ struct FlatMonoResolveFrame {
     // records, corrupt slots, the sky and the first-person pixels are untouched. staticScene (the menu's blanket form) wins when both are
     // set. False (the default) leaves every pixel, every resource and the prep's arithmetic exactly as before the field.
     bool steadyDetail = false;
+    // The stale slot's own record (the flat profile's treatment alone; the VR world route never sets it): a pixel the steady-detail rule
+    // finds stale, whose slot a later draw overdrew, first asks the record that slot names where the surface moved, and keeps that motion
+    // where last frame's depth confirms it, exactly as it confirms the camera term. The cockpit's body and controls are drawn over the keyed
+    // shell and ride the camera with it; the camera term holds them still in the world and last frame's depth never agrees at a few metres
+    // a frame. A record that is masked, no rig record, skinned, or carrying an old marker, or a depth that disagrees, leaves the camera
+    // term as it was. Needs steadyDetail's depth check (no effect where that is unavailable, on a reset, or under staticScene). False (the
+    // default) leaves every pixel and the prep's arithmetic exactly as before the field.
+    bool staleRecordTerm = false;
     // Planet patch motion (celestial_motion.h): the planet records (the SRV the flat runtime fetched for this frame, bound at t18 for the prep)
     // and the tangents (l, r, b, t) of this frame's and last frame's camera rows they were built for. The pixels inside a body take its own
     // motion in place of the camera term. Only the flat runtime fills them, from its own frames; the VR world route never does. Null leaves

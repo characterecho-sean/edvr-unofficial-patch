@@ -421,7 +421,9 @@ bool g_steadyFailureLogged=false;
 // unchanged.
 // debug: x = this frame samples the refusal census, y = this frame paints the refusal view (FlatMonoResolveFrame::refusalCensus and
 // refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither. debug.w bit 3 (8): the
-// planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise.
+// planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise. debug.w bit 4
+// (16): a stale slot's pixel asks the record under it first (FlatMonoResolveFrame::staleRecordTerm; set only with the steady-detail depth check
+// available); the bits 1, 2, 4 and 8 are the untrusted-camera map, the foreground map, the skin target and the planet records, each tested alone.
 // celestialTanNow/celestialTanPrev: the flat tangents (l, r, b, t) of this frame's and last frame's camera rows, read only with that bit.
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4];
     float celestialTanNow[4], celestialTanPrev[4]; };
@@ -1311,6 +1313,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
     constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
+    if(f.staleRecordTerm && depthCheck)constants.debug[3]|=16u;
     if(celestialBound){constants.debug[3]|=8u;std::memcpy(constants.celestialTanNow,f.celestialTanNow,sizeof(f.celestialTanNow));std::memcpy(constants.celestialTanPrev,f.celestialTanPrev,sizeof(f.celestialTanPrev));}
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;

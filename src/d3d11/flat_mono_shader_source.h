@@ -303,6 +303,36 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     }
     return 1;
 }
+// THE STALE SLOT'S OWN RECORD (debug.w bit 4, value 16; the flat profile's treatment alone, FlatMonoResolveFrame::staleRecordTerm). A pixel
+// whose slot a later draw overdrew (engineBefore's return 3) is an unkeyed surface drawn over a keyed one, and what is drawn over a joined
+// record is nearly always attached to the same thing: the commander's body and the flight controls over the cockpit shell ride the camera
+// with it. The camera term holds the surface still in the world, which is wrong for those, so the slot under the pixel is asked first: the
+// record it names, certified exactly as the exact path certifies it (a rig record with this frame's marker, never a skinned one), moves
+// this pixel's own depth the way the record moved. Returns false, leaving the camera term, for anything else: the bit clear, a slot code
+// that is no record, a masked, non-rig or stale-marker record, a skinned one, or one the rows cannot reproject. The caller validates the
+// answer against last frame's depth (historyDepthMatches) exactly as it validates the camera term.
+bool staleRecordBefore(int2 q,float2 uv,float depth,out float4 before) {
+    before=0;
+    if((debug.w&16)==0)return false;
+    float2 es=Slots.Load(int3(q,0));
+    if(!(es.x>=1) || es.x>=4294967296.0)return false;
+    uint code=uint(es.x);
+    if(float(code)!=es.x || (code&1)==0)return false;
+    uint count,stride; Pool.GetDimensions(count,stride);
+    uint slot=code>>1;
+    if(slot>=count || stride!=336)return false;
+    EnginePoolRecord r=Pool[slot];
+    if((debug.w&4)!=0 && r.data[0].x!=0u)return false;
+    uint kind=engineRecordKind(r,asuint(EN[276].x));
+    if(kind==3)kind=engineStaleStampKind(r,asuint(EN[276].x));
+    if(kind!=1)return false;
+    if(r.data[18].x!=(0x7FC0ED01u^engineMarkerHash(r,asuint(EN[276].x))))return false;
+    return engineReprojectRows(r,uv*float2(2,-2)+float2(-1,1),depth,
+        unjitterRow(EN[270],rowsJitter.xy),unjitterRow(EN[271],rowsJitter.xy),
+        unjitterRow(EN[272],rowsJitter.xy),unjitterRow(EN[273],rowsJitter.xy),EN[275].xyz,
+        unjitterRow(EB[270],rowsJitter.zw),unjitterRow(EB[271],rowsJitter.zw),
+        unjitterRow(EB[272],rowsJitter.zw),unjitterRow(EB[273],rowsJitter.zw),EB[275].xyz,before);
+}
 )HLSL"
 R"HLSL(
 [numthreads(8,8,1)]
@@ -390,12 +420,32 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // HLSL logical operators do not short-circuit: putting cameraBefore's
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
-        if(kind==0||kind==3) {
+        // A stale slot (kind 3) asks its own record first (staleRecordBefore, debug.w bit 4): the record's motion stands where last frame's depth
+        // confirms it, exactly as the camera term's would, and the camera term below is what runs where it does not. The class stays
+        // kClassStale, so a pixel kept this way is a stale pixel the rule kept. The range tests are the camera term's own.
+        bool recordKept=false;
+        if(kind==3) {
+            float4 recordBefore;
+            const bool recordOk=staleRecordBefore(q,rawUv,depth,recordBefore);
+            if(recordOk) {
+                const float2 recordPrev=recordBefore.xy/recordBefore.w*float2(.5,-.5)+.5;
+                const float2 recordMotion=(recordPrev-rawUv)*float2(size.xy);
+                float recordExpected=recordBefore.z/recordBefore.w;
+                const bool inRange=all(isfinite(recordMotion)) && all(abs(recordMotion)<=65504) &&
+                                   all(recordPrev>=0) && all(recordPrev<=1) && isfinite(recordExpected) && recordExpected>=0 && recordExpected<=1;
+                if((debug.w&2)!=0)recordExpected*=foregroundDepth.x;
+                if(inRange)recordKept=historyDepthMatches(recordPrev,recordExpected);   // an if, not &&: no short-circuit
+                if(recordKept){motion=recordMotion;expected=recordExpected;reject=0;}
+            }
+        }
+        if(recordKept) {
+        } else if(kind==0||kind==3) {
             // A planet's pixel takes the body's own motion (celestialBefore); anywhere else, or with no records bound, the camera term stands.
             uint celestial=celestialBefore(rawUv,depth,before);
             if(celestial==0)valid=cameraBefore(rawUv,depth,before); else valid=celestial==1;
         }
-        if(valid) {
+        if(recordKept) {
+        } else if(valid) {
             float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives
             // the actual current phase separately and tracks its own history.
