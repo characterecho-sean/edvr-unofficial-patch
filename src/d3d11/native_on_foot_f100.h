@@ -56,18 +56,6 @@ inline uint32_t teeHeldBy(const TeeState& s, uint32_t frame) noexcept {
     return kTeeHeldNone;
 }
 
-// #155: the world draw's scene-depth test without the depth probe. With AA off the probe is not wanted, so the eye-of-draw lookup names no scene depth and
-// every world draw was refused as not scene depth: no world rows, no fast frame. Here the bound depth view's texture has the draw's colour target's size
-// (both read at runtime, nothing per headset); the colour target already gives the draw its eye. It cannot tell twin eye-sized depth targets apart, which
-// the probe's pair pick can, so while the probe is wanted it is only compared with the probe's answer, never used.
-inline bool sceneDepthSizeMatch(bool haveDepth, uint32_t depthW, uint32_t depthH, uint32_t colourW, uint32_t colourH) noexcept {
-    return haveDepth && depthW != 0 && depthH != 0 && depthW == colourW && depthH == colourH;
-}
-// The world draw's "is scene depth" argument: the probe's answer (eyeOfDraw >= 0) while the probe is wanted; the size test only with the probe not wanted.
-inline bool worldSceneDepth(bool probeWanted, bool probeSaysScene, bool sizeMatch) noexcept {
-    return probeWanted ? probeSaysScene : sizeMatch;
-}
-
 inline bool teeFast(uint32_t fastFrame, uint32_t frameNow, uint64_t vs) noexcept {
     return fastFrame != kNoFrame && fastFrame == frameNow && !teeSlowVs(vs);
 }

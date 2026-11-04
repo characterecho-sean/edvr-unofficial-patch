@@ -3825,9 +3825,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     s->realUnmap(self, res, sub);
 }
 
-// Every re-issue (GLOSSARY: Re-issue) is counted and timed by caller (draw_reissue_line.h; perf_monitor.cpp's "draw reissue CPU:" line): the count on every frame, the
-// time on a draw-sample frame, where each re-issue is clocked whole (they are few, so no stride and no scaling). pureDrawReissue and the thunk below are the only
-// ways to re-issue a game draw; a new re-issue goes through one of them, never to g_state->realDraw* directly.
+// Re-issues (GLOSSARY: Re-issue) are counted and timed by caller (draw_reissue_line.h; perf_monitor.cpp's "draw reissue CPU:" line): the count on every frame, the
+// time on a draw-sample frame, where each re-issue is clocked whole (they are few, so no stride and no scaling). pureDrawReissue and the thunk below count them; a new
+// re-issue goes through one of them. The one exception is visual.cockpit_glass = legacy's overlay, which calls g_state->realDraw* directly and is not counted.
 struct ReissueClock {
     ReissueCaller caller;
     bool on;
@@ -4746,7 +4746,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
         return;
     }
     // Which second issues this draw's own flags ask for (draw_call_flags.h), now that `layered` is known and no early return is left.
-    const DrawReissues reissues = drawReissuesFor(flags, owner, layered, false);
+    const DrawReissues reissues = drawReissuesFor(flags, owner, layered);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth
     // only, right after its own draw and inside the scope that owns the
@@ -5682,7 +5682,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.startInstance = startInstance;
     DrawCallFlags flags;   // this draw's own (draw_call_flags.h)
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args, flags);
-    const bool fast = drawPathFast(v);   // draw_fast_path.h: the gate's tail below (weapon and screen motion, the temporal draws, the census and the footprint) is all behind a subscriber the fast path excludes
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
@@ -5695,7 +5694,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // and the guarded SRV3); the pool families' substituted shaders and MRT6 are
     // bound only when the game has rebound something since the last look. After
     // the verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
     }
@@ -5703,13 +5702,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
-    if (fast) {
-        if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
-            const int64_t r0 = clock.on ? qpcNow() : 0;
-            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
-            if (clock.on) clock.realCall(r0);
-        }
-    } else forwardWithVerdict(self, v, flags, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
+    forwardWithVerdict(self, v, flags, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             // The game's own draw, and only it (gpu_census.h): the weapon and screen motion

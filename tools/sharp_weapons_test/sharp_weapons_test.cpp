@@ -458,14 +458,13 @@ static void build2WiringTests() {
           "the gate is one statement per holder and nothing else");
     check(hasIn(vscreen, "drawGateSet(m != 0);") && countIn(vscreen, "drawGateSample(s);") == 2, "the gate is sampled from the holder set at both places");
 
-    // The instanced thunk takes the fast path like the other three, with the body cull's and the intro curve's ends outside it.
+    // The instanced thunk has no fast exit (#151, held back until #152 makes it reachable): forwardWithVerdict always runs, with the body cull's and the intro curve's ends after it.
     const std::string x = bodyFrom(vscreen, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
-    check(hasIn(x, "const bool fast = drawPathFast(v);") && hasIn(x, "if (fast) {") && hasIn(x, "} else forwardWithVerdict(self, v, flags, 'X'"), "the instanced thunk asks drawPathFast and has a fast branch");
-    check(beforeIn(x, "nativeOnFootBodyCullBegin(", "if (fast) {") && beforeIn(x, "} else forwardWithVerdict(self, v, flags, 'X'", "if (bodyCull) nativeOnFootBodyCullEnd(self);") &&
+    check(!hasIn(x, "drawPathFast") && !hasIn(x, "fast") && hasIn(x, "    forwardWithVerdict(self, v, flags, 'X'"), "the instanced thunk has no fast branch: forwardWithVerdict always runs");
+    check(beforeIn(x, "nativeOnFootBodyCullBegin(", "forwardWithVerdict(self, v, flags, 'X'") && beforeIn(x, "forwardWithVerdict(self, v, flags, 'X'", "if (bodyCull) nativeOnFootBodyCullEnd(self);") &&
               beforeIn(x, "if (bodyCull) nativeOnFootBodyCullEnd(self);", "introCurveEndDraw();"),
-          "the body cull begins before and ends after the fast branch, and the intro curve ends after it");
-    check(hasIn(x, "if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {") && hasIn(x, "uiLayerIssueBlocked()"),
-          "the fast branch keeps engine velocity's full-path call and the blocked UI layer's early return");
+          "the body cull begins before and ends after the verdict forward, and the intro curve ends after it");
+    check(hasIn(x, "if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {"), "engine velocity's call is behind the verdict alone");
 
     // The UI family check is skipped inside the branch that calls it and never reaches the probe branch after it.
     const std::string fwd = bodyFrom(vscreen, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");

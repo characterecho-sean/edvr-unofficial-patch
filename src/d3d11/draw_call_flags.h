@@ -31,11 +31,9 @@ struct DrawReissues {
     bool worldScreen = false;       // the in-world screen coverage (still needs a true Begin)
 };
 
-// `ended`: forwardWithVerdict returned before the re-issues (the owner's blocked UI layer, or a kSkip verdict). `layered`: the UI layer took the draw. `owner`: the draw is
-// the owner context's.
-inline DrawReissues drawReissuesFor(const DrawCallFlags& f, bool owner, bool layered, bool ended) {
+// `layered`: the UI layer took the draw. `owner`: the draw is the owner context's.
+inline DrawReissues drawReissuesFor(const DrawCallFlags& f, bool owner, bool layered) {
     DrawReissues r;
-    if (ended) return r;
     r.uiDepthCoverage = !layered && f.uiDepth;
     r.hologram = !layered && f.holoDepth;
     r.planet = owner && f.planetPending;

@@ -506,19 +506,16 @@ void testDrawCallFlags() {
     check(drawCallOwnsPending(planet) && drawCallOwnsPending(screen) && !drawCallOwnsPending(depth), "flags: only a planet or world-screen pending flag makes a draw the owner of the pending clear");
     DrawCallFlags all; all.uiDepth = all.holoDepth = all.composite = all.planetPending = all.worldScreenPending = true;
     // An ordinary owner draw with every flag set: every second issue is asked for.
-    DrawReissues r = drawReissuesFor(all, true, false, false);
+    DrawReissues r = drawReissuesFor(all, true, false);
     check(r.uiDepthCoverage && r.hologram && r.planet && r.worldScreen, "reissues: an owner draw, not layered, issues the coverage, the hologram passes, the planet and the world screen");
-    // The verdict: a skipped or blocked draw (ended) issues nothing, whatever its flags.
-    r = drawReissuesFor(all, true, false, true);
-    check(!r.uiDepthCoverage && !r.hologram && !r.planet && !r.worldScreen, "reissues: a skipped or blocked draw issues nothing");
     // Layered: the take is not in the eye's colour, so the coverage, the hologram passes and the world screen are skipped; the planet coverage has no layered test.
-    r = drawReissuesFor(all, true, true, false);
+    r = drawReissuesFor(all, true, true);
     check(!r.uiDepthCoverage && !r.hologram && r.planet && !r.worldScreen, "reissues: a layered draw skips the coverage, the hologram passes and the world screen, and keeps the planet's (as before)");
     // A foreign-context draw: its flags are false, so nothing is issued on that context (#184's first stale consumer).
-    r = drawReissuesFor(none, false, false, false);
+    r = drawReissuesFor(none, false, false);
     check(!r.uiDepthCoverage && !r.hologram && !r.planet && !r.worldScreen, "reissues: a draw with no flags of its own issues nothing (a foreign context never takes another draw's)");
     // The planet and the world screen need the owner.
-    r = drawReissuesFor(all, false, false, false);
+    r = drawReissuesFor(all, false, false);
     check(r.uiDepthCoverage && r.hologram && !r.planet && !r.worldScreen, "reissues: the planet and world-screen coverage need the owner context");
     // Every combination of the five flags, the owner and layered: a second issue never appears without its own flag.
     unsigned wrong = 0;
@@ -526,7 +523,7 @@ void testDrawCallFlags() {
         DrawCallFlags f;
         f.uiDepth = bits & 1; f.holoDepth = bits & 2; f.composite = bits & 4; f.planetPending = bits & 8; f.worldScreenPending = bits & 16;
         const bool owner = bits & 32, layered = bits & 64;
-        const DrawReissues x = drawReissuesFor(f, owner, layered, false);
+        const DrawReissues x = drawReissuesFor(f, owner, layered);
         wrong += (x.uiDepthCoverage && !f.uiDepth) + (x.hologram && !f.holoDepth) + (x.planet && !(f.planetPending && owner)) + (x.worldScreen && !(f.worldScreenPending && owner && !layered));
         wrong += (f.uiDepth && !layered && !x.uiDepthCoverage) + (f.holoDepth && !layered && !x.hologram) + (f.planetPending && owner && !x.planet);
     }

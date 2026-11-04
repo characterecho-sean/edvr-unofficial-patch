@@ -9,8 +9,8 @@
   criterion. Shipped items 1 and 3 and the re-issue counter; removed the rest
   and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
 - **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair test
-  before `GetType`, `drawPathFast` in the instanced hook. Its targets fell about
-  0.6 ms a frame. Ruled out after it: the tee trap (0.08 ms), the EDHM bypass.
+  before `GetType`. Its targets fell about 0.6 ms a frame gross, with rises of
+  under 0.2. Ruled out after it: the tee trap (0.08 ms), the EDHM bypass.
 - **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
   marker windows copied once per Unmap. Passed: coverage held, R5
   `streamUnmapCopy` 0.697 to 0.506 ms. B1: 607 of 676 non-eye draws are
@@ -45,20 +45,20 @@
   S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
   Closing build (#194, `a7941eb0`): S1 and the temporary lines out. Flown
   2026-11-04: no regression; F95c's NEVER APPLIED is the scene, not the build.
-  Arc total about 1.6-1.75 ms a frame. Next: PR #166, merged with `main`.
-- **Confirmed (item 1):** with AA off and the key off, every world draw is held
-  as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
-  on: fast path 36-46%, F113 scene meshes 94%.
+  Arc total about 1.4-1.75 ms a frame. Next: fly the merge (PR #166).
+- **Superseded (item 1, #163):** removed at review. `main`'s F196 and F207 want
+  the depth probe on foot with AA off, so its size test could never decide. Its
+  figures came from a tree without them.
 - **Ruled out:** re-issues as a CPU cost (at most 0.004 ms per sampled frame).
   Item 4 as a saving (0 hits: the binding generation moves between every eye
   draw). Item 2 as a saving (the collector cleared nothing). Idling the whole
   marker tee without the UI layer (its slow path is the only publisher of the
   per-eye world rows, `eyeRowsPublish`). Changing `eyeOfDraw` itself
   (`rowSourceDraw` and five census callers would shift).
-- **Left out, tracked:** #151 (`drawPathFast` in `hookedDrawIndexedInstanced`),
-  #152 (per-scene subscriber mask), #153 (cross-profile per-bind counter), #154
-  (`/GL /LTCG`), #183 (cleanup when the arc closes: worktrees, branches,
-  captures, notes, install backups).
+- **Left out, tracked:** #151 (instanced `drawPathFast`, removed at review:
+  unreachable until #152), #152 (per-scene subscriber mask), #153 (cross-profile
+  per-bind counter), #154 (`/GL /LTCG`), #183 (cleanup when the arc closes:
+  worktrees, branches, captures, notes, install backups).
 
 ## Evidence in brief
 
@@ -772,31 +772,28 @@ EDHM costs (~0.5-0.8 us/draw across all modules), cutting unneeded draw calls
 at the engine or proxy boundary is the only way to save 5-10 ms and push VR
 concourse/settlement frame rates from ~28 fps into the 40+ fps range:
 
-1. **Filter tiny clutter out of offscreen shadow cascades in `FUN_1442B3FC0`
-   (`~5,000-10,000` offscreen draws/frame):**
+1. **Filter tiny clutter out of offscreen shadow cascades in the game's part
+   test (`~5,000-10,000` offscreen draws/frame):**
    - About half of all `DrawIndexedInstanced` calls (~15,000-17,700/frame;
      build 2's log shows 7M offscreen `8BC3..` draws per 1800-frame window =
      ~3,900/frame on `8BC3..` alone) are offscreen shadow cascade and auxiliary
      views, and 45% of `X` draws have `IndexCount <= 64`.
-   - In the view loop `FUN_1442B4420`
-     (`docs\stereo-cpu-sharing-2026-10-16.md`),
-     Eye A is bit 1 (`0x2`) and Eye B is bit 22 (`0x400000`); shadow cascades
-     are other bits in `param_3`. In the part test `FUN_1442B3FC0`
-     (`kPartTestRva = 0x42B3FC0`), skipping tiny clutter parts (e.g. world
-     radius `r < 0.20 m`) when the active view is a shadow cascade prevents the
-     part from entering Stage 4-6 submission, EDHM, EDVR, D3D11, and the GPU.
+   - The game's view loop (`docs\stereo-cpu-sharing-2026-10-16.md`) tells the
+     two eyes and the shadow cascades apart by view. Skipping tiny clutter parts
+     (e.g. a world radius under 0.20 m) in its part test when the active view
+     is a shadow cascade keeps the part out of submission, EDHM, EDVR, D3D11 and
+     the GPU.
 
-2. **Sub-pixel clutter floor in `FUN_1442B3FC0` (screen-size test only, capped
+2. **Sub-pixel clutter floor in the part test (screen-size test only, capped
    by world radius):**
    - The retired LOD governor (`fix.settlement_detail`,
-     `docs\design-settlement-lod-bias-2026-09-22.md`) scaled `ctx+0x30` (`s`),
-     which multiplied the asset LOD table test `A*(d - r)*s + B <= t0` and
-     dropped 4.2 m parts (`0.74 deg`) that had small `t0` values.
-   - `FUN_1442B3FC0` has a separate pure screen-size test (`0.5*(A*d + B) <=
-     r`)
-     before the `t0` table loop. Enforcing a 2-3 pixel minimum projected
-     diameter strictly on small props (`r < 0.35 m`, leaving `t0` untouched so
-     large structures never pop) leverages the engine's 8.08x submission
+     `docs\design-settlement-lod-bias-2026-09-22.md`) scaled the factor the
+     asset LOD table is tested with, and dropped 4.2 m parts (`0.74 deg`) whose
+     table entries were small.
+   - The part test also has a separate pure screen-size test before that table.
+     Enforcing a 2-3 pixel minimum projected diameter strictly on small props
+     (under 0.35 m, leaving the table alone so large structures never pop)
+     leverages the engine's 8.08x submission
      multiplier (`docs\engine-render-pipeline.md`: 2 eyes x LOD ranges x
      material layers): each culled sub-pixel part saves ~8 D3D11 draw calls.
 
@@ -807,8 +804,8 @@ concourse/settlement frame rates from ~28 fps into the 40+ fps range:
      clipped the lift and concourse. While standing in the enclosed concourse,
      the engine still evaluates and submits exterior station superstructure,
      docking bay rings, and hangar pads. Using the node-name cache and rig
-     hooks in `optimized_station.cpp` (or the engine's portal callback
-     `FUN_14288D1C0` in `FUN_1442B4420`), we can veto exterior/hangar station
+     hooks in `optimized_station.cpp` (or the engine's portal callback in its
+     view loop), we can veto exterior/hangar station
      rigs when the player is inside the concourse shell.
 
 4. **Gate `t33` layer-A weathering decals (`vh = 8056C9D5F22007F9`) at their
@@ -870,7 +867,7 @@ engine docs.
   - Offscreen draws are not established as shadow cascades. This needs
     evidence before any design.
 - **B2, a sub-pixel floor:** already dead. `design-settlement-lod-bias`: "ruled
-  out: the screen-size half of FUN_1442B3FC0 as the settlement lever, because
+  out: the screen-size half of the part test as the settlement lever, because
   at 8 pixels it removes 613 of 18,267 pool eye draws (0.21 ms)". A 2-3 pixel
   floor removes fewer.
 - **B3, a concourse keep-cell:**
@@ -901,7 +898,7 @@ the coverage problem on **A1 (`streamUnmapCopy`)** without shrinking
 `kF85Entries` or `kWinEntries`:
 
 1. **Agreements (accepted rule-outs):**
-   - **B2 (`FUN_1442B3FC0` sub-pixel floor):** Agreed, ruled out. The 8-pixel
+   - **B2 (the part test's sub-pixel floor):** Agreed, ruled out. The 8-pixel
      test in `docs\design-settlement-lod-bias-2026-09-22.md` (613 draws =
      0.21 ms) kills this lever.
    - **B5 (EDHM / 3Dmigoto bypass):** Agreed. Skipping 3Dmigoto's draw hook on
@@ -3391,8 +3388,10 @@ decimals of a degree; heading within 3 degrees.
   0-pair state appears in builds 2 and 3, and on `e1606a23` before the arc.
 
 **The arc's saving.** Sum of what each flight measured, ms a frame: build 2's
-byte 0.6, build 3's copy 0.19, build 4 0.45-0.60, build 5 0.34; build 6 net 0.
-About 1.6-1.75 ms, on a cycle of about 32-36 ms. Like for like since build 3,
+byte 0.6 gross and at least 0.4 net of its rises, build 3's copy 0.19, build 4
+0.45-0.60, build 5 0.34; build 6 net 0. About 1.4-1.75 ms, on a cycle of about
+32-36 ms. Build 2's figure is the softest: its baseline capture lost 1.29M
+events, in another scene and session. Like for like since build 3,
 in the 0-pair state at about the same draws (13,480 and 13,933): own time 4.72
 to 4.07 ms, R1 23.8 to 22.4, cycle 33.8 to 31.7. Build 2's 0-pair flight (14,076 draws) read R1 26.1 and
 cycle 35.8; most of that wider gap is not attributed to this arc, because the game's own time also moves between sessions.
@@ -3416,4 +3415,44 @@ probably would have failed a rig:
 Three rigs' text pins moved to the merged forms (`sharp_weapons_test`,
 `depth_scene_pick_test`, `srv_turret_hud_test`). Noted, not changed: the cockpit
 glass overlay's second draw calls the real draw directly, so `draw reissue CPU:`
-does not count it.
+does not count it; the comment above `ReissueClock` says so.
+
+## Review of the merge (2026-11-04)
+
+The maintainer's review of `40dfb5df` requested changes. Done here:
+
+- **A fourth collision, of another class: item 1 (#163).** Nothing clashed in
+  the text, but `main`'s F196 (`76b03845`) and F207 (`a4413c83`) changed a fact
+  it rests on: the depth probe is wanted on foot with AA off, and the tee only
+  runs on foot, so the size test decided at most one frame per on-foot entry.
+  Removed: `sceneDepthSize`, `sceneDepthSizeMatch`, `worldSceneDepth`,
+  `bindingResolveAgreement` and the agree/disagree counters; `sceneRefWhy` is
+  `eyeOfDraw(frame) >= 0` again; `teeHeldBy` stays. Main already publishes rows
+  with AA off.
+- **#151's exit removed.** The instanced hook's `drawPathFast` needs the draw
+  gate shut, and the shipped `edvr.ini` holds it open, so it never ran and cost
+  four loads a draw under DLAA. #151 stays open until #152 makes it reachable.
+- **Dead code:** `drawReissuesFor`'s `ended` parameter, `perfMonitorFrameNo`.
+- **Corrections:** the total above is net of build 2's rises; decompiler detail
+  taken out of this doc's later review sections (the maintainer holds the
+  private analysis repository, and this text stays in the branch's older commits
+  `639904db`, `e998a360` and `cfa5e806`).
+- **S2 is a behaviour change, approved, and not exact by construction**
+  (see "Build 6: one interest mask"): the flights' 0 disagreements are evidence
+  for it, not proof.
+
+- ruled out: item 1 on the merged tree, because F196 and F207 make the depth
+  probe answer on every world draw but the first frame on foot.
+- ruled out: the instanced `drawPathFast` as a cut today, because no shipped
+  config shuts the gate.
+
+A second read of the merge for changed premises (Opus, git objects only, not
+run; `native_on_foot.cpp` and `ui_layer.cpp` by keyword) found no other. S2's key
+against upstream's VR overlay guard is inference: the guard's t3 binds change
+the pointer, so they should move the key, and the 0 disagreements predate it.
+
+**Before merging, fly the merge:** `--expect-build` and `--health`, then:
+- DLAA, on foot, weapon drawn: ADS, scope lens, markers, weapon readout (the
+  arc's concourse flights cannot draw a weapon).
+- AA off, the same; no AA-off flight is recorded since build 1.
+- SRV turret view, cockpit glass, normal-space dust, the depth writer probe.
