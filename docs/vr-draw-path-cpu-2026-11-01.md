@@ -2839,10 +2839,11 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
    - Build 4's `binding re-sets:` line: already removed in build 5.
    - Build 5's item 6 line (the #184 and S2 counts) and item 1's drift check
      above, after build 6's flight.
-   - **Asked:** `draw mask:` (`draw_mask_line.h`, which calls itself a
-     standing line, so it is not removed without a yes). It costs a load and
-     a store on `g_maskDraws` every draw (`vscreen.cpp:4301`) plus the skip
-     counts. Keep it, or retire it with the arc.
+   - **Kept (maintainer, 2026-11-04):** `draw mask:` (`draw_mask_line.h`)
+     stays a standing line. It is the log's only full-path draw count, the
+     denominator of every per-draw comparison, and its skip counts show the
+     VS-bit gates working; in build 5's profile its call-site lines total
+     under 0.02 ms a frame (the draw count 0.002), gate tests included.
 5. **Build 5's items 2 and 3 removed** (maintainer, 2026-11-04; exact both
    ways). Each saved nothing ("Flight 2026-11-04 (build 5)"), so the code
    goes:
