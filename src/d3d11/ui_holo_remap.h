@@ -5,6 +5,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 
 // The layer's SV_Position remap. A pixel shader that derives an address from the rasterizer's pixel position
@@ -56,7 +57,8 @@ inline void require(bool ok,const char* why) {if(!ok)throw std::runtime_error(wh
 // `target`, the exact tokens of it. `follow` is what must come straight after it, so the edit can only land on the
 // intended lookup. `operand` is the operand token that replaces v2 in the target: the new temp, with the swizzle
 // the target read v2 through. The remap itself is the same for both kinds, one instruction inserted before the
-// target: temp.xy = SV_Position.xy * cb13[0].xy + cb13[0].zw.
+// target: temp.xy = SV_Position.xy * cb13[0].xy + cb13[0].zw. The hologram kind has a second, same-size edit, THE
+// RELIEF below, and its b13 is two registers; the frosted base's stays one.
 struct Recipe {
     uint32_t target[8];size_t targetLength;
     uint32_t follow[17];size_t followLength;
@@ -76,30 +78,61 @@ inline constexpr Recipe kRecipes[]={
 };
 static_assert(sizeof(kRecipes)/sizeof(kRecipes[0])==2,"one recipe per kind");
 
-// Restricted actual-DXBC transform: only the one address the position feeds. Every material/UV/derivative
-// instruction, signature and resource stays stock.
+// THE RELIEF (issue 140, 2026-11-01: the radar's terrain darker and flat with fix.ui_quality on). Both hologram programs
+// shade the picture they show (t4) from an 8-tap Sobel whose taps sit at UV +- ddx/ddy(UV) * r, with
+// r = max(cb1[120].z, 1) * cb2[21].y: a radius in the pixels of the target the draw rasterizes into. Taken into the layer
+// the derivatives are the layer's, k = layer pixels / game pixels times smaller, so the taps sit k times closer, and the
+// gradient that drives the colour and the alpha falls by about k: a darker fill with no relief. The edit gives the taps the
+// game's own radius again: the `max` that reads cb1[120].z reads cb13[1].x instead, which the layer fills with
+// k * max(cb1[120].z, 1) (reliefRadius, cb1[120].z from SceneRelief below), and its l(1.0) becomes l(0.0) so that value is
+// taken as it is for any k (a layer smaller than the game's target, k < 1, would otherwise be floored at 1). Same size: two
+// operands of one instruction, four tokens; the derivatives sample_d reads as gradients stay the layer's. The programs
+// have the pair below exactly once, the `max` straight before the `mul` that reads its result (EA02FAC2 through r1.x,
+// E95634B0 through r1.w): stock tokens, then the edited operands.
+inline constexpr size_t kReliefLength=16;
+inline constexpr uint32_t kReliefStock[2][kReliefLength]={
+    // max r1.x, cb1[120].z, l(1.0)  then  mul r1.x, r1.x, cb2[21].y   (EA02FAC2)
+    {0x08000034,0x00100012,1,0x0020802a,1,120,0x00004001,0x3f800000, 0x08000038,0x00100012,1,0x0010000a,1,0x0020801a,2,21},
+    // max r1.w, cb1[120].z, l(1.0)  then  mul r1.w, r1.w, cb2[21].y   (E95634B0)
+    {0x08000034,0x00100082,1,0x0020802a,1,120,0x00004001,0x3f800000, 0x08000038,0x00100082,1,0x0010003a,1,0x0020801a,2,21},
+};
+inline constexpr size_t kReliefOperandAt=3,kReliefImmediateAt=7;   // cb1[120].z: tokens 3..5 of the max; l(1.0): its value, token 7
+inline constexpr uint32_t kReliefOperand[3]={0x0020800a,13,1};     // cb13[1].x
+inline constexpr uint32_t kReliefImmediate=0;                      // l(0.0)
+inline bool hasRelief(Kind kind) {return kind==Kind::kHologramDepth;}
+
+// Restricted actual-DXBC transform: only the one address the position feeds, and for the hologram kind the relief
+// radius. Every other material/UV/derivative instruction, signature and resource stays stock.
 inline std::vector<uint32_t> patchProgram(const std::vector<uint32_t>& t,Kind kind=Kind::kHologramDepth) {
     using namespace dxbc_container;
     const Recipe& r=kRecipes[static_cast<size_t>(kind)];
-    size_t target=0,tempAt=0;uint32_t temp=0;unsigned found=0;
+    const bool relief=hasRelief(kind);
+    size_t target=0,tempAt=0,reliefAt=0;uint32_t temp=0;unsigned found=0,reliefFound=0;
     require(t.size()>2&&t[0]==0x50&&t[1]==t.size(),"pixel SM5 program");
     for(size_t a=2;a<t.size();a+=instructionLength(t,a)) {
         const unsigned op=t[a]&2047,n=instructionLength(t,a);
         if(op==89)require(n==4&&t[a+2]!=13,"private b13 occupied");
         if(op==104){require(n==2&&!tempAt,"temps declaration");tempAt=a;temp=t[a+1];}
         if(n==r.targetLength&&std::equal(r.target,r.target+n,t.begin()+a)){target=a;++found;}
+        if(relief&&a+kReliefLength<=t.size())for(const auto& v:kReliefStock)
+            if(std::equal(v,v+kReliefLength,t.begin()+a)){reliefAt=a;++reliefFound;}
     }
     require(found==1&&tempAt&&temp<4096&&tempAt<target,r.notFound);
     require(target+r.targetLength+r.followLength<=t.size()&&
         std::equal(r.follow,r.follow+r.followLength,t.begin()+target+r.targetLength),r.notFollowed);
-    const uint32_t cb[]={0x04000059,0x00208e46,13,1};
+    if(relief)require(reliefFound==1&&reliefAt>target,"one relief radius after the position");
+    const uint32_t cb[]={0x04000059,0x00208e46,13,relief?2u:1u};
     const uint32_t mad[]={0x0b000032,0x00100032,temp,0x00101046,2,0x00208046,13,0,0x00208ae6,13,0};
     std::vector<uint32_t> out(t.begin(),t.begin()+tempAt);out.insert(out.end(),cb,cb+4);
     out.insert(out.end(),t.begin()+tempAt,t.begin()+target);out[tempAt+5]=temp+1;
     out.insert(out.end(),mad,mad+11);out.insert(out.end(),t.begin()+target,t.end());
     out[target+18]=r.operand;out[target+19]=temp;out[1]=static_cast<uint32_t>(out.size());
+    if(relief){const size_t at=reliefAt+15;   // after the declaration (4) and the inserted mad (11)
+        for(size_t k=0;k<3;++k)out[at+kReliefOperandAt+k]=kReliefOperand[k];
+        out[at+kReliefImmediateAt]=kReliefImmediate;}
     require(out.size()==t.size()+15,"bounded remap");
     for(size_t i=0;i<t.size();++i){if(i==1||i==tempAt+1||i==target+3||i==target+4)continue;
+        if(relief&&(i==reliefAt+kReliefOperandAt||i==reliefAt+kReliefOperandAt+1||i==reliefAt+kReliefOperandAt+2||i==reliefAt+kReliefImmediateAt))continue;
         require(out[i+(i>=tempAt?4:0)+(i>=target?11:0)]==t[i],"untouched instruction");}
     return out;
 }
@@ -122,16 +155,54 @@ inline bool patch(const void* data,size_t n,uint64_t ps,std::vector<BYTE>& outpu
         require(changed==1,"one program");output=dxbc_container::makeContainer(chunks);return true;
     } catch(const std::exception& e) {why=e.what();return false;}
 }
-// The private cb13 float4 the remapped shader reads: game position = layer position * (x,y) + (bx,by). x,y is the
-// game target's size over the layer's; bx,by the frame's jitter in the game's pixels (the layer's viewport moved
+// The private cb13 the remapped shader reads. Register 0: game position = layer position * (x,y) + (bx,by). x,y is
+// the game target's size over the layer's; bx,by the frame's jitter in the game's pixels (the layer's viewport moved
 // by -jitter * scale, ui_layer_math.h's uiLayerJitterCancel, so a layer pixel stands for game position
-// pixel / scale + jitter). The layer's map has no offset, so there is no other term.
-struct Params {float x,y,bx,by;};
+// pixel / scale + jitter). The layer's map has no offset, so there is no other term. Register 1 (.x): the hologram
+// programs' relief radius factor (THE RELIEF; reliefRadius), 1 unless set; the frosted base never reads it.
+struct Params {float x,y,bx,by;float relief=1.0f,pad0=0.0f,pad1=0.0f,pad2=0.0f;};
+static_assert(sizeof(Params)==32,"two float4 registers: the position map, then the relief radius");
 inline bool params(uint32_t sourceW,uint32_t sourceH,uint32_t layerW,uint32_t layerH,float jx,float jy,Params& out) {
     if(!sourceW||!sourceH||!layerW||!layerH||!std::isfinite(jx)||!std::isfinite(jy))return false;
     const float ax=float(layerW)/sourceW,ay=float(layerH)/sourceH;
     out={1.0f/ax,1.0f/ay,jx,jy};
     return std::isfinite(out.x)&&std::isfinite(out.y)&&out.x>0&&out.y>0;
+}
+// THE RELIEF's factor for a draw whose position map is p: k = layer pixels / game pixels, the inverse of the map's scale
+// (the geometric mean of its two axes, which the layer keeps equal), times the game's own max(cb1[120].z, 1). A z that
+// is not finite counts as 1. p must have passed params().
+inline float reliefRadius(const Params& p,float sceneZ) {
+    const double k=1.0/std::sqrt(double(p.x)*double(p.y));
+    const double z=std::isfinite(sceneZ)&&sceneZ>1.0f?double(sceneZ):1.0;
+    return static_cast<float>(k*z);
+}
+// cb1[120].z as the game last wrote it, by buffer: vscreen.cpp's Unmap tee hands each write of the 5376-byte scene
+// camera block here (ui_layer.cpp uiLayerNoteSceneWrite) while the layer is live, and a hologram draw looks up the
+// buffer its pixel stage reads b1 from. A b1 not seen written (or bound past its first constant) takes the latest
+// write of any scene block; none at all takes 1. Raw pointers are identity only. Owner context's thread.
+class SceneRelief {
+public:
+    static constexpr uint32_t kRow=120,kEntries=16;
+    enum Source:int {kBound=0,kLatest,kNone,kSources};
+    void note(const void* res,const void* data,uint32_t bytes) {
+        if(!res||!data||bytes<(kRow+1)*16)return;
+        float z;std::memcpy(&z,static_cast<const BYTE*>(data)+kRow*16+8,sizeof(z));
+        Entry* w=nullptr;for(auto& e:e_)if(e.res==res)w=&e;
+        if(!w){w=&e_[next_];next_=(next_+1)%kEntries;w->res=res;}
+        w->z=z;latest_=z;have_=true;
+    }
+    Source find(const void* bound,bool fromFirst,float& z) const {
+        if(bound&&fromFirst)for(const auto& e:e_)if(e.res==bound){z=e.z;return kBound;}
+        if(have_){z=latest_;return kLatest;}
+        z=1.0f;return kNone;
+    }
+    void reset() {for(auto& e:e_)e=Entry{};next_=0;latest_=0.0f;have_=false;}
+private:
+    struct Entry {const void* res=nullptr;float z=0.0f;};
+    Entry e_[kEntries];uint32_t next_=0;float latest_=0.0f;bool have_=false;
+};
+inline const char* reliefSourceName(SceneRelief::Source s) {
+    return s==SceneRelief::kBound?"the bound b1's last write":s==SceneRelief::kLatest?"the latest scene block write (b1 not seen written)":"none (no scene block write seen; taken as 1)";
 }
 inline bool depthSource(ID3D11ShaderResourceView* srv,uint32_t w,uint32_t h) {
     if(!srv||!w||!h)return false;D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -230,7 +301,8 @@ public:
     void clear(){release(ps_);release(cb_);for(auto& p:classes_)release(p);count_=D3D11_SHADER_MAX_INTERFACES;shaderSaved_=bufferSaved_=modified_=false;patched_=constants_=nullptr;}
     bool begin(ID3D11DeviceContext* c,ID3D11PixelShader* patched,ID3D11Buffer* constants,const Params& p,SetPs setPs=directSetPs,ID3D11PixelShader* expected=nullptr){
         if(!c||!patched||!constants||modified_||shaderSaved_||bufferSaved_||
-            !std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.bx)||!std::isfinite(p.by)||p.x<=0||p.y<=0)return false;
+            !std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.bx)||!std::isfinite(p.by)||p.x<=0||p.y<=0||
+            !std::isfinite(p.relief)||!(p.relief>0.0f))return false;
         c->PSGetShader(&ps_,classes_,&count_);shaderSaved_=true;
         c->PSGetConstantBuffers(13,1,&cb_);bufferSaved_=true;
         if(count_!=0||(expected&&ps_!=expected))return false; // actual variants have no dynamic linkage

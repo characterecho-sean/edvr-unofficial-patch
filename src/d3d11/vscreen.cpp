@@ -45,6 +45,7 @@
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
+#include "depth_writer_probe.h"   // beside it: who wrote each pixel's depth in the same armed frame
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
@@ -75,8 +76,12 @@
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
+#include "cockpit_glass_probe.h"   // TEMPORARY: the canopy draw's state and constants, for the legacy-glass port
+#include "cockpit_glass.h"         // visual.cockpit_glass: the legacy canopy shader, handed to the real PSSetShader at bind time
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
+#include "srv_turret.h"         // issue 140: the SRV turret view's HUD, a private geometry-shader pass bound around every issue of the HUD families' draws
+#include "srv_turret_math.h"    // issue 140: the HUD families' shader pairs
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -1066,6 +1071,8 @@ FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's t
 FaultBudget g_glitchCameraBudget("vScreen.glitchCamera", 5);          // the transition-flash engine fix's camera tap
 FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and its live true-camera feed
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
+FaultBudget g_srvTurretCameraBudget("vScreen.srvTurretCamera", 5);    // issue 140: the SRV radar anchor's camera rows 277..279
+FaultBudget g_uiLayerSceneBudget("vScreen.uiLayerScene", 5);          // fix.ui_quality: the hologram programs' relief radius (cb1[120].z)
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
 FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
@@ -1794,9 +1801,16 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // rung's own test; the second rung's pre-check, depthProbeEyeDrawNeedsNote(),
 // is that same flag AND a per-view test, so it cannot pass while the flag is
 // false. depthProbeConfigure arms it for any fix.temporal_aa value but off, or
-// for advanced.eye_depth_capture alone. objectProbeWantsDraws() below covers a
-// recognised temporal mode, which is why this went unnoticed; it does not cover
-// an unrecognised value or the capture on its own.
+// for advanced.eye_depth_capture alone, or (F196) for native on-foot VR alone: the
+// VR profile with fix.native_on_foot on and Anti-aliasing off, where it forms the
+// scene pair for the ADS sight lock and F113 and opens this gate (and so shuts the
+// AA-off draw fast path, draw_fast_path.h) -- in the shipped file the gate is open
+// already, remlok_lines = outer and holo_pattern = steady being on. F207 (issue 152):
+// that last arm is wanted only WHILE native on-foot VR is active (the frame boundary tells
+// the probe, depthProbeSetNativeOnFoot, before this gate is re-sampled), so off foot its
+// term here is false. objectProbeWantsDraws()
+// below covers a recognised temporal mode, which is why this went unnoticed; it does
+// not cover an unrecognised value, the capture on its own or native on-foot VR.
 //
 // Two rungs below the gate are deliberately NOT listed: screenMotionLive() and
 // uiLayerCrispOn(). Each implies temporalModeEnabled(fix.temporal_aa), the same
@@ -1818,6 +1832,7 @@ uint32_t drawGateHolders(State* s) {
     if (sunglareWantsDraws()) m |= gateHolderBit(GateHolder::SunGlare);
     if (drawCensusArmed()) m |= gateHolderBit(GateHolder::DrawCensus);
     if (blendProbeWantsDraws()) m |= gateHolderBit(GateHolder::BlendProbe);   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
+    if (srvTurretHudWantsDraws()) m |= gateHolderBit(GateHolder::SrvTurretHud);   // issue 140: the SRV turret view's HUD (srv_turret.h): its scope opens in forwardWithVerdict, which the AA-off fast path skips
     if (objectProbeWantsDraws()) m |= gateHolderBit(GateHolder::ObjectProbe);
     if (panelCurveWants()) m |= gateHolderBit(GateHolder::PanelCurve);
     if (particleWantsDraws()) m |= gateHolderBit(GateHolder::Particle);
@@ -1904,9 +1919,16 @@ __forceinline bool desktopWindowSkipsDraw(State* s, ID3D11DeviceContext* self, c
 // on its own whether a run is armed and this is its frame. Unconfigured
 // costs the one bool load pixelProbeWantsDraws() is for; nothing below it
 // runs.
-// The first test of both halves below, inline at every draw thunk so an unconfigured probe costs no call: both halves keep it as their first line.
-__forceinline bool pixelProbeLive(State* s) { return pixelProbeWantsDraws() && s->rtv0Eye; }
+// The first test of both halves below, inline at every draw thunk so an unconfigured probe costs no call: both halves keep it as their first line. The depth writer probe has its own gate: a depth-only draw has no eye colour at slot 0.
+__forceinline bool pixelProbeLive(State* s) { return depthWriterWantsDraws() || (pixelProbeWantsDraws() && s->rtv0Eye); }
+// depth_writer_probe.h's eye resolver: the depth probe's settled scene pair, the identity lookup that never scans.
+bool depthWriterResolveEye(ID3D11DepthStencilView* dsv, int* outEye) {
+    int target = -1;
+    return depthProbeCurrentSceneEyeOf(dsv, outEye, &target);
+}
+
 void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
+    if (depthWriterWantsDraws()) depthWriterBeforeDraw(self);   // its own gate: a depth-only draw has no eye colour at slot 0
     if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
     const ResourceInfo* info = rtv0Resolved(s);
     if (!info) return;
@@ -1922,11 +1944,13 @@ void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
 // it have fully returned.
 void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
                         uint32_t instances, bool indirect) {
-    if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
-    const ResourceInfo* info = rtv0Resolved(s);
-    if (!info) return;
-    const int eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
-    if (eye < 0) return;
+    const bool writerWants = depthWriterWantsDraws();
+    const bool pixelWants = pixelProbeWantsDraws() && s->rtv0Eye;
+    if (!writerWants && !pixelWants) return;
+    const ResourceInfo* info = pixelWants ? rtv0Resolved(s) : nullptr;
+    int eye = -1;
+    if (info) eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+    if (!writerWants && eye < 0) return;
     DrawInfo di;
     di.count = count;
     di.instances = instances;
@@ -1959,7 +1983,8 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
         di.depthFunc = static_cast<uint32_t>(dd.DepthFunc);
         ds->Release();
     }
-    pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
+    if (writerWants) depthWriterAfterDraw(self, di);
+    if (info && eye >= 0) pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
 }
 
 // kind, count and instances describe the draw for the census and the census
@@ -1970,9 +1995,12 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
 // to them.
 // The AA-off fast path's decision for one draw (draw_fast_path.h, 2026-10-13): the verdict the draw got, the three loads
 // the decision reads (relaxed), and the VR world route's flag. Every draw thunk asks this after beginPanelOverride.
+// F201: a draw the marker fix has decided and not yet bound is claimed too (draw_fast_path.h drawClaimed): its bind is in forwardWithVerdict. The flag is read only while the AA is off, so with
+// the AA on the decision is what it was.
 inline bool drawPathFast(DrawVerdict v) {
-    return drawFastPathTaken(DrawPathInputs{g_aaOffDraw.load(std::memory_order_relaxed), drawGateWanted(),
-                                            engineVelocityLiveNow(), g_vrWorldWants, v != DrawVerdict::kNone});
+    const bool aaOff = g_aaOffDraw.load(std::memory_order_relaxed);
+    return drawFastPathTaken(DrawPathInputs{aaOff, drawGateWanted(), engineVelocityLiveNow(), g_vrWorldWants,
+                                            drawClaimed(v != DrawVerdict::kNone, aaOff && nativeOnFootMarkerFixPending())});
 }
 
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
@@ -3371,6 +3399,9 @@ void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelS
         if (h) engineVelocityNoteSelfMarkingPs(h);   // the seam arc's bind census (engine_velocity.cpp)
         ++g_state->psSets;
         if (ps && !h) ++g_state->psSetsNoHash;
+        // visual.cockpit_glass = legacy (cockpit_glass.h): the canopy's pixel shader is swapped for EDVR's here, after the binding shadow took the game's own
+        // (the census and the glass probe see what the game bound). Odyssey, the default, is this one load.
+        if (cockpitGlassLegacyLive()) ps = cockpitGlassPsFor(self, ps, h);
     }
     g_state->realPSSetShader(self, ps, ci, n);
 }
@@ -3745,6 +3776,11 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
                 return 56;
             });
         });
+        // fix.ui_quality: cb1[120].z, kept by buffer for the hologram programs' relief radius in the layer (ui_holo_remap.h THE RELIEF; one load otherwise).
+        if (uiLayerLive()) guardedBudget(g_uiLayerSceneBudget, [&] { uiLayerNoteSceneWrite(s->camResource, s->camData, s->camBytes); });
+        // Issue 140 (experimental.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279), kept by buffer for the SRV radar anchor's turret direction
+        // while the Scorpion's turret view wants them (srv_turret.h srvTurretNoteCameraWrite; one relaxed load otherwise).
+        if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;
@@ -4008,6 +4044,7 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
 __declspec(noinline) void pureDrawReissue(ReissueCaller who, ID3D11DeviceContext* self, char kind, UINT count,
                                           UINT instances, const DrawArgs& args) {
     ReissueClock clock(who);
+    srvTurretHudCountIssue(self);   // issue 140: a re-issue inside a family's first scope is an issue of the matched draw, and its state is said (one relaxed load otherwise)
     switch(kind) {
     case 'D':g_state->realDraw(self,count,UINT(args.base));break;
     case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
@@ -4191,10 +4228,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;
     f.vs = bindingShaderHash(BindSlot::Vs);
     f.nativeOnFoot = nativeOnFootSharpHudWanted();   // F26: the on-foot HUD family is named only while the sharp on-foot HUD is on, on foot
-    // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
-    // shader PAIR (ui_layer_math.h: the bars' and the dust's vertex shaders are also seen with another pixel shader). Ordinary
-    // HDR draws need no extra hash read.
-    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
+    // The target sphere needs exact PS admission for its depth-address remap, and the supercruise draws and the normal-space dust
+    // are named by their shader PAIR (ui_layer_math.h: the bars' and the supercruise dust's vertex shaders are also seen with another
+    // pixel shader). Ordinary HDR draws need no extra hash read.
+    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust || f.vs == kVsNormalSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
     // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
     else if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
@@ -4273,6 +4310,60 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     }
 }
 
+// Issue 140 (experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by eleven shader
+// pairs (srv_turret_math.h kFamilies): the four hologram families (vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, vs 2CECEC3065EF0D4A with ps A4D03619D631B186, and vs 81216C77F90DEDD6 with ps A2965EC2931A39C8 or B4786E0A0B199285) that draw the weapon
+// panels, from records 0.27 to 0.70 m out, and the larger panels from records 1.3 m and deeper, and the radar-named billboard families and the target hologram sphere, which draw the
+// radar from 0.11 to 0.44 m. Their draws are issued through the signature's private geometry shader, which moves every vertex forward by its group's forward key (HUD forward for the panels, radar forward for the radar) and then, in 3D about a fixed
+// anchor, pushes a vertex within 1 m of it deeper by its group's key (or, with no push, brings a vertex in the deep band forward by the gap). (The targeting sprite, vs E508648660A352B2 with ps 63ABD86359B57D01, is the reticle's three layers at about 500 m, not the
+// panels: an earlier build targeted it and moved nothing. With "Disable GUI effects" OFF the holo panels are vs 81216C77F90DEDD6, whose output has SV_Position at o5; the dump
+// vs_81216C77F90DEDD6.dxbc gave its signature, and its two pixel-shader pairs are families like the others, issue 179.) Asked per draw while the pass is wanted (the gate's term, srvTurretHudWantsDraws): a
+// compare of the vertex shader's hash with the families' rejects every other draw, the pixel shader's is read only on a vertex shader of a family. The draw's eye is the UI layer's
+// own mapping of the bound target, else ui depth's frame table, read only, and last the table's registering form (what the layer's decision and the pixel probe make at the same
+// draw; the first interface draw of a frame registers its target, the left eye's first). Refused when the eye is unknown. NOINLINE: the draw path pays this call only while the
+// pass is wanted.
+static int srvTurretDrawEye(State* s) {
+    if (!s->rtv0Eye) return -1;
+    const ResourceInfo* info = rtv0Resolved(s);
+    if (!info) return -1;
+    const int layerEye = uiLayerEyeOfGameTarget(info->resource);
+    if (layerEye == 0 || layerEye == 1) return layerEye;
+    const int tableEye = uiDepthEyeOfTargetReadOnly(info->resource);
+    if (tableEye == 0 || tableEye == 1) return tableEye;
+    return uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+}
+__declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self, char kind, UINT indexCount) {
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    if (srv_turret::gunnerSignature(vs, kind, indexCount) >= 0)
+        return srvTurretGunnerBegin(self, vs, kind, indexCount, srvTurretDrawEye(s));
+    if (srvTurretWatchOnly()) return false;   // the turret view is off and only the gunner sheet is watched for (the early edge, srv_turret_sheet_latch.h): the HUD families are the game's
+    if (!srv_turret::isFamilyVs(vs)) return false;
+    const int family = srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps));
+    if (family < 0) return false;
+    int eye = -1;
+    if (s->rtv0Eye) {
+        const ResourceInfo* info = rtv0Resolved(s);
+        if (info) {
+            eye = uiLayerEyeOfGameTarget(info->resource);
+            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTargetReadOnly(info->resource);
+            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+        }
+    }
+    return srvTurretHudBegin(self, family, eye);
+}
+
+// The scope that spans every issue of such a draw: forwardWithVerdict's own (the game's, the UI layer's, the interface depth's and the hologram passes' re-issues all run
+// inside it, with the game's vertex shader and so the shader's input signature), and the game's geometry stage and constant slot 0 go back on every way out of the function.
+struct SrvTurretHudScope {
+    ID3D11DeviceContext* ctx;
+    bool bound = false;
+    explicit SrvTurretHudScope(ID3D11DeviceContext* c) : ctx(c) {}
+    ~SrvTurretHudScope() {
+        if (bound) srvTurretHudEnd(ctx);
+    }
+    SrvTurretHudScope(const SrvTurretHudScope&) = delete;
+    SrvTurretHudScope& operator=(const SrvTurretHudScope&) = delete;
+};
+
 // The shared tail of all four draw thunks: run the wrapped fix's begin,
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
@@ -4344,6 +4435,12 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
                                 blendDecisionsBefore);
         return;
     }
+    // Issue 140: the SRV turret view's HUD. After kSkip (a skipped draw is not issued at all), before anything issues: the scope spans every issue of a matched draw below and
+    // puts the game's geometry stage back on every way out. Off, this is one relaxed load.
+    SrvTurretHudScope turretHud(self);
+    if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self, kind, count);
+    // Issue 140: the radar picture's writers (the terrain schematic and the Scorpion icon), noted so the camera mode can tell the radar's own billboards from the others. One relaxed load otherwise.
+    if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
     // and applied around EVERY issue of it below -- the loader panel's and
     // the curved screen's substitutions draw the composite themselves, so
@@ -4565,7 +4662,13 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
     // F47 (TEMPORARY, fix.native_on_foot_marker_fix, default on since F98c): the marker composite's private b0 (rows 4 and 5 moved by the eye's NDC
     // delta), bound inside the layer's bracket for the game's own issue and the layer's second issues alone; End below, after them, puts the
     // game's b0 back. Begin binds nothing unless the draw tee decided this very draw. Two loads while off.
-    const bool markerFixed = layered && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
+    // F201: the bind used to need `layered`, and with Anti-aliasing off the UI layer is not live, so no marker composite was ever layered and every decision (the markers' lock, the
+    // weapon readout's pin, the labels, the reticle's depth patch) went unbound: F62c "0 of 13449 decisions bound", F85b "decided 35740, bound 0" in the pilot's flight of 2026-10-31.
+    // markerFixBindWanted (draw_fast_path.h): `layered` while a temporal mode runs, exactly as before; with it off there is no layer and no second issue, and the bind covers the game's
+    // own single issue below (the fast path does not skip it: drawPathFast claims a decided draw). Nothing between here and End rebinds b0 without the layer: the strip is an intro
+    // verdict's (a marker composite has none), the bars are layered only, the orbit lines bind a private b13 for their own vertex shader, and the label instrument only reads; and End is
+    // reached on every path (there is no return between this line and it).
+    const bool markerFixed = markerFixBindWanted(layered, temporalPassWantsFssChrome()) && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
     if (owner && nativeOnFootLabelPending() && nativeOnFootMarkerProbeLive()) nativeOnFootLabelIssue(self, layered);   // F87p: the label instrument's issue facts (read only)
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.
@@ -5226,12 +5329,45 @@ private:
     bool masked_ = false;
 };
 
+// fix.particle_billboard in the flat profile (particle_fix.h, docs\particle-billboards.md): the substitution the VR ladder makes in
+// beginPanelOverride / forwardWithVerdict, around the game's own issue of ONE draw. The plume and the flare are claimed (particleOnDraw says
+// so; particleBegin swaps the vertex shader and the viewer feed at b3), the explosion transcriptions and the roll-free families arm the
+// pending rebind that particleRollFreeBegin makes. Built AFTER the FlatRuntimeDrawScope and its beginActualDraw, so the flat classification
+// of the draw (it keys on the game's vertex shader) sees the game's bindings, and destroyed straight after the real call, so nothing of
+// the swap is bound when endActualDraw or uiReissue runs. Owner context only; one load of the mode while the fix is stock.
+struct FlatParticleScope {
+    FlatParticleScope(ID3D11DeviceContext* ctx, char kind, UINT count, UINT instances) : ctx_(ctx) {
+        if (!particleSteady() || ctx != g_state->ownerCtx) return;
+        detail::g_rollFreePending = false;   // a pending rebind belongs to ONE draw (what particleRollFreeClear does; billboard_rollfree_test pins that name to the VR ladder)
+        if (!particleOnDrawMayMatch(kind, count, instances,
+                                    bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0)) return;
+        if (particleOnDraw(ctx, kind, count, instances)) {
+            particleBegin(ctx);
+            claimed_ = true;
+        } else if (detail::g_rollFreePending) {
+            particleRollFreeBegin(ctx);
+        }
+    }
+    ~FlatParticleScope() {
+        if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx_);   // also puts back a facing transcription's swap
+        if (claimed_) particleEnd(ctx_);
+    }
+    FlatParticleScope(const FlatParticleScope&) = delete;
+    FlatParticleScope& operator=(const FlatParticleScope&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+    bool claimed_ = false;
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+        // TEMPORARY (cockpit_glass_probe.h): the canopy draw's state, before anything substitutes a binding; one load while off.
+        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
@@ -5244,9 +5380,14 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);   // built 2026-10-21: only a skipped sun draw is changed (no real call, or a masked one)
-        if (sun.issues()) g_state->realDraw(self, count, start);
+        {
+            FlatParticleScope particle(self, 'D', count, 1);
+            if (sun.issues()) g_state->realDraw(self, count, start);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        // visual.cockpit_glass = legacy (cockpit_glass.h): over the game's ice or condensation canopy draw, the legacy dirt, drawn again with EDVR's overlay; one relaxed load otherwise
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDraw(self, count, start); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDraw(self, count, start); });
         return;
     }
@@ -5254,6 +5395,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'D', count, start, 0);
+    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }   // tags the camera write before it / counts a mini-render's draws
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
@@ -5283,9 +5425,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDraw(self, count, start);
         }
+        srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDraw(self, count, start); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'D', count, 1, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
@@ -5316,6 +5460,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h)
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         {
@@ -5327,9 +5472,13 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        {
+            FlatParticleScope particle(self, 'I', count, 1);
+            if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
@@ -5337,6 +5486,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'I', count, startIndex, baseVertex);
+    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
@@ -5366,9 +5516,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         }
+        srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'I', count, 1, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
@@ -5396,6 +5548,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5408,9 +5561,13 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        {
+            FlatParticleScope particle(self, 'N', perInstance, instances);
+            if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
@@ -5418,6 +5575,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'N', perInstance, startVertex, 0);
+    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
@@ -5457,9 +5615,11 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                        startInstance);
         }
+        srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
@@ -5472,6 +5632,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5485,11 +5646,15 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues())
-            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                              baseVertex, startInstance);
+        {
+            FlatParticleScope particle(self, 'X', perInstance, instances);
+            if (sun.issues())
+                g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                                  baseVertex, startInstance);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); cockpitGlassOverlayEnd(self); }
         if (!stationSkip) flatDraw.uiReissue([&] { ReissueClock flatClock(ReissueCaller::FlatUi); g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
@@ -5497,6 +5662,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'X', perInstance, startIndex, baseVertex);
+    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
@@ -5554,6 +5720,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         }
         // Stop the draw-hook clock here: the weapon-motion re-issue below is EDVR's own work, counted under "draw reissue CPU:" and not inside "draw hook CPU:".
         if (clock.on) clock.realCall(r0);
+        srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             (vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion) ? (maskNoteSkip(MaskSkip::WeaponMotion), false)
@@ -5631,6 +5798,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return true;  // the original draw was issued
     });
     if (bodyCull) nativeOnFootBodyCullEnd(self);   // F18 (TEMPORARY): the game's rasterizer state back
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx && cockpitGlassOverlayBegin(self)) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); cockpitGlassOverlayEnd(self); }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
     // The splash's numbers are put away after the draw and the dim have used them (forwardWithVerdict), and the flag with them, on every way out of
@@ -6171,6 +6339,16 @@ void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D1
     }
 }
 
+void vScreenCopySubresourceRegionRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, uint32_t dstX, ID3D11Resource* src, const D3D11_BOX* box) {
+    if (!ctx || !dst || !src) return;
+    flatIssueEpochNoteResource(dst);
+    if (g_state && g_state->realCopySubresourceRegion) {
+        g_state->realCopySubresourceRegion(ctx, dst, 0, dstX, 0, 0, src, 0, box);
+    } else {
+        ctx->CopySubresourceRegion(dst, 0, dstX, 0, 0, src, 0, box);
+    }
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -6423,12 +6601,15 @@ EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
 EDVR_BOUNDARY_TICK(tkOrbitalWidth, "orbital_width");
 EDVR_BOUNDARY_TICK(tkSupercruiseBars, "supercruise_bars");
+EDVR_BOUNDARY_TICK(tkSrvTurretHud, "srv_turret_hud");
 EDVR_BOUNDARY_TICK(tkVrWorldRoute, "vr_world_route");
 EDVR_BOUNDARY_TICK(tkVrCameraCensus, "vr_camera_census");
 EDVR_BOUNDARY_TICK(tkVScreenFootprint, "vscreen_footprint");
 EDVR_BOUNDARY_TICK(tkScreenMotion, "screen_motion");
 EDVR_BOUNDARY_TICK(tkEngineVelocity, "engine_velocity");
 EDVR_BOUNDARY_TICK(tkCelestialMotion, "celestial_motion");
+EDVR_BOUNDARY_TICK(tkCockpitGlassProbe, "cockpit_glass_probe");
+EDVR_BOUNDARY_TICK(tkCockpitGlass, "cockpit_glass");
 EDVR_BOUNDARY_TICK(tkSharpenTick, "sharpen_tick");
 EDVR_BOUNDARY_TICK(tkTemporalTick, "temporal_tick");
 EDVR_BOUNDARY_TICK(tkTemporalBoundary, "temporal_boundary");
@@ -6481,7 +6662,7 @@ void vScreenFrameBoundary() {
         tkQuadProbe.run([&] { quadProbeTick(g_state->ownerCtx); });
         tkDrawCensusTick.run([&] { drawCensusTick(g_state->ownerCtx); });
         tkObjectProbe.run([&] { objectProbeFrameBoundary(g_state->ownerCtx); });
-        tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); });
+        tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); depthWriterFrameBoundary(g_state->ownerCtx); });
         // Before drawGateSet below re-samples the draw gate, so a capture that starts here is seen by the next frame's first draw.
         tkBlendProbe.run([&] { blendProbeFrameBoundary(g_state->frameNo); });
         tkWakePulse.run([&] { wakePulseReport(); });
@@ -6495,6 +6676,8 @@ void vScreenFrameBoundary() {
         tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
         // The supercruise bars' private pass (supercruise_bars.h): settles a binding the last issue could not restore.
         tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
+        // The SRV turret view's HUD pass (srv_turret.h, issue 140): settles a binding the last issue could not restore.
+        tkSrvTurretHud.run([&] { srvTurretHudFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // the census off each returns at its first test when the route has nothing to do.
@@ -6514,6 +6697,10 @@ void vScreenFrameBoundary() {
         // Planet patch motion's stamp and 5 s census line (celestial_motion.h): the stamp pairs each eye's frames, and the pass's
         // consumer for a frame has run by the time this does, as every consumer of the frame's draws has.
         tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
+        // TEMPORARY (cockpit_glass_probe.h): the key (live), a pending readback, the 30 s window line. Off, a generation compare.
+        tkCockpitGlassProbe.run([&] { cockpitGlassProbeFrameBoundary(g_state->ownerCtx); });
+        // visual.cockpit_glass (cockpit_glass.h): the key (live) and, while it is legacy, the 30 s window line. Odyssey, a generation compare.
+        tkCockpitGlass.run([&] { cockpitGlassFrameBoundary(g_state->ownerCtx); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });
@@ -6521,7 +6708,12 @@ void vScreenFrameBoundary() {
         // rows becoming last frame's.
         tkTemporalTick.run([&] { temporalPassTick(g_state->ownerCtx); });
         tkTemporalBoundary.run([&] { temporalPassFrameBoundary(); });
-        tkDepthProbe.run([&] { depthProbeFrameBoundary(g_state->ownerCtx); });
+        // F207: the depth probe's native on-foot arm is live while native on-foot VR is (nativeOnFootActive(), the flag the on-foot features gate on); told here, on the render thread,
+        // just before the boundary rolls the counts, and the gate below re-samples depthProbeWanted() for the frame about to start.
+        tkDepthProbe.run([&] {
+            depthProbeSetNativeOnFoot(nativeOnFootActive());
+            depthProbeFrameBoundary(g_state->ownerCtx);
+        });
         // Issue #38's per-feature GPU cost census (gpu_census.h): polls every
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.
@@ -7351,6 +7543,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
+    depthWriterSetEyeResolver(&depthWriterResolveEye);
 
     // The panel size is NOT read from config here.
     //
@@ -7679,6 +7872,7 @@ void shutdownVScreenFixes() {
     particleShutdown();
     objectProbeShutdown();
     pixelProbeShutdown();
+    depthWriterShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
@@ -7691,6 +7885,7 @@ void shutdownVScreenFixes() {
     uiLayerShutdown();
     orbitalWidthShutdown();
     supercruiseBarsShutdown();
+    srvTurretShutdown();
     screenMotionShutdown();
     celestialMotionShutdown();
     nightVisionShutdown();

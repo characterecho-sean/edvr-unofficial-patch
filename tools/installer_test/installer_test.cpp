@@ -18,6 +18,8 @@
 //
 // Usage: installer_test.exe <repo root> <scratch dir>
 #include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -6468,6 +6470,39 @@ static void testLogBundle(const std::wstring& scratch) {
     makeTree(bare);
     const LogBundle nothing = collectLogs(bare, scratch, &noDumps);
     check(!nothing.ok, "a folder with no logs and no settings collects nothing");
+
+    // The clipboard half of Save logs. The bytes are read back with the shell's own parser, the one
+    // Explorer and a file-drop target use. The clipboard itself is left alone: a run of this rig must not
+    // overwrite the clipboard of whoever is building.
+    {
+        const std::wstring zip = L"C:\\Users\\Jos\u00e9 N\\Desktop\\edvr logs 20260827.zip";
+        const std::vector<unsigned char> block = dropFilesBlock(zip);
+        check(block.size() == sizeof(DROPFILES) + (zip.size() + 2) * sizeof(wchar_t),
+              "the clipboard block is the header, the path and the list's closing empty string");
+        const DROPFILES* header = reinterpret_cast<const DROPFILES*>(block.data());
+        check(header->pFiles == sizeof(DROPFILES) && header->fWide,
+              "the file list starts after the header and is wide");
+        const size_t n = block.size();
+        check(n >= 4 && block[n - 1] == 0 && block[n - 2] == 0 && block[n - 3] == 0 && block[n - 4] == 0,
+              "the list ends in two wide NULs, which is where a reader stops");
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, block.size());
+        void* bytes = memory ? GlobalLock(memory) : nullptr;
+        check(bytes != nullptr, "the clipboard block fixture is allocated");
+        if (bytes) {
+            memcpy(bytes, block.data(), block.size());
+            GlobalUnlock(memory);
+            HDROP drop = reinterpret_cast<HDROP>(memory);
+            check(DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) == 1, "the shell reads one file from it");
+            wchar_t back[MAX_PATH]{};
+            const UINT length = DragQueryFileW(drop, 0, back, MAX_PATH);
+            check(length == zip.size() && zip == back,
+                  "and that file is the zip's path, spaces and a non-ASCII letter intact");
+            GlobalFree(memory);
+        }
+        std::string copyError;
+        check(!copyFileToClipboard(nullptr, std::wstring(), &copyError) && !copyError.empty(),
+              "copying no file says so rather than clearing the clipboard");
+    }
 }
 
 // ---------------------------------------------------------------------------

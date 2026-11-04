@@ -16,6 +16,9 @@
 // picture.
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 
@@ -49,5 +52,23 @@ void lumaProbeSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, in
 // round when at least two seconds have passed since the last completed
 // report (at once, for the first). A no-op when eye is not 0 or 1.
 void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye);
+
+// The frame-by-frame mode (docs/srv-turret-hud-2026-10-30.md, "the entry fade"): while on, the "game" stage (0) is sampled in EVERY pass of both eyes, apart from the two-second
+// rounds above, and its mean luminance is kept for lumaProbeTakeBurst. Off, it costs one relaxed load a sample call and nothing else. The caller turns it on only where it
+// wants the trace (the Scorpion SRV); a sample is the same sixteen row copies a round's stage takes, read back the same way, up to kBurstSlots in flight an eye.
+void lumaProbeBurst(bool on);
+
+// One finished frame-by-frame reading: the pass it was taken in (seq counts the left eye's passes while the mode is on; the right eye's sample of the same frame has the same seq),
+// the eye, the clock when the pass sampled (lumaProbeClockMs) and the mean luma of the 16x16 grid.
+struct LumaBurstReading {
+    uint32_t seq;
+    int eye;
+    double tMs;
+    float mean;
+};
+// Moves the finished readings, oldest first, into out (at most cap). Returns how many. Any thread.
+size_t lumaProbeTakeBurst(LumaBurstReading* out, size_t cap);
+// The clock the readings are stamped with: QueryPerformanceCounter in milliseconds. Any thread.
+double lumaProbeClockMs();
 
 }  // namespace edvr

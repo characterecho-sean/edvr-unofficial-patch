@@ -7,7 +7,7 @@
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 - **Current code state (2026-10-08; dated notes in Status detail):**
   - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`visual.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. The Desktop window page (2026-10-28, `menu desktop_window`, docs\desktop-window.md) follows it: `visual.desktop_window` and its aspect and style keys. Sections "What it shows" and "Visual tab" below.
-  - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
+  - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a HUD Anti-Aliasing row (2026-10-24, flat-only as `menu flat_performance`; on VR's Performance page too since 2026-11-03, `menu performance`, flown OK the same day); sections below.
   - Explorer Cam page (2026-10-08): REMOVED with Explorer Cam (F98, 2026-10-24); its keys are retired.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
     comparison, exposure and history keys (Explorer Cam's key until F98). FLOWN
@@ -248,7 +248,9 @@ that order. Visual lists the `[visual]` options of edvr.ini that do something in
 user settings, Fix tier, like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly
 `fix.intro_video`, which left the Performance tab) and Star glow (`visual.star_glow`, 100 to 400
 percent in steps of 25, live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`,
-kept in edvr.ini order and checked against the flat key gate like the other two tabs.
+kept in edvr.ini order and checked against the flat key gate like the other two tabs. Cockpit glass
+(`visual.cockpit_glass`, `odyssey` or `legacy`, live; `docs/cockpit-glass-legacy-port.md` section 8) is the
+third row, on both profiles' Visual pages (`menu visual`).
 
 Since 2026-10-27 VR's menu has a Visual page of the same name (above, "What it shows"), built from
 the rows whose token is `menu visual`; the flat tab is built from the table whatever the token. The
@@ -268,10 +270,16 @@ with no `menu` token is desktop-only, as a `[fix]` row is; the installer's windo
 BUILT. The Performance tab is built from `kFlatPageRows` in `menu_flat_rows.h` whatever page a row's `menu`
 token names, and the headset's Performance page is the Fix-tier rows whose page is `performance`. A row that
 does something only in the flat profile therefore takes `menu flat_performance`: a page the headset's menu
-builds none of, so the row is on the flat tab and not on VR's page. The first is HUD Anti-Aliasing
+builds none of, so the row is on the flat tab and not on VR's page. The first was HUD Anti-Aliasing
 (`fix.hud_antialiasing`, on or off, default off, live), directly under UI quality; it dims, and refuses a step,
-while UI quality is off or the flat anti-aliasing is off (`hudAntiAliasingRowDim`; the layer it smooths is live
-only with both on), and its hint and refusal name the cause that applies. `tools/gen_settings_schema.py` refuses the token on a key
+while UI quality is off or the anti-aliasing is off (`hudAntiAliasingRowDim`; the layer it smooths is live
+only with both on), and its hint and refusal name the cause that applies.
+**2026-11-03: the row is on both menus.** VR's UI layer now smooths its HUD with the same key (`ui_layer.cpp`
+`uiLayerConfigure` reads it; `docs/ui-layer-2026-09-23.md`, "2026-11-03"), so the row's token is `menu performance`: it
+is on VR's Performance page, directly under UI quality, and on the flat tab (`kFlatPageRows` lists it, as before). The
+dim rule reads the running profile's own anti-aliasing: the flat mode in flat, `fix.temporal_aa` in VR. No row uses
+`flat_performance` today; the generator still supports the token. NOT FLOWN.
+`tools/gen_settings_schema.py` refuses the token on a key
 that is not in `[fix]` and on a key `kFlatPageRows` does not list (the row would be on no menu at all); the
 rigs `flat_sharpen_test` and `sharp_weapons_test` hold the placement, the dimming and VR's page. The installer's
 window, VR view, still lists the row.
@@ -925,12 +933,15 @@ they were there (flown 2026-09-07).
      in `edvr.ini` order, the switch first and the HUD last: **Native on foot VR**
      (the feature switch, `fix.native_on_foot`); **Look and aim** (Look to aim,
      Turn style, Snap turn step, Look to aim smoothing); **Aiming down sights**
-     (ADS: sight in both eyes, ADS: aim with head, ADS: scope zoom, A1: the scope
+     (ADS: sight eye, ADS: Look to Aim, ADS: scope zoom, A1: the scope
      lens, `fix.native_on_foot_ads_scope_zoom`, on by default since it flew OK; its
      reference FOV is the developer tier's `experimental.native_on_foot_ads_scope_zoom_fov`
-     row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default off, the user's choice of the scoped
+     row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default on since F205, the user's choice of the scoped
      Executioner's optic: on takes the lens from the left eye drawn as the zoomed view, at full detail, with an equal black edge in each eye's outer view
-     while the zoom stands; off is the digital zoom with no edge); **Body and
+     while the zoom stands, the press taking both eyes whatever ADS: sight eye says, and needing a temporal Anti-aliasing mode; off is the digital
+     zoom with no edge; with ADS: scope zoom on, every ADS press also shows the view inside a circle around the sight in both eyes, black outside, its
+     radius the same share of the headset's view that flat's ADS FOV keeps of the screen, with Anti-aliasing on or off: F205, with no row of its own
+     since F205b, the pilot's word); **Body and
      view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
      breathable air); **HUD** (HUD distance, HUD size, HUD
      element scale, HUD spread, HUD follow). The headings are the ini's own

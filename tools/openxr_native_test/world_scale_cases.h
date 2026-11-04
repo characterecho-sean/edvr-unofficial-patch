@@ -88,14 +88,17 @@ template<class Check> void runWorldScaleCases(Check&& check) {
             has(host,"features.begin(located,")&&has(host,"makeGeometrySnapshot(located,temporalGeometry)")&&!has(host,"frameGeometry=gameGeometry")&&!has(host,"frameViews[0]=gameGeometry")&&
             has(host,"auto menuGeometry=frameGeometry;"),
         "world scale wiring: the layer's views, the menu's, the plugins' and the frame input stay the located ones; only the game's and the temporal pass's geometry is scaled");
-  check(has(stereo,"v.pose=views[i].pose;")&&!has(stereo,"eyeToHead")&&!has(menuClient,"eyeToHead")&&!has(frameClient,"eyeToHead")&&has(menuClient,"detail::rigid(geometry.views[eye].pose, matrix);"),
-        "world scale wiring: the projection layer's pose is the located view, and the menu client takes the located views, not the snapshot's eye transforms");
+  check(has(stereo,"v.pose=layerPose(seatOrigin,views[i].pose);")&&!has(stereo,"eyeToHead")&&!has(menuClient,"eyeToHead")&&!has(frameClient,"eyeToHead")&&has(menuClient,"detail::rigid(geometry.views[eye].pose, matrix);"),
+        "world scale wiring: the projection layer's pose is the located view (with the seat origin applied, F189), and the menu client takes the located views, not the snapshot's eye transforms");
   check(has(temporalClient,"makeGeometrySnapshot(geometry, snapshot)")&&has(temporalClient,"std::memcpy(frame.eyeToHead[eye], snapshot.eyeToHead[eye].m, sizeof(frame.eyeToHead[eye]));"),
         "world scale wiring: the temporal frame's eye transforms are the snapshot's, made from the geometry it is handed (the scaled one)");
   // ---- the readers of eyeToHead are the classified ones ----
   const std::vector<std::string> want={
     "src\\common\\native_temporal.h",          // (a) the temporal frame struct: the eye transforms as given to Elite
     "src\\d3d11\\native_temporal.cpp",         // (a) the temporal pass's eyes: motion, the ADS eye offsets, the history reset on a moved separation
+    "src\\d3d11\\srv_turret.cpp",              // (a) the SRV turret HUD's anchored move: the eyes as Elite is given them (the head and the eye matrices of the frame)
+    "src\\d3d11\\srv_turret_math.h",           // (a) ... its eye frame from them (eyeFrameFrom)
+    "src\\d3d11\\vr_camera_census.h",          // (a) the declaration of nativeTemporalHeadPose, which hands them over
     "src\\openxr\\canted_display.h",           // (a) gameHandedness: Elite's S*E*S of the snapshot's pair
     "src\\openxr\\geometry_snapshot.h",        // the one place the scale is applied
     "src\\openxr\\native_runtime_host.h",      // the change line's two separations

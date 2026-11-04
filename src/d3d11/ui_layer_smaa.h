@@ -1,7 +1,7 @@
 #pragma once
 
-// The HUD layer's edge smoothing (flat profile; fix.hud_antialiasing; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for the
-// HUD layer"): SMAA 1x over the layer's finished 8-bit content, so the composite that downsamples it reads smoothed edges. The shaders are
+// The HUD layer's edge smoothing (fix.hud_antialiasing; the flat profile since 2026-10-24, VR too since 2026-11-03: docs/design-flat-ui-quality-2026-10-05.md,
+// "2026-10-24: edge smoothing for the HUD layer", and docs/ui-layer-2026-09-23.md, "2026-11-03"): SMAA 1x over the layer's finished 8-bit content, so the composite that downsamples it reads smoothed edges. The shaders are
 // ui_layer_smaa_shader.h's edge entry and the map's weights and blend (map_smaa_shader.h), all built offline (tools/temporal_shader_build) with SMAA.hlsl
 // as upstream wrote it; the lookup textures are map_smaa.cpp's. Nothing here logs: ui_layer.cpp reads the state and the failure this returns and says it.
 //

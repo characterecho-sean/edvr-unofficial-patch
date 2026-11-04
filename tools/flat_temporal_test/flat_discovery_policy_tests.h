@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/d3d11/flat_discovery_policy.h"
 #include "../../src/d3d11/flat_offscreen_fast.h"
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -66,6 +67,35 @@ template<class Check> void run(Check check) {
                hooks=read("src/d3d11/vscreen.cpp"),deviceHook=read("src/d3d11/device_hook.cpp"),
                compute=read("src/d3d11/flat_compute_capture.cpp");
     check(!temporal.empty()&&!runtime.empty()&&!hooks.empty()&&!deviceHook.empty()&&!compute.empty(),"discovery wiring: source inputs are readable");
+    // The vehicle frame's gate asks the FLAT journal reader. journalOnFootKnown() goes through journalWatchActive(), which is false in the flat profile, so a gate built on it was
+    // dead in every flight (the ship record's census read 0 in every window); journalFlatOnFoot is the reader that answers in flat.
+    {
+        const auto fill=body(runtime,"static void fillVehicleFrame(");
+        size_t sites=0;for(size_t at=runtime.find("fillVehicleFrame(f);");at!=std::string::npos;at=runtime.find("fillVehicleFrame(f);",at+1))++sites;
+        check(!fill.empty() && fill.find("journalFlatOnFoot(&onFoot)")!=std::string::npos && fill.find("vframe::gate(known,onFoot)")!=std::string::npos &&
+              fill.find("journalOnFootKnown")==std::string::npos && fill.find("journalOnFoot()")==std::string::npos && fill.find("vframe::useFrame(known,onFoot,true)")!=std::string::npos &&
+              sites==2 && runtime.find("journalOnFootKnown()")==std::string::npos && runtime.find("shipRecordTerm")==std::string::npos,
+              "vehicle frame gate: both treatment sites ask journalFlatOnFoot through fillVehicleFrame, never journalOnFootKnown (dead in flat)");
+    }
+    // The F10 audit's identity check knows EDVR's own canopy swap (issue 193): without it the audit held the route in observation for the whole arm, in any cockpit with
+    // visual.cockpit_glass = legacy, and the capture it armed had no treated frame to copy.
+    {
+        const auto qualify=body(runtime,"const FlatProjectionBindingPlan* qualifyProjection(");
+        check(qualify.find("cockpitGlassReplacedHash(actualPs.Get())==ps")!=std::string::npos,"F10 audit: the canopy swap is not an actual-shader mismatch");
+    }
+    // The vehicle frame has no key: advanced.vehicle_rig_probe (never in a release) is gone from every source file, the allow-list included.
+    {
+        size_t files=0,hits=0;
+        std::error_code ec;
+        for(std::filesystem::recursive_directory_iterator it("src",ec),end;!ec && it!=end;it.increment(ec)) {
+            if(!it->is_regular_file(ec))continue;
+            const std::string ext=it->path().extension().string();
+            if(ext!=".cpp" && ext!=".h" && ext!=".hpp" && ext!=".c" && ext!=".inl")continue;
+            ++files;
+            if(read(it->path().string().c_str()).find("advanced.vehicle_rig_probe")!=std::string::npos)++hits;
+        }
+        check(files>100 && hits==0,"vehicle frame: advanced.vehicle_rig_probe appears nowhere under src (the key is removed, not renamed)");
+    }
     const auto keyStart=deviceHook.find("if (g_state->censusKey.pressed()) {");
     const auto keyEnd=deviceHook.find("if (g_state->gpuPassKey.pressed())",keyStart);
     const auto key=(keyStart!=std::string::npos && keyEnd!=std::string::npos)?deviceHook.substr(keyStart,keyEnd-keyStart):std::string();
@@ -81,7 +111,7 @@ template<class Check> void run(Check check) {
     check(passive!=std::string::npos && ordinary!=std::string::npos && vr!=std::string::npos && passive<ordinary && ordinary<vr &&
           key.substr(passive,ordinary-passive).find("flatTemporalArmPassive(g_state->device);")!=std::string::npos &&
           key.substr(passive,ordinary-passive).find("drawCensusFlatRequest(")==std::string::npos &&
-          key.substr(ordinary,vr-ordinary).find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos &&
+          key.substr(ordinary,vr-ordinary).find("flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);")!=std::string::npos &&
           key.substr(ordinary,vr-ordinary).find("drawCensusFlatRequest();")!=std::string::npos &&
           key.substr(vr).find("drawCensusRequest();")!=std::string::npos &&
           key.substr(vr).find("quadProbeRequest();")!=std::string::npos,
@@ -157,6 +187,20 @@ template<class Check> void run(Check check) {
     check(!before(removed,"flatRuntimeSubstitution(ctx, FlatSubstEvent::kOtherDraw)","flatComputeProbeDraw("),
           "discovery wiring control: losing restore is detected");
     const auto arm=body(temporal,"void flatTemporalArm(");
+    // Issue 189: a session that began in VR has no g.device, so the arm must take
+    // the caller's device, and each early return must say why it did not arm.
+    check(arm.find("ID3D11Device* callerDevice")!=std::string::npos &&
+          arm.find("g.device ? g.device : callerDevice")!=std::string::npos &&
+          before(arm,"g.device ? g.device : callerDevice","flatTemporalStart(device);") &&
+          arm.find("if (!g.device)")==std::string::npos,
+          "issue 189: the arm starts from the caller's device when no window exists");
+    size_t returns=0,notes=0;
+    for(size_t at=arm.find("return;");at!=std::string::npos;at=arm.find("return;",at+1)){
+        ++returns;
+        const auto lineStart=arm.rfind('\n',arm.rfind('\n',at)-1);
+        if(arm.find("the capture key did not arm a capture",lineStart)<at)++notes;
+    }
+    check(returns==3 && notes==3,"issue 189: every early return of the arm logs that the press did not arm a capture");
     check(before(arm,"flatTemporalStart(device);","g_flatTemporalManual.store(true")&&
           arm.find("g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);")!=std::string::npos&&
           arm.find("g.projectionManual = full;")!=std::string::npos,

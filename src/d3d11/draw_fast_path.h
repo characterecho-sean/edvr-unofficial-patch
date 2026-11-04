@@ -28,6 +28,17 @@ struct DrawPathInputs {
     bool claimed;             // the verdict is not kNone: a fix claims this draw
 };
 
+// F201: is the draw claimed? A fix claims it by a verdict (not kNone), and native on foot's marker fix claims it when the draw tee has DECIDED this very draw and is waiting to bind its
+// patched b0 at the game's issue (nativeOnFootMarkerFixPending): the bind sits in forwardWithVerdict, which the fast path skips. Asked only while the AA is off, so with the AA on the
+// claim, and the whole decision, is what it was.
+inline bool drawClaimed(bool verdictClaims, bool markerFixPending) { return verdictClaims || markerFixPending; }
+
+// F201: does forwardWithVerdict bind the marker fix's patched b0 for this draw? The bind was inside the UI layer's bracket (the game's own issue and the layer's second issues), so a
+// draw the layer did not take never got it: with the temporal path off (Anti-aliasing off) the layer is not live, no marker draw was ever layered, and every decision of the marker lock,
+// the weapon readout pin and the labels went unbound. With no layer there is no second issue: the bind covers the game's own single issue. With the temporal path on the answer is
+// `layered`, as before, bit for bit.
+inline bool markerFixBindWanted(bool layered, bool temporalPathRuns) { return layered || !temporalPathRuns; }
+
 // True when the draw takes the fast path: no verdict scopes, no engine velocity call, the game's draw issued directly.
 inline bool drawFastPathTaken(const DrawPathInputs& in) {
     return !in.claimed && in.aaOff && !in.gateWanted && !in.engineVelocityLive && !in.vrWorld;

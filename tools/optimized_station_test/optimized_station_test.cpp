@@ -2967,13 +2967,65 @@ int main(int argc, char** argv) {
         r.producerDelta = ~0ull;
         r.cullDelta = ~0ull;
         r.trigger = se::TraceTrigger::kOwnAbsent;
-        char line[320] = {};
+        for (uint64_t& d : r.padD) d = ~0ull;   // built 2026-11-03: the pad's stages and the pad's rig, at their limits
+        r.rig.known = true;
+        r.rig.publication = 3;
+        r.rig.verdict = 255;
+        r.rig.run = 0xFFFFFFFFu;
+        r.rig.bounded = true;
+        r.rig.distM = 1e9f;
+        r.rig.radiusM = -1e9f;
+        char line[448] = {};
         const int n = se::formatTickLine(r, line, sizeof(line));
-        check(n > 0 && n < 300 && std::strlen(line) < 300, "trace line: under 300 characters with every integer at 20 digits and the floats at their limits");
+        check(n > 0 && n < 440 && std::strlen(line) < 440, "trace line: under 440 characters with every integer at 20 digits and the floats at their limits");
         check(std::string(line).rfind("f=4294967295 t=18446744073709551615 h=1 v=U th=1 pc=18446744073709551615 op=1 un=4294967295 rf=k ", 0) == 0 &&
                   std::strstr(line, "hc=99999.0,-99999.0,nan hs=99999.00 fs=99999.00 cv=1 cj=-99999.00 co=1 ") != nullptr &&
                   std::strstr(line, "ev=seal+rel:mechanism+origin+hold+T4") != nullptr,
               "trace line: the keys in order, the floats clamped to 99999, the event words joined");
+        check(std::strstr(line, "cu=18446744073709551615 pa=99999/99999/99999/99999 pp=99999/99999 pr=99999/99999/99999/99999/99999 "
+                                "pg=1/3/255/4294967295/99999.0/-99999.0 ev=seal+") != nullptr,
+              "trace line: the pad's stages follow the cull count, each delta capped at 99999, the pad's rig after them, the events last");
+    }
+    {
+        // Built 2026-11-03: the pad's stages as deltas. The window totals rise; the trace takes the rise, and a window reset starts them again at zero.
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        se::TickRecord a = heldTick(0, 0);
+        a.pad[se::kPadStore] = 2;
+        a.pad[se::kPadProdVetoed] = 7;
+        tr.step(a, captureLine, &out);
+        se::TickRecord b = heldTick(1, 16);
+        b.pad[se::kPadStore] = 3;
+        b.pad[se::kPadProdVetoed] = 7;
+        b.pad[se::kPadRigVetoed] = 1;
+        b.pad[se::kPadRigStale] = 2;
+        b.pad[se::kPadRigMoved] = 1;
+        tr.step(b, captureLine, &out);
+        check(tr.at(0).padD[se::kPadStore] == 2 && tr.at(1).padD[se::kPadStore] == 1 && tr.at(1).padD[se::kPadProdVetoed] == 0 &&
+                  tr.at(1).padD[se::kPadRigVetoed] == 1,
+              "pad stages: the trace takes the rise of each window total, not the total");
+        char line[448] = {};
+        se::formatTickLine(tr.at(1), line, sizeof(line));
+        check(std::strstr(line, " pa=1/0/0/0 pp=0/0 pr=1/0/0/0/3 pg=0/1/255/0/0.0/0.0 ev=") != nullptr,
+              "pad stages: the row reads store/early/unread/gathered, producer vetoed/kept, rig vetoed/refresh/mixed/unknown/not-published-stale-or-moved, and an unlearned rig");
+        tr.windowReset();
+        se::TickRecord c = heldTick(2, 32);
+        c.pad[se::kPadStore] = 1;
+        tr.step(c, captureLine, &out);
+        check(tr.at(2).padD[se::kPadStore] == 1, "pad stages: after a window reset the totals start again at zero, so the first delta is the total");
+        se::TickRecord d = heldTick(3, 48);
+        d.rig.known = true;
+        d.rig.bounded = false;
+        d.rig.distM = 50.0f;
+        d.rig.radiusM = 9.0f;
+        d.rig.verdict = 2;
+        d.rig.run = 17;
+        d.rig.publication = 0;
+        se::formatTickLine(d, line, sizeof(line));
+        check(std::strstr(line, " pg=1/0/2/17/0.0/0.0 ev=") != nullptr, "pad stages: a rig with no bound prints no distance or radius, the rest of its state is there");
+        d.rig.bounded = true;
+        se::formatTickLine(d, line, sizeof(line));
+        check(std::strstr(line, " pg=1/0/2/17/50.0/9.0 ev=") != nullptr, "pad stages: a bounded rig prints its distance to the cell and its radius");
     }
     {
         // the time since the seal: from the seal's rising edge

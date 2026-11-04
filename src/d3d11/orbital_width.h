@@ -68,7 +68,7 @@ inline bool active() { return factor() < 1.0; }
 
 // What the frame boundary hands to the one decision below.
 struct Inputs {
-    bool vr = false;            // the VR profile: the flat build has no panel patch and no orbit lines
+    bool vr = false;            // the VR profile: the flat profile has no panel patch, so its orbit lines keep the game's width (the flat layer takes them as they are: flat_ui_layer_math.h)
     bool refused = false;       // the shader copy was refused or failed: stays at 1 for the session
     bool ready = false;         // the copy and its constants exist on this device
     bool panelLive = false;     // uiPanelScaleLive()

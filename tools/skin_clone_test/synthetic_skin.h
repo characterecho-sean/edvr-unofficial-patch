@@ -135,4 +135,26 @@ POut main(PIn i) {
 )HLSL";
 }
 
+// The pixel shader of the NPC hair's forward pass has SV_IsFrontFace at the register the vertex shader's E would take (v7 after six interpolants
+// and the position): the same shape here, v3 after the id, the normal and the position.
+inline const char* pixelSourceFrontFace() {
+    return R"HLSL(
+struct PIn {
+ nointerpolation uint id : __USER_VERTEX_FACEINVARIANT;
+ float4 n : __USER_VERTEX_M_LIGHTINGNORMAL;
+ float4 pos : SV_Position;
+ bool front : SV_IsFrontFace;
+};
+struct POut { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3; };
+POut main(PIn i) {
+ POut o;
+ o.c0 = float4(i.n.xyz * 0.5 + 0.5, 1.0);
+ o.c1 = float4(float(i.id & 0xFFFFu), i.pos.z, 0.25, 1.0);
+ o.c2 = float4(i.pos.xy * 0.015625, 0.5, 1.0);
+ o.c3 = float4(0.1, 0.2, 0.3, i.front ? 0.4 : 0.45);
+ return o;
+}
+)HLSL";
+}
+
 }  // namespace skin_clone_synthetic

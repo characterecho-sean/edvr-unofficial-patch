@@ -40,6 +40,7 @@
 #include "xess_engine.h"   // XeSS-SR: the VR eye pass's Intel engine (xessAvailable, xessEvaluate, xessSlotTotals)
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
+#include "depth_writer_probe.h"   // depthWriterArm: who wrote each pixel's depth, the same armed frame
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
 #include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
 #include "ui_resolve.h"
@@ -260,6 +261,9 @@ struct EyeState {
     DXGI_FORMAT histFmt = DXGI_FORMAT_UNKNOWN;
 };
 EyeState g_eye[2];
+// RC5 review: with the mode off nothing holds the views temporalInner made while it was on, and the scope lens's view of the game's depth (F202) is kept past a press. The render thread lets
+// them go once at the edge to off (temporalPassNoteOffAaSceneDepth); the config edge to on arms it again.
+std::atomic<bool> g_offAaFreed[2] = {{false}, {false}};
 
 void releaseSrc(EyeState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
@@ -5619,6 +5623,10 @@ void temporalPassConfigure(Config& cfg) {
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
+        if (detail::g_temporalPassWantedFssChrome) {   // the mode is on again: the next edge to off lets the pass's views go once more (the render thread does it, in the off branch of treat)
+            g_offAaFreed[0].store(false, std::memory_order_relaxed);
+            g_offAaFreed[1].store(false, std::memory_order_relaxed);
+        }
         memset(g_rowsObserved, 0, sizeof(g_rowsObserved));
         g_rowsObservedWrites = 0;
         g_rowsObservedEvictions = 0;
@@ -6806,6 +6814,9 @@ static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot*
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
+    // The depth writer map rides the same run when advanced.pixel_probe has a point (one key arms both): the id of the last draw that
+    // changed each pixel's depth, for naming what disowns a pool record's slot.
+    if(pixelProbeConfigured())depthWriterArm(g_eyeRunStamp);
     mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
     if(!companion) {
         g_airborneCompanion=AirborneCompanionRequest{};
@@ -6964,6 +6975,74 @@ float temporalPassDepthAt(float metres) {
     float a=0.0f,b=0.0f;
     temporalSceneProjection(g_curProj[0],g_curProj[1],g_lastNear,&a,&b);
     return a+b/metres;
+}
+
+// F202: the scope lens's depth with the temporal mode OFF (declared in temporal_pass.h; native_temporal.cpp treat calls it in its mode-off branch, once for each eye, before the door runs).
+// With a mode on, temporalInner makes the depth view for the upscaler and tells the lens (scopeZoomDepthSet above); with it off no treat runs, so the same two facts are told here:
+//  - the view: the depth probe's scene depth for the eye at the submitted texture's size (depthProbeSceneDepth, the very call and the very texture temporalInner reads, F199 having opened
+//    it to Anti-aliasing off), seen through a depth-channel view, kept in the eye's own slot (e.depthRes / e.depthSrv, so a later switch to a mode finds the view it would have made);
+//  - nearDepth: Elite's infinite-far reversed-Z depth of scopezoom::kLensNearM, from the near plane the runtime's projection query gave (scope_zoom_s1.h lensNearDepthInfiniteFar, the
+//    arithmetic temporalSceneProjection falls back to without a measured scene row, which is what the DLSS press of 2026-11-01 ran on: depth = 0.025 / metres).
+// WHEN: at the game's Submit of the eye, which is when temporalInner reads the depth too. The game has drawn the whole frame's scene into the target by then and clears it again only for the
+// next frame, after the Submit returns; the probe refuses a pair whose target was not drawn into last frame, and the slot is cleared at the top of every call, so a failed fill leaves none,
+// never a view an earlier frame filled. The lens's dispatch is queued on the same context after those draws, in the same Submit (the door runs right after, in sharpen's treatEye).
+// Only the right eye's slot is filled, and only while a press of the sights is open (scopeZoomWanted), so outside one this costs a clear and a relaxed load.
+void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {
+    if (eye < 0 || eye > 1) return;
+    scopeZoomDepthClear(eye);
+    // RC5 review: the first call of this eye with the mode off lets go of every view the pass made while it was on (its history, copies, depth and DLSS buffers: nothing holds them now, and a resolution
+    // change would keep the old textures alive); the lens's own depth view is made again on demand. With a temporal mode on this is never called.
+    if (!g_offAaFreed[eye].load(std::memory_order_relaxed)) {
+        releaseEye(g_eye[eye]);
+        g_offAaFreed[eye].store(true, std::memory_order_relaxed);
+    }
+    if (eye != 1 || !source || !region) return;
+    if (!scopeZoomWanted()) {   // no press of the sights is open: the lens's view of the game's depth is let go, so it holds no reference to the texture (a later press makes it again)
+        releaseDepth(g_eye[1]);
+        return;
+    }
+    guarded("scopeZoom.offAaDepth", [&] {
+        const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);
+        if (!(lensNear > 0.0f)) return;   // no near plane yet: the door counts "depth unavailable"
+        D3D11_TEXTURE2D_DESC sd{};
+        source->GetDesc(&sd);
+        ID3D11Texture2D* dtex = nullptr;
+        if (!depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex) || !dtex) return;
+        D3D11_TEXTURE2D_DESC dd{};
+        dtex->GetDesc(&dd);
+        EyeState& e = g_eye[eye];
+        if (e.depthRes != static_cast<void*>(dtex) || !e.depthSrv) {
+            releaseDepth(e);
+            DXGI_FORMAT rf = DXGI_FORMAT_UNKNOWN;
+            switch (dd.Format) {   // the depth channel of the game's texture, as temporalInner views it
+                case DXGI_FORMAT_R32G8X24_TYPELESS:
+                case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+                    rf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+                case DXGI_FORMAT_R32_TYPELESS:
+                case DXGI_FORMAT_D32_FLOAT:
+                    rf = DXGI_FORMAT_R32_FLOAT; break;
+                case DXGI_FORMAT_R24G8_TYPELESS:
+                case DXGI_FORMAT_D24_UNORM_S8_UINT:
+                    rf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+                default: break;
+            }
+            ID3D11Device* dev = nullptr;
+            if (rf != DXGI_FORMAT_UNKNOWN && (dd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) dtex->GetDevice(&dev);
+            if (dev) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = rf;
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipLevels = 1;
+                if (SUCCEEDED(dev->CreateShaderResourceView(dtex, &vd, &e.depthSrv)) && e.depthSrv) e.depthRes = dtex;
+                else e.depthSrv = nullptr;
+                dev->Release();
+            }
+        }
+        if (!e.depthSrv) return;
+        // a uv of the picture is a uv of the depth when the Submit region is the whole source and the depth is the source's size (with Anti-aliasing off the render is the picture)
+        const bool covers = region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height;
+        scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);
+    });
 }
 
 }  // namespace edvr

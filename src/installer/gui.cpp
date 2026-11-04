@@ -1010,6 +1010,19 @@ void saveLogs() {
         }
         text += "\r\nAttach it to a GitHub issue, or drop it on Discord. It holds EDVR's own "
                 "logs and settings and nothing else.\r\n";
+        // The same zip, as a copied file: Ctrl+V in Discord or a GitHub comment attaches it. Only the
+        // logs zip -- the crash dump below is private and never goes on the clipboard.
+        std::string clipError;
+        if (copyFileToClipboard(g.window, bundle.zipPath, &clipError)) {
+            text += "\r\nThe zip is also on your clipboard: press Ctrl+V in a Discord message or a "
+                    "GitHub comment to attach it.\r\n";
+            if (runningUnderWine()) {
+                text += "On Linux, paste before you close this window; the copy may not outlive it.\r\n";
+            }
+        } else {
+            text += "\r\nCould not copy it to the clipboard (" + clipError + "). The file on the "
+                    "Desktop is fine.\r\n";
+        }
         if (!bundle.dumpZipPath.empty()) {
             // The dump is a separate file for a reason: it is a copy of the game's
             // memory, which is not for a public issue.

@@ -619,6 +619,14 @@ constexpr uint32_t kPfzMaxJoints = 0xC0;     // the Animate output's joint cap (
 static_assert(kPfzMaxF >= kPfzMaxJoints, "F53: F can hold every joint the Animate output has (the member cap is never the refusal)");
 constexpr double kPfzBlendSec = 0.3;         // the entry and exit blend
 
+// The rest chain is composed only when the freeze is on (mode 2). Probe (1, the shipped default) and off (0) keep the
+// animated span snapshot and do not multiply the chain: the pin and the arm IK read that snapshot unless a write happened.
+inline bool pfzFreezeBuildsChain(int mode) noexcept { return mode == 2; }
+// The span is written only from that chain, and only while the weight is live and a failed write has not stood the freeze down.
+inline bool pfzFreezeWrites(int mode, float weight, bool writeDown) noexcept {
+    return pfzFreezeBuildsChain(mode) && weight > 0.0f && !writeDown;
+}
+
 // Set an affine row-major transform to identity.
 inline void pfzIdentity(float out[16]) noexcept {
     for (int i = 0; i < 16; ++i) out[i] = 0.0f;
@@ -1480,6 +1488,8 @@ struct IkPoseDeviationSample {
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
     double offDistanceM = 0.0, offChangeDeg = 0.0, offRawWeight = 0.0, offEffectiveWeight = 0.0, leftSolveWeight = 0.0, supportBlend = 0.0;
     double reachRadiusM[2] = {}, reachCandidate[3] = {}, pinReach[3] = {};
+    // F192: the left elbow's draw-hold weight, the game's animated left elbow over its shoulder (m) and F181's plane angle before the cap (deg); not a number when unmeasured
+    double f192Dh = 0.0, f192AnimElbowDyM = std::nan(""), f181PlaneBeforeDeg = std::nan("");
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};

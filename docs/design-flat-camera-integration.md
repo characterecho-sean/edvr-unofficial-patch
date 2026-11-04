@@ -52,7 +52,7 @@
   main-versus-auxiliary camera grouping; c2_coexist C7's unbounded loop
   (a mutation hangs the rig instead of failing it). 2026-10-14, BUILT, NOT FLOWN:
   `flat camera signatures 5s:`; flat owns the relay gate (refresh-calls=0 flight). OPEN
-  on foot: foreground-active-query refusals, 2.5 min; `flat replay query rejected` logs why (last entry).
+  on foot: foreground-active-query refusals; 2026-11-03: UNCERTAIN_BRACKET#100 after a live VR-to-flat switch (last entry).
 - Environment: Windows x64, D3D11 flat mono; headset/runtime N/A. VR
   comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable and
   build identities, backend versions, dimensions, formats and mod chain.
@@ -1519,3 +1519,63 @@ check and logs why, with the tracker's own view of the context (flat_replay_quer
 The decision itself is unchanged (`queriesUnsafe = opaque && bytes && !replayQueriesSafe(ctx)`, pinned). Tests: flat_temporal_test's
 flat_replay_query_reject_tests.h (the words, the counting, the wiring pins). To read on the next flight: which query kind and which VS/PS dominate the
 refused on-foot frames, and whether the first rejection falls at the disembark or at the AA-mode change.
+
+## 2026-11-03 (flight edvr_gfx_20261103_044624): the on-foot refusal is the query tracker, and it follows a live VR-to-flat switch (DIAGNOSED, no change)
+
+Frontier, build 7cc31c5a (`v0.22.0-rc.5-38-g7cc31c5a`, PE `6AE9C874`, `edvr_log.py --expect-build 7cc31c5a` matched). Launched in VR (3D mode 4), live switch
+to flat at 04:51:05.672, DLSS, SS 1.0 (3840x2160 render and output), UI quality 100. Sean's first NumLock (05:03:44, on foot in the hangar, ship in view)
+and the second (05:04:15, seated, sealed) are the two draw censuses; the log records a NumLock only as `flat draw census: armed by NumLock`.
+
+- **What the log shows.** Every on-foot stretch (04:52:07-04:55:27, 05:00:38-05:04:00) refuses `flat-resolve-foreground-contract-unqualified` on
+  nearly every frame (80 five-second windows, 30,823 frames), with `last=spatial-fallback`, `jitter=(0,0)`, `state=warming history-valid=0`, so no DLSS
+  and no temporal AA ran on the hangar frames at marker 1 (`treated` rose 27 frames in 05:02:22-05:04:00; it rose 450 per 5 s in the cockpit at 05:04:02
+  and after). The cause is the query tracker: `flat replay query rejections` shows `checked == rejected` (193,092 of 193,092), every one
+  `UNCERTAIN_BRACKET#100` (`open-brackets=2`, both timing kind, so the open brackets are not the reason). The first rejection is at 04:51:05.744, 72 ms
+  after the switch. `FlatReplayQueryTracker::uncertain` is sticky (flat_replay_query_tracker.h: only `resetForNewContext` clears it), so one unpaired
+  End or duplicate Begin leaves every later foreground draw refused for the session; the cockpit is treated only because no foreground draw reaches the test there.
+- **Across logs (Frontier and Steam, 10-14 on, `replay query rejections` present).** Launched VR and switched live: 5 of 5 sessions with a checked
+  foreground draw rejected all of them (10-14 115326, 10-18 042154, 10-18 043544, 10-23 115856, 11-03 044624). Launched flat: 3 of 3 sessions with
+  checked draws rejected none (10-18 043900: 16,460 checks; 10-18 081908: 57,624; 10-23 093833: 34,201); Steam (119 flat-launched logs since 10-14, 90 with
+  checked draws, 8.7 million checks) rejected none.
+  The other VR-launched logs had no checked foreground draw (not on foot). So the leading cause is state left by the VR phase (as the 10-14 observe-only hook was).
+- **Open: what sets `uncertain`, and whether it is set in the VR phase.** The tracker records no cause. Instrument (log only): keep the first cause (null
+  identity, duplicate Begin, table full, kind mismatch, unmatched End), the D3D11_QUERY, the frame, the thread and whether the game was in VR or flat, and
+  write one line at the first. Expected: a line before 04:51:05 with the VR profile means the VR path sets it; one after means the game does.
+  Do not reset the tracker at the profile switch before the cause is known: a bracket that is really open would then be replayed under.
+- `ruled out: the 2026-11-03 branch (7cc31c5a: the dust and bars recipes, the UI layer's composite) as the cause of the on-foot refusal, because the diff
+  touches no query or foreground-contract code, the first rejection came 72 ms after the switch, and VR-to-flat logs of 10-14 (v0.19.1-238) and 10-18
+  (v0.20.0-rc.2-66) show the same UNCERTAIN_BRACKET#100.`
+- `ruled out: a particular foreground draw (7B0DC42D/0DF03E64, CFCA8FFC/8A08FF78, 88DCF116/494506A6, DFED8E1C/143AAE05) as the trigger, because the tracker
+  rejects every draw it is asked about (checked equals rejected), whatever the pair.`
+- `ruled out: DLSS ghosting of the hangar ship at the first NumLock, because DLSS did not run on those frames (spatial fallback, no jitter); what Sean saw is the untreated frame.`
+- **Leading hypothesis, from the source (T1).** The observer runs only in the flat profile: vscreen.cpp `hookedBegin`/`hookedEnd` call `flatRuntimeReplayQueryBegin/End`
+  behind `if(runtimeFlatProfile())`. After a live VR-to-flat switch its first calls can be Ends of brackets the game opened in the VR phase; an End with no Begin seen
+  and a count-bearing kind sets `uncertain` (the tracker's unmatched-End rule), and it never clears. A flat launch observes from the first call, so nothing escapes.
+  This fits 5 of 5 and 0 of 120+, and the 72 ms; it is not yet shown. Others the instrument separates: T2 a duplicate Begin, T3 a full table (64 open), T4 a kind
+  mismatch, T5 a null query, T6 a Begin on a deferred context and its End on the immediate one (not observed at all today).
+- **Instrument (BUILT 6af59804, INSTALLED on Frontier odyssey-64 `--scope both --xess` and verified, NOT FLOWN, NOT MERGED, log only, no key, no behaviour change; flat_replay_query_tracker.h, flat_replay_query_reject.h, flat_runtime.cpp, pinned in
+  flat_temporal_test's flat_replay_query_reject_tests.h).** The tracker keeps the cause of its first escape and counts the Begins and Ends it saw. Two lines, once per session:
+  `flat replay query tracker: observing from here (first call End on context ..., thread N); calls before this were not observed ...` at the first Begin or End the
+  observer sees, and `flat replay query tracker: first escape: cause=unmatched-end call=End query=OCCLUSION_PREDICATE#5 kind=count thread=N context=...; seen begins=0 ends=1 open=0,
+  3 ms after the first observed call; uncertain now stays set ...` at the first escape. No start line = the observer never ran; a start line and no escape line = the tracker
+  stayed certain (expected in a flat-launched session). **T1 is confirmed by** `cause=unmatched-end` with `begins` small and `ms after the first observed call` within the first
+  frame or two of the start line after the switch, **refuted by** any other cause, or an unmatched-end late in a session that has seen many Begins. If T1 holds, the fix to
+  propose is a grace at adoption (the Ends of brackets opened before the first observed call are not escapes), not a reset of the tracker.
+- **FLOWN 2026-11-03 (log edvr_gfx_20261103_061437, `v0.22.0-rc.5-40-g6af59804` matched; T1 CONFIRMED).** VR launch, live switch to flat at 06:16:34.194. At 06:16:34.225, 31 ms
+  later, the log reads `observing from here (first call End ...)` and in the same millisecond `first escape: cause=unmatched-end call=End query=TIMESTAMP_DISJOINT#3 kind=timing ...
+  seen begins=0 ends=1 open=0, 0 ms after the first observed call`. The first thing the observer ever saw was the End of a timing bracket the game opened in the VR phase.
+  Then every foreground draw was rejected (`UNCERTAIN_BRACKET#100`): 06:16:39 to 06:17:34 on foot in the hangar (checked == rejected in every window, 2,000-2,700 a window),
+  `flat-resolve-foreground-contract-unqualified`, `treated=0`, `last=spatial-fallback`; the cockpit 06:17:34-06:18:09 treated (`treated-jittered-hdr`, checked 0); the disembark at 06:18:09
+  refused again from 06:18:14. Sean: "in the hangar AA still seems disabled after switching to flat, it works in the cockpit"; NumLock at 06:17:14 (on foot, refused) and 06:18:04 (seated, treated).
+  **The unmatched-End rule is stricter than the safety rule.** `FlatReplayQueryTracker::end` escapes on any unmatched End that is not End-only, a timing End included, while `safe()` already
+  ignores an open Timing bracket because a timestamp-disjoint query counts no draws. So a Timing End the observer never saw the Begin of cannot make a replay unsafe, and sets the
+  sticky flag anyway. Why it never shows when launched flat: the observer's first call there is a Begin.
+  **FLOWN OK 2026-11-03 (log edvr_gfx_20261103_063129, `v0.22.0-rc.5-43-g4014cc7f`; Sean: "that works"; merged to main on his word).** VR launch, live switch to flat 06:35:51.261. 06:35:51.285: the start line (first call End) and `an End of a timing query with no Begin seen is not an escape (first: query=TIMESTAMP_DISJOINT#3 ... begins=0 ends=1, 0 ms after the first observed call)`, no `first escape` line. On foot in the hangar from 06:36:12: `rq checked=2794/2694/2646 rejected=0` per window, `treated` rising 450 per 5 s (3057 by 06:36:26, refused 4 in all), `last=treated-jittered-hdr`; before the fix the same stretch was 100% rejected. So the unmatched timing End was the only escape at adoption in this session (a Count-bearing one would have printed the escape line). The station P1 test was not made in this log: its second seal (06:36:47) came after a switch back to VR and lasted 7 s (a T2 dump at 06:36:51, not read).
+  **The fix (Sean said build it; BUILT 4014cc7f on branch claude/clever-fermat-c6f96b, full build green, INSTALLED on Frontier odyssey-64 `--scope both --xess` and verified):** an End of a Timing query with no Begin seen is not an escape (`unmatchedTimingEnds` counts it; flat_replay_query_tracker.h);
+  Count-bearing and Unknown kinds keep the rule. The two instrument lines stay, so if a Count-bearing End also arrives unmatched at adoption (it was hidden behind the timing escape)
+  the next flight names it, and the grace at adoption is then designed against that evidence. A third line, once per session, says the rule ran: `an End of a timing query with no
+  Begin seen is not an escape (first: query=TIMESTAMP_DISJOINT#3 ...)`. Expected log after the fix: the start line, that line, no escape line, `rejected=0` with `checked>0` on foot,
+  `treated` rising on foot in the hangar and no `flat-resolve-foreground-contract-unqualified` windows there. An escape line with another cause means the adoption has a second source.
+  Pinned in flat_temporal_test (the timing, count and unknown unmatched Ends, the kind mismatch, the reset, the line text and the wiring).
+- `ruled out: a Count-bearing bracket as the first escape, because the first observed call was the End of TIMESTAMP_DISJOINT#3 (kind=timing), begins=0 ends=1, 0 ms after the first observed call.` (A later Count escape is hidden behind it, so this does not say none exists.)
+- `ruled out: a duplicate Begin, a full table, a kind mismatch and a null query as the first escape, because the first escape was unmatched-end.`

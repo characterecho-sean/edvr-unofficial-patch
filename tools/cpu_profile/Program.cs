@@ -38,6 +38,7 @@ internal static class Program
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(options.Output))!);
             File.WriteAllText(options.Output, JsonSerializer.Serialize(report, jsonOptions));
             Console.WriteLine($"EDVR CPU report: {options.Output}");
+            foreach (var warning in (string[])report["warnings"]!) Console.WriteLine($"WARNING: {warning}");
             Console.WriteLine($"frames={report["frameCount"]} analyzed={report["analyzedFrameCount"]} " +
                               $"eventsLost={report["eventsLost"]} coverageComplete={report["coverageComplete"]}");
             Console.WriteLine($"cycleDerived={report["cycleDerivedFrameCount"]} " +

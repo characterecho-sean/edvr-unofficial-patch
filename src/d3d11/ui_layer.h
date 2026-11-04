@@ -72,6 +72,9 @@ namespace edvr {
 // The render-owner cache prepares their restricted DXBC remap before a take.
 void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
                            const void* bytes, size_t count, bool linked);
+// vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while uiLayerLive(): the block's
+// cb1[120].z kept by buffer for the hologram programs' relief radius (ui_holo_remap.h THE RELIEF). Owner context's thread.
+void uiLayerNoteSceneWrite(const void* resource, const void* data, uint32_t bytes);
 
 class Config;
 
@@ -386,6 +389,13 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
 // F121c: what the game last submitted for an eye (0 left, 1 right), as uiLayerNoteSubmitted was told; null for none yet or an eye other than 0 or 1. An identity, never
 // dereferenced: remlok_fix.cpp's eye-trust guard asks which eye a visor draw's target was submitted for.
 const void* uiLayerSubmittedTarget(uint32_t eye);
+// F198 (submitted_eye.h): the same submit with the texture's size, kept for the native on-foot marker fix's eye source 'S' while the temporal path is NOT running (Anti-aliasing
+// off: the layer is not live and ui depth classifies nothing, so no other source names a marker composite draw's eye). Called from native_temporal.cpp's treat beside
+// uiLayerNoteSubmitted, before its Anti-aliasing-off return; an on-foot or render-mode edge clears it. Identities only.
+void uiLayerNoteSubmittedSized(uint32_t eye, const void* submitted, uint32_t width, uint32_t height);
+// F198: the eye whose submitted texture `res` is (0 or 1), or -1: both eyes' textures known, distinct, each the same for two submits at the same size. Read only; the draw
+// path's answer is the frames before this one's (the draws precede treat), safe because the textures are stable.
+int uiLayerEyeOfSubmitted(const void* res);
 
 // The door, from the native runtime's submit chain (native_temporal.cpp and
 // native_sharpen.cpp, both on the thread the game submits from):
@@ -437,10 +447,11 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
-// The flat profile's HUD edge smoothing (fix.hud_antialiasing; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
+// The HUD edge smoothing (fix.hud_antialiasing, both profiles; the flat adapter asks through here; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
 // the HUD layer"): SMAA 1x over the layer's finished 8-bit content before the composite downsamples it, so the HUD gets the edge smoothing the game's own
 // anti-aliasing would have given it. The adapter asks for the NEXT composite only, once a frame, with the key it just read: `on` smooths the layer, false leaves it as
-// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (the VR profiles) never sees it set. The result is what that
+// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (VR) never sees it set: VR reads the same key itself, at every
+// configure (2026-11-03), and smooths both eyes' composites when it is on. The result is what that
 // composite did: kNone (no layer composite ran), kRaw (it ran on the layer as is, as asked), kSmoothed (it read the SMAA output) or kFault (smoothing was asked
 // for, the SMAA resources could not be had, and it read the raw layer); w x h is the layer's size at that composite.
 enum class UiLayerEdgeSmoothing : uint8_t { kNone = 0, kRaw, kSmoothed, kFault };

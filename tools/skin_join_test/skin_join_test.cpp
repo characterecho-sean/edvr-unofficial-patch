@@ -519,6 +519,27 @@ void caseLimits() {
         check(r.result.stats[kStatFailCap] == 1, "J8.d a job with no bones is counted and skipped");
     }
     {
+        // J8.f: characters whose rows lie past 65,536 join (2026-11-03: the tables stopped there, the palette is 174,763 rows, and every NPC
+        // drawn from a base past the line was masked with no history). A filler entity pushes the real ones to rows 72,001 and beyond.
+        World hi;
+        Ent filler;
+        filler.key = 900;
+        for (uint32_t i = 0; i < 18; ++i) filler.jobs.push_back({7000 + i, 4000});
+        hi.push_back(filler);
+        for (const Ent& e : a) hi.push_back(e);
+        Run r;
+        r.frame(build(hi, 1));
+        r.frame(build(hi, 2));
+        r.frame(build(hi, 3));
+        const Built b = build(hi, 4);
+        r.frame(b);
+        const uint32_t pastTheOldLine = 65536;
+        bool allPast = b.jobs.back().dst > pastTheOldLine;
+        check(allPast && b.snap.end > pastTheOldLine && b.snap.end < kMaxRows, "J8.f the world has jobs past row 65,536 and inside the tables");
+        check(r.result.stats[kStatFailCap] == 0 && r.result.stats[kStatJoined] == b.jobs.size() && r.joined(b.jobs.back().dst) != 0,
+              "J8.f every job joins, the ones past row 65,536 included");
+    }
+    {
         Run r;
         warm(r);
         Built b = build(a, 4);

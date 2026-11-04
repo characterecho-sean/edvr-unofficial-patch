@@ -90,7 +90,10 @@ struct ScopeZoomLeftArgs {
     uint64_t sequence = 0;
     ID3D11Texture2D* frame = nullptr;
     const uint32_t* region = nullptr;   // x0, y0, x1, y1 in the frame's pixels: the whole texture, or the copy is not made
-    bool resolved = false;              // the frame is the upscaler's picture
+    bool resolved = false;              // the frame is the upscaler's picture. F202: stays the pass's output alone, so with Anti-aliasing off the left door copies nothing and the right eye's lens
+                                        // takes its own picture (A, counted as "no copy"; B3's key is off by default). B3 with Anti-aliasing off would need this flag set for the game's own picture too
+                                        // (scopezoom::lensPictureResolved, as the right eye's door has it), and a flight to show that eye 0 is drawn with the zoomed window and recognised with the mode off
+                                        // (native_temporal.cpp sets zoomedNow from the provider's frame in begin() whichever the mode, so the window may already be told): not built.
 };
 void scopeZoomLeftDoor(const ScopeZoomLeftArgs& args);
 // The doors ask the temporal pass whether eye 0 is zoomed in their frame through this pointer, set once by the frame tick (native_on_foot.cpp: scopeZoomSetTemporalZoom(&nativeTemporalZoom)),
@@ -111,7 +114,8 @@ struct ScopeZoomDoorArgs {
     ID3D11Texture2D* frame = nullptr;
     const uint32_t* region = nullptr;   // x0, y0, x1, y1 in the frame's pixels
     bool inPlace = false;               // the frame is EDVR's own and is rewritten in full every frame: the passes may write it. The region must be the whole texture either way
-    bool resolved = false;              // the frame is the upscaler's picture (unjittered)
+    bool resolved = false;              // the frame is the upscaler's picture (unjittered), or (F202) the game's own with no temporal mode running (scopezoom::lensPictureResolved)
+    bool gameOwn = false;               // F202: resolved, and the game's own picture (Anti-aliasing off): the depth is the depth probe's scene depth, not the upscaler's. Only changes the log line
 };
 // The door, called with the frame the weapons/HUD composite is about to take. Rewrites the right eye's picture in place, or, for a frame it may not write (or whose format has no
 // UAV), makes its own copy of it, rewrites that and hands it back in *copy. Counts every frame it is called on under its verdict or its reason (scope_zoom_s1.h LensDoorStats).

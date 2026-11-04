@@ -47,8 +47,10 @@ static_assert(sizeof(StripParams) == 16, "the strip shader's cbuffer is one 16-b
 
 // The tent's half-width in the pixels of the viewport the strip is drawn into: one pixel of the game's own line is
 // layerViewportW / renderViewportW of them, which is the weight (the width a unit-peak tent integrates to) the line keeps.
-// Clamped to [1, kMaxTent]: a layer no wider than the render never reaches here (the layer declines those draws), and
-// anything past sixteen times is not a layer this was made for. 0 for a dead input; `clamped` says the clamp acted.
+// Clamped to [1, kMaxTent]: a layer NARROWER than the render never reaches here (the layer declines those draws in both profiles),
+// a layer exactly as large gives ratio 1, which is exact (the flat profile takes the bars at that size since 2026-11-03: the take is
+// for the upscaler's history, not for density; uiLayerSceneLinesFit), and anything past sixteen times is not a layer this was made
+// for. 0 for a dead input; `clamped` says the clamp acted.
 inline float tentHalfWidth(float layerViewportW, float renderViewportW, bool* clamped = nullptr) {
     if (clamped) *clamped = false;
     if (!std::isfinite(layerViewportW) || !std::isfinite(renderViewportW) || !(layerViewportW > 0.0f) ||

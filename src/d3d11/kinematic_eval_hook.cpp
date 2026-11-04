@@ -60,6 +60,8 @@ std::atomic<bool> emitWanted{false};
 // Engine-record velocity's emit observer (direct producer 0's post-forward).
 alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 alignas(8) std::atomic<EnginePrimaryEmitObserverFn> primaryEmitObserver{nullptr};
+// The vehicle rig's tap (kinematic_eval_hook.h): read-only, no want on the gate.
+alignas(8) std::atomic<VehicleRigEmitTapFn> vehicleRigTap{nullptr};
 alignas(8) std::atomic<uintptr_t> primaryGate{0};
 std::atomic<uintptr_t> g_primaryReturn{0};
 std::atomic<const char*> g_primaryStatus{"not requested"};
@@ -837,6 +839,8 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
     if(producer==0 && !fault) {
         const auto emit=emitObserver.load(std::memory_order_acquire);
         if(emit)emit(a,b,start,end);
+        const auto rigTap=vehicleRigTap.load(std::memory_order_acquire);
+        if(rigTap)rigTap(a);
     }
     emcpu::leave(engineMotion);
     return result;
@@ -1369,6 +1373,9 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
     emitObserver.store(fn,std::memory_order_release);
+}
+void kinematicEvalSetVehicleRigTap(VehicleRigEmitTapFn fn) noexcept {
+    vehicleRigTap.store(fn,std::memory_order_release);
 }
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn fn) noexcept {
     primaryEmitObserver.store(fn,std::memory_order_release);

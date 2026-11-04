@@ -919,7 +919,9 @@ void particleConfigure(Config& cfg) {
                 "the game draws them.");
 
     const Mode wasMode = detail::g_particleMode;
-    const std::string m = runtimeVrProfile() ?
+    // Read in both profiles since 2026-11-03: the flat draw thunks run the same substitution (vscreen.cpp FlatParticleScope). Passthrough and
+    // invalid stand down with the rest of the fixes.
+    const std::string m = (runtimeVrProfile() || runtimeFlatProfile()) ?
         cfg.getString("fix.particle_billboard", "steady") : "stock";
     if (m == "steady") {
         detail::g_particleMode = Mode::kSteady;

@@ -84,6 +84,10 @@ constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWor
 // The FSS reveal fix's one section (gpu_census.h) follows the world route's three; it is a top-level in-frame item (last in kFrameBreakdownNames, in the total) and, like
 // theirs, has no turn until called this window.
 constexpr size_t kFssFirst = static_cast<size_t>(GpuCensusSection::FrameFssReveal);
+// F199: native on foot's depth readers' one section (gpu_census.h) follows the FSS reveal's. It is EDVR's cost and part of the in-frame total, but the main line is at the log's length
+// (the worst-case line is held under 1150 characters: one more item there was 39 over), so its item is not in kFrameBreakdownNames: it has a line of its own, like the hologram resolve's
+// parts and the second skin's. No turn until called this window.
+constexpr size_t kOnFootDepthFirst = static_cast<size_t>(GpuCensusSection::FrameOnFootDepth);
 // The second skin's five items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
 // span, so none is in kFrameBreakdownNames or in any total: they are priced on a line of their own (logAndResetWindow), and, like the world route's, have no turn
 // in the rotation until called this window.
@@ -92,10 +96,10 @@ constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkin
 constexpr const char* kSkinNames[] = {
     "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
 };
-static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
-static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
-                  kWorldSections == 3 && kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
-              "the seed is followed by the three world-route sections, the FSS reveal's one and the second skin's five, which are the last in-frame ones");
+static_assert(kAlteredFirst == kDoorSections + kFrameSections + 1 + kSkinSections, "one name for each in-frame section (the on-foot depth readers' one on a line of its own), and the altered sections follow them");
+static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kOnFootDepthFirst && kOnFootDepthFirst + 1 == kSkinFirst &&
+                  kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 && kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections, the FSS reveal's one, native on foot's depth readers' one and the second skin's five, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -224,9 +228,9 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
 }
 // The scope lens's door section (gpu_census.h) is a door item that runs only in the right eye's scoped ADS: like the world route's, it has no turn until called this window.
 constexpr size_t kScopeZoomSection = static_cast<size_t>(GpuCensusSection::DoorScopeZoom);
-// A world-route, FSS reveal, second-skin or scope lens section has no turn until it has been called this window (its first call counts whether or not it is on turn).
+// A world-route, FSS reveal, on-foot depth readers', second-skin or scope lens section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) &&
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) &&
            g_section[i].occurrences == 0;
 }
 // The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
@@ -358,7 +362,9 @@ void logAndResetWindow(uint64_t now) {
             doorTotal += s.msPerFrame;
         }
     }
-    double frameTotal = 0.0;
+    // F199: native on foot's depth readers (F85c's reticle march, F119's grid): part of the in-frame total, its item on a line of its own below (the main line is full).
+    const Snapshot onFootDepth = snapshotOf(g_section[kOnFootDepthFirst], frames);
+    double frameTotal = onFootDepth.msPerFrame;
     std::string frameItems;
     Snapshot seedSnap;
     for (size_t i = 0; i < kFrameSections; ++i) {
@@ -478,6 +484,13 @@ void logAndResetWindow(uint64_t now) {
         char seedDetail[1024];
         formatSeedDetail(seedDetail, sizeof(seedDetail), seedSnap, g_seedNotes, g_seedMixed, g_seedFirst, g_seedOther);
         Log::get().note("%s", seedDetail);
+    }
+    // F199: native on foot's depth readers' own line, only when one ran this window (on foot): the item is inside the in-frame figure above.
+    if (onFootDepth.occurred) {
+        std::string item;
+        appendItem(item, "on-foot depth", onFootDepth);
+        Log::get().note("EDVR GPU census, native on foot's depth readers (F85c's reticle depth march and F119's head-containment grid, the GPU work behind F123's wall contact), included in the "
+                        "in-frame figure above although not listed in it: %s.", item.c_str());
     }
     // The hologram resolve's three parts (2026-10-13): their own line, because the main line's door items are at the log's length. They
     // are inside the umbrella's figure, so they are a breakdown of it and never part of a total.

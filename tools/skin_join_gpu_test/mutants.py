@@ -35,7 +35,7 @@ M = lib.M
 ALL = ("G2", "G3", "G4")   # the scripted and random worlds both exercise the join; any of them may be the first to disagree
 MUTANTS = [
     # ---- G1: the numbers the two sides share ----
-    M("rows-differ", "G1", "shader", [("#define SJ_MAX_ROWS 65536u", "#define SJ_MAX_ROWS 32768u")], "the HLSL covers half the rows the header does"),
+    M("rows-differ", "G1", "shader", [("#define SJ_MAX_ROWS 180224u", "#define SJ_MAX_ROWS 65536u")], "the HLSL covers half the rows the header does"),
     M("plan-offset-differs", "G1", "shader", [("#define SJ_PLAN_COUNT 1033u", "#define SJ_PLAN_COUNT 1034u")], "the HLSL reads the entity counts one word late"),
     M("hook-flag-differs", "G1", "join", [("kPlanHook = 2,", "kPlanHook = 4,")], "the header offers the hook with another bit"),
     M("counter-index-differs", "G1", "shader", [("#define SJ_STAT_JOINED 7u", "#define SJ_STAT_JOINED 8u")], "the HLSL counts joins into another counter"),

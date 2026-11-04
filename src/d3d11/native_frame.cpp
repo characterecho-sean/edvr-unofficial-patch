@@ -3,6 +3,7 @@
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
 #include "../common/scope_zoom_window.h"
+#include "../common/view_circle.h"
 #include "../common/config.h"
 #include "../common/world_scale.h"
 #include "../common/frame_flag.h"
@@ -46,6 +47,7 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
+    bool lastTurboMode = false;   // fix.turbo_mode as last logged
     bool lastStepAside = false;   // F36: weapon stability stepped aside (native on foot active), as last logged
     EdvrNativeFrameDecision cachedDecision{};
 };
@@ -419,6 +421,12 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         // B3 (the scope zoom's window): the left eye drawn as the zoomed view, in a version 11 answer only, in five of the retired guard's words. None once the frame thread's request is
         // stale; a shape that cannot carry it leaves the words zero (no zoom, no strip).
         if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);
+        // F206: the ADS view circle's centre (view_circle.h), in five more of the retired guard's words (5..9), in a version 11 answer only: none once the frame thread's request is stale.
+        if (carried) {
+            uint32_t circleWords[edvr::viewcircle::kWords];
+            edvr::viewcircle::toWords(edvr::viewcircle::read(GetTickCount64()), circleWords);
+            std::memcpy(result.reservedTerrainGuard + edvr::viewcircle::kWordsAt, circleWords, sizeof(circleWords));
+        }
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -504,9 +512,19 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->lastStepAside = stepAside;
         edvr::Log::get().note("weapon stability: %s", stepAside ? "stepped aside (native on foot active)" : "resumed");
     }
+    // fix.turbo_mode (experimental): the deferred wait everywhere, ships included, for a
+    // runtime whose own wait halves the refresh when a deadline is missed. Native on foot
+    // keeps the runtime's pacing, as it does for weapon stability.
+    const bool turboMode = edvr::Config::get().getBool("fix.turbo_mode", false);
     result.deferredPacing =
-        (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+        ((turboMode && !stepAside) ||
+         (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot()))
             ? 1u : 0u;
+    if (turboMode != state->lastTurboMode) {
+        state->lastTurboMode = turboMode;
+        edvr::Log::get().note("turbo mode: %s (live; the frame wait leaves the game's pose fetch in ships and on foot%s).",
+                              turboMode ? "on" : "off", turboMode ? ", stepping aside while native on foot is active" : "");
+    }
     if (result.deferredPacing) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::DeferredPacing);   // F0 gate counter (log only)
     if (!state->weaponStabilityNoted ||
         state->lastWeaponStability != weaponStability) {

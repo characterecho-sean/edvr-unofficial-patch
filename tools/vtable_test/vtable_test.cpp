@@ -1258,6 +1258,65 @@ int main() {
               "...and the skeleton FindJoint: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "the FindJoint hook would be refused or stolen at the wrong length");
 
+        // The SRV radar's placement setter (0x38563A0 in build 334925; srv_radar_anchor.cpp): `sub rsp,48h` (4), `movups xmm0,[rdx]` (3),
+        // `movups [rcx+1528h],xmm0` (7), `movups xmm1,[rdx+10h]` (4). CodeHook steals the first two, seven bytes, none rip-relative.
+        const uint8_t radarSetter[] = {0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0x28, 0x15, 0x00, 0x00, 0x0F, 0x10, 0x4A, 0x10};
+        size_t dispB = 9, dispC = 9, dispD = 9;
+        check(codeInstructionLength(radarSetter, sizeof(radarSetter), &disp) == 4 && disp == 0 &&
+                  codeInstructionLength(radarSetter + 4, sizeof(radarSetter) - 4, &dispB) == 3 && dispB == 0 &&
+                  codeInstructionLength(radarSetter + 7, sizeof(radarSetter) - 7, &dispC) == 7 && dispC == 0 &&
+                  codeInstructionLength(radarSetter + 14, sizeof(radarSetter) - 14, &dispD) == 4 && dispD == 0,
+              "...and the radar placement setter: `sub rsp,48h` 4, `movups xmm0,[rdx]` 3, `movups [rcx+1528h],xmm0` 7, `movups xmm1,[rdx+10h]` 4, no displacement",
+              "the radar setter hook would be refused or stolen at the wrong length");
+
+        // The SRV radar's schematic slot update (0x36BF3C0 in build 334925; srv_radar_anchor.cpp, camera mode): `push rbp` with a REX prefix (2), `push r14` (2), `push r15` (2),
+        // `lea rbp,[rsp-6F0h]` (8: SIB, disp32), `sub rsp,7F0h` (7), then `mov rax,[rip+disp32]` (7, the security cookie). CodeHook steals the three pushes, six bytes, none rip-relative.
+        const uint8_t radarSlot[] = {0x40, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x10, 0xF9, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xF0, 0x07, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xDC, 0xA5, 0x7E, 0x02};
+        size_t slotDisp[6] = {9, 9, 9, 9, 9, 9};
+        check(codeInstructionLength(radarSlot, sizeof(radarSlot), &slotDisp[0]) == 2 && slotDisp[0] == 0 &&
+                  codeInstructionLength(radarSlot + 2, sizeof(radarSlot) - 2, &slotDisp[1]) == 2 && slotDisp[1] == 0 &&
+                  codeInstructionLength(radarSlot + 4, sizeof(radarSlot) - 4, &slotDisp[2]) == 2 && slotDisp[2] == 0 &&
+                  codeInstructionLength(radarSlot + 6, sizeof(radarSlot) - 6, &slotDisp[3]) == 8 && slotDisp[3] == 0 &&
+                  codeInstructionLength(radarSlot + 14, sizeof(radarSlot) - 14, &slotDisp[4]) == 7 && slotDisp[4] == 0 &&
+                  codeInstructionLength(radarSlot + 21, sizeof(radarSlot) - 21, &slotDisp[5]) == 7 && slotDisp[5] == 3,
+              "...and the radar slot update: `push rbp`, `push r14`, `push r15` 2 each, `lea rbp,[rsp-6F0h]` 8, `sub rsp,7F0h` 7, no displacement; the cookie load 7, rip-relative at 3",
+              "the radar slot hook would be refused or stolen at the wrong length");
+
+        // movups xmm0,[rip+disp32] -- seven bytes, displacement at offset 3: measured, so CodeHook can rewrite it.
+        const uint8_t ripMovups[] = {0x0F, 0x10, 0x05, 0x10, 0x20, 0x30, 0x40};
+        check(codeInstructionLength(ripMovups, sizeof(ripMovups), &disp) == 7 && disp == 3,
+              "...and a rip-relative `movups xmm0,[rip+disp32]`, its displacement at offset 3",
+              "a rip-relative movups moved without its displacement rewritten addresses other memory");
+
+        // F212: the look springs' target setter (0x1A8DF40 in build 334925; native_on_foot_f212.h) is a 17-byte leaf of two movss stores and a ret:
+        // `movss [rcx+730h],xmm1` (F3 0F 11 89 disp32, 8 bytes), `movss [rcx+74Ch],xmm2` (8), `ret`. CodeHook steals the first instruction, eight bytes,
+        // none rip-relative; the ret (C3) is not an instruction it will move.
+        const uint8_t lookLeaf[] = {0xF3, 0x0F, 0x11, 0x89, 0x30, 0x07, 0x00, 0x00, 0xF3, 0x0F, 0x11, 0x91, 0x4C, 0x07, 0x00, 0x00, 0xC3};
+        size_t leafDisp[3] = {9, 9, 9};
+        check(codeInstructionLength(lookLeaf, sizeof(lookLeaf), &leafDisp[0]) == 8 && leafDisp[0] == 0 &&
+                  codeInstructionLength(lookLeaf + 8, sizeof(lookLeaf) - 8, &leafDisp[1]) == 8 && leafDisp[1] == 0 &&
+                  codeInstructionLength(lookLeaf + 16, sizeof(lookLeaf) - 16, &leafDisp[2]) == 0,
+              "...and the look springs' target setter: `movss [rcx+730h],xmm1` 8 and `movss [rcx+74Ch],xmm2` 8, no displacement; the `ret` is refused",
+              "the F212 hook would be refused or stolen at the wrong length");
+        // movss in its other shapes: the load (F3 0F 10), a register form, a REX prefix after the F3, a rip-relative operand measured like any other.
+        const uint8_t movssLoad[] = {0xF3, 0x0F, 0x10, 0x02}, movssReg[] = {0xF3, 0x0F, 0x10, 0xC1}, movssRex[] = {0xF3, 0x44, 0x0F, 0x11, 0x89, 0x30, 0x07, 0x00, 0x00},
+                      movssRip[] = {0xF3, 0x0F, 0x10, 0x05, 0x10, 0x20, 0x30, 0x40};
+        size_t ssDisp[4] = {9, 9, 9, 9};
+        check(codeInstructionLength(movssLoad, sizeof(movssLoad), &ssDisp[0]) == 4 && ssDisp[0] == 0 && codeInstructionLength(movssReg, sizeof(movssReg), &ssDisp[1]) == 4 && ssDisp[1] == 0 &&
+                  codeInstructionLength(movssRex, sizeof(movssRex), &ssDisp[2]) == 9 && ssDisp[2] == 0 && codeInstructionLength(movssRip, sizeof(movssRip), &ssDisp[3]) == 8 && ssDisp[3] == 4,
+              "...and `movss` in its load, register, REX and rip-relative (displacement at offset 4) shapes",
+              "the F3 prefix was not measured with the instruction, or a rip-relative movss would be moved without its displacement rewritten");
+
+        // Every other SSE form stays refused: movaps (0F 28), movsd (F2 0F 10), the F3 forms that are not movss (F3 0F 12 movsldup, F3 0F 7E movq, F3 90 pause), an F3 with
+        // nothing after it, an F3 before a 66 prefix, and a 66 F3 order.
+        const uint8_t movaps[] = {0x0F, 0x28, 0x02}, movsd[] = {0xF2, 0x0F, 0x10, 0x02}, movsldup[] = {0xF3, 0x0F, 0x12, 0x02}, movq[] = {0xF3, 0x0F, 0x7E, 0x02},
+                      pause[] = {0xF3, 0x90}, bareF3[] = {0xF3}, f3then66[] = {0xF3, 0x66, 0x0F, 0x10, 0x02}, order66[] = {0x66, 0xF3, 0x0F, 0x10, 0x02}, f3mov[] = {0xF3, 0x89, 0x01};
+        check(codeInstructionLength(movaps, sizeof(movaps), &disp) == 0 && codeInstructionLength(movsd, sizeof(movsd), &disp) == 0 && codeInstructionLength(movsldup, sizeof(movsldup), &disp) == 0 &&
+                  codeInstructionLength(movq, sizeof(movq), &disp) == 0 && codeInstructionLength(pause, sizeof(pause), &disp) == 0 && codeInstructionLength(bareF3, sizeof(bareF3), &disp) == 0 &&
+                  codeInstructionLength(f3then66, sizeof(f3then66), &disp) == 0 && codeInstructionLength(order66, sizeof(order66), &disp) == 0 && codeInstructionLength(f3mov, sizeof(f3mov), &disp) == 0,
+              "...and still refuses `movaps`, `movsd`, every F3 form that is not movss, a bare F3, F3 with a 66 prefix either way, and F3 before an ordinary opcode",
+              "the decoder took an SSE form beyond movups and movss");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

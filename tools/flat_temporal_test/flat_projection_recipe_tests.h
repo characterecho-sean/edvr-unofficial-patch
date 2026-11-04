@@ -130,8 +130,27 @@ inline int flatProjectionRecipeTests() {
         {0xDF3503CD07F9B10Cull,0x02CC981DF36257C3ull,2,FlatProjectionPatchLayout::ForwardColumns,6},
         {0x66DE2CADB1F4AE6Bull,0x235567BE2840B3EDull,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0x66DE2CADB1F4AE6Bull,0x818212B5F404C002ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        // 2026-11-03: the supercruise space dust and bars pairs the flat UI layer takes (their vertex shaders' other pixel shaders are
+        // the 9BFC7FD2/CB7AF179 and A47A3315/C67370DE pairs above): colour-only pixel shaders by the dumps' disassembly, the same
+        // vertex shaders (the same hashes), so the same clip spans.
+        {0x9BFC7FD232328391ull,0xDBF1725726018F52ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xA47A3315FFF5E2E4ull,0x869FFF43E875906Eull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        // 2026-11-03: the supercruise orbit lines (the vertex shader's one pixel shader: the offset it adds to clip xy is a screen-space
+        // direction times 1/W,1/H of the target and never reads the jitter; the pixel shader reads SV_Position.w only), so the jitter in
+        // rows 270..273 reaches the rasteriser unchanged.
+        {0xC7FA0C0F5DD49180ull,0x6EEF165A350DA30Full,1,FlatProjectionPatchLayout::ForwardColumns,270},
     };
-    expect(sizeof(latest)/sizeof(latest[0])==46,"latest supported ordinary pair census size");
+    expect(sizeof(latest)/sizeof(latest[0])==49,"latest supported ordinary pair census size");
+    // The orbit lines' vertex shader is keyed by its one pixel shader: none, the bars' and the dust's pixel shaders get no recipe from it.
+    expect(flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0ull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0x869FFF43E875906Eull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xDBF1725726018F52ull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xC67370DE72E4422Cull).count==0 &&
+        flatProjectionDrawRecipes(0xC7FA0C0F5DD49180ull,0xCB7AF179DF4E6A60ull).count==0,
+        "the orbit lines' vertex shader names a recipe for its own pixel shader only");
+    expect(flatProjectionDrawRecipes(0x9BFC7FD232328391ull,0x6EEF165A350DA30Full).count==0 &&
+        flatProjectionDrawRecipes(0xA47A3315FFF5E2E4ull,0x6EEF165A350DA30Full).count==0,
+        "the orbit lines' pixel shader gets no recipe from the dust's or the bars' vertex shader");
     FlatProjectionJitter jitter{};
     expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
     for (const auto& pair : latest) {

@@ -62,6 +62,15 @@ struct RigTally {   // built v14.26: atomic (the callbacks count their vetoes)
     std::atomic<uint64_t> hitVetoed{0}, hitKept{0}, hitMoved{0}, miss{0}, stale{0}, asked{0};
 };
 RigTally g_rigTally;
+// Built 2026-11-03 (log only): where the sealed pad leaves the pass (station_seal_trace.h PadStage). The 11-03 flight showed the pad's record in the store's pass once
+// in 31 frames after a boarding seal. These count the events of the sealed pad's record (the producer veto, the store callback) and of the rig the tick last saw it in
+// (the rig veto). Direct atomic adds: only the pad's record and its rig match, a few calls a frame, so no thread-local staging is needed and the trace rows are exact.
+std::atomic<uint64_t> g_padStage[sealed::kPadStages];
+std::atomic<uintptr_t> g_ownRigA{0};   // the rig the tick last saw the sealed pad's record gathered in (0: not learned yet); the rig veto compares with it
+inline void padStageAdd(sealed::PadStage k) noexcept { g_padStage[k].fetch_add(1, std::memory_order_relaxed); }
+uintptr_t g_ownRig = 0;                // tick only: the rig the sealed pad's record was last gathered in (applyRigNote); g_ownRigA publishes it to the rig veto
+uintptr_t g_ownRigPad = 0;             // the sticky pad g_ownRig was learned for (a different pad clears it)
+sealed::OwnRigTrace g_ownRigTrace;     // the tick's view of that rig, written once a tick; the trace row and the 30 s line read it
 // Built v14.29: the per-call counters of the callbacks are the thread's own, flushed to the shared atomics once per pass the thread works in (the first
 // call it makes in a new pass), so no call writes a cache line another thread touches. The summary reads the shared totals (at most one pass per thread
 // behind).
@@ -962,6 +971,53 @@ void refreshRigVerdicts() noexcept {
     g_winRigPublished += published;
 }
 
+// Built 2026-11-03 (log only): the tick's view of the sealed pad's rig, once a tick, for the trace row and the 30 s line. The rig is learned from the pad's
+// own record (applyRigNote), which in a sealed pass arrives once in kRigRefreshN + 1 frames while the rig is vetoed; until then it reads "not known".
+void updateOwnRigTrace() noexcept {
+    if (g_ownRigPad != g_ownSticky.pad) {   // another pad (or none): the old rig says nothing about it
+        g_ownRigPad = g_ownSticky.pad;
+        g_ownRig = 0;
+        g_ownRigA.store(0, std::memory_order_relaxed);
+    }
+    sealed::OwnRigTrace o;
+    if (g_ownRig != 0) {
+        o.known = true;
+        uint8_t pv = 0;
+        uintptr_t pc = 0;
+        size_t idx = 0;
+        uint32_t ep = 0;
+        if (g_rigPub.lookup(g_ownRig, rigIndex(g_ownRig), &pv, &pc, &idx, &ep)) {
+            o.verdict = pv;
+            o.run = g_rigPub.runAt(idx);
+            uintptr_t live = 0;
+            o.publication = ep != g_rigEpochA.load(std::memory_order_acquire) ? 2 : (readVal(&live, g_ownRig + 0x348) && live != 0 && live != pc ? 3 : 0);
+        }
+        const RigSlot* s = rigFind(g_ownRig, false);
+        const float* mn = nullptr;
+        const float* mx = nullptr;
+        if (s && s->curValid) {
+            mn = s->curMn;
+            mx = s->curMx;
+        } else if (s && s->lastValid) {
+            mn = s->lastMn;
+            mx = s->lastMx;
+        }
+        if (mn) {
+            float c[3] = {};
+            float d2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                c[k] = 0.5f * (mn[k] + mx[k]);
+                const float h = 0.5f * (mx[k] - mn[k]);
+                d2 += h * h;
+            }
+            o.bounded = true;
+            o.radiusM = std::sqrt(d2);
+            o.distM = g_cellPrev.has ? sealed::distanceToCell(c, g_cellPrev) : 0.0f;
+        }
+    }
+    g_ownRigTrace = o;
+}
+
 // ---- Built v14.24 (2026-10-13): the station's own costs, clocked with QPC and reported in the 30 s summary ---------------------------------------
 // The store observer, the producer veto and the rig veto are timed one call in 32 (their p50, p95 and max are per call); the frame tick is timed every
 // frame (per frame). The state lock's wait is timed on every acquisition it guards. The samples are the tick's (built v14.26: the callbacks' samples arrive as gathered entries).
@@ -1071,6 +1127,7 @@ bool rigVetoLockFree(uintptr_t rig) noexcept {
     const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
     TlsCounters& tc = tcFor(stamp);   // built v14.29: the thread's own counters
     ++tc.rigSeen;
+    const bool padRig = rig == g_ownRigA.load(std::memory_order_relaxed);   // log only, 2026-11-03: the sealed pad's rig (rig is not 0 here)
     uint8_t verdict = kVerdictUnknown;
     uintptr_t published = 0;
     size_t idx = 0;
@@ -1082,6 +1139,7 @@ bool rigVetoLockFree(uintptr_t rig) noexcept {
         // published, and the tick learns a rig no other way on the job path, so no rig was ever published and the veto never fired.
         ++tc.rigMiss;
         ++tc.rigUnknown;
+        if (padRig) padStageAdd(sealed::kPadRigMiss);
         if (haveColl) {
             struct Asked {
                 uintptr_t rig = 0;
@@ -1105,11 +1163,13 @@ bool rigVetoLockFree(uintptr_t rig) noexcept {
     if (epoch != g_rigEpochA.load(std::memory_order_acquire)) {
         ++tc.rigStale;   // published in an earlier lifecycle epoch: forwards until the tick republishes
         ++tc.rigUnknown;
+        if (padRig) padStageAdd(sealed::kPadRigStale);
         return false;
     }
     if (haveColl && coll != published) {
         g_rigPub.touch(idx, stamp);
         ++tc.rigHitMoved;
+        if (padRig) padStageAdd(sealed::kPadRigMoved);
         if (g_rigPub.askOnce(idx, stamp)) {
             GatherEntry e;
             e.kind = GKind::kRigAssoc;
@@ -1125,18 +1185,22 @@ bool rigVetoLockFree(uintptr_t rig) noexcept {
         case sealed::RigOutcome::kVetoed:
             ++tc.rigVetoed;
             ++tc.rigHitVetoed;
+            if (padRig) padStageAdd(sealed::kPadRigVetoed);
             return true;
         case sealed::RigOutcome::kRefresh:
             ++tc.rigRefresh;
             ++tc.rigHitKept;
+            if (padRig) padStageAdd(sealed::kPadRigRefresh);
             return false;
         case sealed::RigOutcome::kMixed:
             ++tc.rigMixed;
             ++tc.rigHitKept;
+            if (padRig) padStageAdd(sealed::kPadRigMixed);
             return false;
         default:
             ++tc.rigUnknown;
             ++tc.rigHitKept;
+            if (padRig) padStageAdd(sealed::kPadRigUnknown);
             return false;
     }
 }
@@ -1647,6 +1711,24 @@ void summaryLine(uint64_t now) noexcept {
         g_winPadSeen = g_winPadMissed = g_winPadAbsentWindow = g_winCamHold = g_winCamJump = g_winCtxChange = 0;
         g_winRigPublications = g_winRigPublished = 0;
     }
+    // Built 2026-11-03 (log only): where the sealed pad leaves the pass in this window (station_seal_trace.h PadStage), read and reset here like the other window totals.
+    {
+        unsigned long long p[sealed::kPadStages];
+        for (size_t k = 0; k < sealed::kPadStages; ++k) p[k] = g_padStage[k].exchange(0, std::memory_order_relaxed);
+        static const char* const kPub[] = {"current", "not published", "earlier epoch", "collection moved"};
+        const sealed::OwnRigTrace& o = g_ownRigTrace;
+        const char* verdictText = o.verdict == 0 ? "unknown" : o.verdict == 1 ? "mixed" : o.verdict == 2 ? "outside" : "none";
+        SUMMARY_NOTE("optimized station: last %llu s sealed pad: store callbacks %llu (left early %llu, pose unread %llu, gathered %llu); producer veto vetoed %llu, "
+                        "kept %llu; its rig %s: rig veto vetoed %llu, refreshed %llu, mixed %llu, unknown %llu, not published %llu, earlier epoch %llu, "
+                        "collection moved %llu; the tick's view: publication %s, verdict %s, run %u, bound %.1f m from the cell, radius %.1f m; "
+                        "sticky pad is the sealed pad: %s.",
+                        static_cast<unsigned long long>((now - g_summaryStartMs) / 1000), p[sealed::kPadStore], p[sealed::kPadEarly], p[sealed::kPadUnread],
+                        p[sealed::kPadGathered], p[sealed::kPadProdVetoed], p[sealed::kPadProdKept], o.known ? "known" : "not learned yet", p[sealed::kPadRigVetoed],
+                        p[sealed::kPadRigRefresh], p[sealed::kPadRigMixed], p[sealed::kPadRigUnknown], p[sealed::kPadRigMiss], p[sealed::kPadRigStale],
+                        p[sealed::kPadRigMoved], o.known ? kPub[o.publication < 4 ? o.publication : 1] : "-", o.known ? verdictText : "-", static_cast<unsigned>(o.run),
+                        o.bounded ? static_cast<double>(o.distM) : 0.0, o.bounded ? static_cast<double>(o.radiusM) : 0.0,
+                        (g_heldValid && g_ownSticky.pad != 0 && g_ownSticky.pad == g_heldCell.pad) ? "yes" : (g_heldValid ? "NO" : "not sealed"));
+    }
     // Built v14.20 (review 5), v14.31: the tables' occupancy now (written only when a probe bound was hit), the longest probe and the bounded (full) count this window, and the rig epoch count.
     if (g_prodStats.full.load(std::memory_order_relaxed) + g_rigStats.full + g_collStats.full > 0)
     SUMMARY_NOTE("optimized station: last %llu s tables: producer %u of %u used, longest probe %u, bounded %llu; rigs %u of %u, longest %u, "
@@ -1749,6 +1831,7 @@ bool producerVetoBody(uintptr_t rec, uintptr_t owner) noexcept {
     const PadSnapshot& s = pin.get();
     const bool veto = s.held && producerDecideSnap(rec, s);
     if (veto) ++tlsTc.producerVetoes;
+    if (s.held && rec != 0 && rec == s.cell.pad) padStageAdd(veto ? sealed::kPadProdVetoed : sealed::kPadProdKept);   // log only, 2026-11-03
     return veto;
 }
 
@@ -1879,6 +1962,12 @@ void applyRigNote(const GatherEntry& e) {
     if (!s) return;
     // Built v14.24: a job-path association is current only while the rig still holds that collection.
     if (jobPath && !sealed::collAssociationIs(s->coll, g_rigBucketColl)) return;
+    // Log only, 2026-11-03: the rig the sealed pad's record was gathered in. The rig veto compares with g_ownRigA to count its outcomes for this rig.
+    if (e.record != 0 && e.record == g_ownSticky.pad) {
+        g_ownRig = rig;
+        g_ownRigPad = g_ownSticky.pad;
+        g_ownRigA.store(rig, std::memory_order_relaxed);
+    }
     size_t pidx = 0;
     uint8_t pv = 0;
     uintptr_t pc = 0;
@@ -2287,16 +2376,21 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
     SnapshotPin pin;
     const PadSnapshot& s = pin.get();
     if (judge && !s.held) return;
+    // Log only, 2026-11-03: the sealed pad's own store callbacks, and how many leave before the pad is gathered (kPadStage* in station_seal_trace.h).
+    const bool isPad = s.held && record != 0 && record == s.cell.pad;
+    if (isPad) padStageAdd(sealed::kPadStore);
     uintptr_t ctx = 0;
     uint32_t count = 0;
     if (!bucket || !record || !readVal(&ctx, bucket) || !ctx || !readVal(&count, ctx + kCtxCount) || count == 0) {
         faultNote(kFaultBucket);
+        if (isPad) padStageAdd(sealed::kPadEarly);
         return;
     }
     w.context(ctx);   // names the context for the pass (the call itself was counted above)
     if (!s.camValid) {
         // Not a fault: the first pass after the gate opens has no camera yet (v14.26 counted the whole pass, 1268 records, as faults here).
         ++tc.noCamera;
+        if (isPad) padStageAdd(sealed::kPadEarly);
         return;
     }
     const float* cam = s.cam;
@@ -2321,6 +2415,7 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
     if (wr.source == 4 || !std::isfinite(radius) || !(radius > 0.0f) || !std::isfinite(centre[0]) || !std::isfinite(centre[1]) ||
         !std::isfinite(centre[2])) {
         if (judge) ++tc.keptUnknown;   // the centre cannot be read: kept, never judged
+        if (isPad) padStageAdd(sealed::kPadUnread);
         return;
     }
     if (ni.cls == sealed::NameClass::kPad) {
@@ -2330,7 +2425,7 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
             if (size != sealed::PadSize::kNone) {
                 GatherEntry e = gatherEntry(GKind::kPad, record, centre, radius, stamp, name);
                 e.flags = static_cast<uint8_t>(size);
-                w.push(e);
+                if (w.push(e) && isPad) padStageAdd(sealed::kPadGathered);
             }
         }
     } else if (ni.cls == sealed::NameClass::kExplicit && !s.giveUp) {   // built v14.13: stops after the give-up
@@ -2964,6 +3059,9 @@ void optimizedStationFrameBody(uint32_t frame) {
         tr.rigVetoes = g_winRigVetoes.load(std::memory_order_relaxed);
         tr.producerVetoes = g_winProducerVetoes.load(std::memory_order_relaxed);
         tr.culled = g_winCulled.load(std::memory_order_relaxed);
+        updateOwnRigTrace();   // log only, 2026-11-03: the sealed pad's rig as the tick sees it, and the pad's stage counts (the trace takes the deltas)
+        tr.rig = g_ownRigTrace;
+        for (size_t k = 0; k < sealed::kPadStages; ++k) tr.pad[k] = g_padStage[k].load(std::memory_order_relaxed);
         tr.released = act == sealed::SealAction::kRelease;
         tr.why = why;
         tr.originShift = in.originShifted;

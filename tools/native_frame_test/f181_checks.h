@@ -211,7 +211,7 @@ inline void run181(Check&& check) {
         // the cap: after the hinge measure, before the swivel choice that follows, from the hip share, through capSwivel on the same measure
         const size_t hsOk = at("nofoot::HingeSwings hs = nofoot::ikHingeSwings(S, F0, H0, E, tb.hand,"), capAt = at("if (f181Eligible) {\n            const double capDeg"), next = at("// F76 armed full-grip solving follows a transported physical pole.");
         check(hsOk != std::string::npos && hsOk < capAt && capAt < next &&
-                  has("const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f181::hipShare(pinCall.detachW));") && has("if (target < planeBefore) {") &&
+                  has("const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), o.f192Dh));") && has("if (target < planeBefore) {") &&
                   has("const nofoot::f181::Cap cap = nofoot::f181::capSwivel(theta, planeBefore, target, planeAt);") &&
                   has("const nofoot::HingeSwings c = nofoot::ikHingeSwings(S, F0, H0, Ec, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);"),
               "F181a: the cap sits after the hinge is measured and before the swivel choice, takes its target from the hip share, and measures the plane angle of each swivel it tries with the same ikHingeSwings call F98a's figure comes from");
@@ -219,7 +219,7 @@ inline void run181(Check&& check) {
         check(!capBlock.empty() && capBlock.find("physicalPoleCommit") == std::string::npos && capBlock.find("s_physicalPole") == std::string::npos && capBlock.find("seed.") == std::string::npos &&
                   capBlock.find("ikSwivelClamp") != std::string::npos,
               "F181a: the cap does not touch the pole's seed or what is committed from it (it is made again on every solve from the pole), and holds the ceiling as blendPole does");
-        check(has("o.f181Hip = nofoot::f159::atHip(pinCall.detachW);") && has("if (so[0].f181Hip) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane,") && has("nofoot::f181::Counters f181;") &&
+        check(has("o.f181Hip = nofoot::f159::atHip(pinCall.detachW);") && has("if (so[0].f181Hip && !(so[0].f192Dh > 0.0)) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane,") && has("nofoot::f181::Counters f181;") &&
                   has("nofoot::f181::appendSummary(line98, sizeof(line98), f98.f181,") && has("Log::get().note(\"%s\", line98);") && logpin.find("d.f181.merge(s.f181);") != std::string::npos,
               "F181a: the two-handed hip solves are counted after the cap (the plane angle as finally solved), F98Left carries the counters, logpin merges them and the F98a line ends with them");
         // the ini key: beside the standing ADS dials' neighbours, after the neck guard, with its ui row

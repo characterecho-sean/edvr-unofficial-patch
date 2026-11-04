@@ -169,6 +169,21 @@ constexpr uint32_t kLensOffRadiusDeg = kLensOffRadiusPx + 4 * kLensRays;   // 12
 constexpr uint32_t kLensBufferBytes = kLensOffRadiusDeg + 4 * kLensRays;
 static_assert(kLensOffRadiusDeg == 576 && kLensBufferBytes == 1088, "the lens buffer is 272 uints");
 
+// F202: may the right eye's door treat the picture it was handed as the one it can read as resolved (unjittered, the picture the eye shows)? Two cases say yes. The picture is the temporal
+// pass's own output (doorFromPass): the upscaler's, as before. Or no temporal mode runs (Anti-aliasing off): the game's own picture IS what the eye shows, there is no jitter in it
+// (native_temporal.cpp begin() leaves the eye shift zeroed and the lens's jitterUv reads zero), and the sight point c the frame thread worked out from the game's rows is where the game
+// drew it. With a temporal mode running, a picture the pass did not make (the pass declined, stood down, or the frame was withheld) is still refused, exactly as before F202.
+inline bool lensPictureResolved(bool doorFromPass, bool temporalPathRuns) noexcept { return doorFromPass || !temporalPathRuns; }
+
+// F202: the reverse-Z depth of kLensNearM for the scene depth the lens's rays march, with Anti-aliasing off, from the near plane the runtime's projection query gave. Elite's scene depth is
+// reversed Z with an infinite far plane: d = A + B / z with A = 0 and B = the near plane, so d(z) = near / z. That is what temporal_math.h temporalSceneProjection falls back to when no
+// scene row is measured (a = 0, b = nearZ), and what the 2026-11-01 DLSS flight's presses read ("no usable scene projection row; using Elite's infinite-far reversed-Z depth = 0.025 /
+// metres", near 0.041667 = 0.025 / 0.6 in the press line). The lens's hole test is `depth > nearDepth`, larger is nearer, so it asks z < kLensNearM. The same float arithmetic as
+// temporal_pass.cpp's `lensA + lensB / static_cast<float>(kLensNearM)` with lensA = 0. 0 for a near plane that is not a positive number: the door counts that as no depth.
+inline float lensNearDepthInfiniteFar(float nearZ) noexcept {
+    return (std::isfinite(nearZ) && nearZ > 0.0f) ? nearZ / static_cast<float>(kLensNearM) : 0.0f;
+}
+
 // The tangents {L, R, D, U} an eye's image spans (tangentsOf's order). A uv of the image (0..1, y down) is a point of the tangent plane.
 inline void lensTangentAtUv(const float tan4[4], double u, double v, double out[2]) noexcept {
     out[0] = static_cast<double>(tan4[0]) + (static_cast<double>(tan4[1]) - tan4[0]) * u;
@@ -377,7 +392,7 @@ struct LensDoorStats {
     uint32_t notOptical = 0;          // declined by the gate: the (item, scope) is not an optical sight, or its M is under 1.05
     uint32_t leftAim = 0;             // declined by the gate: the aiming eye is the left one (fix.native_on_foot_ads_sight_eye = left); the lens is the right eye's
     uint32_t depthUnavailable = 0;    // no depth for the eye at the door, or not at the size c was worked out for
-    uint32_t formatRefused = 0;       // the frame route: a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
+    uint32_t formatRefused = 0;       // the frame route: a picture that is not resolved (lensPictureResolved: a temporal mode ran and the pass did not make it), a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
     uint32_t dispatched = 0;          // frames the passes were issued on
     uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease) that the door would otherwise have run on: nothing to do, nothing issued, not applied
     uint32_t seqGap[kLensGapBuckets] = {};   // frames (applied or not) with a c reading, by the picture's temporal sequence less the sequence c's draws were made in: -1, 0, +1, +2, other

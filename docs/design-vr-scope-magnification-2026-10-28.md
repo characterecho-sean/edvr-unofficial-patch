@@ -7,6 +7,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 ## Status
 
 - **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
+- **F205 (`25b94de6`, `claude/full-detail-scope`, installed on Frontier 2026-11-01, NOT FLOWN, not merged):** B3 on by default and taking both eyes; every ADS press a circle in
+  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. F206 `06e1e54b` (FLOWN OK 2026-11-02, "it looks good"; ON MAIN): the circle is the full-detail scope's alone, the widest that hides its bars. F210 `c96bb403` (2026-11-01, branch `claude/scope-circle-aspect`, installed on Steam, NOT FLOWN, rigs and a note only): the Quest 3 "not centred" report; the circle measures centred on the sight in angle on any aspect and frustum; the Quest's picture middle is below its forward axis, so the disc can look high; CONFIRMED by the pilot. F210b `f52c211d` (FLOWN OK 2026-11-02 on the Quest 3, "Centred"; ON MAIN): the circle pitched to the field's vertical middle (-5.54 deg on the Quest 3, 0 on the Pimax). Journal: F205 at the end.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
@@ -1083,3 +1085,101 @@ its `build.bat` gate. `temporal_pass.cpp`, `native_on_foot.h` and `build.bat` ar
 merge. Kept: the draw census's own line budget for eye draws and the end line's `eye_lines=` and `capture_id=` (a census fix, not the cycle). Rigs: the withhold cases are gone; `scope_zoom_test` checks the cycle is
 nowhere (the header absent, none of its names in the four sources), with controls that put the header, the arming and the json record back. The scope glass stays in the scene, through the upscaler, as the game draws it. Built `3d2944fc` (full build, all gates;
 `--dll-only` on the clean tree), installed on Epic `--scope both --xess`, `--verify-only` passed; the live `edvr.ini` needed no edit (the cycle had no key). Not flown.
+
+**F205** (2026-11-01, `25b94de6` on `claude/full-detail-scope` from origin/main 97acace1; full build green: `native_frame_test` 3781, `openxr_stereo_test` 29724, the `edvr_log.py` self-test; installed on Frontier as v0.22.0-rc.4-51-g386229c0, verified; NOT FLOWN).
+
+The pilot's asks, 2026-11-01, on the full-detail scope:
+- "make it turned on by default";
+- "override the ADS eye sight setting so it correctly uses both eyes";
+- "a wide circular black stencil centered on the scope so it hides the black bars on either side".
+
+He then amended them: "make the stencil appear in both eyes for all ADS actions so that it mimics the FOV effect flat uses for each weapon ... a similar loss in periphery between the two game modes", and "This should apply to AA off as well."
+
+1. **The default.** `experimental.native_on_foot_ads_scope_zoom_full_detail` is on by default (code, `edvr.ini`, the menu row). B3's window now also needs a temporal mode (`b3Tick`'s `keyB3`). Without one, the new default would narrow the left eye and black the bars with Anti-aliasing off for no gain, so F202's lens stays.
+   - Not built: B3 with Anti-aliasing off. It would take `leftArgs.resolved` for the game's own picture and dropping that term, and needs a flight.
+2. **Both eyes for B3.** One reader, `adsSightEyeMode()`, returns the key unless the press latch forced both. The latch is decided once at the press's engage, when the B3 key, the scope zoom and the scoped Executioner all hold. F106's share, B3's gate and `adsAimEye()` (F162's aiming eye, the lens's left-aim refusal) all ask it. It holds through a re-engage and clears when ADS goes idle. The line, once per press: `scope zoom (B3): the sight eye is both for this press (fix.native_on_foot_ads_sight_eye is right/left): full detail needs both eyes`.
+3. **The ADS view circle** (`fix.native_on_foot_ads_view_circle`, on | off, default on, live; a row on the Native on foot page).
+   - **Where it runs:** every ADS press, in both eyes, with Anti-aliasing on or off. `circleTick` has no temporal, layer, door or ui-depth gate.
+   - **The radius** = (the weapon's ADS FOV / the hip FOV 56.3) x the right eye's vertical half-FOV. The edge is half black at the radius, with a 3 deg soft band. It ramps in over 0.15 s and out over 0.3 s, as the sight lock does.
+   - **Values**, Pimax (half-FOV 51.67) / Quest 3 (49.50):
+
+     | Weapon | Pimax | Quest 3 |
+     |---|---|---|
+     | Scoped Executioner (15 deg) | 13.77 | 13.19 |
+     | Bare Executioner | 32.12 | 30.77 |
+     | Assault rifles | 44.05 | 42.20 |
+     | Sub-machine guns | 45.89 | 43.96 |
+     | Pistols, the shotgun, the launcher | 47.72 | 45.72 |
+
+     The B3 cap (the circle that keeps the side bars inside the black) is 39.42 deg on the Pimax and about 37.66 on the Quest 3, and never binds the Executioner. An unknown ADS FOV, a bad frustum or no far point gives no circle, with the reason in the line.
+   - **The centre** is the sight's far point in each eye's own view, so the two circles fuse.
+   - **The draw:** one triangle per eye over the finished image, before the fade, a circle mode of the share shader (`misc.w = 2`) in `D3D11Stereo::renderCaptured`. With weight 0, or no circle, no pass is drawn: B3-1's golden hashes and the weight-0 renders are unchanged. B3-3's narrowed-frame black is kept.
+   - **The wire:** words 5 to 11 of a version 11 answer, and the export `edvrNoteNativeViewCircle`.
+4. **Lines.**
+   - Press: `ADS view circle (F205): press N, Anti-aliasing on|off: radius X deg (ADS FOV A / hip FOV H x the headset's half-FOV V deg, vertical)`.
+   - Runtime: `ADS view circle on N frames, radius X deg (the d3d11 half asked Y)`.
+   - `--health`: a press with a radius and no frame drawn is PARTIAL.
+5. **Doubts.**
+   - The game's ADS and hip FOVs are taken as vertical. If they are horizontal, the circle is measured against the wrong half-FOV.
+   - The hip FOV is the 56.3 key, not read from the game.
+   - The scoped Executioner's circle is small: about 13.8 deg radius, the clear part about 12.
+   - Scoped copies of other weapons take the item's own (unmeasured) ADS FOV.
+   - The left eye's circle under the share assumes a far sight point.
+6. **Next flight** (Frontier, `--expect-build 386229c0`).
+   - A rifle, a pistol and the scoped Executioner in ADS, with DLSS and then with Anti-aliasing off.
+   - Judge the circle's size against flat, and B3's look with the circle.
+   - Try the sight eye at right, to see the B3 override.
+   - Read the press lines' radius and mode, the runtime's circle frames, and `--health`.
+
+**F205 flown, F205b** (2026-11-01). The pilot flew F205 (`edvr_gfx` at 05:49, v0.22.0-rc.4-51-g386229c0, build matched): "Looks great". Every ADS press drew its circle; the scoped Executioner's radius was 12.47 deg on that session's frustum. His word, given after the key was quoted: remove the circle's own toggle and tie it to the scope zoom setting.
+
+F205b (`143b4f04`, full build green, `native_frame_test` 3784, `openxr_stereo_test` 29724):
+- `fix.native_on_foot_ads_view_circle` is removed: its reader, `edvr.ini` line and `# ui:` row, menu row and hotkey pin. It never shipped in a release, so there is no retired-key note.
+- `circleTick` reads `g_scopeZoomKey`, the one live reader of `fix.native_on_foot_ads_scope_zoom`. With the scope zoom on, every ADS press with any weapon gets the circle; with it off, there is none.
+- The off press line reads `ADS view circle (F205): press N: no circle (fix.native_on_foot_ads_scope_zoom is off)`, and `--health` reads it IDLE.
+- Nothing else about the circle changed.
+
+**F206** (2026-11-02, `06e1e54b` on `claude/sniper-circle-readout` from aad934ef = the v0.22.0-rc.5 draft's tag; full build green; installed on Frontier as v0.22.0-rc.5-1-g06e1e54b, verified; NOT FLOWN).
+
+The pilot, after reviewing F205: "back off on the stencil entirely for all weapons except the sniper with scope mod so that it hides the black vertical bars and then have the widest radius possible that does". Two earlier asks were superseded and their commit was reset away unpushed: the scoped sniper's circle widened to keep its ammo readout inside, and the circle only with the sight eye at both.
+
+- **Which presses.** A press has a circle exactly when the F205 latch forced both eyes for B3: the scoped Executioner, full detail on, the scope zoom on, and a temporal mode. No other weapon, no B3-less scoped press and no Anti-aliasing-off press draws one.
+  - F205's flat-ADS-FOV rule and its FOV table for the circle are removed.
+  - There is no new key.
+- **The radius.** The runtime computes it every frame from the actual centre in each eye. `coverageRadius` is the distance from the centre to the nearest edge the share and mirror draw the bars from, less the margin and half the band, and the smaller of the two eyes. It is not smoothed: a smaller radius always hides the bars.
+  - Straight ahead, Pimax 39.42 deg; Quest 3 37.66 deg, on the rig's assumed horizontals. Off centre it shrinks one for one.
+  - The stereo rig checks the circle against the shader's own arithmetic, pointwise.
+- **The weight.** The mirror strip's own weight through the entry ramp and the exit hold, never the ADS weight, so the circle is drawn exactly when the bars are.
+- **The wire.** Words 5..9 of the version 11 answer: the on-flag and the centre in each eye. F205's words 5..11 meant something else under the same version 11. That is safe only because F205 was never released: the rc.5 draft must not ship F205's layout if F206 follows it under version 11.
+- **Lines.**
+  - Press: `ADS view circle (F206): press N: radius X deg (the widest that keeps the full-detail view's side bars in the black: nearest edge Y deg less the band Z deg); over the run a to b deg; drawn on F frames`.
+  - A B3 press with no circle: `... no circle: <reason>`.
+  - `--health`: a B3 press with its window up and no circle frame is PARTIAL.
+- **The readout.** The ammo readout sits about 8-14 deg out, inside the clear region of about 37.9 deg (Pimax) or 36.2 deg (Quest 3). This is an estimate.
+- **Doubts.** A B3 press with the strip up and no centre yet shows the bars without the circle for those frames; the line names it. A radius under 5 deg is refused.
+- **F206 flown and merged (2026-11-02).** The pilot: "it looks good". Merged with origin/main (the Scorpion turret work, #140) in `9a5675b7`; the merged tree's full build is green; pushed to main.
+
+**F210** (2026-11-01, `c96bb403` on `claude/scope-circle-aspect` from main `f3765d20`; full build green; installed on Steam, verified; NOT FLOWN; no behaviour change).
+
+The pilot, on a Quest 3: the circle "is not centered", and should be "centered regardless of aspect resolution". No Quest 3 log yet carries an F206 line, so this worked from the code and the rigs.
+
+- **The path, step by step.** `circleTick` (the sight's point, then the tangents the game's rows span), the wire (`view_circle.h`), `D3D11Stereo::renderCaptured` and the share shader's circle mode. Each eye's pixels are placed with that eye's own tangents and image size, and every distance is an angle between unit directions.
+- ruled out: square-pixel, symmetric-frustum, one-eye's-tangents and texture-size assumptions in the circle's path, because the stereo rig renders the real frame into the Quest's eyes (3072x3264 and 2064x2208, eye 0 -53.42/+39.41/+41.99/-53.08 deg, eye 1 mirrored; also canted 10.75 deg, a 640x1000 synthetic eye and a square control) and measures the drawn edge at one angle from the sight to 0.009 deg in 72 directions, its centre on the sight to 0.0004 deg, in both eyes. Hand-made copies with each mistake fail (3.7, 23.8 and 10.7 deg). `f210_checks.h` pins the d3d11 half to 2e-5.
+- **What the pilot sees, the hypothesis.** A sight on the forward axis lands at (0.621, 0.403) of the Quest's left image and (0.379, 0.403) of the right. The Quest's picture extends 53 deg below the axis and 42 above, and 53 outward and 39 inward, so a disc centred on the sight leaves more black below and outside it and can look high. A Pimax is symmetric vertically.
+- **Evidence wanted.** A Quest flight with the scoped Executioner, full detail on, a temporal mode: the F206 press line, and an eye dump while scoped. It tells two things apart. If the reticle sits at the disc's centre, the circle is right and "centred" means the frame. If the reticle is off the disc's centre, the sight point is wrong on the Quest.
+- **Not built, the pilot's call.** Moving the disc toward the picture's middle (vertical only, the same in both eyes so they still fuse; Pimax unchanged) would put the reticle off the disc's centre and needs a limit rule.
+- **Doubts.** Virtual Desktop's compositor is not visible from here. The Quest's hidden-area mesh is ignored by the radius, as before.
+- **F210 flown (2026-11-01, Steam, Quest 3, `edvr_gfx_20261101_192516`, v0.22.0-rc.5-14-g8a606896, matches HEAD).** The pilot: "Circle sits high". The reticle is at the circle's centre. The press lines put the centre at (0.626, 0.402) left and (0.383, 0.402) right with the sight straight ahead (press 1: v 0.430), on the told frustum -1.3477/+0.8216/-1.3310/+0.9000. That is about 5 deg of black above the circle and 16 deg below. The hypothesis holds: the circle is right for the sight, and the frame is asymmetric.
+
+**F210b** (2026-11-01, `f52c211d` on `claude/scope-circle-aspect`; full build green; installed on Steam; NOT FLOWN).
+
+- **The behaviour.** The circle's centre is the sight's direction pitched by delta. Delta is the mean over both eyes of (angleUp + angleDown) / 2, using OpenXR's signed angles.
+  - It is a rotation about the head's horizontal axis: the mean of the eyes' right axes in the layer's space. One delta and one axis serve both eyes, so canted eyes still fuse.
+  - Quest 3: delta -5.545 deg. The radius goes from 37.66 to 37.44 deg for a straight-ahead sight. The black above and below goes from 4.33/15.42 to 10.09/10.10 deg.
+  - The reticle sits 5.5 deg above the disc's centre (the pilot's choice).
+  - Pimax (+46.80/-46.80 in its runtime log): delta 0. The rotation is skipped, so its frames hash the same as F210's.
+- **Where.** Runtime only (`scope_circle.h`'s `pitchCentre`, `D3D11Stereo::renderCaptured`). The version 11 wire is unchanged. The press's report back to the graphics log gains three floats, told by its size.
+- **Line.** The F206 press line ends `; pitch -5.5448 deg (the middle of the field: up +41.99, down -53.08 deg)`. `--health` reads both forms.
+- **Rig.** circleAspectSelfTest measures, in the pixels: equal margins on the Quest, one world direction for the canted eyes, and the symmetric cases bit for bit. Hand-broken copies fail: a delta per eye, a pitch about the eye's own axis, and the wrong sign.
+- **Doubts.** The margins are equal in angle, not in pixels; the new centre reads v about 0.445 in the Quest's image. A Pimax whose up and down differ in the floats gets a tiny pitch, which its press line prints to 4 decimals.
+- **F210b flown and merged (2026-11-02).** The pilot, on the Quest 3 (Steam, v0.22.0-rc.5-16-g519c8061): "Centred, merge it". Merged with origin/main (PR #164's cpu_profile tools), full build of the merged tree, pushed to main.

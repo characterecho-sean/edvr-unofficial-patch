@@ -232,6 +232,15 @@ constexpr bool journalAdsFromFlags2(uint32_t flags2) {
 bool journalAdsKnown();
 bool journalAds();
 uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); for the logs
+// Built issue 140 (the SRV turret view, srv_turret.h): Status.json Flags bit 13 (0x2000, "SRV using turret view") while the same word says the commander is in an
+// SRV (Flags bit 26). False in flat, with the watcher off, and whenever Flags is not in the file. The watcher polls Status.json every 500 ms (the game rewrites the
+// file about once a second) and the answer changes at the frame boundary after the worker's pass, so a switch of view is seen up to about half a second after the
+// game has written it. Any thread.
+bool journalSrvTurretView();
+// Built issue 140: the journal says the player's SRV is the Scorpion (journal_vehicle_latch.h): LoadGame's Ship or LaunchSRV's SRVType is combat_multicrew_srv_01. Unknown is false (a
+// training scenario writes no journal), and the main menu's music, a shutdown, DockSRV, SRVDestroyed and a load or launch of anything else clear it. The turret view's camera and HUD
+// act only while this and journalSrvTurretView() are both true. False in flat. Any thread.
+bool journalSrvScorpion();
 
 // F66a (native on foot, the armed flag): Status.json's "SelectedWeapon" while on foot. The game writes the item the commander has in hand;
 // "$humanoid_fists_name;" means nothing (fists). ASSUMPTION, verified by the flight's `armed (F66a)` lines: holstering writes fists.
@@ -299,6 +308,9 @@ bool journalHeldItemName(char* out, size_t cap);
 // F66a: the native on-foot tick asks for the 100 ms Status.json cadence while it is active (journalWatchSetEagerStatus is the FSS latch's and
 // the flat profile's; the worker reads on the faster of the two). Any thread.
 void journalWatchSetEagerStatusOnFoot(bool eager);
+// The SRV turret entry fade (srv_turret_entry_fade.h) asks for the 100 ms Status.json cadence while the commander is in the Scorpion, so the turret-view bit that starts its hold is read
+// within 100 ms of the file changing and not 500. Any thread.
+void journalWatchSetEagerStatusSrv(bool eager);
 // F147: the native on-foot tick asks for the suit loadout's weapon slots (journal_loadout_reader.h) while native on foot is active. The reader runs only in the VR profile
 // (a flat caller is refused) and only after the first request: its first poll reads the current journal once from its start, every later one only the appended bytes, and
 // while the request is false it does not poll. Any thread.

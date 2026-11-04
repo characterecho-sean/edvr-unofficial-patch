@@ -56,6 +56,7 @@ bool exact(const std::vector<float>& a,const std::vector<float>& b){return a.siz
 #include "failure_cases.h"
 #include "writeback_cases.h"
 #include "frosted_cases.h"
+#include "relief_cases.h"
 int main(int argc,char** argv){try{
  if(argc==2&&!std::strcmp(argv[1],"--dry-run")){std::puts("ui_holo_test: dry-run (no files)");return 0;}
  const bool hardware=argc==2&&!std::strcmp(argv[1],"--hardware-self-test");
@@ -80,17 +81,19 @@ int main(int argc,char** argv){try{
   check(cache.prepare(c.Get(),stock.Get(),psHash)==repaired.Get(),"prepared shader reused");
   holoFailure::run(c.Get(),stock.Get(),repaired.Get(),cache.constants(),stockBytes);
   auto unknown=stockBytes;unknown.back()^=1;bool rejected=false;try{patch(unknown,stockBytes);}catch(const std::exception&){rejected=true;}check(rejected,"unknown bytes rejected");
-  c->PSSetShader(stock.Get(),nullptr,0);Scene old{64,64,160,160,2.5f,2.5f,0,0,0,0,{0,0,160,160,0,1},{0,0,160,160}};auto originalDepth=texture(d.Get(),64,64,depth(old,false,true),true);auto refDepth=texture(d.Get(),160,160,depth(old,true,true),true);auto map=cb(d.Get(),{.4f,.4f,0,0});auto bad=draw(d.Get(),c.Get(),stock.Get(),old,originalDepth.Get(),map.Get());auto fixed=draw(d.Get(),c.Get(),repaired.Get(),old,originalDepth.Get(),map.Get());auto ref=draw(d.Get(),c.Get(),stock.Get(),old,refDepth.Get(),map.Get());check(visible(bad)==4096&&visible(fixed)==25600,"original pixel loss and repair");check(exact(fixed,ref),"constant-depth exact reference");
+  c->PSSetShader(stock.Get(),nullptr,0);Scene old{64,64,160,160,2.5f,2.5f,0,0,0,0,{0,0,160,160,0,1},{0,0,160,160}};auto originalDepth=texture(d.Get(),64,64,depth(old,false,true),true);auto refDepth=texture(d.Get(),160,160,depth(old,true,true),true);auto map=cb(d.Get(),{.4f,.4f,0,0,1,0,0,0});auto bad=draw(d.Get(),c.Get(),stock.Get(),old,originalDepth.Get(),map.Get());auto fixed=draw(d.Get(),c.Get(),repaired.Get(),old,originalDepth.Get(),map.Get());auto ref=draw(d.Get(),c.Get(),stock.Get(),old,refDepth.Get(),map.Get());check(visible(bad)==4096&&visible(fixed)==25600,"original pixel loss and repair");check(exact(fixed,ref),"constant-depth exact reference");
   std::vector<float> modelData(32*32*4);for(unsigned y=0;y<32;++y)for(unsigned x=0;x<32;++x)for(unsigned k=0;k<4;++k)modelData[(y*32+x)*4+k]=1.f+.1f*x+.07f*y;auto model=texture(d.Get(),32,32,modelData);auto modelView=model.Get();c->PSSetShaderResources(4,1,&modelView);b2[22*4+2]=0;b2[21*4+2]=.25f;c->UpdateSubresource(cb2.Get(),0,nullptr,b2.data(),0,0);unsigned cases=0;
   for(float ratio:{.5f,.75f})for(float ui:{1.f,1.25f})for(unsigned eye:{0u,1u})for(unsigned sub:{0u,1u})for(unsigned jit:{0u,1u}){
    Scene s{};s.sw=96;s.sh=72;s.ow=(unsigned)(s.sw/ratio*ui);s.oh=(unsigned)(s.sh/ratio*ui);s.ax=s.ay=ui/ratio;s.bx=sub?3.25f:0;s.by=sub?-2.5f:0;s.jx=jit?(eye?.3125f:-.1875f):0;s.jy=jit?(eye?-.21875f:.15625f):0;
    s.vp={sub?12.f:0,sub?7.f:0,(float)s.ow-(sub?24.f:0),(float)s.oh-(sub?14.f:0),0,1};s.sc={sub?17:0,sub?11:0,(LONG)s.ow-(sub?19:0),(LONG)s.oh-(sub?13:0)};
-   auto input=texture(d.Get(),s.sw,s.sh,depth(s,false),true);auto expanded=texture(d.Get(),s.ow,s.oh,depth(s,true),true);auto transform=cb(d.Get(),{1/s.ax,1/s.ay,-s.bx/s.ax+s.jx,-s.by/s.ay+s.jy});
+   auto input=texture(d.Get(),s.sw,s.sh,depth(s,false),true);auto expanded=texture(d.Get(),s.ow,s.oh,depth(s,true),true);auto transform=cb(d.Get(),{1/s.ax,1/s.ay,-s.bx/s.ax+s.jx,-s.by/s.ay+s.jy,1,0,0,0});
    auto actual=draw(d.Get(),c.Get(),repaired.Get(),s,input.Get(),transform.Get());auto reference=draw(d.Get(),c.Get(),stock.Get(),s,expanded.Get(),transform.Get());check(exact(actual,reference),"nonuniform/subrect/jitter exact RGBA reference");check(std::all_of(actual.begin(),actual.end(),[](float v){return std::isfinite(v);}),"finite RGBA");unsigned changed=0,fractionalAlpha=0;for(size_t q=0;q<actual.size();q+=4){if(actual[q]!=-.25f)++changed;if(actual[q+3]>.5f&&actual[q+3]<1.f)++fractionalAlpha;}check(changed>0&&changed<s.ow*s.oh,"nontrivial occlusion");check(fractionalAlpha>0,"nonopaque alpha preserved");++cases;
   }
   std::printf("%s old=4096/25600 repaired=25600/25600; %u nonuniform exact RGBA cases\n",shader==1?"EA02":"E956",cases);
   writebackCases(d.Get(),c.Get(),stock.Get(),repaired.Get(),cache.constants());
+  reliefCases::run(d.Get(),c.Get(),shader-1,stock.Get(),repaired.Get(),cache.constants(),stockBytes);
  }
+ reliefCases::unitCases();reliefCases::frostedPins();
  frostedBase::run(d.Get(),c.Get());
  std::printf("PASS %u checks; production remap/cache/binding, actual game PS retained\n",checks);return 0;
  }catch(const std::exception& e){std::printf("FAIL %s (%u checks)\n",e.what(),checks);return 1;}}

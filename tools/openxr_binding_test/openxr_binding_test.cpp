@@ -258,6 +258,49 @@ int selfTest(){
     f.runtime.viewCount=1;check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out)==XR_ERROR_RUNTIME_FAILURE,"stereo locate count required");
     frame.status=FrameStatus::Ended;f.runtime.trace.clear();check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,out)==XR_ERROR_CALL_ORDER_INVALID&&f.runtime.trace.empty(),"ended frame rejected");
   }
+  // F189 (#144), the locate edge: a frame's seated space is the natural space (here LOCAL, the handle the runtime knows) and the origin the seated space stood for. The runtime is
+  // asked about LOCAL alone (the fake checks the base of both queries), and the views, the head and its velocity come back as the numbers a reference space made at that origin
+  // would have given: origin^-1 * located, velocities turned by the inverse rotation. The expected values are worked out by hand for a yaw of 90 degrees about +y, whose
+  // inverse turns (x,y,z) into (-z,y,x), at an origin position of (1,0,2); nothing below calls the arithmetic under test.
+  {Fixture f;check(f.init()==XR_SUCCESS,"seated locator fixture");Frame frame{};frame.status=FrameStatus::Open;frame.sequence=12;frame.predictedDisplayTime=223456789;
+    XrViewConfigurationView sizes[2]{};for(auto& s:sizes){s.recommendedImageRectWidth=100;s.recommendedImageRectHeight=101;}
+    const float h=0.70710678118f;
+    SeatedFrame seat;seat.space=local;seat.origin=XrPosef{{0,h,0,h},{1,0,2}};
+    const auto closeTo=[](float a,float b){return std::fabs(a-b)<=1e-5f;};
+    const auto nearV=[&](const XrVector3f& v,float x,float y,float z){return closeTo(v.x,x)&&closeTo(v.y,y)&&closeTo(v.z,z);};
+    GeometryInput natural{},seated{},identity{};XrSpaceVelocity naturalVelocity{XR_TYPE_SPACE_VELOCITY},seatedVelocity{XR_TYPE_SPACE_VELOCITY},identityVelocity{XR_TYPE_SPACE_VELOCITY};
+    f.runtime.expectVelocity=true;f.runtime.trace.clear();
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,natural,&naturalVelocity,local)==XR_SUCCESS,"seated locate: the natural locate for comparison");
+    f.runtime.trace.clear();
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,seated,&seatedVelocity,seat)==XR_SUCCESS&&
+      f.runtime.trace==std::vector<std::string>({"locateViews","locateHead"}),"seated locate: two queries, both against the natural space (the fake checks the base)");
+    check(nearV(seated.headPose.position,-28,20,9)&&closeTo(seated.headPose.orientation.y,-h)&&closeTo(seated.headPose.orientation.w,h)&&closeTo(seated.headPose.orientation.x,0)&&
+      closeTo(seated.headPose.orientation.z,0),"seated locate: the head is origin^-1 * the located head (position (-28,20,9), turned back 90 degrees)");
+    check(nearV(seated.views[0].pose.position,-1,2,-1)&&nearV(seated.views[1].pose.position,-1,2,0)&&closeTo(seated.views[0].pose.orientation.y,-h)&&closeTo(seated.views[1].pose.orientation.w,h),
+      "seated locate: each eye view is origin^-1 * the located view");
+    check(nearV(seatedVelocity.linearVelocity,-3,2,1)&&nearV(seatedVelocity.angularVelocity,-6,5,4)&&seatedVelocity.velocityFlags==naturalVelocity.velocityFlags,
+      "seated locate: linear and angular velocity are turned by the inverse rotation (no lever arm), their flags kept");
+    check(seated.viewFlags==natural.viewFlags&&seated.headFlags==natural.headFlags&&seated.displayTime==natural.displayTime&&seated.sequence==natural.sequence&&
+      std::memcmp(&seated.views[0].fov,&natural.views[0].fov,sizeof(XrFovf))==0&&seated.width[1]==natural.width[1],"seated locate: flags, time, sequence, field of view and size are the located ones");
+    // The identity origin (the state until the first origin is set) is the located numbers bit for bit.
+    SeatedFrame plain;plain.space=local;
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,identity,&identityVelocity,plain)==XR_SUCCESS&&
+      std::memcmp(&identity.headPose,&natural.headPose,sizeof(XrPosef))==0&&std::memcmp(&identity.views[0].pose,&natural.views[0].pose,sizeof(XrPosef))==0&&
+      std::memcmp(&identity.views[1].pose,&natural.views[1].pose,sizeof(XrPosef))==0&&
+      std::memcmp(&identityVelocity.linearVelocity,&naturalVelocity.linearVelocity,sizeof(XrVector3f))==0&&
+      std::memcmp(&identityVelocity.angularVelocity,&naturalVelocity.angularVelocity,sizeof(XrVector3f))==0,
+      "seated locate: an identity origin returns the natural numbers bit for bit");
+    // A part the runtime did not call valid is not turned (nobody reads it; the submit edge maps it back to what a space of that origin would have held).
+    f.runtime.invalidTracking=true;f.runtime.expectVelocity=false;GeometryInput unknown{};
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,unknown,nullptr,seat)==XR_SUCCESS&&unknown.viewFlags==0&&unknown.headFlags==0&&
+      nearV(unknown.headPose.position,10,20,30)&&nearV(unknown.views[1].pose.position,1,2,3),"seated locate: a pose the runtime called invalid is left as it came");
+    f.runtime.invalidTracking=false;
+    // The physical pose round trip a layer takes: the seated numbers submitted with the origin applied are the located pose again.
+    const XrPosef back=seatxf::toNatural(seat.origin,seated.views[1].pose);
+    check(nearV(back.position,natural.views[1].pose.position.x,natural.views[1].pose.position.y,natural.views[1].pose.position.z)&&
+      closeTo(back.orientation.y,natural.views[1].pose.orientation.y)&&closeTo(back.orientation.w,natural.views[1].pose.orientation.w),
+      "seated locate then submit: toNatural of the located-then-seated view is the located view (the layer is where the runtime put the eye)");
+  }
   std::printf("openxr_binding_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
 int publishedTest(const char* path){

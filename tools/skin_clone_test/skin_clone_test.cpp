@@ -374,6 +374,25 @@ void caseProperties(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const unsigned examined = skin_clone_tests::run(dev, ctx, vs, ps, displacement ? "synthetic+displacement" : "synthetic", &check, nullptr, displacement ? "K5" : "K4");
         check(examined > 1000, displacement ? "K5.z the properties were exercised on covered pixels" : "K4.z the properties were exercised on covered pixels");
     }
+    // The NPC hair's forward pass: its pixel shader reads SV_IsFrontFace at the register the vertex shader's E would take, so the family names a
+    // register of its own (kFamilies skinRegister), the same on both stages. With E at the vertex shader's next free register that pair is
+    // refused (the pixel patch finds the register occupied); with E one register further the patched pair creates, links and gives the same
+    // pixels and the same exact E. (A pixel-side remap to a different register was tried and gave wrong E on WARP.)
+    {
+        const auto vs = compile(skin_clone_synthetic::vertexSource(false), "vs_5_0");
+        const auto psFront = compile(skin_clone_synthetic::pixelSourceFrontFace(), "ps_5_0");
+        edvr::EngineVelocityInputs in;
+        std::string why;
+        std::vector<BYTE> refused;
+        const bool derived = edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why);
+        check(derived && in.skinRegister < 32, "K4b.a the pair derives with the vertex shader's next free register for E");
+        edvr::EngineVelocityInputs clash = in;
+        clash.skinExport = true;
+        check(!edvr::engineVelocityPatchPs(psFront.data(), psFront.size(), clash, refused, why) && has(why, "occupied"),
+              "K4b.b the pixel shader's SV_IsFrontFace sits at that register: the export is refused, not silently wrong");
+        const unsigned examined = skin_clone_tests::run(dev, ctx, vs, psFront, "synthetic+front-face input", &check, nullptr, "K4b", in.skinRegister + 1);
+        check(examined > 1000, "K4b.z the properties were exercised on covered pixels with E one register further");
+    }
 }
 
 // ---- K9 ------------------------------------------------------------------------------------------------------------------
@@ -387,13 +406,16 @@ std::vector<BYTE> readFile(const std::string& path) {
     return b;
 }
 void caseCorpus(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::string& dir) {
-    struct Pair { const char* vs; const char* ps; std::vector<std::pair<unsigned, float>> material; bool useMaterial; };
+    struct Pair { const char* vs; const char* ps; std::vector<std::pair<unsigned, float>> material; bool useMaterial; uint32_t skinRegister = ~0u; };
     const Pair pairs[] = {
         {"vs_D99AFDC250D19A3F", "ps_E86271E464CCDC1D", {}, false},
         {"vs_61AE8EB05FDC18DD", "ps_451A82D4DD1BA254", {}, false},
         {"vs_114AF608F86D9ED8", "ps_A17504A2627767F2", {{23, 1000.0f}}, true},   // cb2[5].w: the discard threshold
         {"vs_7B0DC42D383F694C", "ps_0DF03E64DF9DBEF1", {{23, 1000.0f}}, true},
         {"vs_8B589D25B2A0ADDC", "ps_7268762D11A610F2", {}, true},                // an all-zero b2 turns the alpha test off
+        // the hair's forward pass (2026-11-01): E travels in v8 (kFamilies skinRegister; its pixel shader reads SV_IsFrontFace at v7). Its two
+        // discards are a dissolve test (cb2[2].y) and a checkerboard alpha test against cb2[0].y / cb2[0].z: a threshold of -1000 keeps every pixel
+        {"vs_A6A39338C06E03A1", "ps_1AE6AB9A94C0456E", {{1, -1000.0f}, {2, -1000.0f}}, true, 8},
     };
     unsigned present = 0;
     for (const Pair& p : pairs) {
@@ -404,7 +426,7 @@ void caseCorpus(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::string& 
         }
         ++present;
         const std::string name = std::string(p.vs) + "+" + p.ps;
-        skin_clone_tests::run(dev, ctx, vs, ps, name.c_str(), &check, p.useMaterial ? &p.material : nullptr, "K9");
+        skin_clone_tests::run(dev, ctx, vs, ps, name.c_str(), &check, p.useMaterial ? &p.material : nullptr, "K9", p.skinRegister);
     }
     check(present > 0, "K9.a the dump holds at least one of the game's skinned pairs");
 }

@@ -2937,12 +2937,14 @@ void testFlatCpuWiring() {
     const auto beginBody=beginAt!=std::string::npos&&endAt!=std::string::npos?runtimeCpp.substr(beginAt,endAt-beginAt):std::string{};
     const auto endBody=endAt!=std::string::npos&&dtorAt!=std::string::npos?runtimeCpp.substr(endAt,dtorAt-endAt):std::string{};
     bool drawOutsideCallbacks=true;size_t hookAt=0;
+    // The span from beginActualDraw to endActualDraw is a proximity bound, not a ceiling on useful work: since 2026-11-03 the four instanced/indexed/plain
+    // hooks hold a FlatParticleScope block around the game's issue (fix.particle_billboard), the longest span being DrawIndexedInstanced's at 447 characters.
     for(unsigned i=0;i<7;++i) {
         const auto before=vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw",hookAt);
         const auto draw=before==std::string::npos?std::string::npos:vscreenCpp.find("g_state->realDraw",before);
         const auto after=before==std::string::npos?std::string::npos:vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.endActualDraw",before);
         drawOutsideCallbacks=drawOutsideCallbacks&&before!=std::string::npos&&draw!=std::string::npos&&
-            after!=std::string::npos&&before<draw&&draw<after&&after-before<350;
+            after!=std::string::npos&&before<draw&&draw<after&&after-before<500;
         hookAt=after==std::string::npos?vscreenCpp.size():after+1;
     }
     check(beginBody.find("if(!ctx)return;")<beginBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);")&&
@@ -3160,7 +3162,7 @@ void testFlatWitnessWiring() {
           temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
           temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
           "ordinary discovery avoids compute/manual projection arms and propagates explicit full tier");
-    check(hookCpp.find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
+    check(hookCpp.find("flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
           "configured flat census key still gives Shift its explicit full tier");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");

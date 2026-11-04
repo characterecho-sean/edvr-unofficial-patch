@@ -56,7 +56,8 @@
   4K its slanted edges stepped. SMAA 1x over the layer before the composite is the user setting `fix.hud_antialiasing` (F8 "HUD
   Anti-Aliasing", flat Performance tab under UI quality, default off; "flat ui layer smaa:" lines). Seen working at 2560x1440 (15:43);
   nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost.
-- **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them. Last entry.
+- **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them.
+- **2026-11-03, bars and dust in the flat layer (FLOWN OK, Frontier, 7cc31c5a):** the supercruise bars and both dusts are taken, as in VR; the orbit lines followed (FLOWN OK, 894343b1), last entry.
 - **Next on Epic:** SS 0.5 on the shipped build (copy route, eced5813's admission change), 100% at SS 1.0, then all three maps.
 
 ## Purpose
@@ -1164,3 +1165,71 @@ distributor panel: its diagonal runs show a step every pixel or two, where the g
 - Flight check (flat): the HUD layer and panels look as before, and the "flat ui layer" 30 s lines read as before. The "ui quality: layer"
   line never printed in flat, so no log line goes away. On the Deck, a same-scene frame-time comparison against the previous build would
   price it under DXVK.
+
+## 2026-11-03: the supercruise bars and the dust in the flat UI layer (FLOWN OK)
+
+A user report: in flat, the supercruise vertical bars and the supercruise space dust blur under motion. The upscaler's history smears them: a bar is
+one render pixel wide and a dust streak moves about its own width a frame, so successive frames never overlap and there is nothing to accumulate.
+VR already draws both into the UI layer, after the upscale. The flat layer now takes them too, and the normal-space dust (the specks near a planet
+or a station) with them, in both editions.
+
+- **Evidence** (Steam flat logs, 14 sessions 2026-10-14..11-02): flat draws the dust and the bars with the same pairs as VR (vs 9BFC7FD2 / ps DBF17257
+  and vs A47A3315 / ps 869FFF43) into the R11G11B10 scene target at render size, so the family rule already named them and the adapter's pre-test
+  (`flat_pair_facts.h` `uiMayAsk`) already passed. The generic classifier refused both pairs (the dust: vertex shader forward-columns, pixel shader a
+  consumer with a multi-row temp; the bars: vertex shader unclassified, slice-not-clean), so the draws had no camera rows and the adapter would have
+  left every one in the scene as `no-camera-rows`.
+- **The hand recipes** (`flat_projection_recipes.h`, the Caspian / fleet-carrier block): the two pairs join the pairs already reciped for the same vertex
+  shaders (the same bytecode, the same hash). Vetted from the shader dumps with `tools\dxbc_disasm.py`: ps 869FFF43 is `o0.xyz = v0.xyz * cb1[90].y;
+  o0.w = v0.w` (colour only); ps DBF17257 reads the cb2 material rows, t0 and t1 at varying coordinates, cb1[61].z and cb1[90].y only (no SV_Position
+  input, never cb1 270..273, no depth output); its multi-row temp is the material blend. `flat_temporal_test` pins both pairs.
+- **The take.** `flatUiLayerTakesFamily` asks for the bars, the space dust and the normal-space dust; the orbit lines stay out (not asked: their width
+  patch is VR's). The density rule is per profile (`uiLayerSceneLinesFit`): VR keeps its strict one (the layer wider than the render), flat takes a layer
+  at least as large as the render on both axes, because the take is for the history and DLAA at UI quality 100 has render == display. A layer narrower
+  than the render (Elite's Supersampling above the UI quality) still leaves the bars in the scene (`no-density-gain`); the dusts are exempt from the
+  rule in both. The bars' strip shader (`supercruise_bars.cpp`) is exact at ratio 1 (`tentHalfWidth` clamps to one texel).
+- **The bars' strip pass in flat.** The issue path brackets the game's draw as `vscreen.cpp` does in VR: Prepare reads the game's viewport before the
+  layer's Begin, the strip shader binds after a true Begin, and End puts the game's geometry stage, constant slot and rasterizer state back before the
+  layer's End (`flatUiLayerBars*`, inside the flat runtime's internal scope). `supercruise_bars_test` pins the order in `flat_runtime.cpp`.
+- **Log lines** (every 30 s, zeros print, so a log without them is a build that never ran this code):
+  `flat ui layer scene: supercruise-bars asked=N decided=N taken=N refused-at-issue=N refused=N (reasons); space-dust ...; normal-space-dust ...`, the
+  reasons being the adapter's refusals and the shared decision's declines by name (`no-camera-rows`, `no-density-gain`, `family-not-ready`, ...);
+  `ui quality: supercruise bars: ...` (the strip pass's own counts, with the flat layer text); and once per family `flat ui layer: the first supercruise
+  bars taken -- frame N, vs ..., ps ..., into the flat HDR layer, composited after the upscale; said once.`
+- **HUD Anti-Aliasing** (`fix.hud_antialiasing`) is one key for both editions now (`ui-layer-2026-09-23.md`, same date); the flat adapter's ask is unchanged,
+  and the smoothing also acts on the bars and the dust, since they are in the layer.
+- **Flight check** (flat, supercruise, then near a planet): `flat ui layer scene:` reads `taken` above zero for the bars and the space dust in supercruise and
+  for the normal-space dust near a body, with `no-camera-rows` and `no-density-gain` at 0 at UI quality 100 and Supersampling 1.0; the bars and the dust
+  no longer smear when the view turns. If `no-camera-rows` climbs, the recipe did not take for that pair; if `no-density-gain` climbs, the layer is
+  narrower than the render (lower Supersampling, or raise UI quality). Frame time: the strip shader and the extra layer draws are small; the smoothing,
+  when on, is the larger cost.
+- **Flight (Frontier, 2026-11-03, log `edvr_gfx_20261103_044624`, build v0.22.0-rc.5-38-g7cc31c5a, VR then flat in one session):** Sean: works in both
+  profiles. Flat, 3840x2160, DLSS, UI quality 100, HUD Anti-Aliasing on: in supercruise every window read `supercruise-bars asked=2700 decided=2700
+  taken=2700 ... refused=0 (none)` and the same for `space-dust` (one draw a frame each at 90 fps), the strip pass at `tent half-width 1.00 layer px in a
+  3840x2160 viewport` (layer and render the same size: the looser flat density rule is what admitted the bars); near a body `normal-space-dust taken=2669
+  of 2672` (3 refused: `not-hdr-target=1 tone-unproven=2`, at a transition). `no-camera-rows` and `other-shift` never appeared: the two new recipes give
+  the rows and the rows carry the frame's phase. `flat ui layer smaa: key=on smoothed=2669 raw-fault=0 size=3840x2160`.
+
+## 2026-11-03: the orbit lines in the flat UI layer (FLOWN OK)
+
+Sean asked for the orbit lines to go the way of the bars and the dust. Flat draws them with VR's pair (vs C7FA0C0F / ps 6EEF165A) into the
+3840x2160 R11G11B10 scene target, depth and stencil tested as in VR, and the generic classifier refused the pair (log `edvr_gfx_20261103_044624`,
+04:56:41: `verdict=refused ... vs-reason=not-forward ... ps-reason=vpos-consumer`). So the lines had no camera rows and stayed in the upscaler's history.
+
+- **The recipe** (`flat_projection_recipes.h`, beside the dust and the bars): ForwardColumns at cb1 row 270 on the vertex stage. The vertex shader
+  projects by cb1[270..273], then adds a screen-space offset scaled by clip w (the instance's half-width over the target's 1/W, 1/H). The offset never
+  reads the jitter, so the rows carry the frame's phase. The pixel shader reads SV_Position.w only (the edge distance's perspective divide), never its
+  x, its y or the target size, so the layer's size does not change what it draws; VR has drawn the pair into a larger layer since 2026-10-07.
+  `flat_temporal_test` pins the pair (49 pairs) and the orbit shaders' other pairings as recipe-less.
+- **The take.** `flatUiLayerTakesFamily` asks for `kOrbitLines` under the flat scene-line density rule (a layer at least as large as the render), as for
+  the bars. Flat has no width patch (`orbital_width.h` stays VR's): the game's half-width is in render pixels, so a line is as wide on screen as when it
+  was upscaled; it only leaves the history. The depth and stencil tests run against the layer's seeded copy, as the normal-space dust's do.
+- **Log:** the `flat ui layer scene:` line gains a fourth part, `orbit-lines asked=N decided=N taken=N refused-at-issue=N refused=N (reasons)`, and once:
+  `flat ui layer: the first orbit lines taken -- ...`.
+- **Flight check** (flat, supercruise with orbit lines showing): `orbit-lines taken` above zero, `no-camera-rows` and `depth-stencil-test` at 0, the
+  lines steady when the view turns. `depth-stencil-test` climbing means the seed refused this depth target; `no-density-gain` means the layer is
+  smaller than the render.
+- **Flight (Frontier, 2026-11-03, log `edvr_gfx_20261103_093139`, build v0.22.0-rc.6-1-g894343b1, flat, 3840x2160, HUD Anti-Aliasing on):** Sean:
+  "seems to work". First take at 09:33:24 (frame 9049). The two supercruise windows read `orbit-lines asked=1414 decided=1306 taken=1306 refused=108`
+  and `asked=2792 decided=2699 taken=2699 refused=93`, every refusal `not-hdr-target`: about three draws a second of the same pair go to a target
+  that is not the scene's HDR one, are left to the game as before, and are outside the history anyway. `no-camera-rows`, `other-shift` and
+  `depth-stencil-test` never appeared. `flat ui layer smaa: key=on smoothed=2699 raw-fault=0`.

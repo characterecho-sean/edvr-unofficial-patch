@@ -32,6 +32,9 @@
 #include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the paced F68d window, the throttled lines
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1)
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
+#include "f210_checks.h"    // F210: the full-detail scope's circle centre on a Quest 3's eyes (the d3d11 half; the pixels are openxr_stereo_test's)
+#include "f209_checks.h"    // F209: the Pioneer Supplies buy screens found by the game's own open flag; F107 holds the camera away while one is open
+#include "f212_checks.h"    // F212: the conversation look (the leaf that sets the look springs' targets stores 0 on foot; the runs, the summary, the wiring)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
 #include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
@@ -68,6 +71,12 @@
 #include "f185_checks.h"    // F185: the left arm keeps a bend in the sights (TEMPORARY dial 0.80..1.00, default 0.92): the dial and its weights, the reach radius (today's at 1.00, the hip and 0.92; the target plus the clavicle's chord at 0.80), the clavicle's protraction (the smallest turn, the 15 deg limit), the composition with F59's turn, the counters and the line, the key and the source sites
 #include "f184_checks.h"    // F184: in the sights nothing that moves the body reads the eye: the guard acts at the hip armed alone and measures only elsewhere (counts the push it would make), the standing raise is asked of the legs' room (the same with the eye moved 20 cm), two toy loops (the camera riding on the chest and on the neck), the lines, the source sites
 #include "f186_checks.h"    // F186: the ADS terms pre-turned by the aim pitch under mouse look (TEMPORARY A/B), the sight lock's response measured, a stability stop: the turn on toy vectors (the game's turn lands them back), a toy loop (spirals unturned from 60 deg, settles turned), the response fit, the stop's timing, the lines, the key and the source sites
+#include "f191_checks.h"    // F191: the hip reticle found by its marker type (1001), not by pool slot 10: the tracker on the sequences the logs show (the fallback, the switch to 11, the overlap, the previous key expiring, an owner of slot 10 that is not the reticle, the wrap, the reset, the threads), the lines, the source sites
+#include "f192_checks.h"    // F192: the left elbow held at the body-down pole through a weapon draw: the hold by native epoch (the epoch start, held until the Status.json flip + 0.5 s, the 2 s timeout, the 0.3 s ramp, a stall, a pistol and a tool not held, the holster, a second switch inside the ramp), the weights on the real pole blend and F181's cap, the counters and lines, the source sites
+#include "f193_checks.h"    // F193: in the sights the body's neck follows the camera's height as at the hip: the steady states against the old rule within 1 cm, a jump with a flat camera, a crouch entry, lowering and the legs' cap, continuity from the hip, the stability stop and its fall back to the old rule, a toy loop, the lines, the source sites
+#include "f194_checks.h"    // F194: look to aim aims at the middle of the picture and its eye height settles as mouse look's does (TEMPORARY A/B keys): the pitch helper (Quest -13.0 deg, Pimax 0), the channel's swap, the ray (a level head, a head pitched +13, a rolled head turned about its own right axis, the refusals near vertical), centreOffset with the key on and off, the settle gate's verdicts (aim -13 / -15 / +12 against F139's rule; off: 10 deg), the lines, the height probe, the source sites
+#include "f205_checks.h"    // F205/F206: the full-detail scope on by default taking both eyes (the effective sight eye, decided at the press start), and its view circle (which presses have one, the centre-only request, the wire, the lines, the sites)
+#include "f195_checks.h"    // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B key): the four flown engages kept whole, 26.4 up keeps 15 and centres 11.4, 20 down, exactly +-15, offsets that are not numbers and the key off centring all, the follower, the key's places, the line, the sites
 #include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
 #include "f180_checks.h"    // F180: the left elbow hangs standing in ADS (the blend weight), the spine straighten dial (TEMPORARY: the plan of the spine and the neck, F166's capture and apply on a toy skeleton: slerp share, the reference store, the line), the neck guard's distance (TEMPORARY) and the unarmed guard measuring only, the source sites
@@ -1245,6 +1254,11 @@ int wmain(int argc, wchar_t** argv) {
             bl.step(false, 0.3);
             check(std::fabs(half - 0.5f) < 1e-6f && std::fabs(full - 1.0f) < 1e-6f && clamped == 1.0f && bl.w == 0.0f,
                   "F49: the blend weight reaches 1 in 0.3 s, clamps, and returns to 0 in 0.3 s");
+            check(!nf::pfzFreezeBuildsChain(0) && !nf::pfzFreezeBuildsChain(1) && nf::pfzFreezeBuildsChain(2),
+                  "F49: off and probe do not build the rest chain; on does");
+            check(!nf::pfzFreezeWrites(1, 1.0f, false) && !nf::pfzFreezeWrites(2, 0.0f, false) && !nf::pfzFreezeWrites(2, 1.0f, true) &&
+                      nf::pfzFreezeWrites(2, 0.25f, false),
+                  "F49: the span is written only when the freeze is on, the weight is live, and a write has not stood down");
             // The rest gate: steady for 1 s rests; a 3 cm move or ADS ends it.
             nf::PfzHeadRest hr;
             bool rest = false;
@@ -6285,6 +6299,30 @@ int wmain(int argc, wchar_t** argv) {
         edvr::clearGlitchFrame();
     }
 
+    // ---- fix.turbo_mode: the deferred wait in a ship too, whatever weapon stability says; native on foot keeps the runtime's pacing ----------------------------------------
+    {
+        uint64_t seq = 150;
+        auto pacing = [&]() {
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_8};
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            return table.beginFrame(table.context, &f, &o) == S_OK ? static_cast<int>(o.deferredPacing) : -1;
+        };
+        g_journalActive = g_onFootKnown = true;
+        g_onFoot = false;   // in a ship
+        edvr::Config::get().set("fix.weapon_stability", "1");
+        check(pacing() == 0, "turbo mode off (the default): a ship stays on the runtime's pacing");
+        edvr::Config::get().set("fix.turbo_mode", "on");
+        check(pacing() == 1, "fix.turbo_mode = on defers pacing in a ship");
+        edvr::Config::get().set("fix.weapon_stability", "0");
+        check(pacing() == 1, "fix.turbo_mode does not depend on fix.weapon_stability");
+        edvr::g_nativeOnFootActive.store(true);
+        check(pacing() == 0, "fix.turbo_mode steps aside while native on foot is active");
+        edvr::g_nativeOnFootActive.store(false);
+        edvr::Config::get().set("fix.turbo_mode", "off");
+        edvr::Config::get().set("fix.weapon_stability", "1");
+        g_journalActive = g_onFootKnown = g_onFoot = false;
+    }
+
     // ---- F101: mixed DLL versions against this provider: a released (v0.21.1) runtime's shapes, F31 to F100's version 1 words, this runtime's ladder -----
     {
         uint64_t seq = 200;
@@ -7521,6 +7559,12 @@ int wmain(int argc, wchar_t** argv) {
     f101test::run101(check);
     // F107: the carrier management screen's camera away from the commander: the gate, the episode, the neck reference held out, the calibration's consequence.
     f107test::run107(check);
+    // F209: the buy screens' flag: the signal from Show and Close, the once-a-frame re-check, F107's rule at any distance, normal play unchanged, the lines and their cap, the wiring.
+    f209test::run209(check);
+    // F212: the conversation look: the leaf's bytes and offsets, the decision (gated stores 0, passed stores the inputs bit for bit), the counters, the runs and windows, the lines, the wiring.
+    f212test::run212(check);
+    // F210: the circle's centre is the sight's tangent whatever the eye's frustum and aspect (the Quest 3's), through the rows, the narrowed left eye, jitter and the wire.
+    f210test::run210(check);
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
     // snap's fade, the smoothing, the follower against the real map, the per-second check.
     f109test::run109(check);
@@ -7706,6 +7750,20 @@ int wmain(int argc, wchar_t** argv) {
     // F186: the ADS terms turned by -a under mouse look (a = 0 untouched; the game's turn lands them back; off and the other conditions leave them), a toy loop whose plant is the game's turn (it runs away unturned at 85 deg and
     // settles turned), the response fit on synthetic pairs and its bins, the stability stop's timing and ramp, the lines, the key, and the source sites.
     f186test::run186(check);
+    // F191: the reticle is the key marker type 1001 uses, not slot 10: the fallback to 10 before any call, the switch to 11 (key 10's other owner is left alone), two live keys through the allocator's overlap, the replaced key
+    // released 500 ms after its last SetMarker, a key past the pool ignored, the 32-bit clock's wrap, the reset, a writer pair against three readers, the lines, and the source sites.
+    f191test::run191(check);
+    // F192: the left elbow's draw hold: the weight by native epoch on the flight's timings (the hold until the Status.json flip + 0.5 s or the 2 s timeout, then the 0.3 s ramp; a stall; a pistol and a tool never held; the holster; a second switch inside the ramp restarts it), the larger-of blend on the real solver and F181's cap share, the counters, the lines, and the source sites.
+    f192test::run192(check);
+    // F193: the sights' neck height by the camera's: against the old rule on the flight's steady states, a jump with a flat camera, a crouch entry; a lowering and the legs' cap; the blend from the hip; the stability stop and the old rule bit for bit after it; a toy loop; the lines; and the source sites.
+    f193test::run193(check);
+    // F194: look to aim aims at the middle of the picture (the Quest's -13.0 deg, the Pimax's 0: the helper, the channel's swap, the ray, centreOffset with the key on and off) and its eye height settles as mouse look's does
+    // (the 10 deg carried-pitch gate skipped, F139's rule alone); the lines; the height probe at an edge; the source sites.
+    f194test::run194(check);
+    // F195: the engage keeps the aim's pitch (the pilot's flown 0.77 to 5.55 deg offsets stay; 26.4 deg up keeps 15 and centres 11.4; the key off, and an offset that is not a number, centre all); the key's places; the line; the sites.
+    f195test::run195(check);
+    // F205: the effective sight eye and the ADS view circle.
+    f205test::run205(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

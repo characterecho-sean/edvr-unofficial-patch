@@ -17,6 +17,8 @@
 #include "shader_swap.h"      // F121: shaderSwapCreateVs
 #include "ui_depth.h"         // F27: uiDepthEyeOfTargetReadOnly, the bound target's eye
 #include "ui_layer.h"         // F121c: uiLayerSubmittedTarget, the eyes' submitted targets (the eye filing's cross-check)
+#include "depth_probe.h"      // F200: depthProbeCurrentSceneEyeOf, the visor draw's eye with Anti-aliasing off
+#include "temporal_pass.h"    // F200: temporalPassWantsFssChrome, whether the temporal path runs
 #include "visor_axis_math.h"  // F121: the shift per eye, the counts and the log lines (pure; tools\visor_axis_test runs the same)
 #include "visor_census_core.h"   // F121b: the census of the HDR scene after the visor draw (pure; the rig runs the same decode and model)
 #include "visor_eye_trust.h"  // F121c: the eye-trust guard and its instrument (pure; the rig runs the same)
@@ -323,8 +325,9 @@ void axisNoteWindow(uint64_t now) {
         return;
     }
     if (now - g_axisWindowMs < 30000) return;
-    char line[640];
-    visoraxis::formatWindow(line, sizeof(line), g_axisCounts, g_axisLastS[0], g_axisLastS[1], g_axisLastOuter, g_axisLastInner, g_axisLastTangents);
+    char line[704];
+    const int used = visoraxis::formatWindow(line, sizeof(line), g_axisCounts, g_axisLastS[0], g_axisLastS[1], g_axisLastOuter, g_axisLastInner, g_axisLastTangents);
+    if (used > 0 && static_cast<size_t>(used) < sizeof(line)) visoraxis::formatWindowDepthTail(line + used, sizeof(line) - static_cast<size_t>(used), g_axisCounts);   // F200
     Log::get().note("%s", line);
     g_axisCounts = visoraxis::Counts();
     g_axisWindowMs = now;
@@ -436,11 +439,24 @@ visoraxis::EyeTrust g_trust;
 visoraxis::EyeTrust::Verdict g_trustVerdict;   // for the visor draw in flight; untrusted unless eyeWatchNote proved it
 uint64_t g_trustWindowMs = 0;
 
+// F200: the visor draw's eye, from the eye filing first (ui depth's frame table, read only: it never registers) and, only with the temporal path OFF (Anti-aliasing off: the
+// table learns nothing, so it answered -1 and every per-eye visor job was refused), from the depth probe's scene pair for the depth-stencil view the draw binds. The choice is
+// visor_eye_trust.h's chooseVisorEye (the rig runs it). The submitted textures are not used: the visor draws into the HDR scene target.
+int visorDrawEye(const void* rtResource, visoraxis::EyeSource* src) {
+    const visoraxis::EyeChoice c = visoraxis::chooseVisorEye(uiDepthEyeOfTargetReadOnly(rtResource), temporalPassWantsFssChrome(), [] {
+        auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+        int eye = -1, target = -1;
+        return dsv && depthProbeCurrentSceneEyeOf(dsv, &eye, &target) ? eye : -1;
+    });
+    if (src) *src = c.src;
+    return c.eye;
+}
+
 void eyeWatchNote() {
     g_trustVerdict = visoraxis::EyeTrust::Verdict();   // a draw whose target or eye is not known proves nothing
     ResourceInfo rt{};
     if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt)) return;
-    const int eye = uiDepthEyeOfTargetReadOnly(rt.resource);   // never registers
+    const int eye = visorDrawEye(rt.resource, nullptr);   // F200: the filing's, else (Anti-aliasing off) the depth probe's
     if (eye < 0) return;
     const void* subL = uiLayerSubmittedTarget(0);
     const void* subR = uiLayerSubmittedTarget(1);
@@ -862,12 +878,14 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
         if (onFoot) axisRefuse(visoraxis::Refusal::kNoEye);
         return;
     }
-    const int eye = uiDepthEyeOfTargetReadOnly(rt.resource);   // never registers: the eye the filing gave this target (native order included)
+    visoraxis::EyeSource eyeSrc = visoraxis::EyeSource::kNone;
+    const int eye = visorDrawEye(rt.resource, &eyeSrc);   // the eye the filing gave this target (native order included) or, F200, the depth probe's with Anti-aliasing off
     if (eye < 0) {
         ++g_visorRefusals;
         if (onFoot) axisRefuse(visoraxis::Refusal::kNoEye);
         return;
     }
+    if (onFoot && eyeSrc == visoraxis::EyeSource::kDepth) ++g_axisCounts.eyesFromDepth;   // F200: counted beside the no-eye refusals, so one flight shows which source worked
     const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
     // The census guards every on-foot correction in outer mode. An older resource generation or an unshifted draw cannot disable it.
     if (onFoot) {

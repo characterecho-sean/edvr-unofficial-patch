@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <cstring>
 #include <new>
 
 #include <algorithm>
@@ -204,6 +205,82 @@ std::wstring desktopFolder() {
         if (dirExists(guess)) return guess;
     }
     return std::wstring();
+}
+
+std::vector<unsigned char> dropFilesBlock(const std::wstring& path) {
+    // Zero-filled, so the path's own terminator and the list's closing empty string are already there.
+    const size_t head = sizeof(DROPFILES);
+    std::vector<unsigned char> block(head + (path.size() + 2) * sizeof(wchar_t), 0);
+    DROPFILES header{};
+    header.pFiles = static_cast<DWORD>(head);
+    header.fWide = TRUE;
+    memcpy(block.data(), &header, head);
+    memcpy(block.data() + head, path.c_str(), path.size() * sizeof(wchar_t));
+    return block;
+}
+
+bool copyFileToClipboard(HWND owner, const std::wstring& path, std::string* error) {
+    auto fail = [&](const char* what) {
+        if (error) *error = std::string(what) + " (Windows error " + std::to_string(GetLastError()) + ")";
+        return false;
+    };
+    if (path.empty()) {
+        if (error) *error = "there is no file to copy";
+        return false;
+    }
+
+    // Another program (a clipboard manager, a remote-desktop client) can hold the clipboard for a few
+    // milliseconds; a short wait is the documented answer and a long one would freeze the window.
+    bool open = false;
+    for (int attempt = 0; attempt < 10 && !open; ++attempt) {
+        open = OpenClipboard(owner) != FALSE;
+        if (!open) Sleep(20);
+    }
+    if (!open) return fail("the clipboard is in use by another program");
+
+    bool ok = false;
+    if (!EmptyClipboard()) {
+        fail("could not clear the clipboard");
+    } else {
+        const std::vector<unsigned char> block = dropFilesBlock(path);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, block.size());
+        void* bytes = memory ? GlobalLock(memory) : nullptr;
+        if (!bytes) {
+            if (memory) GlobalFree(memory);
+            fail("could not allocate the clipboard data");
+        } else {
+            memcpy(bytes, block.data(), block.size());
+            GlobalUnlock(memory);
+            if (SetClipboardData(CF_HDROP, memory)) {
+                ok = true;  // the clipboard owns the memory now
+            } else {
+                fail("the clipboard refused the file");
+                GlobalFree(memory);
+            }
+        }
+    }
+
+    // Without this, Explorer decides copy or move by the drive; "copy" says the Desktop zip stays put
+    // after a paste. Best effort: a paste without it is a copy in practice.
+    if (ok) {
+        const UINT effectFormat = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+        HGLOBAL effect = effectFormat ? GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD)) : nullptr;
+        DWORD* value = effect ? static_cast<DWORD*>(GlobalLock(effect)) : nullptr;
+        if (value) {
+            *value = DROPEFFECT_COPY;
+            GlobalUnlock(effect);
+            if (!SetClipboardData(effectFormat, effect)) GlobalFree(effect);
+        } else if (effect) {
+            GlobalFree(effect);
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
+bool runningUnderWine() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
 bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& files,

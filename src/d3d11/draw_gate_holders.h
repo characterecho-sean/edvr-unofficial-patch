@@ -13,7 +13,7 @@ namespace edvr {
 enum class GateHolder : uint8_t {
     Distance, CensusSkip, QuadSkip, CensusAuto, FssRes, FssPanel, Remlok, Holo, TargetSharp, UiDepth, SunGlare, DrawCensus, BlendProbe, ObjectProbe,
     PanelCurve, Particle, Backdrop, Scrim, QuadProbe, LoaderPanel, IntroPanel, WakePulse, NightVision, SpaceDustHidden, WitchspaceStarsHidden,
-    DepthProbe, Footprint, IntroCurve,
+    DepthProbe, Footprint, IntroCurve, SrvTurretHud,
     Count
 };
 constexpr size_t kGateHolders = static_cast<size_t>(GateHolder::Count);
@@ -23,12 +23,12 @@ inline const char* gateHolderName(size_t h) {
     static const char* const names[kGateHolders] = {
         "distance", "census_skip", "quad_skip", "census_auto", "fss_res", "fss_panel", "remlok", "holo", "target_sharp", "ui_depth", "sun_glare",
         "draw_census", "blend_probe", "object_probe", "panel_curve", "particle", "backdrop", "scrim", "quad_probe", "loader_panel", "intro_panel",
-        "wake_pulse", "night_vision", "space_dust_hidden", "witchspace_stars_hidden", "depth_probe", "footprint", "intro_curve"};
+        "wake_pulse", "night_vision", "space_dust_hidden", "witchspace_stars_hidden", "depth_probe", "footprint", "intro_curve", "srv_turret_hud"};
     return h < kGateHolders ? names[h] : "unknown";
 }
 constexpr uint32_t gateHolderBit(GateHolder h) { return 1u << static_cast<unsigned>(h); }
 
-// "draw gate holders: 3 of 28 terms hold the gate open: ui_depth, sun_glare, footprint." / "...: none (the gate is closed)." Written when the set changes.
+// "draw gate holders: 3 of 29 terms hold the gate open: ui_depth, sun_glare, footprint." / "...: none (the gate is closed)." Written when the set changes.
 inline void formatGateHolders(char* out, size_t cap, uint32_t mask) {
     unsigned n = 0;
     for (size_t h = 0; h < kGateHolders; ++h) n += (mask >> h) & 1u;

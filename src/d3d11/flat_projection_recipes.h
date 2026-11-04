@@ -284,10 +284,34 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     // indexable-temp and resinfo cases are array lighting and atlas-dimension
     // queries. CB0[9..11] local pre-transforms before the 270..273 columns
     // are covered by the ce715126 block's local-transform note.
+    // 2026-11-03: the supercruise space dust (vs 9BFC7FD2 with ps DBF17257) and the supercruise bars (vs A47A3315 with ps 869FFF43)
+    // join the pairs of this block so the flat UI layer can read their jitter from camera rows (flat_ui_layer.cpp takes them: they
+    // blur under the temporal history otherwise). The generic classifier refused both (the dust: vs forward-columns, ps consumer
+    // multi-row-temp; the bars: vs unclassified, slice-not-clean), so the draws carried no rows and the adapter would have left every
+    // one in the scene as no-camera-rows. Vetted from the shader dumps (edvr_logs\shaders\ps_DBF1725726018F52.dxbc and
+    // ps_869FFF43E875906E.dxbc, read with tools\dxbc_disasm.py): the vertex shaders are the same bytecode (the same hash) as the
+    // pairs reciped on the same lines, so the projection rows are the ones already established (cb1 270..273 for the dust, cb0
+    // 4..7 for the bars). PS 869FFF43 is `o0.xyz = v0.xyz * cb1[90].y; o0.w = v0.w`: colour only. PS DBF17257 reads the cb2
+    // material rows, t0 and t1 at varying coordinates, and cb1[61].z and cb1[90].y only -- no SV_Position input, never cb1
+    // 270..273, no depth output; its multi-row-temp is the material blend of the cb2 rows, as for the other reviewed
+    // multi-row-temp companions of this block.
+    // 2026-11-03: the supercruise orbit lines (vs C7FA0C0F with ps 6EEF165A) join them for the same reason. The generic classifier
+    // refused the pair (vs not-forward, ps consumer vpos-consumer div-origin), so the draw had no camera rows. Vetted from the vertex
+    // bytecode (tools\orbital_width_test\fixtures\vs_C7FA0C0F5DD49180.dxbc) and the pixel dump (ps_6EEF165A350DA30F.dxbc, both read
+    // with tools\dxbc_disasm.py): the vertex shader (vs_5_0, one cb, CB1[333]) subtracts cb1[275] from the world position and projects
+    // it by the forward columns cb1[270..273] into r2; o2.zw = r2.zw and o2.xy = r2.xy + offset * r2.w, where the offset is a
+    // screen-space direction (steered by the view rotation rows cb1[277..279]) times the instance's half-width v1.w times 2 times
+    // cb1[332].zw (1/W, 1/H of the target). That offset does not read the jitter, so a jitter carried in rows 270..273 reaches o2
+    // unchanged. The pixel shader reads SV_Position.w only (`div r0.x, v1.x, v2.w`, the signed edge distance's perspective divide),
+    // never its x or y or the target size, plus cb1[61].z, cb1[90].y, cb2[0..1] and t0 at fixed texels: colour only, no depth
+    // output, so a layer of another size takes it as VR's does.
     if (result.count == 0) switch (vs) {
-    case 0x9BFC7FD232328391ull: if (ps == 0xCB7AF179DF4E6A60ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xC7FA0C0F5DD49180ull: if (ps == 0x6EEF165A350DA30Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x9BFC7FD232328391ull:
+        if (ps == 0xCB7AF179DF4E6A60ull || ps == 0xDBF1725726018F52ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     case 0x2BB766C168B450A2ull: if (ps == 0x4888F2B05460FA9Bull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
-    case 0xA47A3315FFF5E2E4ull: if (ps == 0xC67370DE72E4422Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xA47A3315FFF5E2E4ull:
+        if (ps == 0xC67370DE72E4422Cull || ps == 0x869FFF43E875906Eull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x99B41C87E45319E6ull:
         // The decal projective-depth family, exactly as 0A298DE7/D8FCE3CE:
         // the PS divides an exported view-position varying for the depth UV,

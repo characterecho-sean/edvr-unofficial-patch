@@ -96,7 +96,8 @@ THE DESKTOP WINDOW PAGE (2026-10-28; the menu shows it as the Mirror window tab 
 for them. The keys stay in [visual].
 
 THE FLAT PANEL'S OWN PERFORMANCE ROWS (2026-10-24) are `menu flat_performance`: a [fix] row that belongs on the flat panel's Performance tab and does nothing in the
-headset (fix.hud_antialiasing, which smooths a layer only the flat profile has). The Performance tab is built from menu_flat_rows.h's kFlatPageRows whatever page
+headset (fix.hud_antialiasing was the first, until 2026-11-03, when VR's UI layer began to smooth its HUD with the same key and the row moved to `menu performance`;
+no row uses the token today, and the generator still supports it). The Performance tab is built from menu_flat_rows.h's kFlatPageRows whatever page
 a row's token names, and VR's Performance page is the rows whose token is `menu performance`, so a `flat_performance` row is on the tab and not on VR's page. The
 token is a page only the flat panel builds, as `visual` and `debug` are, and the generator refuses its misuse by name: on anything but a [fix] key, and on a key
 kFlatPageRows does not list (the row would be on no menu at all: not in the headset, and not on the tab either). `menu flat_visual` is the same for the Visual tab

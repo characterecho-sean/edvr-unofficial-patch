@@ -54,7 +54,7 @@ template<class Check> void runPoseCacheInvalidationCases(Check&& check) {
       c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;
       h.seat.setSeat(SeatPose{1,0,0,0});
       h.seat.onContext(c,GetTickCount64());
-      h.seated.replace(xrFromSeatPose(h.seat.seat()));
+      h.seated.setOrigin(xrFromSeatPose(h.seat.seat()));
       h.currentOrigin=SeatPose{1,0,0,0};
       h.seat.noteOrigin(true);
     });

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "geometry_snapshot.h"
+#include "seat_transform.h"
 #include <openxr/openxr.h>
 #include <cstdint>
 #include <cmath>
@@ -62,8 +63,10 @@ inline bool makeHeadPose(const XrPosef& pose, XrSpaceLocationFlags locationFlags
   out = candidate; return true;
 }
 
-inline XrResult locateHeadAt(PFN_xrLocateSpace fn, XrSpace view, XrSpace origin,
-                             XrTime time, bool connected, TimedHeadPose& out) {
+// seatOrigin, when given (F189), is the origin of the seated space the caller means: `origin` is then the natural space, and the located pose and both velocities
+// are turned into that seated space before they are read (seat_transform.h). Null leaves the located numbers as they came.
+inline XrResult locateHeadAtIn(PFN_xrLocateSpace fn, XrSpace view, XrSpace origin, const XrPosef* seatOrigin,
+                               XrTime time, bool connected, TimedHeadPose& out) {
   if (!fn) return XR_ERROR_FUNCTION_UNSUPPORTED;
   if (!view || !origin) return XR_ERROR_HANDLE_INVALID;
   XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
@@ -73,6 +76,7 @@ inline XrResult locateHeadAt(PFN_xrLocateSpace fn, XrSpace view, XrSpace origin,
   if (location.type != XR_TYPE_SPACE_LOCATION || location.next != &velocity ||
       velocity.type != XR_TYPE_SPACE_VELOCITY || velocity.next != nullptr)
     return XR_ERROR_VALIDATION_FAILURE;
+  if (seatOrigin) { seatxf::locationToSeated(*seatOrigin, location); seatxf::velocityToSeated(*seatOrigin, velocity); }
   TimedHeadPose candidate{};
   if (!makeHeadPose(location.pose, location.locationFlags, velocity.velocityFlags,
                     velocity.linearVelocity, velocity.angularVelocity, connected, candidate))
@@ -80,6 +84,18 @@ inline XrResult locateHeadAt(PFN_xrLocateSpace fn, XrSpace view, XrSpace origin,
   candidate.time = time;
   out = candidate;
   return XR_SUCCESS;
+}
+
+// The head in `origin` as the runtime locates it: for a reference space that really is the one asked about (the natural space, LOCAL, VIEW).
+inline XrResult locateHeadAt(PFN_xrLocateSpace fn, XrSpace view, XrSpace origin,
+                             XrTime time, bool connected, TimedHeadPose& out) {
+  return locateHeadAtIn(fn, view, origin, nullptr, time, connected, out);
+}
+
+// F189: the head in a frame's seated space: located in the natural space the SeatedFrame names, then turned by the origin the frame stood for.
+inline XrResult locateHeadAt(PFN_xrLocateSpace fn, XrSpace view, const SeatedFrame& seat,
+                             XrTime time, bool connected, TimedHeadPose& out) {
+  return locateHeadAtIn(fn, view, seat.space, seat.space ? &seat.origin : nullptr, time, connected, out);
 }
 
 inline bool nextPredictionTime(XrTime display, XrDuration period, XrTime& out) {

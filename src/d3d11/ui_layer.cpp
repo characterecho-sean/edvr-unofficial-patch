@@ -53,6 +53,7 @@
 #include "vr_world_mips.h"  // the VR world route: the mipped screen and its sampler (the re-issue's inputs)
 #include "vr_world_route.h" // ...and what the route publishes: may the layer take, which eye was taken
 #include "native_on_foot.h" // the F0 gate counters (log only)
+#include "submitted_eye.h"  // F198: the submitted textures' tracker, the marker fix's eye source 'S'
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -163,7 +164,8 @@ void refreshLive() {
 // untouched.
 // The flat profile backs off instead of standing down for the session (2026-10-09 11:32 flight: one missed tonemap on
 // the first take ended the session's layer, while route changes, menus and frames with no 3D scene are normal in flat).
-// The back-off lifts itself at the frame boundary after kFlatBackOffMs, with a line each way. VR is unchanged.
+// The back-off lifts itself at the frame boundary after kFlatBackOffMs, with a line each way. (VR's HDR HUD path and the weapons layer
+// use the same ladder since 2026-11-03, below.)
 constexpr uint64_t kFlatBackOffMs = 30000;
 uint64_t g_flatBackOffUntilMs = 0;
 uint32_t g_flatBackOffs = 0;
@@ -172,20 +174,40 @@ uint32_t g_flatBackOffs = 0;
 constexpr uint64_t kFlatBackOffFirstMs = 2000, kFlatBackOffCleanMs = 300000;
 uint64_t g_flatBackOffLastMs = 0;
 uint32_t g_flatBackOffStep = 0;
-void flatBackOff(const char* what, const char* why) {
-    const uint64_t now = GetTickCount64();
+// The one ladder, shared by every back-off here (the flat layer and HDR HUD path, and, in VR, the HDR HUD path and in both profiles the
+// sharp weapons layer; 2026-11-03, the Quest 3 report: the VR HDR HUD path and the weapons layer used to stand down for the session after
+// one 30-frame run of misses, and the game's own HUD return after a combat instance is such a run). The clock is the tick count; the rigs
+// add g_backOffSkewMs to it so a re-arm can be tested without waiting.
+uint64_t g_backOffSkewMs = 0;
+uint64_t backOffNowMs() { return GetTickCount64() + g_backOffSkewMs; }
+// Starts one back-off at `now` and returns its length in ms (2 s, 4, 8, 16, then 30; starting over after five clean minutes).
+uint64_t backOffAdvance(uint64_t now) {
     if (g_flatBackOffLastMs && now - g_flatBackOffLastMs >= kFlatBackOffCleanMs) g_flatBackOffStep = 0;
     uint64_t ms = kFlatBackOffFirstMs << (g_flatBackOffStep < 4 ? g_flatBackOffStep : 4);
     if (ms > kFlatBackOffMs) ms = kFlatBackOffMs;
     ++g_flatBackOffStep;
     g_flatBackOffLastMs = now;
-    g_flatBackOffUntilMs = now + ms;
     ++g_flatBackOffs;
+    return ms;
+}
+void flatBackOff(const char* what, const char* why) {
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_flatBackOffUntilMs = now + ms;
     Log::get().note("ui quality: flat layer: %s backs off for %llu s (back-off %u this session) -- %s. The cockpit HUD is "
                     "drawn as it always was until it re-arms.",
                     what, static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
     if (runtimeFlatProfile() && std::strcmp(what, "the HDR HUD path") == 0) flatUiTrailReport();
 }
+
+// VR's HDR HUD path and the sharp weapons layer (both profiles) back off on timers of their own, each re-armed at the frame boundary
+// (uiLayerFrameBoundary) and by a live change of fix.ui_quality. The flat layer's single timer above is unchanged.
+uint64_t g_crispBackOffUntilMs = 0, g_weaponsBackOffUntilMs = 0;
+uint32_t g_crispBackOffNo = 0, g_weaponsBackOffNo = 0;   // the session's back-off count when each began (the re-arm line quotes it)
+// The HUD-layer lost-content instrument (noteHudLost, VR only): up to kHudLostLines lines an episode, a new episode at each re-arm of the HDR HUD path, and
+// no more than kHudLostEpisodes episodes a session (so a path that never recovers cannot fill the log).
+constexpr uint32_t kHudLostLines = 24, kHudLostEpisodes = 4;
+uint32_t g_hudLostLines = 0, g_hudLostEpisodes = 1;
 
 void crispStandDown(const char* why) {
     if (g_crispStoodDown) return;
@@ -195,22 +217,32 @@ void crispStandDown(const char* why) {
         flatBackOff("the HDR HUD path", why);
         return;
     }
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_crispBackOffUntilMs = now + ms;
+    g_crispBackOffNo = g_flatBackOffs;
     Log::get().note(
-        "ui quality: the HDR HUD path stands down for the rest of the session -- %s. The "
+        "ui quality: the HDR HUD path stands down for %llu s (back-off %u this session) -- %s. The "
         "cockpit's holo panels, flight HUD, target sprite and holograms are drawn as they always "
-        "were (the rest of the layer is unaffected). Turning fix.ui_quality off and on re-arms it.",
-        why ? why : "a refusal");
+        "were (the rest of the layer is unaffected). It re-arms by itself after the back-off, and a failure in a row backs off longer "
+        "(2 s, 4, 8, 16, then 30 s); turning fix.ui_quality off and on re-arms it at once.",
+        static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
 }
 
 // The weapons layer's own failure: the layer, its source pass or its re-issue could not be trusted. The weapons fire, and the scope's gunsight mark that rides the layer,
-// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
+// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected. It backs off on the same ladder as the HDR HUD path.
 void weaponsStandDown(const char* why) {
     if (g_weaponsStoodDown) return;
     g_weaponsStoodDown = true;
     refreshLive();
-    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
-                    "rest of the layer is unaffected). It stays down until the game is restarted.",
-                    why ? why : "a refusal");
+    const uint64_t now = backOffNowMs();
+    const uint64_t ms = backOffAdvance(now);
+    g_weaponsBackOffUntilMs = now + ms;
+    g_weaponsBackOffNo = g_flatBackOffs;
+    Log::get().note("sharp weapons: stands down for %llu s (back-off %u this session) -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
+                    "rest of the layer is unaffected). It re-arms by itself after the back-off, and a failure in a row backs off longer (2 s, 4, 8, 16, then 30 s); "
+                    "turning fix.ui_quality off and on re-arms it at once.",
+                    static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
 }
 
 // ---------------------------------------------------------------- the shield ripple (shield_ripple.h; docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield
@@ -487,7 +519,7 @@ struct Eye {
     Ptr<ID3D11ShaderResourceView> copySrv;
     uint32_t copyW = 0, copyH = 0;
     DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
-    // The flat profile's HUD edge smoothing: SMAA 1x on the layer at the layer's size, its output read in the layer's place (ui_layer_smaa.h).
+    // The HUD edge smoothing (fix.hud_antialiasing, both profiles): SMAA 1x on the layer at the layer's size, its output read in the layer's place (ui_layer_smaa.h).
     // Made at the first composite that asks, released with the layer and when the ask stops.
     UiLayerSmaa smaa;
 };
@@ -590,6 +622,29 @@ bool g_holoPrepareNoted[kRemapPrograms]{}, g_holoTakeNoted[kRemapPrograms]{},
 std::atomic<uint64_t> g_holoCaptureCalls{0}, g_holoCaptured{0};
 std::atomic<bool> g_holoCaptureNoted[kRemapPrograms]{}, g_holoCaptureRefusalNoted[kRemapPrograms]{};
 static_assert(ui_holo_remap::kVs == kHoloTargetSphere, "hologram classifier identity");
+// THE RELIEF (ui_holo_remap.h): the scene block's cb1[120].z by buffer (uiLayerNoteSceneWrite), the first application said
+// once per program, and each fallback source said the first time it is used.
+ui_holo_remap::SceneRelief g_sceneRelief;
+bool g_holoReliefNoted[kRemapPrograms]{}, g_holoReliefSourceNoted[ui_holo_remap::SceneRelief::kSources]{};
+
+// The pixel stage's b1 at a hologram draw (the scene block its programs read cb1[120].z from), identity only, and
+// whether it is bound from its first constant (a context without the 11.1 interface: the whole buffer).
+const void* holoPsSceneBlock(ID3D11DeviceContext* ctx, bool& fromFirst) {
+    fromFirst = true;
+    ID3D11Buffer* b = nullptr;
+    ID3D11DeviceContext1* c1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {
+        UINT first = 0, count = 0;
+        c1->PSGetConstantBuffers1(1, 1, &b, &first, &count);
+        fromFirst = first == 0;
+        c1->Release();
+    } else {
+        ctx->PSGetConstantBuffers(1, 1, &b);
+    }
+    const void* id = b;
+    if (b) b->Release();
+    return id;
+}
 uint64_t g_lastRedirectSeq = 0;
 bool g_familyEngaged[static_cast<size_t>(UiLayerFamily::kCount)] = {};
 uint32_t g_watchBudget = kWatchPerFrame;
@@ -667,6 +722,12 @@ struct Window {
     uint64_t multiplies = 0, writeBacks = 0, dsTested = 0, seeds = 0, seedFailures = 0;
     uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0, compositesInPlace = 0;
     uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0;
+    // The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03): each eye's composite counted by what it read -- the SMAA output, the raw layer because
+    // the key was off, the raw layer because the passes could not be had -- the key as the last composite saw it, and the layer's size then. VR's logTotals prints
+    // them; the flat profile keeps its own (flat_ui_layer.cpp) and skips logTotals.
+    uint64_t hudSmoothed = 0, hudRawKeyOff = 0, hudRawFault = 0;
+    bool hudKeyOn = false;
+    uint32_t hudW = 0, hudH = 0;
     // afterWrites' own breakdown: taken into the layer after the UI (kept
     // over it), left as a post pass (an eye-sized input), or refused at
     // issue (decide-time, via decided[kAfterUi][...], plus begin-time below).
@@ -1073,11 +1134,21 @@ void noteWeaponPair(uint64_t vs, uint64_t ps, UiLayerDecision d) {
 //   (c) the weapons were drawn into a second HDR target the tonemap does not read: wOtherTargets counts them, the sighting names the resource it read;
 //   (d) the tonemap was seen and refused (an outcome other than 'admitted').
 // Every tonemap-shaped draw the admission sees is recorded (a handful a frame); a lost layer prints the last few, newest first, with the eye's state.
+// One 2D texture a tonemap-shaped draw sampled while the layer's content was outstanding and the draw matched none of it (noteToneSightSlots): what the HUD-layer
+// lost-content line (noteHudLost) describes. Only those sightings carry slots; every other sighting is the pointer alone, as before.
+struct ToneSlot {
+    const void* res = nullptr;
+    uint32_t w = 0, h = 0, fmt = 0, bind = 0;   // the texture's description: width, height, DXGI_FORMAT, D3D11_BIND_FLAG bits
+    int8_t eyeTable = -1;                       // the eye whose render target the depth pass's table says it is (read only), or -1
+    uint8_t slot = 0;                           // the PS slot
+};
 struct ToneSight {
     uint64_t seq = 0;
     const void* res = nullptr;  // the first 2D texture the draw samples (the HDR source it was admitted on, or what it read instead)
     int8_t eye = -1;            // the eye whose content it matched, or -1
     uint8_t outcome = 0;        // 0 admitted, 1 no eye's content matched it, 2 the 8-bit layer was busy, 3 a second tonemap for the eye
+    uint8_t nSlots = 0;
+    ToneSlot slots[4];
 };
 ToneSight g_toneSights[6];
 uint32_t g_toneSightCount = 0;
@@ -1087,6 +1158,7 @@ void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
     t.res = res;
     t.eye = static_cast<int8_t>(eye);
     t.outcome = outcome;
+    t.nSlots = 0;
 }
 uint32_t g_lostLines = 0;
 // A layer whose frame held the scope's gunsight mark and no weapons fire is lost as a mark (A3): one line a press of the sights says so, and the weapons fire's 24 lines are not spent on it.
@@ -1122,6 +1194,95 @@ void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq, bool markOnly = fa
         label, eye == 0 ? "left" : "right", markOnly ? "gunsight mark" : "weapons", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
         static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
         static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
+}
+
+// The HDR HUD path's lost-content instrument (VR only; the flat profile admits through its own known pairs, which note no sightings). The 2026-11-03 Quest 3
+// report: after a combat instance the game's tonemap read, for about 30 frames, a texture other than the HDR target the HUD went into, so admission missed
+// every frame and the path stood down. The candidates and what settles each, from the lines below:
+//   (a) the tonemap read a texture of another size or format (the description says which; a post-processed or resolved copy of the scene, not the HDR target);
+//   (b) the tonemap read a texture the depth pass knows as an eye's render target ("E0"/"E1"): the game moved the HUD's target to another resource;
+//   (c) the tonemap read a texture none of the above and the HUD's target is also unchanged: the draw is not the eye's tonemap, and the tonemap itself did not run.
+// The WRITER of each texture is not named: that needs a table of every render-target bind and copy on every draw, a per-frame cost on the frames that miss
+// nothing; the description and the eye-table membership are what is known without it.
+// Cost: noteToneSightSlots runs only for a sighting that matched nothing while a layer's content was outstanding, and only while the episode has lines
+// left; noteHudLost runs only for a frame that lost its content.
+void noteToneSightSlots(ID3D11DeviceContext* ctx) {
+    if (!ctx || g_toneSightCount == 0 || g_hudLostLines >= kHudLostLines || runtimeFlatProfile()) return;
+    ToneSight& t = g_toneSights[(g_toneSightCount - 1) % 6];
+    guarded("uiLayer.toneSlots", [&] {
+        for (UINT s = 0; s < 4 && t.nSlots < 4; ++s) {
+            Ptr<ID3D11ShaderResourceView> srv;
+            ctx->PSGetShaderResources(s, 1, &srv);
+            if (!srv) continue;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+            srv->GetDesc(&vd);
+            if (vd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) continue;
+            Ptr<ID3D11Resource> r;
+            srv->GetResource(&r);
+            Ptr<ID3D11Texture2D> tex;
+            if (!r || FAILED(r.As(&tex))) continue;
+            D3D11_TEXTURE2D_DESC d{};
+            tex->GetDesc(&d);
+            ToneSlot& o = t.slots[t.nSlots++];
+            o.res = r.Get();
+            o.w = d.Width;
+            o.h = d.Height;
+            o.fmt = static_cast<uint32_t>(d.Format);
+            o.bind = d.BindFlags;
+            o.eyeTable = static_cast<int8_t>(uiDepthEyeOfTargetReadOnly(r.Get()));
+            o.slot = static_cast<uint8_t>(s);
+        }
+    });
+}
+
+// The sightings, newest first, as the second line of a lost HUD frame: each sighting's frame, the eye it matched and why not, and, for one that carries slots, each
+// texture it read with its description.
+void formatToneSights(char* out, size_t cap) {
+    static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
+    out[0] = 0;
+    size_t used = 0;
+    const uint32_t n = g_toneSightCount < 6 ? g_toneSightCount : 6;
+    for (uint32_t i = 0; i < n; ++i) {
+        const ToneSight& t = g_toneSights[(g_toneSightCount - 1 - i) % 6];
+        int w = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s[frame %llu, eye %d, %s", i ? " " : "", static_cast<unsigned long long>(t.seq),
+                            static_cast<int>(t.eye), kOutcome[t.outcome < 4 ? t.outcome : 0]);
+        if (w < 0) return;
+        used += static_cast<size_t>(w);
+        if (t.nSlots == 0) w = _snprintf_s(out + used, cap - used, _TRUNCATE, ", read %p]", t.res);
+        else {
+            w = _snprintf_s(out + used, cap - used, _TRUNCATE, ", read");
+            if (w < 0) return;
+            used += static_cast<size_t>(w);
+            for (uint32_t k = 0; k < t.nSlots; ++k) {
+                const ToneSlot& o = t.slots[k];
+                char eyeText[16] = "";
+                if (o.eyeTable >= 0) _snprintf_s(eyeText, _TRUNCATE, " E%d", static_cast<int>(o.eyeTable));
+                w = _snprintf_s(out + used, cap - used, _TRUNCATE, "%s t%u %p %ux%u fmt %u bind 0x%x%s", k ? ";" : "", static_cast<unsigned>(o.slot), o.res, o.w, o.h, o.fmt, o.bind, eyeText);
+                if (w < 0) return;
+                used += static_cast<size_t>(w);
+            }
+            w = _snprintf_s(out + used, cap - used, _TRUNCATE, "]");
+        }
+        if (w < 0) return;
+        used += static_cast<size_t>(w);
+    }
+    if (!n) _snprintf_s(out, cap, _TRUNCATE, "none yet");
+}
+
+void noteHudLost(int eye, const Eye& e, uint64_t nextSeq) {
+    if (g_hudLostLines >= kHudLostLines) return;
+    ++g_hudLostLines;
+    Log::get().note(
+        "ui quality: lost HUD layer %u (of the first %u lines of episode %u): the %s eye's HUD content is frame %llu (%u draws, into %p, layer %ux%u) and no tonemap published it "
+        "(streak %u of %u); its weapons layer holds frame %llu; the next HUD draw is frame %llu.",
+        g_hudLostLines, kHudLostLines, g_hudLostEpisodes, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, e.hdrTarget, e.hdrW, e.hdrH,
+        e.hdrMissStreak + 1, kCrispHdrMissFrames, static_cast<unsigned long long>(e.wSeq), static_cast<unsigned long long>(nextSeq));
+    char sights[760];
+    formatToneSights(sights, sizeof(sights));
+    Log::get().note(
+        "ui quality: lost HUD layer %u: the last tonemap-shaped draws seen, newest first (tN is the PS slot, then the texture, its width x height, DXGI format number, "
+        "bind flags, and E0/E1 where the depth pass knows it as that eye's render target; its writer is not tracked): %s.",
+        g_hudLostLines, sights);
 }
 
 // ------------------------------------------------------------ the layer
@@ -2143,6 +2304,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && e.hdrSeq != g_draw.seq) {
         if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
             ++g_win.hdrLost;
+            if (!runtimeFlatProfile()) noteHudLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline (review R1): a content-frame no
             // tonemap re-issue published -- the already-published case does
             // NOT count (hdrToneSeq == hdrSeq). The tonemap runs every frame
@@ -2235,6 +2397,27 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 g_holoRefusalNoted[slot] = true;
             }
             releaseSaved(); return false;
+        }
+        if (depthLoad) {   // THE RELIEF (ui_holo_remap.h): the Sobel taps at the game's own radius, k * max(cb1[120].z, 1)
+            bool fromFirst = true;
+            const void* b1 = holoPsSceneBlock(ctx, fromFirst);
+            float sceneZ = 1.0f;
+            const auto source = g_sceneRelief.find(b1, fromFirst, sceneZ);
+            holoParams.relief = ui_holo_remap::reliefRadius(holoParams, sceneZ);
+            if (!g_holoReliefNoted[slot]) {
+                g_holoReliefNoted[slot] = true;
+                g_holoReliefSourceNoted[source] = true;
+                Log::get().note("crisp holo remap: relief radius applied to PS %016llX (VS %016llX): k %.4f (layer %ux%u over the game's %ux%u), cb1[120].z %.4f from %s, "
+                                "radius factor %.4f = k x max(z, 1); said once per program (fix.ui_quality off draws the game's own shader).",
+                                static_cast<unsigned long long>(g_draw.holoPsHash), static_cast<unsigned long long>(ui_holo_remap::kVs),
+                                1.0 / std::sqrt(double(holoParams.x) * double(holoParams.y)), layerW, layerH, g_draw.targetW, g_draw.targetH,
+                                static_cast<double>(sceneZ), ui_holo_remap::reliefSourceName(source), static_cast<double>(holoParams.relief));
+            } else if (!g_holoReliefSourceNoted[source]) {
+                g_holoReliefSourceNoted[source] = true;
+                Log::get().note("crisp holo remap: relief radius for PS %016llX now from %s: cb1[120].z %.4f, radius factor %.4f (said once per source).",
+                                static_cast<unsigned long long>(g_draw.holoPsHash), ui_holo_remap::reliefSourceName(source), static_cast<double>(sceneZ),
+                                static_cast<double>(holoParams.relief));
+            }
         }
     }
     // The layer's depth-stencil target: for a draw that tests, seeded from
@@ -2523,13 +2706,17 @@ ID3D11ComputeShader* g_csInPlace = nullptr;
 bool g_loadChecked[2] = {}, g_loadOk[2] = {};
 unsigned g_inPlaceDeclinedNoted = 0;   // bit per reason, said once
 bool g_inPlaceNoted = false;
-// The flat profile's HUD edge smoothing (ui_layer.h, uiLayerFlatSetEdgeSmoothing): the adapter's ask for the next composite, taken and cleared on entry to
-// uiLayerComposite, and what that composite did with it. The VR profiles never set the ask.
+// The HUD layer's edge smoothing (ui_layer.h, uiLayerFlatSetEdgeSmoothing): the flat adapter's ask for the next composite, taken and cleared on entry to
+// uiLayerComposite, and what that composite did with it. The VR profile never sets the ask; its own key is g_hudSmoothVr below.
 struct FlatEdgeSmoothing {
     bool ask = false;
     UiLayerEdgeSmoothingResult result;
 };
 FlatEdgeSmoothing g_flatEdge;
+// VR's half of fix.hud_antialiasing (2026-11-03: one key for both profiles, off by default, live): read by uiLayerConfigure, on every reconfigure, and used only
+// while the profile is not flat (the flat adapter reads the same key itself, a frame at a time, and asks per composite through g_flatEdge). uiLayerComposite smooths
+// an eye's HUD layer when either asks.
+bool g_hudSmoothVr = false;
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
@@ -2613,18 +2800,20 @@ ID3D11UnorderedAccessView* inPlaceUavFor(Eye& e, ID3D11Device* dev, ID3D11Textur
 }
 
 // The layer's SMAA resources for this composite, or null: a creation that failed is said once per size (the stand-down line) and the composite reads the raw
-// layer; a creation that succeeded says so once (the ready line).
-UiLayerSmaa* edgeSmoothingFor(Eye& e, ID3D11Device* dev) {
+// layer; a creation that succeeded says so once (the ready line). Two profiles run it (2026-11-03): the flat lines keep their wording ("flat ui layer smaa:"), and
+// VR's name the eye ("ui layer smaa (left eye):"), each eye having its own resources.
+UiLayerSmaa* edgeSmoothingFor(Eye& e, uint32_t eye, ID3D11Device* dev) {
     UiLayerSmaaFail fail;
+    const char* who = runtimeFlatProfile() ? "flat ui layer smaa" : eye == 0 ? "ui layer smaa (left eye)" : "ui layer smaa (right eye)";
     switch (uiLayerSmaaEnsure(e.smaa, dev, e.w, e.h, &fail)) {
         case UiLayerSmaaState::kMade:
-            Log::get().note("flat ui layer smaa: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", e.w, e.h,
+            Log::get().note("%s: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", who, e.w, e.h,
                             uiLayerMB(uiLayerBytes(e.w, e.h, 10)));
             return &e.smaa;
         case UiLayerSmaaState::kReady:
             return &e.smaa;
         case UiLayerSmaaState::kFailed:
-            Log::get().note("flat ui layer smaa: stood down at %ux%u -- %s hr=0x%08X", e.w, e.h, fail.what ? fail.what : "a creation failed",
+            Log::get().note("%s: stood down at %ux%u -- %s hr=0x%08X", who, e.w, e.h, fail.what ? fail.what : "a creation failed",
                             static_cast<unsigned>(fail.hr));
             return nullptr;
         case UiLayerSmaaState::kStoodDown:
@@ -2775,11 +2964,11 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                         eye == 0 ? "left" : "right", rw, rh, viewName(view),
                         uiLayerMB(uiLayerBytes(rw, rh)));
     }
-    // The flat profile's HUD edge smoothing: the SMAA resources for the layer's size are made here and the passes run inside the timed span below. Not asked
-    // for, nothing is kept.
+    // The HUD layer's edge smoothing (fix.hud_antialiasing; both profiles since 2026-11-03): the SMAA resources for the layer's size are made here (per eye) and the
+    // passes run inside the timed span below, so VR's "ui quality: layer" price line includes their cost. Not asked for, nothing is kept.
     UiLayerSmaa* smaa = nullptr;
     if (smooth)
-        smaa = edgeSmoothingFor(e, dev.Get());
+        smaa = edgeSmoothingFor(e, eye, dev.Get());
     else if (e.smaa.ready())
         e.smaa.releaseTargets();
 
@@ -2866,6 +3055,15 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     g_flatEdge.result.outcome = !smooth ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
     g_flatEdge.result.w = e.w;
     g_flatEdge.result.h = e.h;
+    // VR's window (the flat profile counts the same outcome in its own, from uiLayerFlatEdgeSmoothingResult): both eyes' composites.
+    if (!runtimeFlatProfile()) {
+        if (!smooth) ++g_win.hudRawKeyOff;
+        else if (smoothed) ++g_win.hudSmoothed;
+        else ++g_win.hudRawFault;
+        g_win.hudKeyOn = smooth;
+        g_win.hudW = e.w;
+        g_win.hudH = e.h;
+    }
     if (inPlaceUav) {
         ++g_win.compositesInPlace;
         if (!g_inPlaceNoted) {
@@ -3453,6 +3651,16 @@ void logTotals(double seconds) {
     // printed with zeros like the other two so that a log without the line is a build that never ran it, and a window in which no
     // dust reached the decision reads "0 in the HDR layer, 0 left in the scene" -- which is not what a decline looks like.
     Log::get().note("ui quality: space dust: %s.", sceneLineLayerText(UiLayerFamily::kSpaceDust, frames).c_str());
+    // The normal-space dust, the specks near a planet or a station (2026-11-03), is the same kind of account: taken as the game draws it, printed with zeros.
+    Log::get().note("ui quality: normal-space dust: %s.", sceneLineLayerText(UiLayerFamily::kNormalSpaceDust, frames).c_str());
+    // The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03), whenever the window composited the layer: the composites (both eyes) that read the SMAA output,
+    // those that read the raw layer because the key was off, those that fell back to it because the passes could not be had, the key as the last composite read it and the
+    // layer's size then. A window with composites and all three counts zero says the composite never reached the smoothing. The passes run inside the composite's timed
+    // span, so the "ui quality: layer" price line below includes their cost.
+    if (g_win.composites || g_win.hudSmoothed || g_win.hudRawKeyOff || g_win.hudRawFault)
+        Log::get().note("ui quality: hud smaa: key=%s smoothed=%llu raw-key-off=%llu raw-fault=%llu size=%ux%u", g_win.hudKeyOn ? "on" : "off",
+                        static_cast<unsigned long long>(g_win.hudSmoothed), static_cast<unsigned long long>(g_win.hudRawKeyOff),
+                        static_cast<unsigned long long>(g_win.hudRawFault), g_win.hudW, g_win.hudH);
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
@@ -3680,6 +3888,8 @@ void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
     }
 }
 
+void uiLayerNoteSceneWrite(const void* resource, const void* data, uint32_t bytes) { g_sceneRelief.note(resource, data, bytes); }
+
 // The crisp take's whole dependency set, established no later than the first
 // HUD take (review R2) -- defined beside the coverage machinery, below.
 bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
@@ -3709,6 +3919,10 @@ void uiLayerConfigure(Config& cfg) {
                         text.c_str(), newSpelling, uiQualityLabel(target), newSpelling);
     }
     const bool temporalVr = temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false);
+    // VR's half of the HUD edge smoothing (fix.hud_antialiasing, off by default, live; 2026-11-03): read on every configure and used by uiLayerComposite only while the
+    // profile is not flat (the flat adapter reads the key itself, a frame at a time). The layer's composite runs only while fix.ui_quality is not off and a temporal
+    // mode is on, so the key does nothing before then.
+    g_hudSmoothVr = !runtimeFlatProfile() && cfg.getBool("fix.hud_antialiasing", false);
     // The flat profile reads its mode around the gate (fix.temporal_aa reads off there): its half of the layer -- the cockpit
     // HUD families through the mono adapter, flat_ui_layer.cpp -- and its panel factor arm with the flat anti-aliasing.
     const bool flatAa = runtimeFlatProfile() && temporalModeEnabledFor(cfg.requestedTemporalMode(), true);
@@ -3717,11 +3931,14 @@ void uiLayerConfigure(Config& cfg) {
     // flat phase machine's, read per draw from the camera rows (flat_ui_layer.cpp): as shipped by construction.
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
                          temporal != g_temporal;
-    // A live change of the key re-arms a stood-down layer, either half of it
-    // (the LDR take's or the HDR HUD path's): the player asked.
+    // A live change of the key re-arms a stood-down layer, every half of it
+    // (the LDR take's, the HDR HUD path's and the weapons layer's, with the back-offs they were waiting out): the player asked.
     if (g_keyNoted && (text != g_keyText || target != g_target)) {
         g_stoodDown = false;
         g_crispStoodDown = false;
+        g_weaponsStoodDown = false;
+        g_crispBackOffUntilMs = g_weaponsBackOffUntilMs = 0;
+        for (Eye& e : g_eye) { e.hdrMissStreak = 0; e.wMissStreak = 0; }
     }
     g_keyText = text;
     g_target = target;
@@ -4101,12 +4318,14 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
             // The orbit lines and the supercruise bars are scene geometry the layer takes for DENSITY: the layer the door will
             // hand on (its size, from the door's frame and the target) against the render this draw is made at. Not asked of
-            // any other family, which keeps its default and so its decision exactly as it was.
+            // any other family, which keeps its default and so its decision exactly as it was. In VR the layer must be wider
+            // than the render; in flat the take is for the upscaler's history, so a layer at least as large is enough
+            // (uiLayerSceneLinesFit, 2026-11-03).
             if (uiLayerFamilyIsSceneLines(family)) {
                 const UiLayerSize ls = uiLayerSize(g_eye[f.eye].door.fullW, g_eye[f.eye].door.fullH, layerTarget());
                 sceneLayerW = ls.w;
                 sceneLayerH = ls.h;
-                f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);
+                f.layerWider = uiLayerSceneLinesFit(ls.w, ls.h, g_tc.info.a, g_tc.info.b, runtimeFlatProfile());
             }
             // The crisp take's publication deadline (review crisp-hud-phase3-
             // 2026-09-28, the missing ship/target mesh holograms): the game's
@@ -5435,6 +5654,8 @@ bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t c
     }
     if (eye < 0) {
         noteToneSight(seq, seenRes, -1, 1);
+        // A tonemap-shaped draw that matched nothing while a layer's content is outstanding is the one sighting the lost-HUD line may need described.
+        if (content) noteToneSightSlots(ctx);
         // Outstanding HUD content this frame, but this draw reads no eye's
         // HUD source. Only the eye's OWN tonemap failing to read it is a
         // failed consumer (review R1): the draw must BE the tonemap -- the
@@ -5462,8 +5683,8 @@ bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t c
                     (c.wSeq == seq && c.wDraws && c.wSrv && c.wToneSeq != c.wSeq);
             }
             if (failedConsumer) {
-                // Named once, counted -- and the crisp path stands down to
-                // stock rather than lose the HUD for the session.
+                // Named once, counted -- and the crisp path backs off to
+                // stock (it re-arms at a frame boundary) rather than lose the HUD.
                 crispToneDecline(CrispToneDecline::kNoHdrSlot, vs, ps);
                 crispStandDown("no PS slot of the tonemap reads an eye's HUD source");
             }
@@ -6600,6 +6821,22 @@ const void* uiLayerSubmittedTarget(uint32_t eye) {
     return eye <= 1 ? g_eye[eye].submitted : nullptr;
 }
 
+// F198: the submitted textures with their sizes, for the eye source 'S' (submitted_eye.h). Plain state: treat (which insists on the render thread) writes it and the
+// draws on that thread read it. The edge token is the render-mode and the on-foot edge counters together.
+namespace {
+submittedeye::Tracker g_submittedEyes;
+}  // namespace
+
+void uiLayerNoteSubmittedSized(uint32_t eye, const void* submitted, uint32_t width, uint32_t height) {
+    if (eye > 1) return;
+    const uint64_t edge = (static_cast<uint64_t>(g_nativeModeEdges.load(std::memory_order_relaxed)) << 32) | nativeOnFootEdges();
+    g_submittedEyes.note(static_cast<int>(eye), submitted, width, height, edge);
+}
+
+int uiLayerEyeOfSubmitted(const void* res) {
+    return g_submittedEyes.eyeOf(res);
+}
+
 bool uiLayerDoorFromPass(uint32_t eye) {
     return eye <= 1 && g_eye[eye].doorFromPass;
 }
@@ -6615,7 +6852,7 @@ constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
     // The flat adapter's ask for this composite (uiLayerFlatSetEdgeSmoothing), taken whatever happens below so it never carries to another call.
-    const bool smooth = g_flatEdge.ask;
+    const bool smooth = g_flatEdge.ask || (!runtimeFlatProfile() && g_hudSmoothVr);  // VR: the key's, both eyes
     g_flatEdge.ask = false;
     g_flatEdge.result = UiLayerEdgeSmoothingResult{};
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
@@ -6653,7 +6890,10 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     }
     // The scope lens (scope_zoom.h): the aiming (right) eye's picture inside the scope's frame, magnified by the game's zoom, after the upscaler and RCAS and before the weapons/HUD
     // composite (which must not be magnified). A frame EDVR rewrites in full every frame, or the ripple's private copy of one, is written in place; any other comes back as the lens's
-    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered.
+    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered. F202: with no temporal mode running
+    // (g_temporal false: fix.temporal_aa, the gate temporalPassWantsFssChrome reads) the game's own picture is that picture, unjittered, and the lens takes it (scopezoom::lensPictureResolved;
+    // with a mode running the answer is e.doorFromPass, as before). The gunsight mark (C1a) rides the weapons layer, which is not live then: it stays in the scene and is magnified with
+    // the picture. A frame that is not EDVR's own comes back as the lens's copy, and the share the runtime makes of the right eye's finished picture to the left (F106) is taken after this.
     // B3: the left eye's picture, copied for that lens before the left eye's own UI composite (the part of it the lens may read, when the left eye is drawn as the zoomed view).
     if (eye == 0 && scopeZoomWanted()) {
         guarded("scopeZoom.leftDoor", [&] {
@@ -6673,7 +6913,8 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
             lensArgs.frame = frame;
             lensArgs.region = region;
             lensArgs.inPlace = ownedFrame || rewritten;
-            lensArgs.resolved = e.doorFromPass;
+            lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);
+            lensArgs.gameOwn = lensArgs.resolved && !e.doorFromPass;
             Ptr<ID3D11Texture2D> lensCopy;
             scopeZoomDoor(lensArgs, &lensCopy);
             if (lensCopy) {
@@ -6799,7 +7040,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     rippleIdleTick();
     // The flat profile's back-off (flatBackOff) lifts itself here.
     if (runtimeFlatProfile() && g_flatBackOffUntilMs && !detail::g_uiLayerIssueBlocked &&
-        GetTickCount64() >= g_flatBackOffUntilMs) {
+        backOffNowMs() >= g_flatBackOffUntilMs) {
         g_flatBackOffUntilMs = 0;
         g_stoodDown = false;
         g_crispStoodDown = false;
@@ -6808,6 +7049,27 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         Log::get().note("ui quality: flat layer: re-armed after its back-off (%u this session); the cockpit HUD is taken "
                         "again from the next frame behind a proven tonemap.",
                         g_flatBackOffs);
+    }
+    // VR's HDR HUD path and the weapons layer (both profiles) lift their back-offs here, one line each. Nothing is read unless a timer is set.
+    if ((g_crispBackOffUntilMs || g_weaponsBackOffUntilMs) && !detail::g_uiLayerIssueBlocked) {
+        const uint64_t now = backOffNowMs();
+        if (g_crispBackOffUntilMs && now >= g_crispBackOffUntilMs) {
+            g_crispBackOffUntilMs = 0;
+            g_crispStoodDown = false;
+            for (Eye& e : g_eye) { e.hdrMissStreak = 0; e.hdrDraws = 0; }   // the content taken before the stand-down is stale
+            if (g_hudLostEpisodes < kHudLostEpisodes) { ++g_hudLostEpisodes; g_hudLostLines = 0; }   // the lost-HUD instrument's lines, for the next episode
+            refreshLive();
+            Log::get().note("ui quality: the HDR HUD path re-armed after its back-off (back-off %u this session); the cockpit HUD is taken "
+                            "again from the next frame behind a tonemap that reads its HUD source.", g_crispBackOffNo);
+        }
+        if (g_weaponsBackOffUntilMs && now >= g_weaponsBackOffUntilMs) {
+            g_weaponsBackOffUntilMs = 0;
+            g_weaponsStoodDown = false;
+            for (Eye& e : g_eye) { e.wMissStreak = 0; e.wDraws = 0; e.wFires = e.wMarks = 0; }
+            refreshLive();
+            Log::get().note("sharp weapons: re-armed after its back-off (back-off %u this session); the weapons fire is taken "
+                            "again from the next frame.", g_weaponsBackOffNo);
+        }
     }
     // F30: the eye check's stand-down is re-armed on the next native render-mode edge (the setter's count), logged. A stand-down by
     // anything else is left alone, and a re-arm by fix.ui_quality (g_stoodDown cleared) clears the flag.
@@ -6967,6 +7229,7 @@ void releaseDeviceObjects() {
     if (g_draw.active) releaseSaved();
     g_holoBinding.clear();
     g_holoCache.reset();
+    g_sceneRelief.reset();   // the buffers it names belong to the old device
     g_hdrSeedGpu.reset();  // release-only; the old device may already be gone
     g_hdrSeedActive = 0;
     releaseLayers();

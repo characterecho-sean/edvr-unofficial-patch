@@ -20,7 +20,8 @@
 //       decimals and prints 1e-9 as 0.000000), with a control that the audit sees a floor changed to 0;
 //   V12 F121c: the eye-trust guard (visor_eye_trust.h): pairs trusted, one eye or one target not, the submitted targets overruling, a retarget costing one draw,
 //       the state lines after kTrustRun draws, the 10 s window only for an anomaly, and the log lines;
-//   V13 F121c: the census's self-off verdict, its line, and the 30 s line's new counters.
+//   V13 F121c: the census's self-off verdict, its line, and the 30 s line's new counters;
+//   V14 F200: the visor draw's eye with Anti-aliasing off: the table's answer wins, the depth probe's only with the temporal path off, -1 when both fail, and the 30 s line's tail.
 // The bytes under test are the build's (kVisorAxisVsBytecode and kVisorCensusBytecode from temporal_shader_build), not a compile made here. Output under obj\.
 #include <windows.h>
 #include <d3d11.h>
@@ -741,6 +742,48 @@ int main(int argc, char** argv) {
         check(w30.find("refused 7 (no eye 0, no tangents 0, other pixel shader 0, no replacement 0, eye filing 7), self-off 3; s left +0.0890") != std::string::npos,
               "V13.the-30-s-line-counts-the-eye-filing-refusals-and-the-self-off-draws");
         check(std::string(edvr::visoraxis::refusalText(edvr::visoraxis::Refusal::kOneEye)).find("the eye filing is not trusted") == 0, "V13.the-refusal-reads");
+    }
+
+    // V14 (F200): the visor draw's eye with Anti-aliasing off. The eye filing (ui depth's table) names none then, so the per-eye visor work was refused as kNoEye; the depth probe's scene pair names
+    // it for the depth-stencil view the draw binds, only with the temporal path off. The choice as a pure function: the table's answer wins; the depth is asked only with the temporal path off;
+    // -1 when both fail. And the 30 s line carries the count, last.
+    {
+        using edvr::visoraxis::chooseVisorEye;
+        using edvr::visoraxis::EyeChoice;
+        using edvr::visoraxis::EyeSource;
+        int asked = 0;
+        const auto depth = [&asked](int eye) { return [&asked, eye] { ++asked; return eye; }; };
+        EyeChoice c = chooseVisorEye(1, false, depth(0));
+        check(c.eye == 1 && c.src == EyeSource::kTable && asked == 0, "V14.the-tables-answer-wins-and-the-depth-is-not-asked");
+        c = chooseVisorEye(0, true, depth(1));
+        check(c.eye == 0 && c.src == EyeSource::kTable && asked == 0, "V14.the-tables-answer-wins-with-the-temporal-path-on-too");
+        c = chooseVisorEye(-1, false, depth(1));
+        check(c.eye == 1 && c.src == EyeSource::kDepth && asked == 1, "V14.the-table-has-none-and-the-temporal-path-is-off-so-the-depth-probe-names-the-eye");
+        asked = 0;
+        c = chooseVisorEye(-1, false, depth(0));
+        check(c.eye == 0 && c.src == EyeSource::kDepth && asked == 1, "V14.the-depth-probe-can-name-the-left-eye");
+        asked = 0;
+        c = chooseVisorEye(-1, true, depth(0));
+        check(c.eye == -1 && c.src == EyeSource::kNone && asked == 0, "V14.with-the-temporal-path-on-the-depth-is-never-asked-and-no-table-answer-is-none");
+        c = chooseVisorEye(-1, false, depth(-1));
+        check(c.eye == -1 && c.src == EyeSource::kNone && asked == 1, "V14.both-fail-minus-one");
+        asked = 0;
+        c = chooseVisorEye(2, false, depth(7));
+        check(c.eye == -1 && c.src == EyeSource::kNone && asked == 1, "V14.values-other-than-0-and-1-are-no-eye");
+        // the temporal path on is exactly the table's answer, whatever the depth would say (the path that was before F200)
+        bool same = true;
+        for (int table = -2; table <= 2; ++table) {
+            asked = 0;
+            const EyeChoice on = chooseVisorEye(table, true, depth(1 - (table & 1)));
+            const bool valid = table == 0 || table == 1;
+            same = same && asked == 0 && on.eye == (valid ? table : -1) && on.src == (valid ? EyeSource::kTable : EyeSource::kNone);
+        }
+        check(same, "V14.the-temporal-path-on-is-the-tables-answer-and-nothing-else");
+        char line[96];
+        edvr::visoraxis::Counts counts;
+        counts.eyesFromDepth = 5;
+        edvr::visoraxis::formatWindowDepthTail(line, sizeof line, counts);
+        check(std::string(line) == "; eyes from the depth probe 5", "V14.the-30-s-lines-tail-counts-the-eyes-the-depth-probe-named");
     }
 
     check(rig.problems() == 0, "V8.debug-layer-clean");

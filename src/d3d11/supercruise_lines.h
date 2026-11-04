@@ -42,8 +42,9 @@ constexpr uint64_t kUiPsSpaceDust = 0xDBF1725726018F52ull;
 // NORMAL-SPACE DUST: CONFIRMED by the Steam flight of v0.19.0-38-g7f22b141, 2026-10-10 17:01 (toggling off withheld it,
 // "normal space 1 draw(s)", and the specks went). vs E904D334BC8B11EA / ps 095030F27D2C362A. Census 2026-10-10 16:40:44:
 // a non-indexed Draw of 3072 vertices (512 quads), one instance, triangle list, additive (SRC_ALPHA / ONE) into the lit
-// HDR scene target, depth tested with no write. Used only by spaceDustSkip (particle_fix.cpp): NOT in the UI-layer
-// family rule (ui_layer_math.h).
+// HDR scene target, depth tested with no write. Used by spaceDustSkip (particle_fix.cpp) and, since 2026-11-03, by the UI-layer
+// family rule (ui_layer_math.h, UiLayerFamily::kNormalSpaceDust): the specks are taken into the HDR layer as they are, in VR and in
+// flat, so the upscaler's history cannot smear them.
 constexpr uint64_t kVsNormalSpaceDust = 0xE904D334BC8B11EAull;
 constexpr uint64_t kPsNormalSpaceDust = 0x095030F27D2C362Aull;
 

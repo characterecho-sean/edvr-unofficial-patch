@@ -23,7 +23,6 @@
 - **Build 4 (#185, `c86670bd`; design and reviews in "Build 4: the draw path's
   own cost"):** inlined first tests, a hot `State` block, the map bounce gated,
   the hologram pass by VS bit, own time in the analyzer. Item 3 dropped (#184).
-  Temporary: item 7's line.
 - **Build 4 flown (2026-11-03, "Flight 2026-11-03 (build 4)"):** passed. Own
   time per full-path draw 349 to 304 ns; 0.45 ms a frame at build 3's draw
   count without Map/Unmap (0.60 with). Heavier scene (17,148 draws a frame
@@ -44,8 +43,9 @@
   2-3 removed. Argon agreed; Opus approved on re-review. Spec #191,
   `d5135e52`. Flown 2026-11-04: S2 cut eye-memo misses 45% (about 0.08 ms);
   S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
-  Closing build (#194, `a7941eb0`): S1 and the temporary lines out,
-  installed. Next: check flight, then the PR.
+  Closing build (#194, `a7941eb0`): S1 and the temporary lines out. Flown
+  2026-11-04: no regression; F95c's NEVER APPLIED is the scene, not the build.
+  Arc total about 1.6-1.75 ms a frame. Next: PR #166, merged with `main`.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3361,3 +3361,57 @@ not fixed (tests only, each would cost another build):
   `scrim_metadata_test`.
 - `gate_test.cpp:1698`: the scan for removed S1 names skips subfolders of
   `src` (`fsr`, `smaa`, `plugins`), which are clean today.
+
+## Flight 2026-11-04 (closing build)
+
+Build `a7941eb0` (log `edvr_gfx_20261104_130625.log`, `--expect-build
+a7941eb0` matches; HEAD was a docs-only commit later), the L2 spot, standing
+still, DLAA, one 100 s capture (`profile-closing\`, notes outside the repo:
+`per_draw.py`). Position at the capture's start matches builds 3-6 to six
+decimals of a degree; heading within 3 degrees.
+
+- **Composites 0, `ui depth totals:` 9.3 a frame:** both pass.
+- **`--health`: one NEVER APPLIED, head in the shadows (F95c); exits 3.** It
+  fails the criterion as written, and the cause is the scene, not this build.
+  The F95c code is byte-identical to build 5, which read 12 head and shadow-view
+  pairs a call. Across the arc the same spot flies in two states: 12 pairs at
+  about 16,000-18,000 draws a frame, and 0 pairs at about 11,000-14,000 (build 2's
+  11:24 flight on 2026-11-03, build 3, this one). The 0-pair state also lacks
+  the `0x4010` and `0x4020` shadow views and sits near 185 `weapon_motion`
+  skips a frame, against about 3,870. What selects the state is not known.
+- **Own time per full-path draw: 292.9 ns (SE 5.2), 250.5 without Map/Unmap;**
+  build 6 283.3 (SE 2.5) and 246.1. The difference is 1.7 of its standard
+  errors, and 4 ns without Map/Unmap, across different scenes: not a regression
+  beyond noise. Own time 4.07 ms a frame. Draws a frame are estimated at 13,933
+  from the tee counts, because the second `draw mask:` window runs past the
+  capture into the exit from the game. Windows 5-6 are excluded: own samples fell to a third while
+  tee calls held, and the cause is not known.
+
+- ruled out: removing S1 as the cause of F95c's NEVER APPLIED, because the same
+  0-pair state appears in builds 2 and 3, and on `e1606a23` before the arc.
+
+**The arc's saving.** Sum of what each flight measured, ms a frame: build 2's
+byte 0.6, build 3's copy 0.19, build 4 0.45-0.60, build 5 0.34; build 6 net 0.
+About 1.6-1.75 ms, on a cycle of about 32-36 ms. Like for like since build 3,
+in the 0-pair state at about the same draws (13,480 and 13,933): own time 4.72
+to 4.07 ms, R1 23.8 to 22.4, cycle 33.8 to 31.7. Build 2's 0-pair flight (14,076 draws) read R1 26.1 and
+cycle 35.8; most of that wider gap is not attributed to this arc, because the game's own time also moves between sessions.
+
+## Merged with `main` (2026-11-04)
+
+`origin/main` `859cde44` merged for PR #166: 248 commits since `e1606a23`,
+conflicts in six files. Full build green on the merged tree; not flown. A fresh
+Opus read of the merge for silent collisions found none beyond these three,
+which would have compiled and passed:
+- **Depth writer probe:** `pixelProbeLive` required `rtv0Eye`, but the probe's
+  depth-only draws have no eye colour, so it also tests
+  `depthWriterWantsDraws()`.
+- **SRV turret HUD:** upstream's new gate term became the holder
+  `SrvTurretHud` (29 terms).
+- **Normal-space dust:** `kVsNormalSpaceDust` added to
+  `uiLayerFamilyHdrVsMayWant`, or the may-want byte would skip the family.
+
+Three rigs' text pins moved to the merged forms (`sharp_weapons_test`,
+`depth_scene_pick_test`, `srv_turret_hud_test`). Noted, not changed: the cockpit
+glass overlay's second draw calls the real draw directly, so `draw reissue CPU:`
+does not count it.

@@ -40,6 +40,13 @@ struct StereoHiddenArea {
   uint32_t indexCount = 0;
   uint64_t revision = 0;
 };
+// F206: the ADS view circle (src\common\view_circle.h; src\openxr\scope_circle.h) is the full-detail scope's alone: black outside a circle about the sight in each eye, drawn over that eye's finished
+// image exactly while the right eye's mirror strip is (so with the bars it hides), by the mirror's own weight. tc[e] is the sight's far point as tangents of eye e's own view (0 the left); the
+// radius is the renderer's: the widest that keeps the bars in the black, worked out every frame. Absent, off, or no mirror: no pass, and both eyes are the images the renderer has always drawn.
+struct StereoViewCircle {
+  bool on = false;
+  float tc[2][2] = {};
+};
 // F106: what the renderer did with the left eye's share in its last renderCaptured call, for the host's per-press line. coverage and coverageWhole (eye_share.h,
 // coverageOf) are computed again only when the relative rotation, a fov, a placement or the mask changes, not every frame.
 struct StereoShareFacts {
@@ -53,6 +60,14 @@ struct StereoShareFacts {
   // and mirrorWidth the share of the right eye's width it covered on its middle row (the columns at least half black), 0..1.
   bool leftBlacked = false, mirrorDrawn = false;
   float mirrorWidth = 0.0f;
+  // F206: the view circle was drawn in both eyes / asked (the request on with the mirror drawn) and refused (the centre or the views unusable, or the radius that hides the bars too small to be a
+  // view). The radius it drew (degrees), the nearest edge of what the other eye covers it was worked from (the radius plus the margin and half the band; 0 when not worked out), the weight it was
+  // drawn by (the mirror's; 0 when not asked) and its centre in each eye's image: left u, v then right u, v (fractions, v down).
+  bool circleDrawn = false, circleRefused = false;
+  float circleRadiusDeg = 0.0f, circleEdgeDeg = 0.0f, circleWeight = 0.0f, circleCentreUv[4]{};
+  // F210b: the pitch the centre was turned by (degrees, + up; the middle of the field vertically, scope_circle.h fieldMiddleRad) and the field's up and down angles it is the middle of (the mean over
+  // both eyes, degrees, down negative). 0 and the field's own angles when not asked.
+  float circlePitchDeg = 0.0f, circleFieldUpDeg = 0.0f, circleFieldDownDeg = 0.0f;
 };
 
 struct StereoDispatch {
@@ -107,12 +122,20 @@ class D3D11Stereo final {
   // placement, inside its hidden area, the mask built from rightHidden) the left pixel keeps its own image, over a band of eye_share.h's kBandDeg. Exactly 0 (and
   // anything that is not a number or is negative) runs no extra pass, so the image is the one this renderer has always drawn, bit for bit. The layer's views stay each
   // eye's own. Like the fade it is an argument of each draw, not a state of the renderer; shareFacts() says what the call did with it.
+  // seatOrigin (F189, #144; the same on renderSkybox and renderNotice): the views are in SEATED coordinates, the seated space being the natural space moved by this origin
+  // (seat_transform.h), and the layer's space is the natural one. When given, each layer view's pose is toNatural(*seatOrigin, view pose), so the physical pose of the
+  // layer is the one a reference space made at that origin would have given it. Null leaves the views' poses as they are (the space handed in is then the one they were
+  // located in). Only the poses the layer hands the runtime change: the renderer's own use of the views (the share, the plugins' frame, the sky's rotation) stays in the
+  // seated numbers it was given.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false);
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false,
+                          const XrPosef* seatOrigin = nullptr, const StereoViewCircle* circle = nullptr);
+  // circle (F206, StereoViewCircle above): with it on and the mirror drawn each eye gets one more draw of the share shader in its circle mode, over its finished image, before the fade, by the
+  // mirror's weight; the share and the mirror are drawn as they were and the circle goes over them. Nothing else changes, so with no circle (or no mirror) both eyes are bit for bit what they were.
   // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
   // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
   // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
@@ -124,13 +147,13 @@ class D3D11Stereo final {
   // is the image it always was. The weight is the left strip's, so both edges come and go together.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
-                        XrCompositionLayerProjection&, float fade = 0.0f);
+                        XrCompositionLayerProjection&, float fade = 0.0f, const XrPosef* seatOrigin = nullptr);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the
   // notice's text is copied in with its centre on that eye's optical centre, found from the view's own fov (flat_notice_placement.h).
   // text false draws the same black frame with no text: the eye images are cleared and nothing is copied in.
   // Same swapchain handling as renderSkybox: acquire, wait, draw, submit, release, for each eye. Every path releases what it acquired.
   // The renderer stays ready whatever this returns, except a GPU submit failure, which leaves it unready like any stereo failure.
-  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&, bool text = true);
+  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&, bool text = true, const XrPosef* seatOrigin = nullptr);
   // True when the notice's face is the fallback (Segoe UI, not Bahnschrift), as of the current notice texture.
   bool noticeFontFallback() const { return noticeFallback_; }
   // The text's format is one this renderer can convert it to (the four it chooses from).

@@ -118,3 +118,10 @@
 0x51AA500 data   #   PreviewIface
 0x51AA388 data   #   PreviewObject
 0x55999C0 data   # completed-mission surface model vtable (native_on_foot_menu_surface.h)
+#
+# Vehicle rig (issue 186): ICameraTargetShip::SetTarget, the vehicle-change event vehicle_rig.cpp hooks.
+0x1096640 code   # vehicle_rig.cpp: SetTarget(this, handle)
+0x5F05D38 data   # vehicle_rig.cpp: the IKinematicRig token (a u32)
+0x5F2F274 data   # the vehicle modules token (a u32)
+0x55956B0 data   # the IKinematicRig concrete vtable
+0x559CF58 data   # the vehicle modules concrete vtable

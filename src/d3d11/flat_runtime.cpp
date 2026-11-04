@@ -69,6 +69,9 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "cockpit_glass.h"
+#include "vehicle_frame.h"
+#include "vehicle_rig.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
@@ -849,6 +852,25 @@ bool flatRuntimeMapOpenFrame() {
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
+// The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
+// journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
+// (known and not on foot); the last gate seen is what the 30 s line reports.
+static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
+static void fillVehicleFrame(FlatMonoResolveFrame& f) {
+    bool onFoot=false;
+    const bool known=journalFlatOnFoot(&onFoot);
+    g_vehicleGateSeen=vframe::gate(known,onFoot);
+    f.vehicleFrame=false;
+    if(g_vehicleGateSeen!=vframe::Gate::kOn)return;
+    VehicleFrameRead frame;
+    if(vehicleRigFrameTake(engineVelocityPresentClock(),&frame)!=vframe::Why::kOk)return;
+    if(!vframe::useFrame(known,onFoot,true))return;
+    for(int i=0;i<3;++i){std::memcpy(&f.vehiclePosition[0][i],&frame.frame.now.pos[i],4);std::memcpy(&f.vehiclePosition[1][i],&frame.frame.prev.pos[i],4);}
+    for(int i=0;i<2;++i){f.vehicleQuat[0][i]=frame.frame.now.quat[i];f.vehicleQuat[1][i]=frame.frame.prev.quat[i];}
+    std::memcpy(f.vehicleSphere,frame.sphere,sizeof(f.vehicleSphere));
+    f.vehicleFrame=true;
+}
+
 static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
     if (f.reset) return;
     State::CameraOriginWindow& o = s.origin;
@@ -1252,9 +1274,14 @@ struct ReplayQueryObserver {
         Ptr<ID3D11DeviceContext> context;
         FlatReplayQueryTracker tracker;
         Ptr<ID3D11Asynchronous> holds[64];
+        bool escapeLogged=false;   // log only: the tracker's first escape has been written (flat_replay_query_reject.h)
+        bool ignoredLogged=false;  // log only: the first unmatched timing End has been written
+        bool staleLogged=false;    // log only: the first stale timing Begin has been written
     } contexts[8];
     std::mutex mutex;
     bool overflow=false;
+    bool started=false;        // log only: the first observed call has been written
+    ULONGLONG firstTick=0;     // GetTickCount64 at that call
     Context* find(ID3D11DeviceContext* ctx) {
         for(auto& entry:contexts)if(entry.context.Get()==ctx)return &entry;
         for(auto& entry:contexts)if(!entry.context) { entry.context=ctx;return &entry; }
@@ -2879,7 +2906,9 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     bool shadersMatch = false;
     if (cs) { s.context->CSGetShader(&actualCs,nullptr,nullptr); shadersMatch=lookupShaderHash(actualCs.Get())==cs; }
     else { s.context->VSGetShader(&actualVs,nullptr,nullptr); s.context->PSGetShader(&actualPs,nullptr,nullptr);
-        shadersMatch=lookupShaderHash(actualVs.Get())==vs && lookupShaderHash(actualPs.Get())==ps; }
+        // visual.cockpit_glass = legacy swaps the canopy's pixel shader at the bind, so the actual one is EDVR's: that is still the game's canopy. Without this the F10 audit, the one
+        // path that reaches here under Upstream ownership, took the swap for a modded context and held the route in observation for the whole 900-frame arm (issue 193).
+        shadersMatch=lookupShaderHash(actualVs.Get())==vs && (lookupShaderHash(actualPs.Get())==ps || cockpitGlassReplacedHash(actualPs.Get())==ps); }
     if (!shadersMatch) {
         if(audit) { ++s.projectionMissing;projectionDetail(s,vs,ps,cs,100,"actual-shader-mismatch"); }
         // Local refusal only on the draw path (cs==0); the dispatch path
@@ -4811,6 +4840,20 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
         {
+            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root): every 30 s (every sixth of these windows), zeros included, so a gate that never opens cannot hide.
+            // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
+            // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
+            static unsigned vehicleWindows=0;
+            if(++vehicleWindows%6==0) {
+            VehicleFrameWindow vw;
+            vehicleRigFrameWindow(&vw);
+            Log::get().note("flat vehicle frame 30s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,(unsigned long long)vw.fromOlder,
+                (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
+                !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
+            }
+        }
+        {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
             Log::get().note("flat steady detail 5s: steady-detail=on depth-check=%llu/%llu; a stale-slot pixel takes the camera term only where "
                             "last frame's depth confirms it (ran/skipped resolves this window)",
@@ -4832,12 +4875,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu vehicle-frame=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
-                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],"off",
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],(unsigned long long)steady.skinned,s.refusalView?"on":"off",
                     used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
@@ -5142,29 +5185,109 @@ void flatRuntimeClearBindings() {
         flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);
     }
 }
+// Log only (2026-11-03): what the observer saw that the log says once. Filled under the observer's lock, written after it.
+struct ReplayQueryNote {
+    bool start=false,escape=false;
+    const char* call="?";
+    unsigned long long context=0;
+    uint32_t thread=0,cause=0,queryCode=kFlatQueryUnheld,kind=0,open=0;
+    uint64_t begins=0,ends=0,sinceMs=0;
+    bool ignored=false;                         // the first End of a timing query with no Begin seen (not an escape since 2026-11-03)
+    uint32_t ignoredCode=kFlatQueryUnheld;
+    uint64_t ignoredBegins=0,ignoredEnds=0,ignoredSinceMs=0;
+    bool stale=false;                           // the first Begin of a timing query already open as a timing query (not an escape since 2026-11-03)
+    uint32_t staleCode=kFlatQueryUnheld;
+    uint64_t staleBegins=0,staleEnds=0,staleCount=0,staleUnmatched=0,staleSinceMs=0;
+};
+// The D3D11_QUERY of an asynchronous object, read back once for a log line (never on the hot path); kFlatQueryUnheld when it cannot be read.
+static uint32_t replayQueryCodeOf(ID3D11Asynchronous* async) {
+    Ptr<ID3D11Query> q;
+    if(!async || FAILED(async->QueryInterface(IID_PPV_ARGS(&q)))) return kFlatQueryUnheld;
+    D3D11_QUERY_DESC qd{};q->GetDesc(&qd);
+    return static_cast<uint32_t>(qd.Query);
+}
+static void replayQueryTakeNote(ReplayQueryObserver& observer,ReplayQueryObserver::Context& entry,ID3D11DeviceContext* ctx,ID3D11Asynchronous* async,
+    const char* call,ReplayQueryNote& note) {
+    const ULONGLONG now=GetTickCount64();
+    if(!observer.started) {
+        observer.started=true;observer.firstTick=now;
+        note.start=true;note.call=call;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+    }
+    if(entry.tracker.uncertain && !entry.escapeLogged) {
+        entry.escapeLogged=true;
+        note.escape=true;note.call=call;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.cause=static_cast<uint32_t>(entry.tracker.firstCause);note.kind=static_cast<uint32_t>(entry.tracker.firstCauseKind);
+        note.begins=entry.tracker.causeBegins;note.ends=entry.tracker.causeEnds;note.open=entry.tracker.causeOpen;
+        note.sinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        // The query's own kind, read back once (never on the hot path): the object of the call that caused the escape.
+        if(async && entry.tracker.firstCauseIdentity==async) note.queryCode=replayQueryCodeOf(async);
+    }
+    if(entry.tracker.unmatchedTimingEnds>0 && !entry.ignoredLogged) {
+        entry.ignoredLogged=true;
+        note.ignored=true;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.ignoredBegins=entry.tracker.begins;note.ignoredEnds=entry.tracker.ends;note.ignoredSinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        note.ignoredCode=replayQueryCodeOf(async);
+    }
+    if(entry.tracker.staleTimingBegins>0 && !entry.staleLogged) {
+        entry.staleLogged=true;
+        note.stale=true;note.context=static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ctx));note.thread=GetCurrentThreadId();
+        note.staleBegins=entry.tracker.begins;note.staleEnds=entry.tracker.ends;note.staleCount=entry.tracker.staleTimingBegins;
+        note.staleUnmatched=entry.tracker.unmatchedTimingEnds;note.staleSinceMs=static_cast<uint64_t>(now-observer.firstTick);
+        note.staleCode=replayQueryCodeOf(async);
+    }
+}
+static void replayQueryWriteNote(const ReplayQueryNote& note) {
+    char text[640];
+    if(note.start) {
+        flatQueryTrackerFormatStart(text,sizeof(text),note.call,note.context,note.thread);
+        Log::get().note("%s",text);
+    }
+    if(note.escape) {
+        flatQueryTrackerFormatEscape(text,sizeof(text),note.cause,note.call,note.queryCode,note.kind,note.thread,note.context,note.begins,note.ends,note.open,note.sinceMs);
+        Log::get().note("%s",text);
+    }
+    if(note.ignored) {
+        flatQueryTrackerFormatIgnoredTimingEnd(text,sizeof(text),note.ignoredCode,note.thread,note.context,note.ignoredBegins,note.ignoredEnds,note.ignoredSinceMs);
+        Log::get().note("%s",text);
+    }
+    if(note.stale) {
+        flatQueryTrackerFormatStaleTimingBegin(text,sizeof(text),note.staleCode,note.thread,note.context,note.staleBegins,note.staleEnds,note.staleCount,note.staleUnmatched,note.staleSinceMs);
+        Log::get().note("%s",text);
+    }
+}
 void flatRuntimeReplayQueryBegin(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
     if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
         const auto kind=replayQueryKind(async);
-        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
-        auto* entry=observer.find(ctx);if(!entry)return;
-        entry->tracker.begin(async,kind);
-        // Keep the object's identity alive for the whole bracket. A released
-        // query's address could otherwise be reused by an unrelated query.
-        if(async) for(size_t i=0;i<64;++i)
-            if(entry->tracker.active[i].identity==async && !entry->holds[i]) {
-                entry->holds[i]=async; break;
-            }
+        ReplayQueryNote note;
+        {
+            auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+            auto* entry=observer.find(ctx);if(!entry)return;
+            entry->tracker.begin(async,kind);
+            // Keep the object's identity alive for the whole bracket. A released
+            // query's address could otherwise be reused by an unrelated query.
+            if(async) for(size_t i=0;i<64;++i)
+                if(entry->tracker.active[i].identity==async && !entry->holds[i]) {
+                    entry->holds[i]=async; break;
+                }
+            replayQueryTakeNote(observer,*entry,ctx,async,"Begin",note);
+        }
+        if(note.start||note.escape||note.ignored||note.stale)replayQueryWriteNote(note);
     }
 }
 void flatRuntimeReplayQueryEnd(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
     if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
         const auto kind=replayQueryKind(async);
-        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
-        auto* entry=observer.find(ctx);if(!entry)return;
-        size_t release=64;
-        for(size_t i=0;i<64;++i)if(entry->tracker.active[i].identity==async) { release=i;break; }
-        entry->tracker.end(async,kind);
-        if(release<64)entry->holds[release].Reset();
+        ReplayQueryNote note;
+        {
+            auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+            auto* entry=observer.find(ctx);if(!entry)return;
+            size_t release=64;
+            for(size_t i=0;i<64;++i)if(entry->tracker.active[i].identity==async) { release=i;break; }
+            entry->tracker.end(async,kind);
+            if(release<64)entry->holds[release].Reset();
+            replayQueryTakeNote(observer,*entry,ctx,async,"End",note);
+        }
+        if(note.start||note.escape||note.ignored||note.stale)replayQueryWriteNote(note);
     }
 }
 void flatRuntimeUnknown() {
@@ -7011,7 +7134,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
             };
-            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
+            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; uiBars = flatUiLayerDecidedBars(); uiBarsVertices = count; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
             else if (ask == FlatUiLayerAsk::kRefused) { if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
@@ -7176,6 +7299,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm=true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -7620,6 +7745,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm = true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {
@@ -7782,8 +7909,13 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
     // fix.ui_quality's flat layer (flat_ui_layer.h), right before the game's issue: a taken HUD draw is bound into the
     // layer (false: it goes to H as always), and the output copy gets this frame's HUD composited over what it reads.
     if(uiTake) {
+        // The supercruise bars: the game's own viewport is read BEFORE the layer's Begin remaps it to the layer's (the strip's tent is one render pixel).
+        if(uiBars)flatUiLayerBarsPrepare(ctx);
         uiTaken=flatUiLayerBegin(ctx);
         flatUiLayerNoteIssue(uiVs,uiPs,uiTaken);
+        // ... and the strip shader binds inside the layer's bracket, with the remapped viewport bound. A false Begin leaves the game's state as it was: the draw
+        // goes into the layer as the plain lines the game drew (the module counts it).
+        if(uiTaken&&uiBars)uiBarsBound=flatUiLayerBarsBegin(ctx,uiBarsVertices);
     }
     if(uiComposite) {
         auto& s=state();
@@ -8080,6 +8212,8 @@ void FlatRuntimeDrawScope::endActualDraw() {
     if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardReturn(state(),forwardIssue);
     if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.
+    // The bars' strip shader, constants and rasterizer state first (the game's geometry stage back), then the layer's own restore.
+    if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
@@ -8131,6 +8265,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return;
     // A taken HUD draw whose End never ran (the hook did not reach endActualDraw): the game's state back from the layer.
+    if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
     FlatComputeInternalScope guard;

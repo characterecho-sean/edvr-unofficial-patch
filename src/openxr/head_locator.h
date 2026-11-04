@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <openxr/openxr_platform.h>
 #include "geometry_snapshot.h"
+#include "seat_transform.h"
 #include <cmath>
 #include <limits>
 
@@ -88,6 +89,28 @@ class HeadLocator {
     if(!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
     if(!view||!origin)return XR_ERROR_HANDLE_INVALID;
     return finish(d,view,origin,target,out,exact,stage);
+  }
+  // F189: the same three locates in a frame's seated space (seat_transform.h). The locate is made against the natural space the SeatedFrame names and the located pose is
+  // turned by that frame's origin, so the numbers are the ones a reference space made at that origin would have given. A locate of the natural space itself (the
+  // overloads above, given a space) is never turned.
+  XrResult locate(const LocatorDispatch& d,XrInstance instance,XrSpace view,const SeatedFrame& seat,
+                  float prediction,XrSpaceLocation& out,XrTime* exact=nullptr,CounterNow now=nullptr,
+                  HeadLocatorStage* stage=nullptr,XrTime fallbackNow=0) const {
+    const XrResult r=locate(d,instance,view,seat.space,prediction,out,exact,now,stage,fallbackNow);
+    if(r==XR_SUCCESS)seatxf::locationToSeated(seat.origin,out);
+    return r;
+  }
+  XrResult locateFrom(const LocatorDispatch& d,XrSpace view,const SeatedFrame& seat,XrTime time,float prediction,XrSpaceLocation& out,
+                      XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {
+    const XrResult r=locateFrom(d,view,seat.space,time,prediction,out,exact,stage);
+    if(r==XR_SUCCESS)seatxf::locationToSeated(seat.origin,out);
+    return r;
+  }
+  XrResult locateAt(const LocatorDispatch& d,XrSpace view,const SeatedFrame& seat,XrTime target,XrSpaceLocation& out,
+                    XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {
+    const XrResult r=locateAt(d,view,seat.space,target,out,exact,stage);
+    if(r==XR_SUCCESS)seatxf::locationToSeated(seat.origin,out);
+    return r;
   }
  private:
   static XrResult predictionOffset(float prediction,XrTime& offset) {

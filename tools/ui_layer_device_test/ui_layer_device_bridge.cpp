@@ -194,5 +194,190 @@ void crispProbeArm(bool headerFlag) {
 }
 bool crispProbeRecordPending() { return g_crispPending.pending; }
 
+// ---- The back-off of the HDR HUD path and the weapons layer (2026-11-03). Each returns null when every step held, else the step that did not.
+// They read the production state directly and move the production clock (g_backOffSkewMs) instead of waiting.
+
+void backOffReset(RuntimeProfile profile) {
+    runtimeProfileSet(profile);
+    g_backOffSkewMs = 0;
+    g_flatBackOffStep = 0;
+    g_flatBackOffLastMs = 0;
+    g_flatBackOffs = 0;
+    g_flatBackOffUntilMs = g_crispBackOffUntilMs = g_weaponsBackOffUntilMs = 0;
+    g_crispStoodDown = g_weaponsStoodDown = g_stoodDown = false;
+    for (Eye& e : g_eye) { e.hdrMissStreak = 0; e.wMissStreak = 0; }
+    Config& cfg = Config::get();
+    cfg.set("fix.temporal_aa", "dlss");
+    cfg.set("fix.ui_quality", "100");
+    uiLayerConfigure(cfg);
+}
+
+// Milliseconds left on a timer (0 when none is set or it has passed).
+uint64_t backOffLeft(uint64_t until) {
+    const uint64_t now = backOffNowMs();
+    return until > now ? until - now : 0;
+}
+
+// The 30-frame miss streak of the HUD layer in VR stands the HDR HUD path down for 2 s, and the frame boundary re-arms it once those 2 s have passed (not before); the
+// second failure in a row backs off for 4 s and the third for 8. The first failure goes through the production draw path (missingConsumerLeavesCurrentDrawStock).
+const char* vrHudPathBacksOffAndRearms(ID3D11DeviceContext* ctx) {
+    backOffReset(RuntimeProfile::Vr);
+    const uint64_t expectMs[3] = {2000, 4000, 8000};
+    for (int round = 0; round < 3; ++round) {
+        if (!missingConsumerLeavesCurrentDrawStock(ctx)) return "the 30th consecutive HUD miss did not stand the path down at the draw";
+        if (!g_crispStoodDown || uiLayerCrispOn()) return "stood down, but the path still reads as live";
+        const uint64_t left = backOffLeft(g_crispBackOffUntilMs);
+        if (left > expectMs[round] || left + 500 < expectMs[round]) return "the back-off is not the ladder's length for this failure (2 s, then 4, then 8)";
+        if (g_flatBackOffUntilMs) return "VR set the flat layer's timer";
+        g_backOffSkewMs += expectMs[round] - 300;
+        uiLayerFrameBoundary(ctx);
+        if (!g_crispStoodDown || uiLayerCrispOn()) return "re-armed before its back-off passed";
+        g_backOffSkewMs += 600;
+        uiLayerFrameBoundary(ctx);
+        if (g_crispStoodDown || !uiLayerCrispOn() || g_crispBackOffUntilMs) return "not re-armed at the first frame boundary after its back-off";
+        if (g_eye[0].hdrMissStreak != 0 || g_eye[0].hdrDraws != 0) return "re-armed with the old streak or content";
+        uiLayerFrameBoundary(ctx);   // a boundary with nothing pending changes nothing
+        if (g_crispStoodDown) return "a later boundary stood the path down again";
+    }
+    return nullptr;
+}
+
+// The ladder starts over once the layer has run five clean minutes since its last back-off.
+const char* backOffLadderRestartsAfterCleanMinutes() {
+    backOffReset(RuntimeProfile::Vr);
+    crispStandDown("first");
+    if (backOffLeft(g_crispBackOffUntilMs) > 2000) return "the first back-off is not 2 s";
+    g_backOffSkewMs += 2100;
+    g_crispStoodDown = false;
+    crispStandDown("second");
+    if (backOffLeft(g_crispBackOffUntilMs) <= 2000) return "the second back-off did not grow";
+    g_backOffSkewMs += kFlatBackOffCleanMs + 1000;
+    g_crispStoodDown = false;
+    crispStandDown("after five clean minutes");
+    return backOffLeft(g_crispBackOffUntilMs) <= 2000 ? nullptr : "the ladder did not start over after five clean minutes";
+}
+
+// The sharp weapons layer backs off the same way in both profiles: down for 2 s, re-armed at the frame boundary after, 4 s the second time.
+const char* weaponsBackOffAndRearm(ID3D11DeviceContext* ctx, RuntimeProfile profile) {
+    backOffReset(profile);
+    const uint64_t expectMs[2] = {2000, 4000};
+    for (int round = 0; round < 2; ++round) {
+        if (!uiLayerWeaponsLive()) return "the weapons half is not live before the failure";
+        weaponsStandDown("a test failure");
+        if (!g_weaponsStoodDown || uiLayerWeaponsLive()) return "stood down, but the weapons half still reads as live";
+        const uint64_t left = backOffLeft(g_weaponsBackOffUntilMs);
+        if (left > expectMs[round] || left + 500 < expectMs[round]) return "the weapons back-off is not the ladder's length for this failure";
+        g_backOffSkewMs += expectMs[round] - 300;
+        uiLayerFrameBoundary(ctx);
+        if (!g_weaponsStoodDown) return "re-armed before its back-off passed";
+        g_backOffSkewMs += 600;
+        uiLayerFrameBoundary(ctx);
+        if (g_weaponsStoodDown || !uiLayerWeaponsLive() || g_weaponsBackOffUntilMs) return "not re-armed at the first frame boundary after its back-off";
+    }
+    return nullptr;
+}
+
+const char* weaponsBackOffAndRearmVr(ID3D11DeviceContext* ctx) { return weaponsBackOffAndRearm(ctx, RuntimeProfile::Vr); }
+const char* weaponsBackOffAndRearmFlat(ID3D11DeviceContext* ctx) { return weaponsBackOffAndRearm(ctx, RuntimeProfile::Flat); }
+
+// The flat profile's HDR HUD path keeps its own timer and its own re-arm, which also lifts the layer's stand-down; VR's timer is not used.
+const char* flatHudPathBackOffUnchanged(ID3D11DeviceContext* ctx) {
+    backOffReset(RuntimeProfile::Flat);
+    crispStandDown("a flat test failure");
+    if (!g_crispStoodDown || g_crispBackOffUntilMs) return "the flat profile used VR's HDR HUD timer";
+    const uint64_t left = backOffLeft(g_flatBackOffUntilMs);
+    if (left > 2000 || left + 500 < 2000) return "the flat back-off is not 2 s";
+    g_backOffSkewMs += 2600;
+    uiLayerFrameBoundary(ctx);
+    if (g_flatBackOffUntilMs) return "the flat profile's timer was not cleared by the frame boundary after its back-off";
+    return !g_crispStoodDown ? nullptr : "the flat profile cleared its timer but the HDR HUD path is still stood down";
+}
+
+// A live change of fix.ui_quality clears a stood-down weapons layer and HDR HUD path at once, and their back-offs.
+const char* toggleClearsBothStandDowns() {
+    backOffReset(RuntimeProfile::Vr);
+    weaponsStandDown("a test failure");
+    crispStandDown("a test failure");
+    if (!g_weaponsStoodDown || !g_crispStoodDown) return "(setup) both did not stand down";
+    Config& cfg = Config::get();
+    cfg.set("fix.ui_quality", "off");
+    uiLayerConfigure(cfg);
+    cfg.set("fix.ui_quality", "100");
+    uiLayerConfigure(cfg);
+    if (g_weaponsStoodDown || !uiLayerWeaponsLive()) return "the toggle did not clear the weapons stand-down";
+    if (g_crispStoodDown || !uiLayerCrispOn()) return "the toggle did not clear the HDR HUD path's stand-down";
+    if (g_weaponsBackOffUntilMs || g_crispBackOffUntilMs) return "the toggle left a back-off timer running";
+    return nullptr;
+}
+
+// The instrument's budget: a lost HUD layer prints its lines for the episode and no more, and the next episode (a re-arm) gets a fresh 24.
+const char* hudLostLinesAreBoundedPerEpisode(ID3D11DeviceContext* ctx) {
+    backOffReset(RuntimeProfile::Vr);
+    g_hudLostLines = 0;
+    g_hudLostEpisodes = 1;
+    const Eye& e = g_eye[0];
+    for (uint32_t i = 0; i < 40; ++i) noteHudLost(0, e, 100 + i);
+    if (g_hudLostLines != kHudLostLines) return "the episode's line budget is not 24";
+    g_eye[0].hdrMissStreak = 0;
+    crispStandDown("a test failure");
+    g_backOffSkewMs += 2600;
+    uiLayerFrameBoundary(ctx);
+    if (g_hudLostLines != 0 || g_hudLostEpisodes != 2) return "the re-arm did not start a new episode";
+    return nullptr;
+}
+
+// The lost-HUD instrument names each texture the unmatched tonemap-shaped draw read, with its description; with no lines left in the episode, or under the flat
+// profile, it reads nothing (so the sighting stays the pointer alone).
+const char* toneSlotsDescribeTheReadTextures(ID3D11DeviceContext* ctx) {
+    backOffReset(RuntimeProfile::Vr);
+    g_hudLostLines = 0;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev) return "(setup) no device";
+    const auto make = [&](UINT w, UINT h, DXGI_FORMAT f, UINT bind, Ptr<ID3D11Texture2D>* tex, Ptr<ID3D11ShaderResourceView>* srv) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = w; d.Height = h; d.MipLevels = d.ArraySize = 1; d.Format = f; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = bind;
+        return SUCCEEDED(dev->CreateTexture2D(&d, nullptr, tex->ReleaseAndGetAddressOf())) && SUCCEEDED(dev->CreateShaderResourceView(tex->Get(), nullptr, srv->ReleaseAndGetAddressOf()));
+    };
+    Ptr<ID3D11Texture2D> a, b;
+    Ptr<ID3D11ShaderResourceView> sa, sb;
+    if (!make(96, 54, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, &a, &sa) ||
+        !make(64, 32, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, &b, &sb)) return "(setup) the textures could not be made";
+    ID3D11ShaderResourceView* views[2] = {sa.Get(), sb.Get()};
+    ctx->PSSetShaderResources(0, 2, views);
+
+    noteToneSight(7, a.Get(), -1, 1);
+    noteToneSightSlots(ctx);
+    ToneSight t = g_toneSights[(g_toneSightCount - 1) % 6];
+    const char* bad = nullptr;
+    if (t.nSlots != 2) bad = "the sighting did not take both bound textures";
+    else if (t.slots[0].res != a.Get() || t.slots[0].slot != 0 || t.slots[0].w != 96 || t.slots[0].h != 54 ||
+             t.slots[0].fmt != static_cast<uint32_t>(DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+             t.slots[0].bind != (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) bad = "slot 0's description is wrong";
+    else if (t.slots[1].res != b.Get() || t.slots[1].slot != 1 || t.slots[1].w != 64 || t.slots[1].h != 32 ||
+             t.slots[1].fmt != static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM) || t.slots[1].bind != D3D11_BIND_SHADER_RESOURCE) bad = "slot 1's description is wrong";
+    if (!bad) {
+        char text[760];
+        formatToneSights(text, sizeof(text));
+        if (!std::strstr(text, "96x54") || !std::strstr(text, "64x32") || !std::strstr(text, "t1 ")) bad = "the sightings line does not carry the descriptions";
+    }
+    if (!bad) {
+        g_hudLostLines = kHudLostLines;   // no lines left in this episode: the next sighting reads nothing
+        noteToneSight(8, a.Get(), -1, 1);
+        noteToneSightSlots(ctx);
+        if (g_toneSights[(g_toneSightCount - 1) % 6].nSlots != 0) bad = "a sighting with no lines left still read its textures";
+        g_hudLostLines = 0;
+    }
+    if (!bad) {
+        runtimeProfileSet(RuntimeProfile::Flat);
+        noteToneSight(9, a.Get(), -1, 1);
+        noteToneSightSlots(ctx);
+        if (g_toneSights[(g_toneSightCount - 1) % 6].nSlots != 0) bad = "the flat profile read the sighting's textures";
+        runtimeProfileSet(RuntimeProfile::Vr);
+    }
+    ctx->ClearState();
+    return bad;
+}
+
 }  // namespace devtest
 }  // namespace edvr

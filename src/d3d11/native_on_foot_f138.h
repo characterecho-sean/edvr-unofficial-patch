@@ -45,7 +45,7 @@ namespace f138 {
 // on 2823 calls); the flown bins put the camera's sink at -1 to +3.5 cm at 10 to 20 deg and +5 cm at 20 to 30. The settle's refusal (so the reference's own gate) and the weight
 // start at 20 deg; the instrument (kPitchedDeg) still counts a call from 10.
 constexpr double kWeightLoDeg = 20.0, kWeightHiDeg = 30.0;   // w: 0 up to 20 deg of aim pitch, 1 from 30 (smoothstep)
-constexpr double kSettleGateDeg = 20.0;                      // the settle refuses (nothing drawn) from this |aim pitch|; look to aim's own gate (F109, 10 deg) stays in the hook
+constexpr double kSettleGateDeg = 20.0;                      // the settle refuses (nothing drawn) from this |aim pitch|, in both modes (look to aim's own 10 deg gate, F109's, was retired in F195b)
 constexpr double kPitchedDeg = 10.0;                         // a call at this |aim pitch| or more is the instrument's
 constexpr double kStanceGuardM = 0.03;                       // the animated neck within this of the reference's: the same stance (a crouch, the fists' hunch move it)
 constexpr double kSinkMinM = -0.40, kSinkMaxM = 0.40;        // the sink added, clamped (looking down unarmed the camera rose 12 to 17 cm over the neck)
@@ -61,7 +61,7 @@ inline double smoothstep(double lo, double hi, double x) noexcept {
 inline double pitchWeight(double aimPitchDeg) noexcept {
     return std::isfinite(aimPitchDeg) ? smoothstep(kWeightLoDeg, kWeightHiDeg, std::fabs(aimPitchDeg)) : 0.0;
 }
-// Looking down under look to aim stays as flown (the F109 gate held the raise whatever the pitch): not F138's.
+// Looking down under look to aim stays as flown (F109's own gate held the raise whatever the pitch until F195b retired it; the weight stays 0 there): not F138's.
 inline bool lookToAimDown(double aimPitchDeg, bool lookToAim) noexcept { return lookToAim && aimPitchDeg < 0.0; }
 // The weight of the pitched look: the pitch's, 0 for a look down under look to aim.
 inline double weight(double aimPitchDeg, bool lookToAim) noexcept { return lookToAimDown(aimPitchDeg, lookToAim) ? 0.0 : pitchWeight(aimPitchDeg); }
@@ -322,7 +322,7 @@ struct Call {
     bool lookToAim = false, itemDrawn = false;
     Out out;
     double carriedUpCm = 0.0, carriedFwdCm = 0.0, viewOverNeckCm = 0.0;   // EDVR's carried raise (the neck reference's and F137's up), F137's forward, the view as drawn over the neck
-    bool settleRefusedAim = false;                                       // the settle refused this call for the aim's pitch (F138's gate; look to aim's is F109's, counted apart)
+    bool settleRefusedAim = false;                                       // the settle refused this call for the aim's pitch (F138/F139's gate)
 };
 struct Bin {
     uint32_t n = 0, sinkN = 0, headN = 0;
@@ -510,9 +510,9 @@ struct Mailbox {
 };
 
 // The 1 s line of a window with a pitched call (or an episode's end): the look, the camera's sink, what the raise added or why not, the reference each call used (F170) and its figures
-// (F171), what EDVR carried, INSIDE and the settle's refusals. item is the item's name as the line should say it; ltaGate is look to aim's own gate count for the second. The log's lines
+// (F171), what EDVR carried, INSIDE and the settle's refusals. item is the item's name as the line should say it (F195b: look to aim's own gate is gone, and its count with it). The log's lines
 // end at 1200 bytes, 1166 of them the message: a typical second runs to about 870 and the rig's worst one (every figure at its limit, a 74-character item) to 1163.
-inline int formatPitched(char* buf, size_t n, const Window& w, const char* item, uint32_t ltaGate) noexcept {
+inline int formatPitched(char* buf, size_t n, const Window& w, const char* item) noexcept {
     char mode[96], why[260], reference[96], detail[200];
     w.modeText(mode, sizeof(mode));
     notAppliedText(w.why, why, sizeof(why));
@@ -523,12 +523,12 @@ inline int formatPitched(char* buf, size_t n, const Window& w, const char* item,
                          "native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
                          "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
                          "measured only: an item drawn %u calls | not applied: %s; reference used (F170; the calls that chose one): %s; %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); "
-                         "the view over the neck %+.1f cm; INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times "
+                         "the view over the neck %+.1f cm; INSIDE %u of %u; the settle refused for the aim's pitch %u calls; returned to the stance's raise %u times "
                          "(refused %u, not needed %u)",
                          mode, item ? item : "none", mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
                          w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN), w.appliedN ? w.addedMax : 0.0,
                          w.appliedN, w.calls, w.measuredN, why, reference, detail, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls), w.inside, w.insideOf,
-                         w.settleRefusedAim, ltaGate, w.returned, w.returnRefused, w.notNeeded);
+                         w.settleRefusedAim, w.returned, w.returnRefused, w.notNeeded);
 }
 
 // A group's 10 s bins: "[lo,hi) n sink up fwd head" for each bin with a call, "--" where a mean has no data. Stops before cap; returns the length (0: no bin has a call).

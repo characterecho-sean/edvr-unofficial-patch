@@ -174,6 +174,15 @@ struct EliteResetBind {
     int           filesSeen;
     char          file[64];
 };
+// Any one action by its element name (2026-11-03: the SRV turret view's ToggleBuggyTurretButton shares HMDReset's parser). The HMDReset functions below are this with the name fixed.
+bool eliteBindsAction(const char* elementName, EliteResetBind* out);
+bool eliteBindsActionDir(const char* elementName, const wchar_t* dir, EliteResetBind* out);
+bool eliteBindsActionIn(const char* elementName, const char* text, size_t len, EliteResetBind* out);
+// The same for the SRV's bind context (2026-11-03, issue 179): StartPreset.4.start holds one preset name per bind context, general, ship, SRV, on foot; the third line is the SRV's. That preset is
+// looked up in Options\Bindings (the newest maintained file of that name that has the element), then in <game dir>\ControlSchemes\<name>.binds, where a stock preset such as ConsoleX360 lives.
+// With only the old StartPreset.start, or a file of fewer than four lines, the answer is eliteBindsAction's. HMDReset and the other lookups do not use it.
+bool eliteBindsActionSrv(const char* elementName, EliteResetBind* out);
+bool eliteBindsActionSrvDir(const char* elementName, const wchar_t* dir, const wchar_t* gameDir, EliteResetBind* out);
 bool eliteBindsHmdReset(EliteResetBind* out);
 bool eliteBindsHmdResetDir(const wchar_t* dir, EliteResetBind* out);
 // The pure half, over the text of one .binds file; exposed for the smoke test.

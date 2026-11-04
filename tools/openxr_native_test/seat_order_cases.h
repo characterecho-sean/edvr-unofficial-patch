@@ -18,8 +18,8 @@ namespace seat_order_fixture {
 struct Rig {
   launch_fixture::Fixture f;
   NativeRuntimeHost& h=f.host;
-  unsigned armedCreates=0;
-  unsigned answers() const {return f.fake.creates-armedCreates;}     // seated spaces made since the rig was armed: one per answer
+  uint64_t armedSets=0;
+  unsigned answers() const {return unsigned(h.seated.originSets()-armedSets);}     // origins stored since the rig was armed: one per answer (F189: no reference space is made)
   explicit Rig(bool active,bool stage=false):f(stage) {
     using namespace launch_fixture;
     h.seatEnsureLoaded();
@@ -27,10 +27,10 @@ struct Rig {
     if(active)c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;
     h.seat.setSeat(SeatPose{1,0,0,0});
     h.seat.onContext(c,GetTickCount64());
-    h.seated.replace(xrFromSeatPose(h.seat.seat()));
+    h.seated.setOrigin(xrFromSeatPose(h.seat.seat()));
     h.currentOrigin=SeatPose{1,0,0,0};
     h.seat.noteOrigin(true);
-    armedCreates=f.fake.creates;     // counted from here: the arming replace is not an answer
+    armedSets=h.seated.originSets();     // counted from here: the arming origin is not an answer
   }
   void note(XrTime changeTime) {
     using namespace launch_fixture;
@@ -45,11 +45,11 @@ struct Rig {
     XrResult error=XR_SUCCESS;
     return h.advanceReferenceChanges(fr,error,true);
   }
-  // The pose a frame at `t` would publish from the seated space as it stands.
+  // The pose a frame at `t` would publish from the seated space as it stands: the oracle of the old seated reference space, for the origin the host holds now.
   double poseX(XrTime t) {
     using namespace launch_fixture;
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-    return locate(view(),h.seated.space(),t,&loc)==XR_SUCCESS?double(loc.pose.position.x):1e9;
+    return locateSeated(h.seated.origin(),view(),t,&loc)==XR_SUCCESS?double(loc.pose.position.x):1e9;
   }
 };
 // The state after the game's reset was answered "no press" with the stored seat (x=1) and the frame poll then saw the player's press: a late
@@ -186,19 +186,19 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     Rig r(true);auto& h=r.h;
     armLatePress(r);
     check(h.seatLatePressPending&&h.seat.seat().x==1.0,"late press: the press after the reset is pending, the stored seat still in force");
-    const unsigned creates=r.f.fake.creates;
+    const uint64_t creates=r.h.seated.originSets();
     r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
     const bool first=h.seatPoll();
     check(!first&&h.seatLatePressPending,"late press: a failed locate keeps the request pending");
-    check(h.seat.seat().x==1.0&&h.currentOrigin.x==1.0&&r.f.fake.creates==creates,"late press: ...and changed nothing");
+    check(h.seat.seat().x==1.0&&h.currentOrigin.x==1.0&&r.h.seated.originSets()==creates,"late press: ...and changed nothing");
     r.f.fake.locateResult=XR_SUCCESS;
     const bool second=h.seatPoll();
     check(second&&!h.seatLatePressPending,"late press: the retry applies the press and clears the request");
-    check(h.seat.seat().x==2.0&&h.currentOrigin.x==2.0&&r.f.fake.creates==creates+1,"late press: ...the head is the seat and the origin, one new seated space");
-    check(!h.seatPoll()&&r.f.fake.creates==creates+1&&h.seatLatePressDrops==0,"late press: once applied it is not applied again, and nothing was dropped");
+    check(h.seat.seat().x==2.0&&h.currentOrigin.x==2.0&&r.h.seated.originSets()==creates+1,"late press: ...the head is the seat and the origin, one new origin and no reference space");
+    check(!h.seatPoll()&&r.h.seated.originSets()==creates+1&&h.seatLatePressDrops==0,"late press: once applied it is not applied again, and nothing was dropped");
   }
   {   // the reset itself is rejected (the head locates but is not tracked, so no origin can be made from it), then accepted
-    // (a failed seated-space create is not a retry case: SeatedSpace::replace then stays unusable on purpose)
+    // (F189: the seated space makes no runtime call any more, so there is no failed create to retry)
     Rig r(true);auto& h=r.h;
     armLatePress(r);
     r.f.fake.flags=0;
@@ -214,8 +214,8 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     h.seatLatePressAt=GetTickCount64()-kLatePressRetryMs-1;     // the request is now older than the retry time
     check(!h.seatPoll()&&!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press expiry: past the retry time it is dropped, once");
     r.f.fake.locateResult=XR_SUCCESS;
-    const unsigned creates=r.f.fake.creates;
-    check(!h.seatPoll()&&h.seat.seat().x==1.0&&r.f.fake.creates==creates&&h.seatLatePressDrops==1,"late press expiry: a healthy poll afterwards leaves the seat alone");
+    const uint64_t creates=r.h.seated.originSets();
+    check(!h.seatPoll()&&h.seat.seat().x==1.0&&r.h.seated.originSets()==creates&&h.seatLatePressDrops==1,"late press expiry: a healthy poll afterwards leaves the seat alone");
   }
   {   // a transition window opens while it is pending: the transition's seat supersedes the press
     Rig r(true);auto& h=r.h;
@@ -244,8 +244,8 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     if(reset)h.seat.noteReset(SeatResetDecision::HonourPress,h.currentOrigin,GetTickCount64());
     check(reset&&h.currentOrigin.x==3.0,"late press supersession: the later reset set the origin at the head (x=3)");
     r.f.fake.head.position.x=4;     // the head moves on
-    const unsigned creates=r.f.fake.creates;
-    check(!h.seatPoll()&&h.currentOrigin.x==3.0&&r.f.fake.creates==creates,"late press supersession: the next poll makes no second recentre on the newer head pose");
+    const uint64_t creates=r.h.seated.originSets();
+    check(!h.seatPoll()&&h.currentOrigin.x==3.0&&r.h.seated.originSets()==creates,"late press supersession: the next poll makes no second recentre on the newer head pose");
     check(!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press supersession: the request was dropped, once");
   }
   {   // keep mode ends (a profile switch, the key off): the retry must not apply or save under game mode
@@ -257,9 +257,9 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     publishSeatContext(encodeSeatContext(game));
     h.seatSync(GetTickCount64());
     r.f.fake.locateResult=XR_SUCCESS;
-    const unsigned creates=r.f.fake.creates;
+    const uint64_t creates=r.h.seated.originSets();
     check(!h.seat.keep()&&!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press mode switch: keep to game mode drops the request");
-    check(!h.seatPoll()&&h.currentOrigin.x==1.0&&h.seat.seat().x==1.0&&r.f.fake.creates==creates,"late press mode switch: no recentre and no save followed");
+    check(!h.seatPoll()&&h.currentOrigin.x==1.0&&h.seat.seat().x==1.0&&r.h.seated.originSets()==creates,"late press mode switch: no recentre and no save followed");
   }
   {   // the seat context leaves the cockpit (a menu or a load), where the game's resets pass through
     Rig r(true);auto& h=r.h;
@@ -279,8 +279,8 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     check(!h.seatPoll()&&h.seatLatePressPending,"late press geometry: pending after a failed poll");
     ++h.geometryGeneration;
     r.f.fake.locateResult=XR_SUCCESS;
-    const unsigned creates=r.f.fake.creates;
-    check(!h.seatPoll()&&!h.seatLatePressPending&&h.seatLatePressDrops==1&&r.f.fake.creates==creates,"late press geometry: a new geometry generation drops the request");
+    const uint64_t creates=r.h.seated.originSets();
+    check(!h.seatPoll()&&!h.seatLatePressPending&&h.seatLatePressDrops==1&&r.h.seated.originSets()==creates,"late press geometry: a new geometry generation drops the request");
   }
   publishSeatContext(0);publishHmdResetPress(0,0);     // leave the shared words as found
 

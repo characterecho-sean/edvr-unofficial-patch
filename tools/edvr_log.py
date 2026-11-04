@@ -290,6 +290,22 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
+The SRV turret view (experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back, experimental.srv_turret_hud_gap, experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
+("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
+vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
+(a Scarab, a training scenario) the log says "srv turret view: not the Scorpion at frame ...", which is never a failure: with nothing else from the turret in the window the rule is IDLE
+("nothing applied, by design"), and beside a Scorpion visit the count goes into the detail. The pass covers eleven hologram families in eleven signatures, each signature with a geometry
+shader, each family with a first-draw line, in two groups (the weapon panels and the radar) each pushed back by its own key; the 10 s line
+gives each group's window (a push-back is a negative gap: deeper) and counts the matched draws per family. It
+judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force, the HUD half being on when any of the
+HUD forward, the radar forward, the panels' push-back, the radar's push-back and the gap is above 0 (the 10 s line gives both groups' forward translation, T and Tradar, and how many frames'
+eye frames were rebuilt at draw time from a newer pose than the frame boundary had: "pose refreshed at draw"; the settings line also says the depth mode of the moved parts, front, game or real, and whether their scissor rectangle is opened, open or game, the 10 s line counts the draws whose scissor was opened
+("scissor opened N"), a family found drawing with the scissor test on is said once ("srv turret hud: family F draws with the scissor test on"), and each family's first-scope state lines
+("srv turret hud state:") go into the detail unjudged): NEVER APPLIED when a key is above 0
+and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
+refused for the geometry, the readiness or a game geometry shader; IDLE when the turret view was never entered or the keys are 0; and nothing at all with no line. The radar camera's and
+the radar anchor's own lines ("srv turret radar camera: ...", "srv turret radar anchor: ...") are not this rule's. The lines of a build from before the push-back keys (a settings line with
+the camera and the gap alone, a 10 s line with one window) still parse.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10586,11 +10602,75 @@ H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\
 H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
 H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
+# The SRV turret view (issue 140; src\d3d11\srv_turret.cpp, the vehicle latch's line in journal_watch.cpp, and the geometry shader's creation line in shader_swap.cpp, shaderSwapCreateGs,
+# called with who "srv turret hud"): lines of the graphics log with no build tag, read the way the desktop window's are. The settings and vehicle lines are state, so health_scan keeps
+# every one whatever --since says; the rest are events and are cut by the window. Every kind of line the DLL writes has a pattern of its own, so a labelled line that none matches is
+# counted as unparsed (a format that drifted).
+H_SRV_TURRET = "srv turret view"
+# no colon on most: "hud" covers the 10 s, first-draw, refused, restore, scissor and state lines, and a label whose own text drifted still counts. The vehicle latch's line reads "srv turret: the vehicle is ...".
+# The radar camera's and the radar anchor's own lines ("srv turret radar camera: ...", "srv turret radar anchor: ...") carry none of these labels: this rule never reads or judges them.
+H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud", "srv turret anchor", "srv turret:")
+# Rows of these kinds are state, kept whatever --since says, and are not by themselves a sign the turret view was entered.
+H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
+# thirteen keys; a build of 2026-11-02 (bb545c8b) also said a fourteenth, "bracket cut N mm", before that key was baked at 3 mm and removed, and its logs still parse. Ten keys since the systems-near key (optional, so a log from before it still parses), nine since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
+# the push-back), so the newer keys are optional and the rule reads their absence as the older line
+H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
+                        r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)?(?:, bracket cut (?P<bracketcut>\d+) mm)? \(live; ")
+# An "on" edge the gunner sheet's draw raised before Status.json said so (the early edge, srv_turret_sheet_latch.h) carries the tail " (the gunner sheet drew; Status.json not yet)": the group "early".
+H_SRV_TURRET_VIEW = (r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)"
+                     r"(?P<early> \(the gunner sheet drew; Status\.json not yet\))?$")
+# The early edge's other lines: Status.json caught up (its lag behind the sheet), and the latch ending without it.
+H_SRV_TURRET_AGREED = r"srv turret view: Status\.json agreed (?P<lag>\d+) ms after the sheet$"
+H_SRV_TURRET_LATCH_END = r"srv turret view: the gunner sheet latch (?P<how>expired|dropped) after (?P<held>\d+) ms: .+$"
+# The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
+# "on" and "off" lines above are written only for a turret view in the Scorpion.
+H_SRV_TURRET_IGNORED = (r"srv turret view: not the Scorpion at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\): the turret view is on "
+                        r"in an SRV the journal does not call the Scorpion, so the camera and the HUD stay the game's own$")
+# journal_watch.cpp noteVehicle: the vehicle latch moved (a journal event, or the file changed), in the VR profile only.
+H_SRV_TURRET_VEHICLE = (r"srv turret: the vehicle is (?P<is>the Scorpion|not the Scorpion) \(event (?P<event>LoadGame|LaunchSRV|Music|DockSRV|SRVDestroyed|Shutdown|NewJournal)\)$")
+H_SRV_TURRET_PUBLISHED = r"srv turret camera: back (?P<back>[\d.]+) m published \(serial (?P<serial>\d+)\)$"
+H_SRV_TURRET_CLEARED = r"srv turret camera: back cleared \(serial (?P<serial>\d+)\)$"
+# One group's window in the 10 s line: "off", or the signed gap (a push-back is negative: deeper) with the window its draws ran with. A line from before the push-back keys has one window for every family.
+H_SRV_TURRET_GROUP = r"(?:off|gap=(?P<{p}gap>-?[\d.]+) m (?:dMin|wMin)=(?P<{p}wmin>-?[\d.]+) (?:dMax|wMax)=(?P<{p}wmax>-?[\d.]+))"   # dMin and dMax: the window of distances from the anchor (once, w)
+H_SRV_TURRET_HUD = (r"srv turret hud: (?:panels: " + H_SRV_TURRET_GROUP.format(p="p") + r"; radar: " + H_SRV_TURRET_GROUP.format(p="r") +
+                    r";|gap=(?P<gap>[\d.]+) m wMin=(?P<wmin>-?[\d.]+) wMax=(?P<wmax>-?[\d.]+)) "
+                    r"(?:anchor=\((?P<ax>-?[\d.]+),(?P<ay>-?[\d.]+),(?P<az>-?[\d.]+)\) head_offset=(?P<ho>-?[\d.]+) cm T=\((?P<tx>-?[\d.]+),(?P<ty>-?[\d.]+),(?P<tz>-?[\d.]+)\)"
+                    r"(?: Tradar=\((?P<rtx>-?[\d.]+),(?P<rty>-?[\d.]+),(?P<rtz>-?[\d.]+)\))?"
+                    r"|s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+)) "
+                    r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) (?:scissor opened (?P<so>\d+) )?(?:pose refreshed at draw: (?P<pn>\d+) of (?P<pm>\d+) frames )?"
+                    r"refused\[no-eye,game-gs,topology,not-ready,no-geometry\]=(?P<r0>\d+)/(?P<r1>\d+)/(?P<r2>\d+)/(?P<r3>\d+)/(?P<r4>\d+) "
+                    r"families\[(?P<fnames>[^\]]+)\]=(?P<fcounts>\d+(?:,\d+)*)$")   # the family names, then each one's matched draws, as two comma lists in the same order
+# shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
+H_SRV_TURRET_GS = (r"srv turret hud: precompiled geometry shader (?P<name>.+?) (?P<outcome>created|creation FAILED; standing down|creation faulted/refused; standing down) "
+                   r"\(0x(?P<hr>[0-9A-Fa-f]{8}), (?P<ms>[\d.]+) ms\)\.$")
+# Eleven hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0, 81216C77.A2965EC2, 81216C77.B4786E0A: the first eight
+# hex digits of the vertex shader, and for the four that share one the pixel shader's as well) in eleven signatures with the gunner sheet's (kSignatures, named by the first family's vertex shader), each signature
+# with its own geometry shader; the first-draw and state lines name the family. The flight HUD's vectors (B7790CBF) are no longer in the pass.
+# the anchor the move is made about (srv_turret.cpp cacheGeometry): the head's seated position, latched when the view comes on, a camera key changes, the head jumps (a recentre) or has
+# stayed more than 35 cm from it for 90 frames ("head away": the safety net, e.g. after a frozen pose)
+H_SRV_TURRET_ANCHOR = r"srv turret anchor: latched at (?P<x>-?[\d.]+),(?P<y>-?[\d.]+),(?P<z>-?[\d.]+) m seated \((?P<why>view on|camera back changed|HUD forward changed|radar forward changed|recentre|head away)\)$"
+H_SRV_TURRET_FIRST = r"srv turret hud: first draw of family (?P<family>\S+) through the shader \(frame (?P<frame>\d+), eye (?P<eye>-?\d+)\)"
+H_SRV_TURRET_REFUSED = r"srv turret hud: refused a draw \((?P<reason>no-eye|game-gs|topology|not-ready|no-geometry)\) -- the draw went on as the game made it\."
+H_SRV_TURRET_UNRESTORED = r"srv turret hud: the game's geometry stage could not be put back after an issue;"
+H_SRV_TURRET_RESTORED = r"srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary\.$"
+# srv_turret.cpp srvTurretHudBegin: a family whose draw is found with the scissor test on, said once (the game's first rectangle and the target it was opened to, or kept)
+H_SRV_TURRET_SCISSOR = (r"srv turret hud: family (?P<family>\S+) draws with the scissor test on: (?P<rects>\d+) rect\(s\), first \[(?P<l>-?\d+),(?P<t>-?\d+),(?P<r>-?\d+),(?P<b>-?\d+)\], "
+                        r"target (?P<tw>\d+)x(?P<th>\d+); the scissor is (?P<how>opened to the whole target|kept as the game set it) for its draws$")
+H_SRV_TURRET_SCISSOR_UNRESTORED = r"srv turret hud: the game's scissor rectangles could not be put back after an issue;"
+# srv_turret.cpp noteState: each issue of a family's first scope says the target it drew into (the game's, as bound at the start of the scope, or another: the UI layer's), the depth-stencil state and
+# the blend state of render target 0 (D3D11 enumeration numbers: comparison 1 NEVER .. 8 ALWAYS, blend 1 ZERO .. 15 INV_BLEND_FACTOR, blend op 1 ADD .. 5 MAX)
+H_SRV_TURRET_STATE = (r"srv turret hud state: family=(?P<family>\S+) eye=(?P<eye>-?\d+) issue=(?P<issue>\d+) target=(?P<target>game|other|none) (?P<w>\d+)x(?P<h>\d+) format=(?P<fmt>\d+) "
+                      r"depth_view=(?P<dsv>yes|no) \| depth: enable=(?P<de>\d+) func=(?P<df>\d+) write=(?P<dw>\d+) \| stencil: enable=(?P<se>\d+) ref=(?P<sref>\d+) read=0x(?P<sread>[0-9A-Fa-f]+) "
+                      r"write=0x(?P<swrite>[0-9A-Fa-f]+) front\[func,pass,fail,zfail\]=(?P<sf>\d+),(?P<sp>\d+),(?P<sfl>\d+),(?P<sz>\d+) \| blend rt0: enable=(?P<be>\d+) src=(?P<bs>\d+) dst=(?P<bd>\d+) "
+                      r"op=(?P<bo>\d+) srcA=(?P<bsa>\d+) dstA=(?P<bda>\d+) opA=(?P<boa>\d+) mask=0x(?P<bm>[0-9A-Fa-f]+)"
+                      r"(?: \| raster: scissor=(?P<rs>\d+) rects=(?P<rn>\d+) first=\[(?P<rl>-?\d+),(?P<rt>-?\d+),(?P<rr>-?\d+),(?P<rb>-?\d+)\] depth_clip=(?P<dc>\d+) cull=(?P<cull>\d+) "
+                      r"front_ccw=(?P<ccw>\d+) \| viewport: x=(?P<vx>-?[\d.]+) y=(?P<vy>-?[\d.]+) w=(?P<vw>[\d.]+) h=(?P<vh>[\d.]+))?$")   # the raster and viewport fields since the scissor key
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -10638,6 +10718,14 @@ def _hrows(ctx, name, kind):
 
 def _hsum(rows, key):
     return sum(int(r[key]) for r in rows)
+
+
+def _hnative_onfoot(ctx):
+    """Whether native stereo on foot was on in the window: F115 logged it beginning inside the window, or it was on as the window opened (the last F115 began/ended
+    line before a --since window, which health_scan carries in under H_CARRIED)."""
+    if _hrows(ctx, H_F115, "began"):
+        return True
+    return any(r.get("kind") == "began" for r in _hrows(ctx, H_CARRIED, "onfoot"))
 
 
 def _hpairs(text):
@@ -10857,13 +10945,33 @@ def _hj_f110_model_eye(rows, ctx):
     text = "%d s: aiming eye %s, the solved %s eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
         _hsecs(new), aim, aim, solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
     if not dn:
-        return ("OK", text + "; no frame had the model and the solved %s eye together" % aim)
-    dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
-    dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
-    text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
-    if dmean > 0.5:
-        return ("PARTIAL", text + ": the model is off the %s eye" % aim)
-    return ("OK", text)
+        text += "; no frame had the model and the solved %s eye together" % aim
+        verdict = "OK"
+    else:
+        dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
+        dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
+        text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
+        verdict = "PARTIAL" if dmean > 0.5 else "OK"
+        if verdict == "PARTIAL":
+            text += ": the model is off the %s eye" % aim
+    # F196: a window with ADS frames and not one on the solved right eye is the rendered eyes never reaching the lock, whatever the model's figure against them (there
+    # are none to compare): the model is the job camera (the left eye) plus a fixed IPD along the gun's right, and ignores the eyes' height and depth offsets, the user's
+    # IPD when it is the fallback, and any head roll against the gun. The left eye aims with the job camera itself, which is exact, so only the right eye is judged. The
+    # user's log (Quest 2, WiVRn, Anti-aliasing off) read 464 of 464 frames on the model, the IPD the 0.0630 m fallback, and a build before F196 had no scene depth eye
+    # to give the eyes rows with Anti-aliasing off: the depth probe did not watch.
+    right = [r for r in new if (r.get("aim") or "right") == "right"]
+    drove = [r for r in right if int(r["solved"]) + int(r["model"])]
+    blind = [r for r in drove if not int(r["solved"])]
+    if blind and verdict == "OK":
+        last = blind[-1]
+        why = ("the model's IPD is %s m, %s; the eye rows (F113) and the depth probe's line say why there were no rows (a build before F196 formed no scene pair with "
+               "Anti-aliasing off)" % (last["ipd"], last["ipdsrc"]))
+        if len(blind) == len(drove):
+            return ("NEVER APPLIED", text + "; the solved rendered right eye never reached the lock: all %d s with ADS frames were on the model, the job camera plus a fixed IPD, "
+                    "which ignores the eyes' height and depth offsets and any head roll against the gun (%s)" % (_hsecs(blind), why))
+        if len(blind) * 2 > len(drove):
+            return ("PARTIAL", text + "; %d of %d s with ADS frames had no solved right eye at all (%s)" % (_hsecs(blind), _hsecs(drove), why))
+    return (verdict, text)
 
 
 def _hj_f111_pointer(rows, ctx):
@@ -10915,7 +11023,7 @@ def _hj_f111_pointer(rows, ctx):
 
 def _hj_f113_rows(rows, ctx):
     """F113: each eye's scene rows per frame on foot and where they came from (the scene meshes, the depth prepass, the terrain), the frames with none, and the
-    checks of a source's rows against a scene mesh's. A latch (a source disagreed), or an eye without rows in more than 2% of its frames, is PARTIAL; frames
+    checks of a source's rows against a scene mesh's. A latch (a source disagreed), or an eye without rows in more than 2% of its frames (and more than two frames), is PARTIAL; frames
     without rows while no source ever gave any is the sources never running (NEVER APPLIED)."""
     sec = rows.get("sec", [])
     if not sec:
@@ -10930,7 +11038,7 @@ def _hj_f113_rows(rows, ctx):
         if f:
             parts.append("eye %d %d frames: the scene meshes %.0f%%, the depth prepass %.0f%%, the terrain %.0f%%, none %.1f%%" % (
                 e, f, 100.0 * m / f, 100.0 * p / f, 100.0 * t / f, 100.0 * n / f))
-            if n * 50 > f:
+            if n * 50 > f and n > 2:   # F207: the first on-foot frame after an edge has no rows by design (the pair forms from it), so one or two frames never make a window short
                 short.append("eye %d without rows in %.1f%% of its frames" % (e, 100.0 * n / f))
     checked = sum(int(r["checked"]) for r in sec)
     diffs = [float(r["diff"]) for r in sec if int(r["checked"])]
@@ -10950,7 +11058,11 @@ def _hj_f113_rows(rows, ctx):
     if any(r["lat"] for r in sec):
         return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's (a build before F130)")
     if none_total and not src_total:
-        return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any")
+        # F196: a source draw that declined for want of a scene depth eye is the depth probe's scene pair never having formed (Anti-aliasing off, on a build before
+        # F196: nothing asked for the pair and the probe was not watching); the user's log (Quest 2, WiVRn) read 157185 of them in 490 frames.
+        noeye = sum(int(r["noeye"]) for r in sec)
+        return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any" + (
+            "; %d source draws had no scene depth eye: the depth probe's scene pair never formed (Anti-aliasing off, a build before F196)" % noeye if noeye else ""))
     if short:
         return ("PARTIAL", text + "; " + "; ".join(short))
     return ("OK", text)
@@ -11045,6 +11157,28 @@ def _hvisor_census_needed(ctx):
         return True
     # A correction draw proves the census was wanted, including F128's always-on correction (no keyoff field).
     return any(int(r["seen"]) > int(r.get("keyoff") or 0) for r in _hrows(ctx, "visor axis (F121)", "sec"))
+
+
+_F119_NEVER_READ_S = 5   # F199: on-foot seconds with the depth grid never read that make it NEVER APPLIED (under it, PARTIAL)
+
+
+def _f119_depth_never_read(ctx):
+    """F199: (on-foot seconds, the skip reasons counted) when F119 sampled a head for at least _F119_NEVER_READ_S on-foot seconds and read the scene depth in none of them; else
+    None. F123's wall contact is fed by F119's depth grid alone, so the same fact reads there: the contact never had a frame to judge."""
+    rows = ctx.get("head containment (F119)", {}) if ctx else {}
+    sec = rows.get("sec", []) + _f119_windows(rows.get("window", []))
+    if not sec or _hsecs(sec) < _F119_NEVER_READ_S:
+        return None
+    sampled = 0
+    skips = collections.Counter()
+    for r in sec:
+        for m in _F119_CLASS_RE.finditer(r["offs"]):
+            sampled += int(m.group("n"))
+        for m in _F119_EYE_RE.finditer(r["depth"]):
+            if int(m.group("read")):
+                return None
+        skips.update(_hpairs(r["skipped"]))
+    return (_hsecs(sec), skips) if sampled else None
 
 
 def _hj_f119_containment(rows, ctx):
@@ -11201,7 +11335,10 @@ def _hj_f119_containment(rows, ctx):
         skips = collections.Counter()
         for r in sec:
             skips.update(_hpairs(r["skipped"]))
-        return ("PARTIAL", text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
+        # F199: a session that spent its on foot seconds and never got the scene depth is the grid never applied (with Anti-aliasing off, a build before F199 handed it none:
+        # "no scene depth" in every second); a few seconds may simply not have had a frame to read, so under _F119_NEVER_READ_S seconds it stays PARTIAL.
+        verdict = "NEVER APPLIED" if _hsecs(sec) >= _F119_NEVER_READ_S else "PARTIAL"
+        return (verdict, text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
     if eye_secs * 2 < _hsecs(sec):
         return ("PARTIAL", text + "; the depth grid was read in under half of the seconds")
     if base_max >= 4:
@@ -11214,6 +11351,21 @@ def _hj_f119_containment(rows, ctx):
 # one (black at 23 cm / +8 cm; held 0.3 s: the position recentre), a wall contact one (32 of 64 world cells within the near plane + 3 cm in an eye for 3 frames: black at once,
 # latched; 0.3 s: the recentre; released when it has cleared and the head is inside soft). Each says whether it was recentred and how long the view was black.
 def _hj_f123_containment(rows, ctx):
+    """F199: F123's verdict, then NEVER APPLIED over an OK or IDLE one when F119 never read the scene depth on foot: the wall contact is fed by that grid alone, so an armed machine
+    with no episodes proves nothing about it (with Anti-aliasing off a build before F199 handed the grid no depth: the pilot's eyes passed through walls, the positional leash
+    still worked)."""
+    result = _hj_f123_core(rows, ctx)
+    if result is None or result[0] not in ("OK", "IDLE"):
+        return result
+    never = _f119_depth_never_read(ctx)
+    if never is None:
+        return result
+    secs, skips = never
+    return ("NEVER APPLIED", result[1] + "; the wall contact never had the scene depth: head containment (F119) read none in %d on-foot seconds (skipped: %s), so the leash alone was judged" % (
+        secs, _htop(skips, 4)))
+
+
+def _hj_f123_core(rows, ctx):
     """F123: the leash and the wall contact. IDLE when armed and nothing triggered; OK when the episodes behave: every hard episode held past 0.4 s was recentred, every recentre
     asked brought the head inside soft, and the contact was gone 1 s after it. PARTIAL on a recentre that did not bring the head inside soft, or on a wall contact still present
     1 s after a recentre. NEVER APPLIED on a leash hard episode that stayed past the hard radius 0.4 s or more with no recentre (the timer asks at 0.3 s). The contact
@@ -11416,6 +11568,10 @@ def _hj_f121_visor_axis(rows, ctx):
         len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"],
         ", test key off %d" % tot["keyoff"] if legacy_key_state else "", tot["refused"], tot["r0"], tot["r1"], tot["r2"],
         tot["r3"], tot["r4"], tot["selfoffn"], sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+    # F200: the draws whose eye the depth probe's scene pair named (Anti-aliasing off: the eye filing names none); a line from a build before F200 has no such field
+    depth_rows = [r for r in sec if r.get("depth") is not None]
+    if depth_rows:
+        text += "; eyes named by the depth probe's scene pair (F200) %d of %d draws" % (_hsum(depth_rows, "depth"), tot["seen"])
     if tot["keyoff"] and not tot["shifted"] and not tot["refused"]:
         return ("IDLE", text + "; the test key fix.native_on_foot_visor_axis is off (the default): the game's own visor vertex shader drew all of them")
     if want_l == 0.0 and published and not tot["shifted"] and tot["sym"] and not tot["refused"]:
@@ -11785,12 +11941,17 @@ def _hj_f85b(rows, ctx):
         if none and not eng and not own:
             oflag.append("no source gave the origin rows on any of the %d marker composite draws" % none)
     if path == "none" or found == 0 or decided == 0 or bound == 0:
+        if decided and not bound:   # F201: the same as the marker fix: decided, never bound (the bind needed the UI layer's bracket before F201)
+            oflag.append("%d draws decided and none bound at the issue: the patch was decided and never written (a build before F201 bound it only for a draw the UI layer took, which "
+                         "Anti-aliasing off never does)" % decided)
         return ("NEVER APPLIED", text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
     verdict = "PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided or oflag else "OK"
     return (verdict, text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
 
 
 def _hj_f85c(rows, ctx):
+    # F191: the reticle is the key marker type 1001 uses (a pool slot that is 11 or more on some rigs), so the lines name it: `key 11 (type 1001) draws N` and `no
+    # reticle composite draw over N s (reticle key 11 (type 1001); ...)`. A log of a build before F191 says `key 10 draws N` and `no key 10 composite draw`; both read.
     draws, idle, fail, game = rows.get("draws", []), rows.get("idle", []), rows.get("fail", []), rows.get("game", [])
     if not draws and not idle and not fail and not game:
         return None
@@ -11804,13 +11965,18 @@ def _hj_f85c(rows, ctx):
     if not draws:
         armed = _harmed_seconds(ctx)
         if armed:
-            return ("NEVER APPLIED", "no key 10 composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
-        return ("IDLE", "no key 10 composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
+            return ("NEVER APPLIED", "no reticle composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
+        return ("IDLE", "no reticle composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
     nd, patched, reads, hit, sky = (_hsum(draws, k) for k in ("draws", "patched", "reads", "hit", "sky"))
     refs = collections.Counter()
     for x in draws:
         refs.update(_hpairs(x["refs"]))
-    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    keys = sorted({int(x["key"]) for x in draws}, key=int)
+    assumed = any((x.get("why") or "").startswith("assumed") for x in draws)
+    text = "patched %d of %d key %s draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (
+        patched, nd, ", ".join(str(k) for k in keys), _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    if assumed:
+        text += "; the reticle key was assumed to be 10, no type 1001 call seen (the marker fix is off, or its hook is not in)"
     if game:
         text += "; " + game_text
     if patched == 0:
@@ -11954,10 +12120,23 @@ def _hj_marker(rows, ctx):
         if er:
             per.append("eye %s %s (%d of %d)" % (e, _hpct(_hsum(er, "bound"), _hsum(er, "dec")), _hsum(er, "bound"), _hsum(er, "dec")))
     text = "patch applied %s; named %d, outside %d (F87c)" % (", ".join(per) or "no decision line", _hsum(win, "named"), _hsum(win, "outside"))
+    # F198: the first time a draw's eye was named by the submitted textures (Anti-aliasing off: the layer and ui depth name none), so a log that says it shows which source worked
+    seye = rows.get("seye", [])
+    if seye:
+        text += "; the draws' eyes named by the submitted textures (F198) from %d session(s)' first draw" % len(seye)
     if dec == 0:
+        # F198: the marker probe's cost lines count the marker composite draws that reached the draw tee; when many did and no decision was ever made, the fix never got an eye
+        # for them (a build before F198 named a draw's eye only through the interface layer and ui depth, which run with a temporal mode on): the fix never ran, it was not idle.
+        mc = _hsum(rows.get("probe", []), "mc")
+        if mc >= 20:
+            return ("NEVER APPLIED", text + "; the marker probe counted %d marker composite draws at the tee in the same log and none reached the fix in %d s: their eye was never named "
+                    "(the interface layer and ui depth name it only with a temporal mode on; a build before F198 had no other source)" % (mc, _hsecs(idle)))
         return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % _hsecs(idle))
     if bound == 0:
-        return ("NEVER APPLIED", text)
+        # F201: decisions with not one bound at the issue is the patch decided and never written. The bind sits in forwardWithVerdict and, before F201, needed the UI layer's bracket: with
+        # Anti-aliasing off the layer is never live, so the pilot's flight of 2026-10-31 read "0 of 13449 decisions bound" with every marker, readout and label decided.
+        return ("NEVER APPLIED", text + "; %d decisions and none bound at the issue: the patch was decided and never written (a build before F201 bound it only for a draw the UI layer took, "
+                "which Anti-aliasing off never does)" % dec)
     return ("PARTIAL" if bound * 2 < dec else "OK", text)
 
 
@@ -12266,13 +12445,184 @@ def _hj_f107_away(rows, ctx):
     if not left and not ended and not remote:
         return None
     text = "%d episodes" % len(left)
+    tests = collections.Counter(r.get("test") or "distance" for r in left)   # F208b: the test that made each away (the distance test is the only one an earlier build had); F209: the shop screen
+    names = (("distance", "the distance test"), ("showroom", "the showroom test"), ("shop screen", "the shop screen"))
+    if len(tests) > 1 or (tests and "distance" not in tests):
+        text += " (%s)" % ", ".join("by %s %d" % (label, tests[k]) for k, label in names if tests.get(k))
+    elif left and any(r.get("test") for r in left):
+        text += " (all by the distance test)"
     if ended:
-        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck" % (float(r["s"]), r["calls"], r["near"], r["far"]) for r in ended)
+        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck%s%s" % (
+            float(r["s"]), r["calls"], r["near"], r["far"], ", %s calls with a buy screen open" % r["shopcalls"] if r.get("shopcalls") not in (None, "0") else "",
+            ", %s flaps inside the %s s hold" % (r["alt"], r["hold"]) if r.get("alt") not in (None, "0") else "") for r in ended)
+    # F208: an episode a second long or more is a real one; a log with hundreds of them in a few seconds is the camera flapping through an older build's end rule (the suit shop: 632 in 18 s)
+    flaps = [r for r in ended if float(r["s"]) < 0.2]
+    rej = [int(r["rej"]) for r in ended if r.get("rej") not in (None, "0")]
+    if rej:
+        text += "; %d episode(s) began again within 3 s of an end and doubled the hold (up to %d rejoins in a row)" % (len(rej), max(rej))
+    if len(ended) >= 20 and len(flaps) * 2 > len(ended):
+        return ("PARTIAL", text + "; %d of %d episodes lasted under 0.2 s: the camera alternated between two views and the episode ended on every return (a build before F208), so the view pumped" % (
+            len(flaps), len(ended)))
+    shopnote = _hj_f107_unflagged(left, ended, ctx)   # F209
     if remote:
         far = max(float(r["remote_max"]) if r.get("remote_max") is not None else abs(float(r["game"])) for r in remote) / 100.0
         note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, sum(int(r["remote"]) if r.get("remote") is not None else 1 for r in remote))
-        return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note)
+        return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note + shopnote)
+    if shopnote:
+        return ("PARTIAL", text + shopnote)
     return ("OK", text + "; the neck reference and the standing calibration held")
+
+
+H_SHOP = "shop screens (F209)"
+F107_SHOWROOM_MAX_M = 50.0   # F209: a distance-test episode whose first camera stood over F107's 3 m and no farther than this from the neck is the size of a showroom's camera (the suit shop's: 3.6 to 3.7 m)
+
+
+def _hj_f107_unflagged(left, ended, ctx):
+    """F209: the text to append when an F107 episode by the distance test, at a showroom's distance (over 3 m and at most F107_SHOWROOM_MAX_M), has no shop signal in the log beside it
+    (the signal's ON line from 10 s before the episode's left line to a second after its ended line; any ON line when the log has no stamps): the game's own flag did not see that
+    camera, because the shop hooks stood down, or the screen is not one of the two buy screens. Empty when there is none. A carrier management screen (3367 m) is not one."""
+    ons = _hrows(ctx, H_SHOP, "on")
+    ends = {r["ep"]: r for r in ended}
+    miss = []
+    for r in left:
+        if (r.get("test") or "distance") != "distance":
+            continue
+        m = float(r["m"])
+        if not (3.0 < m <= F107_SHOWROOM_MAX_M):
+            continue
+        t0, e = r.get("_t"), ends.get(r["ep"])
+        t1 = e.get("_t") if e else None
+        if t0 is None or any(o.get("_t") is None for o in ons):
+            covered = bool(ons)
+        else:
+            covered = any(t0 - 10.0 <= o["_t"] <= (t1 if t1 is not None else t0 + 120.0) + 1.0 for o in ons)
+        if not covered:
+            miss.append(m)
+    if not miss:
+        return ""
+    stood = sorted({r["hook"] for r in _hrows(ctx, H_SHOP, "hook") if r["st"] == "stood down"})
+    return ("; %d episode(s) by the distance test with the camera %.1f-%.1f m from the neck, a showroom's distance, and no shop signal in the log beside %s: the game's own flag did not see "
+            "that camera (%s)" % (len(miss), min(miss), max(miss), "it" if len(miss) == 1 else "them",
+                                  "the shop hooks stood down: " + ", ".join(stood) if stood else "the screen is not the suit or the weapon buy screen, or the hooks never ran"))
+
+
+def _hj_shop(rows, ctx):
+    """F209: the Pioneer Supplies buy screens found by the game's own open flag (shop_screen_core.h): the five hooks (armed or stood down), each buy screen's Show and Close (the byte
+    +0x79 before and after), the shop signal's edges, the SuitUIStateMachine's states, the armoury kiosk's start and stop, and the objects the frame thread forgot. A shop signal that went on
+    with native on foot begun and no F107 episode by the shop screen (its left line's test, or calls its ended line says the shop screen held) is NEVER APPLIED (the view did not
+    change); a signal that did not hold on its object, events the hooks lost or the cap dropped, a Show that left
+    the byte unset, a signal that went on more often than it went off, hooks that all stood down, or a Show with no signal are PARTIAL."""
+    kinds = ("hook", "show", "close", "on", "off", "state", "kstart", "kstop", "forgot", "sec", "capped", "lost")
+    if not any(rows.get(k) for k in kinds):
+        return None
+    hooks, shows, closes = rows.get("hook", []), rows.get("show", []), rows.get("close", [])
+    ons, offs, states = rows.get("on", []), rows.get("off", []), rows.get("state", [])
+    armed = sorted({r["hook"] for r in hooks if r["st"] == "armed"})
+    stood = sorted({r["hook"] for r in hooks if r["st"] == "stood down"})
+    parts = []
+    if hooks:
+        parts.append("hooks: %d armed%s" % (len(armed), (", stood down: " + ", ".join(stood)) if stood else ""))
+    byclass = collections.Counter(r["cls"] for r in shows)
+    if shows or closes:
+        parts.append("%d Show / %d Close (%s)" % (len(shows), len(closes), ", ".join("%s %d" % (k, byclass[k]) for k in sorted(byclass)) or "no buy screen"))
+    parts.append("the signal on %d, off %d" % (len(ons), len(offs)))
+    if states:
+        parts.append("%d state change(s), last %s" % (len(states), states[-1]["to"]))
+    if rows.get("kstart") or rows.get("kstop"):
+        parts.append("kiosk %d start / %d stop" % (len(rows.get("kstart", [])), len(rows.get("kstop", []))))
+    if rows.get("sec"):
+        parts.append("%d one-second line(s)" % len(rows["sec"]))
+    text = "; ".join(parts)
+    # An episode is the shop's when F107's left line names the shop screen as the test that made it away, or when its ended line counts calls the shop screen held (F107 can open an
+    # episode by its distance test and the shop signal then keeps it open).
+    shop_eps = [r for r in _hrows(ctx, "camera away (F107)", "left") if r.get("test") == "shop screen"]
+    shop_eps += [r for r in _hrows(ctx, "camera away (F107)", "ended") if int(r.get("shopcalls") or 0) > 0]
+    if ons and not shop_eps and _hnative_onfoot(ctx):
+        return ("NEVER APPLIED", text + "; the shop signal went on %d time(s) but F107 logged no episode by the shop screen: the view did not change" % len(ons))
+    problems = []
+    if rows.get("forgot"):
+        problems.append("%d remembered object(s) forgotten (their vtable changed or they could not be read): the flag did not hold on them" % len(rows["forgot"]))
+    if rows.get("lost"):
+        problems.append("%d shop event(s) were not recorded (the ring was full or a second hook thread was in it)" % _hsum(rows["lost"], "n"))
+    if rows.get("capped"):
+        problems.append("%d event line(s) were not written (the cap of 40 in ten seconds): a flapping screen" % _hsum(rows["capped"], "n"))
+    unset = [r for r in shows if r["a"] != "1"]
+    if unset:
+        problems.append("%d Show(s) left the byte +0x79 not set (read %s)" % (len(unset), ", ".join(sorted({r["a"] for r in unset}))))
+    if any(r["a"] == "1" for r in shows) and not ons:
+        problems.append("a buy screen was shown but the signal never went on")
+    if len(ons) > len(offs) + 1:
+        problems.append("the signal went on %d times and off %d: it may have stuck" % (len(ons), len(offs)))
+    if hooks and stood and not armed and not ons:
+        problems.append("every shop hook stood down: F107 holds a showroom camera by its distance test alone")
+    if problems:
+        return ("PARTIAL", text + "; " + "; ".join(problems))
+    return ("OK", text)
+
+
+H_F212 = "conversation look (F212)"
+H_F115 = "boarding reset (F115)"
+H_CARRIED = "_carried"   # health_scan's state carried into a --since window: "onfoot" (the last F115 began/ended line) and "f212_hook" (the conversation-look hook's line)
+F212_TALK_STATES = ("Mission Giver", "Service Giver", "StartConversation")   # SuitUIStateMachine states (F209 logs them) in which the conversation camera runs
+
+
+def _hj_f212(rows, ctx):
+    """F212: the conversation look (native_on_foot_f212.h). The hook on the leaf that sets the look springs' targets (armed or stood down), a line when gated calls begin and when they
+    end (the run's calls, duration and the largest |yaw| and |pitch| the game asked), and a 10 s summary of a window with any call or any spring above zero (calls gated and passed, and
+    the springs the look processor read for the local component while native on foot was active). A conversation state in F209's lines (Mission Giver, Service Giver, StartConversation)
+    with native on foot begun and no gated call is NEVER APPLIED: the hook stood down, or was armed and the leaf never ran with native on foot active. The springs' targets read above zero
+    in a window that had gated calls (another writer), springs that moved in a 10 s window with no gated call at all (a path the hook does not hold), or a store that faulted, are
+    PARTIAL. Armed with no conversation at all is IDLE. Native on foot and the hook's line may predate a --since window: health_scan carries the last of each into it."""
+    talks = [r["to"] for r in _hrows(ctx, H_SHOP, "state") if r["to"] in F212_TALK_STATES]
+    onfoot = _hnative_onfoot(ctx)
+    if not any(rows.get(k) for k in ("hook", "began", "ended", "sum")) and not (talks and onfoot):
+        return None
+    # The hook's line is written once, when the hooks are installed: a --since window usually opens after it, so the last one before the window stands in.
+    hooks, began, ended, sums = rows.get("hook") or _hrows(ctx, H_CARRIED, "f212_hook"), rows.get("began", []), rows.get("ended", []), rows.get("sum", [])
+    armed = [r for r in hooks if r["st"] == "armed"]
+    stood = [r for r in hooks if r["st"] == "stood down"]
+    gated = max([_hsum(ended, "calls")] + [int(r["sg"]) for r in sums])
+    applied = bool(began) or gated > 0
+    parts = []
+    if hooks:
+        parts.append("hook %s" % ("armed" if armed else "stood down (%s)" % (stood[-1].get("why") or "no reason given").strip()))
+    if began or ended:
+        text = "%d run(s) begun, %d ended" % (len(began), len(ended))
+        if ended:
+            text += " (longest %.1f s, %d gated call(s), the game asked for up to |yaw| %s and |pitch| %s, raw floats)" % (
+                max(float(r["s"]) for r in ended), _hsum(ended, "calls"), max(ended, key=lambda r: float(r["yaw"]))["yaw"], max(ended, key=lambda r: float(r["pitch"]))["pitch"])
+        parts.append(text)
+    parts.append("%d gated call(s), %d passed in the 10 s lines" % (gated, max([int(r["sp"]) for r in sums] + [0])))
+    if talks:
+        parts.append("%d conversation state(s) in F209's lines (%s)" % (len(talks), ", ".join(sorted(set(talks)))))
+    if sums:
+        reads = _hsum(sums, "reads")
+        parts.append("springs read %d time(s) in the 10 s lines: largest |velocity| yaw %.5f pitch %.5f, |target| yaw %.5f pitch %.5f" % (
+            reads, max(float(r["vy"]) for r in sums), max(float(r["vp"]) for r in sums), max(float(r["ty"]) for r in sums), max(float(r["tp"]) for r in sums)))
+    text = "; ".join(parts)
+    if talks and onfoot and not applied:
+        if stood and not armed:
+            return ("NEVER APPLIED", text + "; the hook stood down and a conversation state was logged with native on foot begun: the game's conversation look was not held")
+        return ("NEVER APPLIED", text + "; a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held")
+    problems = []
+    moved = [r for r in sums if int(r["g"]) > 0 and (float(r["ty"]) > 0.0 or float(r["tp"]) > 0.0)]
+    if moved:
+        problems.append("%d 10 s window(s) with gated calls read a spring target above zero (up to yaw %.5f pitch %.5f): something else sets the targets" % (
+            len(moved), max(float(r["ty"]) for r in moved), max(float(r["tp"]) for r in moved)))
+    # The 10 s line is sampled only while native on foot is active, so springs that moved in a window with nothing gated were turned by a path the hook does not hold.
+    unheld = [r for r in sums if int(r["g"]) == 0 and any(float(r[k]) > 0.0 for k in ("ty", "tp", "vy", "vp"))]
+    if unheld:
+        problems.append("the look springs moved in %d 10 s window(s) with no gated call: something other than the hooked leaf turned the look" % len(unheld))
+    faults = max([int(r["f"]) for r in sums] + [0])
+    if faults:
+        problems.append("%d store(s) into the facade faulted" % faults)
+    if stood and not armed:
+        problems.append("the hook stood down: the game's conversation look is not held")
+    if problems:
+        return ("PARTIAL", text + "; " + "; ".join(problems))
+    if not applied and not sums:
+        return ("IDLE", text + "; no conversation call in the window (nothing to hold)")
+    return ("OK", text)
 
 
 def _hj_f115_pair(edges, secs):
@@ -12391,14 +12741,16 @@ def _hj_f109_look(rows, ctx):
     head = sum(abs(v) for v in hy) + sum(abs(v) for v in f("hp"))
     applied = sum(abs(v) for v in ay) + sum(abs(v) for v in f("ap"))
     still = [r for r in sec if abs(float(r["hy"])) < 2.0 and abs(float(r["hp"])) < 2.0]
-    off = [r for r in still if math.hypot(float(r["oy"]), float(r["op"])) >= 3.0]
+    kept195 = _h195_kept_rows(ctx)   # F195: the pitch each engage kept is the pilot's, not a standing offset
+    adj = lambda r: float(r["op"]) - _h195_kept_before(r.get("_order", 0), kept195)
+    off = [r for r in still if math.hypot(float(r["oy"]), adj(r)) >= 3.0]
     pitch = sum(abs(v) for v in up)
     clean, dirty, unsplit = _hsum(sec, "clean"), _hsum(sec, "dirty"), _hsum(sec, "unsplit")
     text = ("%d s engaged (%d engage(s)): the head turned %.1f deg, the game applied %.1f for it; the reported head off the aim 3 deg or more in %d of %d still "
             "seconds; the player's own pitch %.1f deg; dropped stick %d, mouse %d, pitch %d calls; split clean %d, dirty %d, unsplit %d; blocked %d, spring calls %d; "
-            "F98c refused %d calls; guard trips %d, the body's yaw from the aim at most %.1f deg") % (
+            "guard trips %d, the body's yaw from the aim at most %.1f deg") % (
         len(sec), len(eng), head, applied, len(off), len(still), pitch, _hsum(sec, "ds"), _hsum(sec, "dm"), _hsum(sec, "dp"), clean, dirty, unsplit,
-        _hsum(sec, "blocked"), _hsum(sec, "spring"), _hsum(sec, "gated"), len(trips), max(float(r["bmax"]) for r in sec))
+        _hsum(sec, "blocked"), _hsum(sec, "spring"), len(trips), max(float(r["bmax"]) for r in sec))
     gate = [r for r in sec if r.get("gheld") is not None]
     if gate or held or rearm:
         text += ("; F109b's guard: held %d (the game moved the view%s), new bases for the player's own turn %d, growth restarted after a rows gap %d; latched trips "
@@ -12410,7 +12762,7 @@ def _hj_f109_look(rows, ctx):
     # foreign calls, and the aim's pitch (the FP root) moving apart from the carried pitch
     run = longest = 0
     for r in sec:
-        run = run + 1 if math.hypot(float(r["oy"]), float(r["op"])) >= 10.0 else 0
+        run = run + 1 if math.hypot(float(r["oy"]), adj(r)) >= 10.0 else 0
         longest = max(longest, run)
     c109 = [r for r in sec if r.get("foreign") is not None]
     drift = [abs(float(r["drift"])) for r in c109 if r["dread"] == "read"]
@@ -12602,7 +12954,7 @@ def _hj_f138_pitched(rows, ctx):
     applied = [r for r in sec if int(r["napplied"]) > 0]
     added = sum(int(r["napplied"]) for r in sec)
     measured = sum(int(r["nmeasured"]) for r in sec)
-    refused, lta = sum(int(r["refused"]) for r in sec), sum(int(r["lta"]) for r in sec)
+    refused = sum(int(r["refused"]) for r in sec)
     returned, retrefused, notneeded = (sum(int(r[k]) for r in sec) for k in ("returned", "retrefused", "notneeded"))
     empty = [r for r in sec if r["item"] == "none"]
     whys = collections.Counter()
@@ -12612,9 +12964,9 @@ def _hj_f138_pitched(rows, ctx):
             whys[name.strip()] += int(count)
     modes = sorted(set(r["mode"] for r in sec))
     text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
-            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d, not needed %d)") % (
+            "the settle refused for the aim's pitch %d calls; returned to the stance's raise %d times (refused %d, not needed %d)") % (
         n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
-        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused, notneeded)
+        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, returned, retrefused, notneeded)
     # F170: the reference the considered calls used (a log from before F170 has no such column), and the empty-hand seconds that had the view INSIDE the torso with none at all
     withref = [r for r in sec if r.get("rsettled") is not None]
     if withref:
@@ -14477,7 +14829,7 @@ def _hj_f176_pitch_held(rows, ctx):
 # F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
 # menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
 H177_LABEL = "aim choice prompt (F177)"
-H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds; a log from F177 has neither
+H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene|after the switch to VR|at the first menu open), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds (a log from F177 has neither); F190 added after the switch to VR and at the first menu open
 H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
 H177_LATER = r"aim choice prompt \(F177\): later\s*$"
 H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
@@ -14487,7 +14839,8 @@ H177_WANT = {"mouse aim": "off", "look to aim": "on"}   # what each pick must ha
 
 
 def _hj_f177_aim_choice(rows, ctx):
-    """F177: the aiming choice at start. The VR menu opens itself once a session, after the first rendered scene, on a page that asks for look to aim or mouse aim. A pick writes the choice
+    """F177: the aiming choice at start. The VR menu opens itself once a session (F190: 2 s after the first eye frame, at game load or after 3D is turned on in a session that began flat; or at the
+    player's first opening of the menu) on a page that asks for look to aim or mouse aim. A pick writes the choice
     and the hide of the page in one job; the saved line says the write landed with both pairs, the write failed line that it did not (the settings stay as they were and the page asks again at
     the next start). NEVER APPLIED when a pick has a write failed line, or when the saved pairs are not what the pick says (look to aim on for look to aim, off for mouse aim, and the page
     hidden); PARTIAL when a pick has neither line (the writer had not reported); OK when the page was shown and answered with a saved pick, with Ask me next time or Esc (nothing written), or
@@ -15280,6 +15633,145 @@ def _hj_f186_stops(rows, ctx):
     named = "; ".join("aim %+.1f deg, %s (e %.1f cm, applied %.1f cm)" % (float(r["aim"]), r["why"], float(r["perp"]), float(r["app"])) for r in stop) or "no stop line in the window"
     return ("PARTIAL", text + ": " + named)
 
+# F194: look to aim's eye height settles as mouse look's does, and the view's height at each edge of look to aim. The test key (experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look) was RETIRED in F195b and
+# look to aim's own 10 deg settle gate with it: F138/F139's 20 deg gate is the only one. The lines are formatSecond and HeightProbe::format in src/d3d11/native_on_foot_f194.h: a 1 s line while look to aim is engaged,
+# and one line at each engage and disengage with the view's height before and 0.5 s, 1 s and 3 s after. F194 part 1 (look to aim aiming at the middle of the picture, with its key and its frustum line) was removed on
+# 2026-10-31 (F194b), and the rule that judged it is gone. A log of an earlier build is read as before: the frustum line and the key notes belong to no rule, and the 1 s line still parses in all three of its forms (the F194
+# build's, which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim; the F194b build's, with look to aim's own 10 deg gate in the settle field; and the present one).
+H194_LABEL_HEIGHT = "native on foot look to aim height (F194)"
+H194_SEC_RE = (r"native on foot look to aim height \(F194\) (?P<wl>\d+) s: (?:the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); )?"
+               r"the headset's pitch \(LOCAL\) mean (?P<local>%s) deg; carried aim pitch mean (?P<carried>%s) deg \(the game's aim (?P<root>%s) deg\); the reported head's pitch from "
+               r"the aim mean(?:: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg| (?P<off>%s) deg); the settle: "
+               r"(?:look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) (?P<ten>\d+) of (?P<calls>\d+) pin calls, F138/F139's 20 deg gate refused (?P<f139>\d+), taken (?P<taken>\d+)"
+               r"|F138/F139's 20 deg gate refused (?P<f139b>\d+), taken (?P<takenb>\d+) of (?P<callsb>\d+) pin calls); the published raise mean (?P<raise>%s) cm; "
+               r"the drawn eye over the animated neck mean (?P<eye>%s) cm$" % ((_HN,) * 9))
+H194_VIEW_RE = (r"native on foot look to aim height \(F194\) (?P<kind>engage|disengage): the view's height \(the drawn eye above the character's origin, the hip frames read\): "
+                r"before (?P<before>.+?); after 0\.5 s (?P<a1>.+?); after 1 s (?P<a2>.+?); after 3 s (?P<a3>.+)$")
+H194_CM_RE = re.compile(r"(?P<cm>[+-]\d+\.\d) cm \(")
+H194_PITCH_RE = re.compile(r"carried aim pitch (?P<p>[+-]\d+\.\d) deg")
+H194_VIEW_FLAG_CM = 4.0    # an engage after which the view stood this far from where it was 3 s on: the pilot's "my view dropped"
+
+
+def _h194_sec(r):
+    """(pin calls, calls F138/F139's gate refused, stances taken, the old 10 deg gate's (state, count) or None) of a 1 s row, in whichever form the build wrote it."""
+    if r.get("callsb") is not None:
+        return int(r["callsb"]), int(r["f139b"]), int(r["takenb"]), None
+    return int(r["calls"]), int(r["f139"]), int(r["taken"]), (r["gate"], int(r["ten"]))
+
+
+def _hj_f194_height(rows, ctx):
+    """F194: look to aim's eye height settles as mouse look's does (F139's 20 deg gate on the game's aim, nothing drawn, is the only settle gate; look to aim's own 10 deg gate on the carried pitch is gone since F195b),
+    and the view's height at each edge of look to aim. The 1 s line gives F138/F139's gate (calls refused), the stances taken, the pin calls the hook wrote to its window and the drawn eye over the animated neck; each
+    engage and disengage has a line with the view's height before and 0.5 s, 1 s, 3 s after. NEVER APPLIED: the hook wrote no pin call to the window in any engaged second (the instrument did not run); or look to aim
+    was engaged (F109's 1 s lines) and no F194 1 s line was written. PARTIAL: an engage after which the view stood 4 cm or more from where it was 3 s on (the pilot's drop); no stance taken in 10 or more engaged
+    seconds. OK with the figures. The rows of a build that still had look to aim's own gate are read; what that gate did is named, not judged. No line, no verdict."""
+    sec, view = rows.get("sec", []), rows.get("view", [])
+    if not (sec or view):
+        return None
+    norm = [_h194_sec(r) for r in sec]
+    calls, f139, taken = sum(n[0] for n in norm), sum(n[1] for n in norm), sum(n[2] for n in norm)
+    parts = []
+    if sec:
+        eye = sum(float(r["eye"]) * n[0] for r, n in zip(sec, norm)) / calls if calls else 0.0
+        parts.append("%d engaged s, %d pin calls: F138/F139's 20 deg gate refused %d, stances taken %d; the drawn eye over the animated neck %+.1f cm" % (_hsecs(sec), calls, f139, taken, eye))
+        olds = [n[3] for n in norm if n[3]]
+        if olds:
+            parts[-1] += " [%d row(s) of a build with look to aim's own 10 deg gate: it %s %d calls]" % (len(olds), "would have refused (skipped)" if olds[-1][0].startswith("would") else "refused", sum(o[1] for o in olds))
+    drops = []
+    for r in view:
+        a3 = H194_CM_RE.search(r["a3"])
+        p3 = H194_PITCH_RE.search(r["a3"])
+        cms = [H194_CM_RE.search(r[k]) for k in ("a1", "a2", "a3")]
+        parts.append("%s: %s" % (r["kind"], ", ".join("%s %s" % (lab, ("%s cm" % m.group("cm")) if m else "not read") for lab, m in zip(("0.5 s", "1 s", "3 s"), cms)) + ("; carried aim pitch %s deg at 3 s" % p3.group("p") if p3 else "")))
+        if r["kind"] == "engage" and a3 and abs(float(a3.group("cm"))) >= H194_VIEW_FLAG_CM:
+            drops.append(float(a3.group("cm")))
+    text = "; ".join(parts)
+    f109 = (ctx.get("look to aim (F109)") or {}).get("sec", [])
+    if not sec and f109:
+        return ("NEVER APPLIED", text + "; look to aim was engaged for %d s (F109's 1 s lines) and no F194 1 s line was written: the instrument did not run" % _hsecs(f109))
+    if sec and not calls:
+        return ("NEVER APPLIED", text + "; the pin hook wrote no call to the window in any engaged second: the instrument did not run")
+    if drops:
+        return ("PARTIAL", text + "; the view stood %s cm from where it was after %d engage(s) (%.0f cm or more): the pilot's drop" % (", ".join("%+.1f" % d for d in drops), len(drops), H194_VIEW_FLAG_CM))
+    if sec and _hsecs(sec) >= 10 and not taken:
+        return ("PARTIAL", text + "; no stance was taken in %d engaged seconds (F138/F139 refused %d calls)" % (_hsecs(sec), f139))
+    return ("OK", text)
+
+# F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it: the pitch offset of the reported head from the aim, up to 15 deg either way, stays, and only the yaw (and the pitch beyond 15 deg) is
+# centred. Behaviour since F195b (the A/B key experimental.native_on_foot_look_to_aim_keeps_aim_pitch was RETIRED). The line is F109's `centred:` line, which ends "pitch kept %+.2f deg, centred %+.2f deg" (native_on_foot.cpp,
+# ltaFollow); the A/B build wrote "(F195: on|off)" after it (read: a row with the key off is the whole centring, named and not judged), the F194 build wrote the picture-centre pitch and the forward axis's angles before it
+# (read), and a build before F195 wrote none of it (read, and no verdict). F197: the keep applies only after a settled mouse aim, and the line says why after the pitch: "(after 9.0 s of mouse look)", or "(not kept: the first
+# engage on foot)", "(not kept: 0.4 s of mouse look, under 1 s)", "(not kept: the end of a hold)"; an engage that rightly did not keep is not a failure, and a line of the F195b build (no reason) is judged as before. The F109
+# rule's standing-offset judgement takes the pitch each engage kept off the offset it reads (the kept offset is on purpose).
+H195_NAME = "look to aim keeps pitch (F195)"
+H195_LABEL = "native on foot look to aim (F109): centred: the reported head was"
+H195_CENTRED_RE = (r"native on foot look to aim \(F109\): centred: the reported head was yaw (?P<oy>%s) pitch (?P<op>%s) deg from the aim at the engage \((?P<ms>\d+) ms after it\)"
+                   r"(?:; the picture-centre pitch in force (?P<pc>%s) deg \(F194\), the forward axis itself yaw \S+ pitch \S+ deg from the aim)?"
+                   r"(?:; pitch kept (?P<kept>%s) deg, centred (?P<cen>%s) deg(?: \(F195: (?P<key>on|off)\)| \((?P<why>after [\d.]+ s of mouse look|not kept: [^)]*)\))?)?; (?P<what>.+)$" % ((_HN,) * 5))
+H195_KEEP_DEG = 15.0       # the most pitch offset an engage keeps (nofoot::f195::kKeepPitchDeg)
+H195_MIN_OWED = 1.0        # an engage with a pitch offset under this has nothing worth keeping
+H195_TOL = 0.05            # the log prints hundredths of a degree
+
+
+def _h195_kept_before(order, kept_rows):
+    """The pitch (deg) the newest centred line before log position order kept; 0 without one (a window that opened mid-engagement, a build before F195, the A/B build with its key off)."""
+    kept = 0.0
+    for o, k in kept_rows:
+        if o < order:
+            kept = k
+        else:
+            break
+    return kept
+
+
+def _h195_kept_rows(ctx):
+    """[(log order, kept deg)] of the F195 centred lines in the scan, in log order."""
+    rows = (ctx.get(H195_NAME) or {}).get("centred", [])
+    return sorted((r.get("_order", 0), float(r["kept"])) for r in rows if r.get("kept") is not None)
+
+
+def _hj_f195_keep(rows, ctx):
+    """F195: at a look-to-aim engage after a settled mouse aim (F197: on foot under mouse look for a second or more) the aim keeps its pitch where the mouse left it. Each engage's centred line gives the reported
+    head's pitch offset from the aim (op), the part kept (the offset, clamped to +-15 deg) and the part centred (the rest), and, since F197, why: "after N s of mouse look" or "not kept: ..." (the first engage on foot,
+    under a second of mouse look, the end of an F131 hold). NEVER APPLIED: engages that should have kept had a pitch offset of 1 deg or more and none kept it. PARTIAL: some did not, or an engage that said it did
+    not keep kept. IDLE: no engage that should have kept had a pitch offset worth keeping. OK with the figures. An engage that rightly did not keep is named, not a failure. A line from a build before F195 is read
+    and gives no verdict; a row of the A/B build with its key off is named and not judged; a line of the F195b build (no reason text) is judged as before. No line, no verdict."""
+    ce = [r for r in rows.get("centred", []) if r.get("kept") is not None]
+    if not ce:
+        return None
+    off = [r for r in ce if r.get("key") == "off"]
+    rest = [r for r in ce if r.get("key") != "off"]
+    rightly = [r for r in rest if (r.get("why") or "").startswith("not kept")]
+    on = [r for r in rest if not (r.get("why") or "").startswith("not kept")]
+    text = "%d engage(s) centred" % len(rest)
+    notes = []
+    if off:
+        notes.append("%d of the A/B build with its key off: the whole offset centred, not judged" % len(off))
+    if rightly:
+        reasons = collections.Counter(r["why"].split(": ", 1)[1] for r in rightly)
+        notes.append("%d did not keep the pitch offset by the rule: %s" % (len(rightly), ", ".join("%s %d" % (k, n) for k, n in sorted(reasons.items()))))
+    if notes:
+        text += " (and " + "; and ".join(notes) + ")"
+    bad = [r for r in rightly if abs(float(r["kept"])) > H195_TOL]
+    owed = []
+    if on:
+        owed = [r for r in on if abs(float(r["op"])) >= H195_MIN_OWED]
+        figures = ", ".join("%+.2f kept %+.2f centred %+.2f" % (float(r["op"]), float(r["kept"]), float(r["cen"])) for r in on[:8])
+        text += ": the reported head's pitch offset from the aim, kept and centred (deg): %s%s" % (figures, " ..." if len(on) > 8 else "")
+    if bad:
+        return ("PARTIAL", text + "; %d engage(s) said they did not keep the pitch offset and kept it" % len(bad))
+    if not on:
+        return ("IDLE", text + "; no engage followed a settled mouse aim")
+    if not owed:
+        return ("IDLE", text + "; no engage had a pitch offset of %.0f deg or more to keep" % H195_MIN_OWED)
+    missed = [r for r in owed if abs(float(r["kept"]) - max(-H195_KEEP_DEG, min(H195_KEEP_DEG, float(r["op"])))) > H195_TOL]
+    if len(missed) == len(owed):
+        return ("NEVER APPLIED", text + "; %d engage(s) had a pitch offset of %.0f deg or more, but none kept it (the whole offset was centred)" % (len(owed), H195_MIN_OWED))
+    if missed:
+        return ("PARTIAL", text + "; %d of %d engage(s) with a pitch offset to keep did not keep it" % (len(missed), len(owed)))
+    return ("OK", text)
+
+
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
     after the call in the shadow views and in the main or other views, and the fade hook's keeps against its zeroes. A head hide that only zeroed, a swap the fade
@@ -15973,6 +16465,7 @@ H_B3_PRESS_RE = (r"scope zoom \(B3\): press (?P<n>\d+) key (?P<key>on|off); aske
                  r"frame ms in/out " + _b3n("fmi") + "/" + _b3n("fmo") + r" \(max " + _b3n("fxi") + "/" + _b3n("fxo") + r"\); "
                  r"readout pin solo (?P<solo>\d+), no pair (?P<nopair>\d+)$")
 _B3CALL = r"(?:0x[0-9A-F]+|outside):\d+"
+H_B3_OVERRIDE_RE = r"scope zoom \(B3\): the sight eye is both for this press \(fix\.native_on_foot_ads_sight_eye is (?P<key>right|left)\): full detail needs both eyes$"   # F205
 H_B3_RUNTIME_RE = (r"scope zoom \(B3\) runtime: zoomed frames (?P<frames>\d+) over (?P<secs>[^\s;]+) s, peak narrowing (?P<peak>[^\s;]+); "
                    r"refused: answer not version 11 (?P<ref0>\d+), share not at full weight (?P<ref1>\d+), share not drawn (?P<ref2>\d+), geometry (?P<ref3>\d+); "
                    r"strip darkened (?P<strip>\d+) frames, hidden-area mesh withheld (?P<mesh>\d+) frames; "
@@ -16129,6 +16622,106 @@ def _hj_b3(rows, ctx):
     return ("OK", base + "; last press %s: %s" % (good[-1][0]["n"], good[-1][3]) + tail)
 
 
+# ---- F205: the ADS view circle (src\d3d11\native_on_foot_f205.h formatLine / formatRuntime; src\common\view_circle.h; docs\design-vr-scope-magnification-2026-10-28.md, F205) ----
+# Four lines, all tagged (F205): the key (once a session and at each change), one press line a press of the sights (the radius with its three figures and the Anti-aliasing mode, or why there is no
+# circle), and the runtime's report of the run it drew (written when the weight is back at 0, so it comes just after the press's sights go down). A press that has a radius is a press the circle
+# was asked for; the runtime's report after it (before the next press line) says how many frames it was drawn on.
+H_F205 = "ADS view circle (F205)"
+# F206 (the pilot's word: the circle is the full-detail scope's alone, the widest that hides its black side bars): the press's line from the runtime's report, and the line for a B3 press whose window stood
+# and got no circle. The F205 lines below are what earlier builds wrote and stay readable.
+H_F206 = "ADS view circle (F206)"
+H_F206_RUN_RE = (r"ADS view circle \(F206\): press (?P<n>\d+): radius (?P<rad>[\d.]+) deg \(the widest that keeps the full-detail view's side bars in the black: nearest edge (?P<edge>[\d.]+) deg "
+                 r"less the band (?P<band>[\d.]+) deg\); over the run (?P<lo>[\d.]+) to (?P<hi>[\d.]+) deg; drawn on (?P<frames>\d+) frames over (?P<secs>[\d.]+) s; refused (?P<refused>\d+), "
+                 r"with the share (?P<shared>\d+); weight peak (?P<peak>[\d.]+); centre \(u, v\) left (?P<lu>-?[\d.]+)/(?P<lv>-?[\d.]+) right (?P<ru>-?[\d.]+)/(?P<rv>-?[\d.]+)"
+                 r"(?:; pitch (?P<pitch>[+-][\d.]+) deg \(the middle of the field: up (?P<fup>[+-][\d.]+), down (?P<fdn>[+-][\d.]+) deg\))?$")   # F210b: the pitch the centre was turned by
+H_F206_NONE_RE = r"ADS view circle \(F206\): press (?P<n>\d+): no circle: (?P<why>.+?) \(item (?P<item>\S+), scope (?P<scope>\S+)\)$"
+H_F205_KEY_RE = r"native on foot ADS view circle \(F205\): fix\.native_on_foot_ads_view_circle is (?P<key>on|off) -- "
+H_F205_PRESS_RE = (r"ADS view circle \(F205\): press (?P<n>\d+), Anti-aliasing (?P<aa>on|off): radius (?P<rad>[\d.]+) deg \(ADS FOV (?P<ads>[\d.]+) / hip FOV (?P<hip>[\d.]+) x the headset's half-FOV "
+                   r"(?P<half>[\d.]+) deg, vertical\)(?P<rest>.*)$")
+H_F205_SCOPEOFF_RE = r"ADS view circle \(F205\): press (?P<n>\d+): no circle \(fix\.native_on_foot_ads_scope_zoom is off\)$"   # F205b: the circle follows the scope zoom setting
+H_F205_NONE_RE = r"ADS view circle \(F205\): press (?P<n>\d+), Anti-aliasing (?P<aa>on|off): no circle: (?P<why>.+?) \(item (?P<item>\S+), scope (?P<scope>\S+)\)$"
+H_F205_RUNTIME_RE = (r"ADS view circle \(F205\) runtime: ADS view circle on (?P<frames>\d+) frames, radius (?P<rad>[\d.]+) deg \(the d3d11 half asked (?P<req>[\d.]+) deg(?P<cut>; cut to[^)]*)?\), "
+                     r"over (?P<secs>[\d.]+) s; refused (?P<refused>\d+), with the share (?P<shared>\d+); weight peak (?P<peak>[\d.]+); centre \(u, v\) left (?P<lu>-?[\d.]+)/(?P<lv>-?[\d.]+) "
+                   r"right (?P<ru>-?[\d.]+)/(?P<rv>-?[\d.]+)$")
+
+
+def _f205_pair(press, runtime):
+    """({id(press row): its runtime row or None}). A press line takes the first runtime report after it and before the next press line (the report is written when the sights have come down)."""
+    paired = {}
+    order = sorted(press, key=lambda r: r["_order"])
+    for i, p in enumerate(order):
+        ceiling = order[i + 1]["_order"] if i + 1 < len(order) else float("inf")
+        gap = [r for r in runtime if p["_order"] < r["_order"] < ceiling]
+        paired[id(p)] = min(gap, key=lambda g: g["_order"]) if gap else None
+    return paired
+
+
+def _hj_f205(rows, ctx):
+    """F205, the ADS view circle: each press line with a radius is a press the circle was asked for; its runtime report must show frames drawn. PARTIAL when a press that had a radius has no runtime
+    report, or one with 0 frames drawn (the key was on, the radius known, and the runtime drew no circle: a version 11 answer that did not carry the words, a centre it could not use, or a cut radius under 5
+    degrees), naming the press; the runtime's refused frames and the cut to hide the full-detail scope's side bars are notes. A press with no circle (an ADS FOV EDVR has not measured, no frustum, no far
+    point) is not a failure and says why. IDLE with the key off, or with no press in the window. The Anti-aliasing mode is stated beside the radius, so a flight in each mode can be compared."""
+    key, press, none, runtime = rows.get("key", []), rows.get("press", []), rows.get("none", []), rows.get("runtime", [])
+    scopeoff = rows.get("scopeoff", [])   # F205b: the circle follows fix.native_on_foot_ads_scope_zoom; a press with it off says so and is no failure
+    f206run, f206none = rows.get("f206run", []), rows.get("f206none", [])
+    if f206run or f206none:   # F206: only B3 presses (the scoped Executioner, B3 on, a temporal mode) have a circle, and every one writes a line: the run it drew, or why it got none
+        drawn = [r for r in f206run if int(r["frames"]) > 0]
+        empty = [r for r in f206run if int(r["frames"]) == 0]
+        text = "%d B3 press(es) with the circle drawn" % len(drawn)
+        if drawn:
+            text += " (radius %s deg, the widest that keeps the full-detail view's side bars in the black: nearest edge %s less the band %s%s); on %d frame(s) in %d run(s)" % (
+                "/".join(sorted({r["rad"] for r in drawn})[:4]), "/".join(sorted({r["edge"] for r in drawn})[:4]), "/".join(sorted({r["band"] for r in drawn})[:2]),
+                "; over the run " + min((r["lo"] for r in drawn), key=float) + " to " + max((r["hi"] for r in drawn), key=float) + " deg", sum(int(r["frames"]) for r in drawn), len(drawn))
+        pitched = sorted({(r["pitch"], r["fup"], r["fdn"]) for r in drawn if r.get("pitch") is not None})   # F210b: the centre is the sight pitched to the middle of the field vertically
+        if pitched:
+            text += "; the centre pitched by " + "/".join("%s deg (the middle of the field: up %s, down %s deg)" % p for p in pitched[:3])
+        refused = sum(int(r["refused"]) for r in f206run)
+        if refused:
+            text += "; the runtime refused %d frame(s) (the radius that hides the bars too small to be a view, or the centre unusable)" % refused
+        old = len(press) + len(none) + len(scopeoff) + len(runtime)
+        if old:
+            text += "; %d line(s) from an earlier build's circle (F205) in the window" % old
+        if f206none or empty:
+            bad = ["press %s" % r["n"] for r in f206none + empty]
+            why = collections.Counter(n["why"] for n in f206none)
+            return ("PARTIAL", text + "; a B3 press with its window standing got no circle frame (%s)%s" % (
+                ", ".join(bad[:6]), ": " + "; ".join("%s x%d" % (w, c) for w, c in why.most_common(2)) if why else ": the runtime drew it on 0 frames"))
+        return ("OK", text)
+    if not (key or press or none or runtime or scopeoff):
+        return None
+    keyed = key[-1]["key"] if key else None   # an F205 build's own key line (fix.native_on_foot_ads_view_circle, removed in F205b), still read
+    if keyed == "off" and not press:
+        return ("IDLE", "fix.native_on_foot_ads_view_circle is off (the F205 build's own key): no circle by the setting")
+    if not press and not none and scopeoff:
+        return ("IDLE", "fix.native_on_foot_ads_scope_zoom is off for %d press(es) of the sights: no circle by the setting (it follows the scope zoom)" % len(scopeoff))
+    if not press and not none:
+        return ("IDLE", "no press of the sights in this window (the circle follows fix.native_on_foot_ads_scope_zoom)")
+    paired = _f205_pair(press, runtime)
+    bad = [p for p in press if paired[id(p)] is None or int(paired[id(p)]["frames"]) == 0]
+    modes = collections.Counter(p["aa"] for p in press + none)
+    mode_text = ", ".join("Anti-aliasing %s %d" % (m, n) for m, n in sorted(modes.items()))
+    radii = ", ".join("%s deg (ADS %s / hip %s x %s)" % (p["rad"], p["ads"], p["hip"], p["half"]) for p in press[:4])
+    why = collections.Counter(n["why"] for n in none)
+    frames = sum(int(r["frames"]) for r in runtime)
+    text = "%d press(es) with a circle asked (%s), %d with none%s; the runtime drew it on %d frame(s) in %d run(s)" % (
+        len(press), mode_text or "no press", len(none), " (" + "; ".join("%s x%d" % (w, c) for w, c in why.most_common(3)) + ")" if why else "", frames, len(runtime))
+    if radii:
+        text += "; radius " + radii
+    cut = [r for r in runtime if r.get("cut")]
+    if cut:
+        text += "; cut to hide the full-detail scope's side bars in %d run(s)" % len(cut)
+    refused = sum(int(r["refused"]) for r in runtime)
+    if refused:
+        text += "; the runtime refused %d frame(s)" % refused
+    if scopeoff:
+        text += "; %d press(es) with the scope zoom off, no circle by the setting" % len(scopeoff)
+    if not press:
+        return ("IDLE", text + "; every press had no circle (not a failure)")
+    if bad:
+        return ("PARTIAL", text + "; the circle was asked for press %s and the runtime drew it on no frame (no report, or 0 frames drawn)" % ", ".join(p["n"] for p in bad[:6]))
+    return ("OK", text)
+
+
 # ---- C1a: the crisp reticle (src\d3d11\crisp_reticle.h formatAnnounce and formatPress; src\d3d11\native_on_foot.cpp s1::tick and endPress; docs\design-vr-scope-magnification-2026-10-28.md section 12) ----
 # Two lines, both tagged (C1): the announce (once a session) and one press line for each press of the sights the gate was eligible in (the weapon is not one the scope lens names). The gate
 # arms the gunsight quad's take into the sharp weapons layer for the whole press (from the raise to the end of the lower); the press line carries the frame thread's ticks (eligible, armed),
@@ -16223,6 +16816,238 @@ def _hj_desktop_window(rows, ctx):
     return ("OK", text)
 
 
+SRV_TURRET_REFUSE_NAMES = ("no-eye", "game-gs", "topology", "not-ready", "no-geometry")   # the order of the 10 s line's refused[...] counts (srv_turret_math.h refuseName)
+SRV_TURRET_HUD_MIN_SECS = 12.0   # the turret view this long with no 10 s line and no first draw: the HUD half never ran (a 10 s line is due within 10 s of the view going on, and the first draw within a frame)
+SRV_TURRET_BOUND_MIN = 0.9       # the share of the 10 s lines' HUD draws that must go through the shader
+
+
+def _srv_turret_windows(r):
+    """The window each group ran with, read from a 10 s line: [(group, (gap, dMin, dMax)) or (group, None)], None when the group was off; a gap of 0 with a window is the translation alone.
+    A line from before the push-back keys carried one window for every family (a gap of 0 meant off), named here 'all families'."""
+    if r.get("gap") is not None:
+        w = (float(r["gap"]), float(r["wmin"]), float(r["wmax"]))
+        return [("all families", w if w[0] > 0 else None)]
+    out = []
+    for name, p in (("panels", "p"), ("radar", "r")):
+        out.append((name, (float(r[p + "gap"]), float(r[p + "wmin"]), float(r[p + "wmax"])) if r.get(p + "gap") is not None else None))
+    return out
+
+
+def _srv_turret_window_text(groups):
+    """'panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off': a negative gap is a push-back (deeper), a positive one the first build's pull (nearer), a gap of 0 the
+    translation alone (HUD forward). The window is the distance from the anchor."""
+    return ", ".join("%s off" % name if w is None else "%s translated only" % name if w[0] == 0 else "%s %s %.2f m (window %.2f..%.2f m)" % (
+        name, "pushed deeper by" if w[0] < 0 else "pulled nearer by", abs(w[0]), w[1], w[2]) for name, w in groups)
+
+
+SRV_TURRET_COMPARISON = {1: "NEVER", 2: "LESS", 3: "EQUAL", 4: "LESS_EQUAL", 5: "GREATER", 6: "NOT_EQUAL", 7: "GREATER_EQUAL", 8: "ALWAYS"}
+SRV_TURRET_BLEND = {1: "ZERO", 2: "ONE", 3: "SRC_COLOR", 4: "INV_SRC_COLOR", 5: "SRC_ALPHA", 6: "INV_SRC_ALPHA", 7: "DEST_ALPHA", 8: "INV_DEST_ALPHA", 9: "DEST_COLOR", 10: "INV_DEST_COLOR",
+                    11: "SRC_ALPHA_SAT", 14: "BLEND_FACTOR", 15: "INV_BLEND_FACTOR"}
+SRV_TURRET_BLEND_OP = {1: "ADD", 2: "SUBTRACT", 3: "REV_SUBTRACT", 4: "MIN", 5: "MAX"}
+SRV_TURRET_CULL = {1: "NONE", 2: "FRONT", 3: "BACK"}
+
+
+def _srv_turret_state_text(r):
+    """One issue of a family's first scope: 'issue 2 other 2468x2208 fmt 10, depth LESS_EQUAL no write, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD'."""
+    def name(table, v):
+        return table.get(int(v), v)
+    depth = "depth off" if int(r["de"]) == 0 else "depth %s %s" % (name(SRV_TURRET_COMPARISON, r["df"]), "write" if int(r["dw"]) else "no write")
+    stencil = "stencil off" if int(r["se"]) == 0 else "stencil %s ref %s" % (name(SRV_TURRET_COMPARISON, r["sf"]), r["sref"])
+    blend = "blend off" if int(r["be"]) == 0 else "blend %s/%s %s" % (name(SRV_TURRET_BLEND, r["bs"]), name(SRV_TURRET_BLEND, r["bd"]), name(SRV_TURRET_BLEND_OP, r["bo"]))
+    text = "issue %s %s %sx%s fmt %s%s, %s, %s, %s mask 0x%s" % (r["issue"], r["target"], r["w"], r["h"], r["fmt"], "" if r["dsv"] == "yes" else " no depth view", depth, stencil, blend, r["bm"].upper())
+    if r.get("rs") is not None:   # the rasterizer state and the viewport (from the build that logged them)
+        text += ", scissor %s, cull %s%s%s, viewport %sx%s%s" % (
+            "off" if int(r["rs"]) == 0 else "on %s rect(s) first [%s,%s,%s,%s]" % (r["rn"], r["rl"], r["rt"], r["rr"], r["rb"]), name(SRV_TURRET_CULL, r["cull"]),
+            "" if int(r["dc"]) else ", depth clip off", ", front is counter-clockwise" if int(r["ccw"]) else "", r["vw"], r["vh"],
+            "" if float(r["vx"]) == 0 and float(r["vy"]) == 0 else " at %s,%s" % (r["vx"], r["vy"]))
+    return text
+
+
+def _hj_srv_turret(rows, ctx):
+    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back,
+    experimental.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
+    The HUD half is on when any of HUD forward, the panels' push-back, the radar's push-back and the gap is above 0 (a settings line from before them has fewer keys; with no settings
+    line the last 10 s line's per-group windows say whether a group ran). The move is about an anchor, latched at the head's seated position (each latch has an 'anchor' line, with its
+    reason: the view on, a camera key changed, a recentre): the detail says how often (and how often by 'head away', the safety net that takes it again when the head has been 35 cm from it for 90 frames) and where last, and the 10 s line's head offset and translation. No line but settings: IDLE (the turret view was not entered). A geometry shader that could not be made is NEVER
+    APPLIED whatever else the log says. A key above 0 whose half shows nothing is NEVER APPLIED once the log proves the turret view was on: for the camera, at least one 'on' edge; for the
+    HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and no first draw (a shorter stay has no 10 s line due yet and is IDLE). The
+    HUD keys all at 0 are that half off by key, IDLE, and so is the camera key at 0. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws bound, or draws refused for the
+    geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges the camera half on nothing (a key it
+    cannot see) and the HUD half on the 10 s line's own windows. No line at all is nothing to judge (None).
+    The pass covers eleven hologram families in eleven signatures, each signature with its own geometry shader (a creation line apiece: any one failing is NEVER APPLIED), each family
+    with its first-draw line, in two groups (the weapon panels, the radar) each with its own push-back. The Scorpion only: a "not the Scorpion" line (the turret view bit
+    is on in an SRV the journal does not call the Scorpion, a Scarab or a training scenario) is turret activity but never a failure; with nothing else from the turret in the window the rule
+    is IDLE ("nothing applied, by design"), and beside a Scorpion visit its count goes into the detail. The vehicle latch's lines ("srv turret: the vehicle is ...") are state like the
+    settings: they are kept whatever --since says, they never make the rule present or count as activity, and the last one is said in the detail.
+    The 10 s line also counts the draws whose scissor was opened and the frames whose eye frames the draw rebuilt from a newer pose (both go into the detail, unjudged); the scissor lines,
+    the refused lines, the restore lines and each family's first-scope state lines go into the detail unjudged too (only the 10 s line's refusal counts can make the HUD half PARTIAL, as
+    above). The radar camera's and the radar anchor's own lines ("srv turret radar camera: ...", "srv turret radar anchor: ...") are not this rule's."""
+    if not any(v for k, v in rows.items() if k != "vehicle"):   # the vehicle latch alone says nothing of the turret view
+        return None
+    settings, views, ignored = rows.get("setting", []), rows.get("view", []), rows.get("ignored", [])
+    published, secs, firsts, gss = rows.get("published", []), rows.get("hud", []), rows.get("first", []), rows.get("gs", [])
+    s0 = settings[-1] if settings else None
+
+    def key(name):
+        v = s0.get(name) if s0 else None
+        return None if v is None else int(v)
+
+    back, forward, rforward, panels, radar, gap, systems = key("back"), key("forward"), key("rforward"), key("panels"), key("radar"), key("gap"), key("systems")
+    legacy = s0 is not None and panels is None   # a settings line from before the push-back keys: the camera and the gap only
+
+    def cm(v):
+        return "unknown" if v is None else v if isinstance(v, str) else "%d cm" % v
+
+    depth_mode = s0.get("depth") if s0 else None   # the moved parts' depth mode (a settings line from before the switch says none)
+    scissor_mode = s0.get("scissor") if s0 else None   # open or game (a settings line from before the key says none)
+
+    if s0 is not None:   # the keys the settings line carried, in its own order
+        parts = ([("camera back", back)] + ([("hud forward", forward)] if forward is not None else []) + ([("radar forward", rforward)] if rforward is not None else []) +
+                 ([("panels back", panels), ("radar back", radar)] if panels is not None else []) + [("hud gap", gap)] + ([("hud depth", depth_mode)] if depth_mode is not None else []) + ([("hud scissor", scissor_mode)] if scissor_mode is not None else []))
+    else:
+        parts = [("camera back", None), ("hud forward", None), ("radar forward", None), ("panels back", None), ("radar back", None), ("hud gap", None), ("hud depth", None), ("hud scissor", None)]
+    keys = ", ".join("%s %s" % (name, cm(v)) for name, v in parts)
+    vehicles = rows.get("vehicle", [])
+    vnote = "; vehicle latch: %s (event %s), %d change(s)" % (vehicles[-1]["is"], vehicles[-1]["event"], len(vehicles)) if vehicles else ""
+    bad_gs = [r for r in gss if r["outcome"] != "created"]
+    if bad_gs:
+        return ("NEVER APPLIED", "the geometry shader could not be made: " + "; ".join("%s (0x%s, %s ms) for %s" % (r["outcome"], r["hr"], r["ms"], r["name"]) for r in bad_gs) + vnote)
+    activity = any(v for k, v in rows.items() if k not in H_SRV_TURRET_STATE_KINDS)   # a row of any kind but the state kinds
+    if ignored and not any(v for k, v in rows.items() if k not in H_SRV_TURRET_STATE_KINDS + ("ignored",)):
+        return ("IDLE", "the turret view was on %d time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (%s)%s" % (len(ignored), keys, vnote))
+    if not activity:
+        return ("IDLE", "the turret view was not entered in this window (%s)%s" % (keys, vnote))
+    ons = [r for r in views if r["state"] == "on"]
+    n = len(ons)
+    times = [r["_t"] for k, v in rows.items() if k not in H_SRV_TURRET_STATE_KINDS for r in v if r.get("_t") is not None]
+    last_t = max(times) if times else None
+    on_secs, start, is_on = 0.0, None, False   # the seconds the turret view was on: on edge to off edge, the last stay running to the window's last turret row
+    for r in views:
+        if r["state"] == "on":
+            if not is_on:
+                is_on, start = True, r["_t"]
+        elif is_on:
+            if start is not None and r["_t"] is not None:
+                on_secs += (r["_t"] - start) % 86400.0
+            is_on = False
+    if is_on and start is not None and last_t is not None:
+        on_secs += max(0.0, last_t - start)
+    # the camera half
+    if published:
+        cam = ("OK", "camera back %s m published %d time(s)" % (published[-1]["back"], len(published)))
+    elif back == 0:
+        cam = ("IDLE", "camera off by key")
+    elif back is None:
+        cam = None
+    elif n:
+        cam = ("NEVER APPLIED", "the turret view was on %d time(s), the camera key was %d cm, and no 'camera: back ... published' line shows it" % (n, back))
+    else:
+        cam = ("IDLE", "camera key %d cm and no 'on' edge in this window" % back)
+    # the HUD half
+    bound = sum(int(r["bound"]) for r in secs)
+    dl, dr = sum(int(r["dl"]) for r in secs), sum(int(r["dr"]) for r in secs)
+    refused = [sum(int(r["r%d" % i]) for r in secs) for i in range(len(SRV_TURRET_REFUSE_NAMES))]
+    why = ", ".join("%s %d" % (name, count) for name, count in zip(SRV_TURRET_REFUSE_NAMES, refused))
+    last = secs[-1] if secs else None
+    # whether a HUD key is above 0, from the settings line, else from the last 10 s line's windows (a group that ran has one)
+    if s0 is not None:
+        hud_on = any(v > 0 for v in (forward, rforward, panels, radar, gap, systems) if v is not None)
+        hud_keys = ", ".join("%s %s" % (name, cm(v)) for name, v in parts[1:])
+    elif last:
+        groups = _srv_turret_windows(last)
+        hud_on = any(w is not None for _, w in groups)
+        hud_keys = "from the last 10 s line: " + _srv_turret_window_text(groups)
+    else:
+        hud_on, hud_keys = None, None
+    if firsts or bound > 0:
+        text = "hud bound %d of %d draws (L %d, R %d)" % (bound, dl + dr, dl, dr)
+        if last:   # the matched draws per family: each 10 s line names its families and counts them in the same order; the sums, for the families that drew
+            by_family = {}
+            for r in secs:
+                for name, count in zip(r["fnames"].split(","), r["fcounts"].split(",")):
+                    by_family[name] = by_family.get(name, 0) + int(count)
+            drew = ["%s %d" % (name, count) for name, count in by_family.items() if count > 0]
+            text += ", families " + ", ".join(drew) if drew else ", no family drew"
+        if firsts:
+            text += ", " + ", ".join("first draw of family %s at frame %s eye %s" % (f["family"], f["frame"], f["eye"]) for f in firsts)
+        if last:
+            if last.get("ax") is not None:   # the anchor, how far the head is from it, and eye 0's translations (the panels' by HUD forward, the radar's by radar forward) in the shader's axes
+                text += "; anchor (%s,%s,%s) m seated, head offset %s cm, T (%s,%s,%s)" % (last["ax"], last["ay"], last["az"], last["ho"], last["tx"], last["ty"], last["tz"])
+                if last.get("rtx") is not None:
+                    text += ", radar T (%s,%s,%s)" % (last["rtx"], last["rty"], last["rtz"])
+            else:   # a 10 s line from before the anchored move: the per-eye shift
+                text += "; s[L,R] %s,%s" % (last["sl"], last["sr"])
+            text += ", ipd_elite %s mm, P00[L,R] %s,%s (the last 10 s line)" % (last["ipd"], last["pl"], last["pr"])
+            text += "; windows: " + _srv_turret_window_text(_srv_turret_windows(last))
+            posed = [r for r in secs if r.get("pm") is not None]   # the draw-time pose: the frames whose eye frames the draw rebuilt from a newer pose than the boundary tick had (informational)
+            if posed:
+                text += "; pose refreshed at draw in %d of %d frames" % (sum(int(r["pn"]) for r in posed), sum(int(r["pm"]) for r in posed))
+        problems = []
+        if dl + dr and bound < SRV_TURRET_BOUND_MIN * (dl + dr):
+            problems.append("only %d of %d draws went through the shader (under %d%%); refused: %s" % (bound, dl + dr, round(SRV_TURRET_BOUND_MIN * 100), why))
+        stuck = [(name, count) for name, count in zip(SRV_TURRET_REFUSE_NAMES, refused) if count and name in ("game-gs", "not-ready", "no-geometry")]
+        if stuck:
+            problems.append("draws refused for " + ", ".join("%s %d" % nc for nc in stuck))
+        hud = ("PARTIAL", text + "; " + "; ".join(problems)) if problems else ("OK", text)
+    elif hud_on is False:
+        hud = ("IDLE", "hud off by key")
+    elif hud_on is None:
+        hud = None
+    elif secs:
+        hud = ("NEVER APPLIED", "a hud key was above 0 (%s) and the %d 10 s line(s) show nothing bound: draws[L,R] %d,%d, refused %s" % (hud_keys, len(secs), dl, dr, why))
+    elif on_secs >= SRV_TURRET_HUD_MIN_SECS:
+        hud = ("NEVER APPLIED", "a hud key was above 0 (%s), the turret view was on for %.0f s, and no first-draw line and no 10 s line shows a draw through the shader" % (hud_keys, on_secs))
+    elif n:
+        hud = ("IDLE", "hud: turret view on under %d s: no 10 s line yet" % SRV_TURRET_HUD_MIN_SECS)
+    else:
+        hud = ("IDLE", "hud: a hud key above 0 (%s) and no 'on' edge, 10 s line or first draw in this window" % hud_keys)
+    # each family's first scope, unjudged: it says where to look, one flight decides
+    states = rows.get("state", [])
+    state_text = ""
+    if states:
+        by_family = {}
+        for r in states:
+            by_family.setdefault(r["family"], []).append(r)
+        shown = []
+        for fam_name, rs in by_family.items():   # the radar disc's whole first scope, the others' first issue and how many issues there were
+            if fam_name == "DF3503CD":
+                shown.append("%s first scope: %s" % (fam_name, "; ".join(_srv_turret_state_text(r) for r in rs)))
+            else:
+                shown.append("%s first scope: %s (%d issue(s))" % (fam_name, _srv_turret_state_text(rs[0]), len(rs)))
+        state_text += "; state at each family's first matched draw: " + " || ".join(shown)
+    halves = [("camera", cam), ("hud", hud)]
+    verdicts = [h[0] for _, h in halves if h]
+    status = ("NEVER APPLIED" if "NEVER APPLIED" in verdicts else "PARTIAL" if "PARTIAL" in verdicts
+              else "IDLE" if all(s == "IDLE" for s in verdicts) else "OK")
+    text = "turret view on %d time(s), %.0f s in all (%s)" % (n, on_secs, keys)
+    for _, h in halves:
+        if h:
+            text += "; " + h[1]
+    if gss:
+        text += "; geometry shader " + ", ".join("%s created in %s ms" % (r["name"], r["ms"]) for r in gss)
+    anchors = rows.get("anchor", [])
+    if anchors:
+        away = sum(1 for r in anchors if r["why"] == "head away")   # the safety net took the anchor again: it had been 35 cm or more from the head for a second
+        text += "; anchor latched %d time(s)%s, last at %s,%s,%s m seated (%s)" % (len(anchors), " (%d head away)" % away if away else "", anchors[-1]["x"], anchors[-1]["y"], anchors[-1]["z"],
+                                                                                  anchors[-1]["why"])
+    text += state_text
+    found_scissor = rows.get("scissor", [])
+    opened_draws = sum(int(r["so"]) for r in secs if r.get("so") is not None)
+    if found_scissor or opened_draws:   # the game's scissor rectangle: which families had it on, and how many draws had it opened
+        text += "; scissor: " + ("; ".join("%s drew with the test on (%s rect(s), the game's first [%s,%s,%s,%s], target %sx%s, %s)" % (
+            r["family"], r["rects"], r["l"], r["t"], r["r"], r["b"], r["tw"], r["th"], r["how"]) for r in found_scissor) if found_scissor else "no family found with the test on") + \
+            ", %d draw(s) had it opened (the 10 s lines)" % opened_draws
+    if rows.get("scissor_unrestored"):
+        text += "; the game's scissor rectangles could not be put back after an issue"
+    if rows.get("refused"):
+        text += "; draw(s) refused, said once per reason: " + ", ".join(r["reason"] for r in rows["refused"])
+    if rows.get("unrestored"):
+        text += "; the game's geometry stage could not be put back after an issue" + (" (put back at the frame boundary)" if rows.get("restored") else " (no frame-boundary line follows in this window)")
+    if ignored:
+        text += "; the turret view was also on %d time(s) in an SRV the journal does not call the Scorpion (nothing applied there, by design)" % len(ignored)
+    return (status, text + vnote)
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -16284,9 +17109,10 @@ HEALTH_RULES = (
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
-        ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
+        # F191: `key 11 (type 1001) draws N` (the key type 1001 uses; `key 10 (assumed: no type 1001 call seen yet)` before one was seen); a log before F191 says `key 10 draws N`
+        ("draws", r"reticle depth \(F85c\): key (?P<key>\d+)(?: \((?P<why>[^)]*)\))? draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
                   r"sky (?P<sky>\d+).*refusals: (?P<refs>.*?)(?:; over " + H_WL + r"; draws in (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
-        ("idle", r"reticle depth \(F85c\): no key 10 composite draw (?:this second|over (?P<wl>\d+) s)"),
+        ("idle", r"reticle depth \(F85c\): no (?:key 10|reticle) composite draw (?:this second|over (?P<wl>\d+) s)"),
         # F101: the reticle's game placement (a setting until F127; this build never prints the line, an older log may): key 10 is the game's, so nothing is patched by design
         ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
@@ -16443,7 +17269,7 @@ HEALTH_RULES = (
         ("sec", r"visor axis \(F121\) 30 s: visor draws seen (?P<seen>\d+) \(left (?P<seenl>\d+), right (?P<seenr>\d+)\), shifted (?P<shifted>\d+) \(left (?P<shl>\d+), "
                 r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+),(?: key off (?P<keyoff>\d+),)? refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
                 r"no replacement (?P<r3>\d+), eye filing (?P<r4>\d+)\), self-off (?P<selfoffn>\d+); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer "
-                r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+)(?P<np> \(not published\))?$" % (_HN, _HN)),
+                r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+)(?P<np> \(not published\))?(?:; eyes from the depth probe (?P<depth>\d+))?$" % (_HN, _HN)),
     ), _hj_f121_visor_axis),
     _hrule("visor eyes (F121c)", ("F121c",), ("visor eyes (F121c)",), (
         ("event", r"visor eyes \(F121c\): (?P<state>paired|ONE EYE ONLY|DISAGREES).*? -- the filing names target (?P<fl>[0-9A-F]{16}) for the left eye and (?P<fr>[0-9A-F]{16}) "
@@ -16494,7 +17320,8 @@ HEALTH_RULES = (
         ("eyekey", r"native on foot ADS sight eye \(F162\): fix\.native_on_foot_ads_sight_eye is (?P<mode>both|right|left) \(aiming eye (?P<aim>left|right)\)"),
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
     ), _hj_f106_share),
-    _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
+    _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c", "F100", "F198"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)", "native on foot marker probe: cost",
+                                                                       "marker eye (F198)"), (
         # F125: the applied and F87c lines end in "; over N s" (their window); a line without it (a log written before F125) covers one second.
         ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"
                     r"(?:.*; over " + H_WL + r"$)?"),
@@ -16503,6 +17330,9 @@ HEALTH_RULES = (
         # build 3: the one Unmap copy both eyes share (requested against copied bytes, copy faults); the judge reads the eye lines, so the line is matched and not judged
         ("_", r"marker fix \(F87c\) Unmap copy: \d+ Unmaps, requested \d+ bytes, copied \d+ bytes in \d+ ranges \(\d+ windows joined\), whole stream \d+ bytes, faults \d+, "
               r"[\d.]+ ms; over " + H_WL + r"$"),
+        # F198: the marker probe's cost line (marker composite draws that reached the draw tee) and the first draw an eye was named by the submitted textures
+        ("probe", r"native on foot marker probe: cost: draw tee calls \d+, draws scanned past the VS hash \d+ \(on-foot HUD \d+, marker composite (?P<mc>\d+), world \d+\)"),
+        ("seye", r"marker eye \(F198\): the eyes named by the submitted textures \(Anti-aliasing off\): eye 0 \S+, eye 1 \S+$"),
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
         ("sec", r"prompt anchor \(F87p\) " + H_WL + r": SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
@@ -16581,13 +17411,41 @@ HEALTH_RULES = (
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
-        ("left", r"native on foot camera away \(F107\): the game's camera left the commander \(episode (?P<ep>\d+)\): (?P<m>[\d.]+) m from the neck"),
+        ("left", r"native on foot camera away \(F107\): the game's camera left the commander \(episode (?P<ep>\d+)\): (?P<m>[\d.]+) m from the neck"
+                 r"(?:, (?:over|within) the [\d.]+ m a commander's eye can be(?:, (?:and|but) a buy screen is open)? "
+                 r"\(away by: the (?P<test>distance|showroom|shop screen)(?P<both> and the distance)?(?: test)?\))?"),   # F208b: which test made it away (an earlier build's line names none); F209: the shop screen
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
-                  r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
+                  r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"
+                  r"(?:, back near and gone again within the (?P<hold>[\d.]+) s hold (?P<alt>\d+) times(?: \(rejoins in a row (?P<rej>\d+)\))?)?"   # F208/F208b: the flaps the hold absorbed, the rejoins
+                  r"(?:.*\(calls held by the shop screen (?P<shopcalls>\d+), by the distance test (?P<distcalls>\d+)\))?"),   # F209: the calls each test held
     ), _hj_f107_away),
+    _hrule(H_SHOP, ("F209",), ("(F209)",), (
+        ("hook", r"avatar hooks: (?P<hook>shop-[a-z-]+) hook (?P<st>armed|stood down)"),
+        ("on", r"shop screens \(F209\): the shop signal is ON: F107 holds the camera away \(suit (?P<suit>\w+), weapons (?P<weap>\w+), kiosk (?P<kiosk>[\w ]+?); change (?P<n>\d+)\)"),
+        ("off", r"shop screens \(F209\): the shop signal is OFF \(suit (?P<suit>\w+), weapons (?P<weap>\w+), kiosk (?P<kiosk>[\w ]+?); change (?P<n>\d+)\)"),
+        ("show", r"shop screens \(F209\): (?P<cls>\w+) Show: \+0x79 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("close", r"shop screens \(F209\): (?P<cls>\w+) Close: \+0x79 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("state", r"shop screens \(F209\): SuitUIStateMachine: \"(?P<from>[^\"]*)\" -> \"(?P<to>[^\"]*)\" \(thread (?P<tid>\d+)\)"),
+        ("kstart", r"shop screens \(F209\): ArmouryVendorActivity started: \+0x1F8 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("kstop", r"shop screens \(F209\): ArmouryVendorActivity stopped: \+0x1F8 (?P<b>-?\d+) -> (?P<a>-?\d+) \(this 0x(?P<this>[0-9A-F]+), thread (?P<tid>\d+)\)"),
+        ("forgot", r"shop screens \(F209\): the remembered (?P<cls>\w+) \(this 0x(?P<this>[0-9A-F]+)\) is (?P<why>forgotten: .*?) \(vtable 0x(?P<vt>[0-9A-F]+), the class's 0x(?P<want>[0-9A-F]+)\)"),
+        ("sec", r"shop screens \(F209\): 1 s: suit \+0x79 (?P<suit>\w+), weapons \+0x79 (?P<weap>\w+), kiosk \+0x1F8 (?P<kiosk>\w+), SuitUIStateMachine \"(?P<state>[^\"]*)\", "
+                "signal (?P<sig>on|off); F107: (?P<f107>.*)$"),
+        ("capped", r"shop screens \(F209\): (?P<n>\d+) event lines in the last 10 s were not written"),
+        ("lost", r"shop screens \(F209\): (?P<n>\d+) shop event\(s\) were not recorded"),
+    ), _hj_shop),
+    _hrule(H_F212, ("F212",), ("(F212)",), (
+        ("hook", r"avatar hooks: (?P<hook>conversation-look) hook (?P<st>armed|stood down)(?:: (?P<why>.*?)(?:\. the conversation look \(F212\) is not held.*)?)?$"),
+        ("began", r"conversation look \(F212\): run (?P<n>\d+) began: .*\|yaw\| (?P<yaw>[\d.]+) and \|pitch\| (?P<pitch>[\d.]+) asked in its first frames"),
+        ("ended", r"conversation look \(F212\): run (?P<n>\d+) ended after (?P<s>[\d.]+) s: (?P<calls>\d+) gated call\(s\), the game asked for up to \|yaw\| (?P<yaw>[\d.]+) and "
+                  r"\|pitch\| (?P<pitch>[\d.]+) \(raw floats, unit unknown\); no gated call for (?P<gap>\d+) ms"),
+        ("sum", r"conversation look \(F212\): (?P<s>[\d.]+) s: (?P<g>\d+) call\(s\) gated, (?P<p>\d+) passed \(session (?P<sg>\d+) gated, (?P<sp>\d+) passed, (?P<f>\d+) store fault\(s\)\); "
+                r"the game asked for up to \|yaw\| (?P<ay>[\d.]+) and \|pitch\| (?P<ap>[\d.]+); look processor, local component, native on foot active \((?P<reads>\d+) read\(s\)\): "
+                r"largest \|velocity\| yaw (?P<vy>[\d.]+) pitch (?P<vp>[\d.]+), largest \|target\| yaw (?P<ty>[\d.]+) pitch (?P<tp>[\d.]+)"),
+    ), _hj_f212),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
-        ("_", r"native on foot \(F115\): native stereo on foot began at frame \d+"),
+        ("began", r"native on foot \(F115\): native stereo on foot began at frame (?P<frame>\d+)"),   # F212 reads it: native on foot was active
         ("edge", r"boarding reset \(F115\): the on-foot camera ended at frame (?P<frame>\d+) \((?P<src>the cockpit's own panels drew with native stereo still on "
                  r"foot|native stereo on foot ended); the stock panel shader drew (?P<stock>\d+) times on foot this stretch\); undone at once: the eye alignment "
                  r"(?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(the hold's raise (?P<hold>%s) cm, the neck reference's raise (?P<neck>%s) cm\), the look's seated yaw "
@@ -16612,8 +17470,8 @@ HEALTH_RULES = (
                 r"guard: residual largest (?P<res>[\d.]+) deg \(base re-taken (?P<reb>\d+)\); the body's yaw from the aim (?P<body>%s) deg mean \(largest "
                 r"(?P<bmax>[\d.]+), (?P<bn>\d+) frames\); updates (?P<upd>\d+), dropped: stick (?P<ds>\d+), mouse (?P<dm>\d+), pitch (?P<dp>\d+); split: clean "
                 r"(?P<clean>\d+), dirty (?P<dirty>\d+), unsplit (?P<unsplit>\d+), gain yaw (?P<gy>%s) pitch (?P<gp>%s); blocked (?P<blocked>\d+) \((?:holding|not "
-                r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); F98c's settle refused (?P<gated>\d+) calls \(the aim "
-                r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
+                r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); (?:F98c's settle refused (?P<gated>\d+) calls \(the aim "
+                r"pitched 10 deg or more\); )?centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
                 r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
                 r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?(?:; re-centred (?P<recentre>\d+))?"
@@ -16678,7 +17536,7 @@ HEALTH_RULES = (
                 r"G now (?P<rgn>%s) cm; target published (?P<rpub>%s) cm in (?P<rpubn>\d+) calls)?"
                 r"; EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
                 r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
-                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 17)),
+                r"(?P<refused>\d+) calls(?: \(look to aim's gate (?P<lta>\d+)\))?; returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 17)),
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
@@ -16900,6 +17758,13 @@ HEALTH_RULES = (
         ("sec", H186_RESP_RE),
         ("stop", H186_STOP_RE),
     ), _hj_f186_stops),
+    _hrule("look to aim eye height (F194)", ("F194",), (H194_LABEL_HEIGHT,), (
+        ("sec", H194_SEC_RE),
+        ("view", H194_VIEW_RE),
+    ), _hj_f194_height),
+    _hrule(H195_NAME, ("F109",), (H195_LABEL,), (
+        ("centred", H195_CENTRED_RE),
+    ), _hj_f195_keep),
     _hrule("ADS left arm bend (F185)", ("F185",), (H185_LABEL,), (
         ("sec", H185_RE),
     ), _hj_f185_arm_bend),
@@ -17097,7 +17962,18 @@ HEALTH_RULES = (
         ("announce", H_B3_ANNOUNCE_RE),
         ("press", H_B3_PRESS_RE),
         ("runtime", H_B3_RUNTIME_RE),
+        ("override", H_B3_OVERRIDE_RE),
     ), _hj_b3),
+    # F205 (the ADS view circle; src\d3d11\native_on_foot_f205.h, native_on_foot.cpp, src\common\view_circle.h): the key, one press line a press of the sights, and the runtime's report of the run.
+    _hrule(H_F205, ("F205", "F206"), (H_F205, H_F206), (
+        ("f206run", H_F206_RUN_RE),
+        ("f206none", H_F206_NONE_RE),
+        ("key", H_F205_KEY_RE),
+        ("press", H_F205_PRESS_RE),
+        ("none", H_F205_NONE_RE),
+        ("scopeoff", H_F205_SCOPEOFF_RE),
+        ("runtime", H_F205_RUNTIME_RE),
+    ), _hj_f205),
     # C1 (crisp sights; src\d3d11\crisp_reticle.h, native_on_foot.cpp): the announce and one press line a press of the sights the gate was eligible in, both tagged (C1).
     _hrule(H_C1, ("C1",), (H_C1,), (
         ("announce", H_C1_ANNOUNCE_RE),
@@ -17116,7 +17992,28 @@ HEALTH_RULES = (
         ("active", H_DESKTOP_ACTIVE),
         ("declined", H_DESKTOP_DECLINED),
         ("_", H_DESKTOP_OTHER),
-    ), _hj_desktop_window),)
+    ), _hj_desktop_window),
+    # The SRV turret view (issue 140): lines of the graphics log that carry no build tag (health_scan reads them, as it reads the desktop window's, before it drops the untagged lines).
+    _hrule(H_SRV_TURRET, (), H_SRV_TURRET_LABELS, (
+        ("setting", H_SRV_TURRET_SETTING),
+        ("vehicle", H_SRV_TURRET_VEHICLE),
+        ("view", H_SRV_TURRET_VIEW),
+        ("agreed", H_SRV_TURRET_AGREED),
+        ("latch_end", H_SRV_TURRET_LATCH_END),
+        ("ignored", H_SRV_TURRET_IGNORED),
+        ("published", H_SRV_TURRET_PUBLISHED),
+        ("cleared", H_SRV_TURRET_CLEARED),
+        ("hud", H_SRV_TURRET_HUD),
+        ("gs", H_SRV_TURRET_GS),
+        ("first", H_SRV_TURRET_FIRST),
+        ("anchor", H_SRV_TURRET_ANCHOR),
+        ("refused", H_SRV_TURRET_REFUSED),
+        ("unrestored", H_SRV_TURRET_UNRESTORED),
+        ("restored", H_SRV_TURRET_RESTORED),
+        ("state", H_SRV_TURRET_STATE),
+        ("scissor", H_SRV_TURRET_SCISSOR),
+        ("scissor_unrestored", H_SRV_TURRET_SCISSOR_UNRESTORED),
+    ), _hj_srv_turret),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -17149,19 +18046,42 @@ def health_scan(text, since=None, until=None):
     census = {}
     rows = {rule.name: {} for rule in HEALTH_RULES}
     rows["_health_window"] = {"since": since, "until": until}
+    rows[H_CARRIED] = {}
     unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
     tagged = 0
     first = last = None
     # F125: the detail log's state is said when native on foot arms and at each change, often long before a --since window opens. The last F125 line read
     # before the window's first line is the state in force as it opens: it goes to the log diet rule as an "entry" row.
     carried, entered = None, False
+    # F212 and F209 read two states that are logged once, long before a --since window opens: whether native stereo on foot was on (the last F115 began/ended line)
+    # and the conversation-look hook's armed or stood-down line (written when the hooks are installed). The last of each before the window goes in under H_CARRIED.
+    f115_rule = next(r for r in HEALTH_RULES if r.name == H_F115)
+    f212_rule = next(r for r in HEALTH_RULES if r.name == H_F212)
+    f115_state = f212_hook = None
     settings = {}
     setting_rules = (
         ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
     desktop = next(r for r in HEALTH_RULES if r.name == H_DESKTOP)
+    turret = next(r for r in HEALTH_RULES if r.name == H_SRV_TURRET)
     for raw in text.splitlines():
+        if "srv turret" in raw and any(label in raw for label in H_SRV_TURRET_LABELS):
+            # The SRV turret view's lines carry no build tag either. The settings and vehicle lines are state, so every one is kept; the rest are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in turret.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind in H_SRV_TURRET_STATE_KINDS or _health_in_window(tod, since, until):
+                        rows[H_SRV_TURRET].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_SRV_TURRET]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
         if H_DESKTOP_LABEL in raw:
             # The desktop window's lines carry no build tag. The setting is state, so every setting line is kept; the rest are events and are cut by the window.
             sm = HEALTH_STAMP_RE.match(raw)
@@ -17192,6 +18112,25 @@ def health_scan(text, since=None, until=None):
                 rows[name].setdefault("entry", []).append(dict(state))
             if carried is not None:
                 rows[H_F125].setdefault("entry", []).append(carried)
+            if f115_state is not None:
+                rows[H_CARRIED].setdefault("onfoot", []).append(f115_state)
+            if f212_hook is not None:
+                rows[H_CARRIED].setdefault("f212_hook", []).append(f212_hook)
+        if not entered and sm:
+            # Before the window: keep the last native-stereo-on-foot edge and the last F212 hook line.
+            pre = raw[sm.end():]
+            if "(F115)" in pre:
+                for kind, rx in f115_rule.kinds:
+                    g = rx.search(pre) if kind in ("began", "ended") else None
+                    if g:
+                        f115_state = dict(g.groupdict(), kind=kind, _t=tod)
+                        break
+            elif "conversation-look" in pre:
+                for kind, rx in f212_rule.kinds:
+                    g = rx.search(pre) if kind == "hook" else None
+                    if g:
+                        f212_hook = dict(g.groupdict(), _t=tod)
+                        break
         for name, regex in setting_rules:
             match = regex.search(raw)
             if match:
@@ -17380,7 +18319,7 @@ def _perf_window_of(line):
 # The lines laid beside each window (build 2, #168). All four are written by src/d3d11, the first two every window beside `draw hook CPU:`; the self-test holds the fragments to the sources.
 #   draw mask: 1800-frame window ending N; D draws through the full path; calls skipped by the vertex shader's may-want byte: ui_family A, ...        draw_mask_line.h
 #   gpu timing queries: 1800-frame window ending N; X EDVR timing-query Ends a frame over F frames (T in all); by owner a frame: other a, ...        gpu_query_count.h
-#   draw gate holders: K of 28 terms hold the gate open: a, b.        draw_gate_holders.h, when the set changes
+#   draw gate holders: K of 29 terms hold the gate open: a, b.        draw_gate_holders.h, when the set changes
 #   marker fix (F87c) eye E: ...; Unmap copy C copies, B bytes, M ms; ...        native_on_foot.cpp, per eye per window (build 2; build 3 writes "requested B bytes" and no ms)
 #   marker fix (F87c) Unmap copy: U Unmaps, requested R bytes, copied C bytes in N ranges (J windows joined), whole stream W bytes, faults F, M ms; over S s        build 3
 PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
@@ -18288,6 +19227,7 @@ def self_test_health():
     f183_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f183.h")
     f185_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f185.h")
     f186_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f186.h")
+    f194_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f194.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -18330,6 +19270,7 @@ def self_test_health():
         f183src = read_text(f183_path)
         f185src = read_text(f185_path)
         f186src = read_text(f186_path)
+        f194src = read_text(f194_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -18340,7 +19281,10 @@ def self_test_health():
         s0src = read_text(s0_path)
         s1src = read_text(s1_path)
         b3src = read_text(b3_path)
+        f205src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f205.h"))   # F205: the ADS view circle's press, runtime and override lines
         c1src = read_text(c1_path)
+        shopsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "shop_screen_core.h"))   # F209: the buy screens' event, signal and one-second lines
+        f212src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f212.h"))   # F212: the conversation look's run and summary lines
         probesrc = read_text(probe_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -18516,6 +19460,15 @@ def self_test_health():
             fmts[key] = health_c_format(f186src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f186.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R194(needle, *vals):
+        """F194's lines (formatSecond, HeightProbe::format in native_on_foot_f194.h), from their own format literals."""
+        key = "f194:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f194src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f194.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R185(needle, *vals):
@@ -18713,6 +19666,15 @@ def self_test_health():
             raise AssertionError("scope_zoom_s1.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
+    def R205(needle, *vals):
+        """F205's lines (native_on_foot_f205.h builds them: formatLine, formatRuntime, formatOverride), from their own format literals."""
+        key = "f205:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f205src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f205.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
     def RB3(needle, *vals):
         """B3's lines, from their own format literals. The press line is scope_zoom_b3.h's formatB3Press (three appendf calls, so three needles); the announce (announceB3) and the runtime's
         report (edvrNoteNativeScopeZoom) are native_on_foot.cpp's. The header is searched first, then the .cpp."""
@@ -18733,6 +19695,40 @@ def self_test_health():
         if fmts[key] is None:
             raise AssertionError("crisp_reticle.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
+
+    def RS(needle, *vals):
+        """F209's lines (formatEvent, formatSignal, formatForgotten, formatSecond and the cap's notes in shop_screen_core.h), from their own format literals."""
+        key = "shop:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(shopsrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("shop_screen_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R212(needle, *vals):
+        """F212's lines (formatBegan, formatEnded, formatSummary in native_on_foot_f212.h), from their own format literals."""
+        key = "f212:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f212src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f212.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RH(needle, *vals):
+        """F209's hook lines (native_on_foot_hooks.cpp tryHook: armed, stood down), from their own format literals."""
+        key = "hooks:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(hooks_src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_hooks.cpp has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RHT(needle):
+        """The text of a plain literal in native_on_foot_hooks.cpp (the shop hooks' role and consequence sentences)."""
+        text = health_c_format(hooks_src, needle)
+        if text is None:
+            raise AssertionError("native_on_foot_hooks.cpp has no text holding %r: the --health rule that reads it is out of date" % needle)
+        return text
 
     def RPROBE(needle, *vals):
         """The pixel probe's closing line (pixel_probe.cpp closeProbedFrame), which the S0 census rule reads (it carries no tag)."""
@@ -18878,11 +19874,20 @@ def self_test_health():
             # F151: per eye, the draws no stream window held and what the place rule said of each (the line prints the count not bound itself)
             return R("(F85b) eye %d: place bind (F151)", eye, outside, bound, outside - bound, why, wl)
 
-        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
+        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None, key="11 (type 1001)"):
+            # F191: the key text is what the DLL prints (the tracker's describe): "11 (type 1001)", or "10 (assumed: no type 1001 call seen yet)" before a type 1001 call
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
             for i, n in enumerate(refs):
                 v[17 + i] = n
-            return R("reticle depth (F85c): key 10 draws", *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+            return R("reticle depth (F85c): key %s draws", key, *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+
+        def retic_idle(wl=1, key="11 (type 1001)"):
+            # F191: the idle line names the key it waited for
+            return R("reticle depth (F85c): no reticle composite draw", wl, key)
+
+        def retic_old(line):
+            # A log of a build before F191 says `key 10 draws` and `no key 10 composite draw` (frozen wording; the DLL no longer prints it)
+            return line.replace("key 11 (type 1001) draws", "key 10 draws").replace("no reticle composite draw over", "no key 10 composite draw over")
 
         def hold(state="holding"):
             c = [int(state.startswith(x)) for x in ("holding", "frozen", "no pose", "ramping", "out of scope")]
@@ -19123,8 +20128,8 @@ def self_test_health():
         F110 = "ADS model eye (F110)"
 
         def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
-                        dmax=0.3, dn=87, aim="right"):
-            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                        dmax=0.3, dn=87, aim="right", wl=1):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", wl, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
                      dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
 
         # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
@@ -19135,8 +20140,21 @@ def self_test_health():
               has=["the model 0 (0%", "against the solved right eye 0.1 cm mean, 0.3 max over 261 frames"], lacks=["UNPARSED"])
         check("F110 model eye: the tester's 3.1 cm (the model at the nose)", [sight_check(d=(-3.1, 0.0, 0.0), dmean=3.1, dmax=3.2)] * 2, 0, [("PARTIAL", F110)],
               has=["3.1 cm mean, 3.2 max over 174 frames: the model is off the right eye"])
-        check("F110 model eye: no rows, every frame on the camera's model", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 0,
-              [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
+        # F196: the right eye aims and no frame of any ADS second had the solved eye: the rendered eyes never reached the lock (it was OK before: the model is a fallback, but
+        # a fallback that carries every frame is the feature not running). The user's log (Quest 2 on WiVRn under Proton, v0.22.0-rc.4, fix.temporal_aa = off) is the
+        # second case: 464 frames in these 10 s, none/implausible 464, the model 464 from the job camera, the IPD the 0.0630 m fallback.
+        check("F110 model eye: no rows, every frame on the camera's model, never a solved right eye", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 3,
+              [("NEVER APPLIED", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye",
+                                              "the solved rendered right eye never reached the lock: all 2 s with ADS frames were on the model"])
+        USER196 = sight_check(wl=10, both=0, none=464, solved=0, model=464, fromcam=464, ipd=0.0630, src="the fallback", dn=0)
+        check("F196 model eye: the user's log (Anti-aliasing off), 464 of 464 frames on the model, IPD the fallback", [USER196] * 2, 3, [("NEVER APPLIED", F110)],
+              has=["20 s: aiming eye right, the solved right eye 0 frames, the model 928 (100%: from the job camera 928, from the solved left eye 0)", "never reached the lock",
+                   "the model's IPD is 0.0630 m, the fallback", "a build before F196 formed no scene pair with Anti-aliasing off"], lacks=["UNPARSED"])
+        blind196 = sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)
+        check("F196 model eye: one blind second among solved ones is a moment, not the feature missing", [sight_check(), sight_check(), blind196], 0, [("OK", F110)],
+              lacks=["never reached the lock", "had no solved right eye at all"])
+        check("F196 model eye: most of the ADS seconds blind, some solved", [sight_check(), blind196, blind196], 0, [("PARTIAL", F110)],
+              has=["2 of 3 s with ADS frames had no solved right eye at all"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
         # F162: the aiming eye. A line before it is the right eye's (the F110 to F161 builds wrote "the lock's right eye" and "the solved right eye").
@@ -19153,9 +20171,9 @@ def self_test_health():
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
 
-        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0):
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0, noeye=0):
             f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
-            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, repl, marked, refused)
+            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, noeye, 0, repl, marked, refused)
             if latched:   # a build before F130: its tail was ", latched N" and the LATCHED OFF note
                 line = line.split("; mesh rows replaced by a source")[0] + ", latched 0 -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone"
             return line
@@ -19187,6 +20205,9 @@ def self_test_health():
         check("F113 rows: 10 s latch tail", [rows113(wl=10, diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["10 s:", "LATCHED OFF"], lacks=["UNPARSED"])
         check("F113 rows: 10 s sources never ran", [rows113(m=(300, 300), p=(0, 0), n=(600, 600), wl=10)], 3,
               [("NEVER APPLIED", F113)], has=["10 s:", "no source ever gave any"], lacks=["UNPARSED"])
+        # F196: the user's log (Quest 2, WiVRn, Anti-aliasing off): no scene depth eye for 157185 source draws, so no rows at all
+        check("F196 rows: the user's log, source draws with no scene depth eye (the depth probe's pair never formed)", [rows113(m=(0, 0), p=(0, 0), n=(490, 490), checked=0, noeye=157185, wl=10)], 3,
+              [("NEVER APPLIED", F113)], has=["none 100.0%", "157185 source draws had no scene depth eye: the depth probe's scene pair never formed"], lacks=["UNPARSED"])
 
         # ---- reticle depth (F118): the edge or the speed as the cause of a reticle seen double ----
         F118 = "reticle depth (F118)"
@@ -19276,6 +20297,14 @@ def self_test_health():
               [("NEVER APPLIED", F119)], has=["no head offset was ever sampled"])
         check("F119 containment: the depth grid never read", [ses119(), sec119(depth="none read", skipped="no scene rows 90"), sec119(depth="none read", skipped="no scene rows 90")], 0,
               [("PARTIAL", F119)], has=["the depth grid was never read (skipped: no scene rows 180)"])
+        # F199: with Anti-aliasing off a build before F199 handed the grid no scene depth (kSkipDepth, "no scene depth", in every second): over a few seconds on foot that is the grid never applied
+        def nodepth119():
+            return sec119(depth="none read", skipped="no scene depth 90")
+        check("F199 containment: the grid never got the scene depth in six on-foot seconds", [ses119()] + [nodepth119() for _ in range(6)], 3, [("NEVER APPLIED", F119)],
+              has=["the depth grid was never read (skipped: no scene depth 540)"])
+        check("F199 containment: under five seconds without the scene depth stay partial", [ses119()] + [nodepth119() for _ in range(4)], 0, [("PARTIAL", F119)],
+              has=["the depth grid was never read (skipped: no scene depth 360)"])
+        check("F199 containment: the depth read in some of the seconds is not never", [ses119()] + [nodepth119() for _ in range(5)] + [sec119()], 0, lacks=["NEVER APPLIED  head containment"])
         check("F119 containment: a baseline that is not about 0", [ses119(), sec119(base=(80, 9, 9)), sec119(base=(80, 9, 9))], 0, [("PARTIAL", F119)],
               has=["the baseline is not about 0: 9 cells of 64 within 20 cm"])
         check("F119 containment: the shader stood down", [ses119(), "head containment (F119): precompiled compute shader head_containment_cs creation FAILED; standing down (0x00000000, 0.100 ms).",
@@ -19303,6 +20332,12 @@ def self_test_health():
         def fail123(n=1, w=0.6, h=28.0, up=0.0):
             return R123("position recentre %u DID NOT bring", n, w, h, up)
 
+        check("F199 F123: armed and nothing triggered, but the scene depth never reached the wall contact", [ses123(), ses119()] + [nodepth119() for _ in range(6)], 3,
+              [("NEVER APPLIED", F123), ("NEVER APPLIED", F119)],
+              has=["the wall contact never had the scene depth: head containment (F119) read none in 6 on-foot seconds (skipped: no scene depth 540), so the leash alone was judged"])
+        check("F199 F123: a recentred leash episode with no scene depth is NEVER APPLIED over the OK", [ses123(), leash123(), ask123(), done123(), ses119()] + [nodepth119() for _ in range(6)], 3,
+              [("NEVER APPLIED", F123)], has=["leash hard 1", "the wall contact never had the scene depth"])
+        check("F199 F123: the depth read, still idle", [ses123(), ses119()] + [sec119() for _ in range(6)], 0, [("IDLE", F123), ("OK", F119)], lacks=["the wall contact never had the scene depth"])
         check("F123 containment: armed, nothing triggered", [ses123(), hold(), hold()], 0, [("IDLE", F123)], has=["armed (the session line is there), nothing triggered: no episode, no recentre"])
         check("F123 containment: a soft episode, a hard one recentred", [ses123(), leash123("leash soft", h=20.1, black=0.0, past=0.0, rec="no", ln=0.4), ask123(), done123(), leash123()], 0,
               [("OK", F123)], has=["2 episode(s): leash soft 1 (peak 20.1 cm, black 0.00 s); leash hard 1 (peak 31.4 cm horizontal, -3.0 cm up; recentred 1; black 0.90 s); "
@@ -19407,10 +20442,11 @@ def self_test_health():
         F121 = "visor axis (F121)"
 
         def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, keyoff=0, refused=0, r=(0, 0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np="",
-                    selfoff=0):
+                    selfoff=0, depth=None):
             r = tuple(r) + (0,) * (5 - len(r))
             line = R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, refused, r[0], r[1], r[2], r[3], r[4], selfoff, sl, sr, outer, inner, np)
-            return line.replace(", refused ", ", key off %d, refused " % keyoff, 1) if keyoff else line
+            line = line.replace(", refused ", ", key off %d, refused " % keyoff, 1) if keyoff else line
+            return line + ("; eyes from the depth probe %d" % depth if depth is not None else "")
 
         def vax_selfoff(nf=29753344, taps=29753344, eye=1):
             return R121("visor axis (F121c): SELF-OFF", nf, taps, eye)
@@ -19446,6 +20482,14 @@ def self_test_health():
               0, [("IDLE", F121)], has=["test key off 5400", "the test key fix.native_on_foot_visor_axis is off (the default)"], lacks=["NEVER APPLIED"])
         check("F121 visor axis: the key turned on mid-flight, shifted and left to the game both counted",
               [vax_armed(), vax_win(shl=0, shr=0, keyoff=2700, sl=0.0, sr=0.0, outer=0.0, inner=0.0), vax_win()], 0, [("OK", F121)], has=["shifted 2700", "test key off 2700"])
+        # F200: with Anti-aliasing off the eye filing names no visor draw's eye (the pilot's 16:14 window: seen 3768, refused 3768, no eye 3768) and the rule reads NEVER APPLIED; from F200 the
+        # depth probe's scene pair names it and the line says how many (the field is the line's last)
+        check("F200 visor axis: Anti-aliasing off, every draw refused for want of an eye (a build before F200)", [vax_armed(), vax_win(seen=3768, seenl=0, seenr=0, shl=0, shr=0, sl=0.0, sr=0.0, refused=3768, r=(3768, 0, 0, 0, 0))],
+              3, [("NEVER APPLIED", F121)], has=["none was shifted", "no eye 3768"], lacks=["eyes named by the depth probe"])
+        check("F200 visor axis: Anti-aliasing off, the eyes named by the depth probe's scene pair and shifted", [vax_armed(), vax_win(depth=2700), vax_win(depth=2700)], 0, [("OK", F121)],
+              has=["eyes named by the depth probe's scene pair (F200) 5400 of 5400 draws"], lacks=["UNPARSED"])
+        check("F200 visor axis: the depth probe named the eyes of some and the rest had none", [vax_armed(), vax_win(seen=2700, seenl=1350, seenr=1350, refused=100, r=(100, 0, 0, 0, 0), depth=2600)], 0,
+              [("OK", F121)], has=["eyes named by the depth probe's scene pair (F200) 2600 of 2700 draws", "no eye 100"])
         check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
         check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
               has=["the rule's patterns do not match"])
@@ -20692,6 +21736,13 @@ def self_test_health():
               has=["shown during the splash, 5.8 s after the game started; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
         check("F188 aim choice: shown after the first scene says so, with the seconds", [a177_shown("after the first scene", 28.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
               has=["shown after the first scene, 28.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown after the switch to VR says so, with the seconds", [a177_shown("after the switch to VR", 61.3), a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 61.3 s after the game started; picked look to aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown at the first menu open says so, with the seconds", [a177_shown("at the first menu open", 12.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["shown at the first menu open, 12.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: a flat start's not shown line beside a shown after the switch is read as shown (the page was shown)",
+              [R177("aim choice prompt (F177): not shown: %s", "the flat profile has no such page"), a177_shown("after the switch to VR", 30.0)], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 30.0 s after the game started"], lacks=["UNPARSED"])
         check("F188 aim choice: the F177 build's bare shown line is still read (no frame, no seconds)", ["aim choice prompt (F177): shown", a177_picked(), a177_saved()], 0, [("OK", H177)],
               has=["shown; picked look to aim"], lacks=["UNPARSED", "after the game started"])
         check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
@@ -20898,12 +21949,142 @@ def self_test_health():
 
         # ---- camera away (F107): the game's camera away from the commander ----
         F107 = "camera away (F107)"
-        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, 3.0)
-        AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0)
+        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, "over", 3.0, "", "distance test", 2.0, "")
+        AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0, 2.0, 0, 0)
+        AWAY_END_FLAPS = R("native on foot camera away (F107): the episode ended", 18.4, 2, 1620, 710.5, 710.6, 0, 2.0, 640, 0)
+        AWAY_END_REJOIN = R("native on foot camera away (F107): the episode ended", 11.2, 3, 980, 3.6, 3.7, 0, 4.0, 3, 2)
         check("F107 away: the carrier management screen in the 1c26ea5f build (the camera taken as the eye)", [neck(view=17373.5, tgt=-50.0, incam=-50.0,
               game=17423.5)] * 3 + [neck()], 3, [("NEVER APPLIED", F107)], has=["the game's camera 174.2 m from the neck in 3 neck reference seconds"])
         check("F107 away: an episode refused, the neck reference clean", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)],
-              has=["1 episodes (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
+              has=["1 episodes (all by the distance test) (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
+        check("F208 away: the suit shop in one episode, the flaps the hold absorbed counted and no line each", [neck(), AWAY_LEFT, AWAY_END_FLAPS, neck()], 0, [("OK", F107)],
+              has=["1 episodes (all by the distance test) (18.4 s, 1620 calls refused, the camera 710.5-710.6 m from the neck, 640 flaps inside the 2.0 s hold)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F208b away: an episode that began again within 3 s of an end doubles the hold, and the log says so", [neck(), AWAY_LEFT, AWAY_END_REJOIN, neck()], 0, [("OK", F107)],
+              has=["1 episode(s) began again within 3 s of an end and doubled the hold (up to 2 rejoins in a row)", "3 flaps inside the 4.0 s hold"], lacks=["UNPARSED", "PARTIAL"])
+        AWAY_LEFT_OLD = "native on foot camera away (F107): the game's camera left the commander (episode 1): 710.5 m from the neck, over the 3.0 m a commander's eye can be; the body pin takes nothing from it"
+        AWAY_LEFT_SHOWROOM = AWAY_LEFT.replace("(away by: the distance test)", "(away by: the showroom test)")
+        check("F208b away: an earlier build's left line (no test named) and a line by each test are read, the tests counted", [neck(), AWAY_LEFT_OLD, AWAY_LEFT, AWAY_LEFT_SHOWROOM, AWAY_END, neck()], 0, [("OK", F107)],
+              has=["3 episodes (by the distance test 2, by the showroom test 1)"], lacks=["UNPARSED"])
+        SHOP_FLAP_END = R("native on foot camera away (F107): the episode ended", 0.0, 4, 1, 710.5, 710.5, 0, 1.0, 0, 0)
+        check("F208 away: a build before F208 ended an episode on every return: hundreds of 0.0 s episodes are PARTIAL", [neck()] + [AWAY_LEFT, SHOP_FLAP_END] * 30 + [neck()], 0, [("PARTIAL", F107)],
+              has=["30 of 30 episodes lasted under 0.2 s", "the view pumped"], lacks=["UNPARSED"])
+
+        # ---- the Pioneer Supplies buy screens (F209): the game's own open flag, and F107's reason ----
+        S209 = "shop screens (F209)"
+        TAG209 = "shop screens (F209):"
+        AWAY_LEFT_SHOP = R("native on foot camera away (F107): the game's camera left", 1, 1.2, "within", 3.0, ", but a buy screen is open", "shop screen", 2.0, "")
+        AWAY_LEFT_BOTH = R("native on foot camera away (F107): the game's camera left", 2, 3.7, "over", 3.0, ", and a buy screen is open", "shop screen and the distance test", 2.0, "")
+        AWAY_END_SHOP = R("native on foot camera away (F107): the episode ended", 12.0, 1, 540, 1.2, 1.3, 0, 2.0, 0, 0, 540, 0)
+        AWAY_LEFT_3M7 = R("native on foot camera away (F107): the game's camera left", 1, 3.7, "over", 3.0, "", "distance test", 2.0, "")
+        AWAY_END_3M7 = R("native on foot camera away (F107): the episode ended", 14.0, 1, 600, 3.6, 3.7, 0, 2.0, 4, 0, 0, 600)
+        SHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Show", 0, 1, 0x1A2B3C4D, 7)
+        CLOSE209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Close", 1, 0, 0x1A2B3C4D, 7)
+        WSHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "WeaponsVendorInteraction", "Show", 0, 1, 0x2B3C4D5E, 7)
+        BADSHOW209 = RS(": +0x79 %d -> %d (this", TAG209, "SuitVendorInteraction", "Show", 0, 0, 0x1A2B3C4D, 7)
+        ON209 = RS("the shop signal is %s (suit", TAG209, "ON: F107 holds the camera away", "open", "closed", "not running", 1)
+        OFF209 = RS("the shop signal is %s (suit", TAG209, "OFF", "closed", "closed", "not running", 2)
+        STATE209 = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "OnFoot", "Suit Vendor", 7)
+        KSTART209 = RS(": +0x1F8 %d -> %d (this", TAG209, "ArmouryVendorActivity", "started", 0, 1, 0x3C4D5E6F, 7)
+        KSTOP209 = RS(": +0x1F8 %d -> %d (this", TAG209, "ArmouryVendorActivity", "stopped", 1, 0, 0x3C4D5E6F, 7)
+        SEC209 = RS("1 s: suit +0x79 %s", TAG209, "1", "none", "none", "Suit Vendor", "on", "away (episode 1, 90 calls refused, 90 with a buy screen open)")
+        FORGOT209 = RS("is %s (vtable 0x%llX", TAG209, "SuitVendorInteraction", 0x1A2B3C4D, "forgotten: its vtable is no longer the class's", 0x7FF600001234, 0x7FF600005D20)
+        LOST209 = RH("shop event(s) were not recorded", TAG209, 3)
+        CAPPED209 = RH("event lines in the last 10 s were not written", TAG209, 12, 40)
+        HOOK_DOWN209 = RH("hook stood down: %s. %s", "avatar hooks:", "shop-show", "the game build differs (the PE timestamp or image size is not build 334925's); EliteDangerous64.exe+0x9C3960 was not touched",
+                          RHT("none of the five shop screen hooks (F209) is placed"))
+        HOOK_UP209 = RH("hook armed: EliteDangerous64.exe+0x%llX", "avatar hooks:", "shop-show", 0x9C3960, "UI interaction base Show (sets the open byte +0x79)", 0x7FF600001000, 6, 14, 14, 0x7FF700000000,
+                        RHT("the Pioneer Supplies buy screens' flag (F209)"))
+        check("F209: a suit buy screen opened and closed, F107 held the camera away by the shop screen, and both say so", [neck(), HOOK_UP209, STATE209, SHOW209, ON209, AWAY_LEFT_SHOP, SEC209, SEC209,
+              CLOSE209, OFF209, AWAY_END_SHOP, neck()], 0, [("OK", S209), ("OK", F107)],
+              has=["hooks: 1 armed", "1 Show / 1 Close (SuitVendorInteraction 1)", "the signal on 1, off 1", "1 state change(s), last Suit Vendor", "2 one-second line(s)",
+                   "1 episodes (by the shop screen 1) (12.0 s, 540 calls refused, the camera 1.2-1.3 m from the neck, 540 calls with a buy screen open)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F209: the weapon buy screen and the armoury kiosk are counted by class", [neck(), KSTART209, WSHOW209, ON209, AWAY_LEFT_SHOP, OFF209, AWAY_END_SHOP, KSTOP209, neck()], 0,
+              [("OK", S209)], has=["1 Show / 0 Close (WeaponsVendorInteraction 1)", "kiosk 1 start / 1 stop"], lacks=["UNPARSED"])
+        BEGAN209 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        check("F209: the shop signal went on and F107 logged no episode by the shop screen: the view did not change", [neck(), BEGAN209, SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 3,
+              [("NEVER APPLIED", S209)], has=["went on 1 time(s) but F107 logged no episode by the shop screen: the view did not change"], lacks=["UNPARSED"])
+        check("F209: the same log with native on foot never begun (flat, or the log's start cut off) is not NEVER APPLIED", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_3M7, CLOSE209, OFF209, neck()], 0,
+              lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F209: an episode F107 opened by its distance test and the shop signal kept open (its ended line counts calls the shop screen held) is the shop's, not NEVER APPLIED",
+              [neck(), BEGAN209, SHOW209, ON209, AWAY_LEFT_3M7, AWAY_END_SHOP, CLOSE209, OFF209, neck()], 0, [("OK", S209)],
+              lacks=["NEVER APPLIED", "no episode by the shop screen", "UNPARSED"])
+        check("F209: a shop-sized distance episode with the shop signal beside it is not flagged", [neck(), SHOW209, ON209, AWAY_LEFT_3M7, AWAY_LEFT_BOTH, AWAY_END_3M7, CLOSE209, OFF209, neck()], 0,
+              [("OK", S209), ("OK", F107)], has=["(by the distance test 1, by the shop screen 1)"], lacks=["no shop signal in the log"])
+        check("F209: a distance episode at a showroom's distance with no shop signal is PARTIAL (the flag did not see that camera)", [neck(), AWAY_LEFT_3M7, AWAY_END_3M7, neck()], 0,
+              [("PARTIAL", F107)], has=["1 episode(s) by the distance test with the camera 3.7-3.7 m from the neck, a showroom's distance, and no shop signal in the log beside it",
+                                          "the screen is not the suit or the weapon buy screen, or the hooks never ran"], lacks=["UNPARSED"])
+        check("F209: the same episode with the hooks stood down names them", [neck(), HOOK_DOWN209, AWAY_LEFT_3M7, AWAY_END_3M7, neck()], 0, [("PARTIAL", F107), ("PARTIAL", S209)],
+              has=["the shop hooks stood down: shop-show", "every shop hook stood down: F107 holds a showroom camera by its distance test alone"], lacks=["UNPARSED"])
+        check("F209: the carrier management screen (3367 m) is not a showroom's distance", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)], lacks=["no shop signal", "UNPARSED"])
+        check("F209: a signal that did not hold on its object, events the hooks lost and lines the cap dropped are PARTIAL", [neck(), SHOW209, ON209, AWAY_LEFT_SHOP, FORGOT209, LOST209, CAPPED209,
+              OFF209, AWAY_END_SHOP, neck()], 0, [("PARTIAL", S209)],
+              has=["1 remembered object(s) forgotten", "3 shop event(s) were not recorded", "12 event line(s) were not written"], lacks=["UNPARSED"])
+        check("F209: a Show that left the byte not set, and a signal that never went on, are PARTIAL", [neck(), BADSHOW209, neck()], 0, [("PARTIAL", S209)],
+              has=["1 Show(s) left the byte +0x79 not set (read 0)"], lacks=["UNPARSED"])
+        check("F209: a signal that went on more often than it went off may have stuck", [neck(), SHOW209, ON209, AWAY_LEFT_SHOP, OFF209, ON209, ON209, AWAY_END_SHOP, neck()], 0, [("PARTIAL", S209)],
+              has=["the signal went on 3 times and off 1: it may have stuck"], lacks=["UNPARSED"])
+        check("F209: a line that drifted from its pattern is unparsed", [neck(), "shop screens (F209): the buy screen is somewhere else"], 4, [("UNPARSED", S209)])
+
+        # ---- the conversation look (F212): the leaf that sets the look springs' targets is held at 0 while native on foot is active ----
+        S212 = "conversation look (F212)"
+        TAG212 = "conversation look (F212):"
+        ONFOOT212 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        TALK212 = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "OnFoot", "Mission Giver", 7)
+        TALK212B = RS('SuitUIStateMachine: \\"%s\\" -> \\"%s\\"', TAG209, "Mission Giver", "Service Giver", 7)
+        HOOK_UP212 = RH("hook armed: EliteDangerous64.exe+0x%llX", "avatar hooks:", "conversation-look", 0x1A8DF40,
+                        "look springs' target setter (the look component facade's slot +0xE8, a 17-byte leaf)", 0x7FF600001000, 8, 17, 17, 0x7FF700000000,
+                        RHT("the conversation look (F212): the leaf that sets the look springs' two targets"))
+        HOOK_DOWN212 = RH("hook stood down: %s. %s", "avatar hooks:", "conversation-look",
+                          "the game build differs (the 17 bytes at EliteDangerous64.exe+0x1A8DF40 are not build 334925's look springs' target setter: found cc cc, expected f3 0f); nothing was patched",
+                          RHT("the conversation look (F212) is not held"))
+        BEGAN212 = R212("run %u began:", TAG212, 1, 0.2, 0.0646)
+        ENDED212 = R212("run %u ended after", TAG212, 1, 5.93, 541, 0.2, 0.0646, 1000)
+        ENDED212B = R212("run %u ended after", TAG212, 2, 1.2, 100, 0.9, 0.1, 1000)
+        SUM212 = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 0, 0.2, 0.0646, 541, 0.0, 0.0, 0.0, 0.0)
+        SUM212_MOVED = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 0, 0.2, 0.0646, 541, 0.3, 0.1, 0.12, 0.0)
+        SUM212_FAULT = R212("call(s) gated", TAG212, 10.0, 541, 0, 541, 0, 2, 0.2, 0.0646, 541, 0.0, 0.0, 0.0, 0.0)
+        SUM212_SPRINGS = R212("call(s) gated", TAG212, 10.0, 0, 0, 0, 0, 0, 0.0, 0.0, 450, 0.3, 0.0, 0.2, 0.0)
+        SUM212_REST = R212("call(s) gated", TAG212, 10.0, 0, 0, 0, 0, 0, 0.0, 0.0, 450, 0.0, 0.0, 0.0, 0.0)
+        check("F212: a mission giver's conversation, the leaf gated for the run, the springs at rest: OK", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212, neck()], 0,
+              [("OK", S212)], has=["hook armed", "1 run(s) begun, 1 ended (longest 5.9 s, 541 gated call(s), the game asked for up to |yaw| 0.20000 and |pitch| 0.06460, raw floats)",
+                                   "541 gated call(s), 0 passed in the 10 s lines", "1 conversation state(s) in F209's lines (Mission Giver)",
+                                   "springs read 541 time(s) in the 10 s lines: largest |velocity| yaw 0.00000 pitch 0.00000, |target| yaw 0.00000 pitch 0.00000"],
+              lacks=["UNPARSED", "PARTIAL", "NEVER APPLIED"])
+        check("F212: two runs and a second state are counted", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, TALK212B, BEGAN212, ENDED212B, neck()], 0, [("OK", S212)],
+              has=["2 run(s) begun, 2 ended (longest 5.9 s, 641 gated call(s)", "2 conversation state(s) in F209's lines (Mission Giver, Service Giver)"], lacks=["UNPARSED"])
+        check("F212: a conversation state with native on foot begun, the hook armed and no gated call is NEVER APPLIED", [neck(), ONFOOT212, HOOK_UP212, TALK212, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["0 gated call(s)", "a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held"],
+              lacks=["UNPARSED"])
+        check("F212: the springs moved and the leaf never fired: NEVER APPLIED, with what the springs read", [neck(), ONFOOT212, HOOK_UP212, TALK212, SUM212_SPRINGS, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["springs read 450 time(s) in the 10 s lines: largest |velocity| yaw 0.30000 pitch 0.00000, |target| yaw 0.20000 pitch 0.00000"], lacks=["UNPARSED"])
+        check("F212: the hook stood down and a conversation state was logged: NEVER APPLIED, naming the reason", [neck(), ONFOOT212, HOOK_DOWN212, TALK212, neck()], 3,
+              [("NEVER APPLIED", S212)], has=["hook stood down (the game build differs (the 17 bytes at EliteDangerous64.exe+0x1A8DF40 are not build 334925's look springs' target setter: found cc cc, expected f3 0f); nothing was patched)",
+                                              "the hook stood down and a conversation state was logged with native on foot begun: the game's conversation look was not held"], lacks=["UNPARSED"])
+        check("F212: the hook stood down with no conversation is PARTIAL (the look is not held)", [neck(), HOOK_DOWN212, neck()], 0, [("PARTIAL", S212)],
+              has=["the hook stood down: the game's conversation look is not held"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: armed, with no conversation and no call, is IDLE", [neck(), ONFOOT212, HOOK_UP212, neck()], 0, [("IDLE", S212)], has=["no conversation call in the window (nothing to hold)"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a conversation state with native on foot never begun (flat, or the log's start cut off) is not NEVER APPLIED", [neck(), HOOK_UP212, TALK212, neck()], 0, [("IDLE", S212)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a spring target above zero in a window that had gated calls is PARTIAL (something else sets the targets)", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212_MOVED, neck()], 0,
+              [("PARTIAL", S212)], has=["1 10 s window(s) with gated calls read a spring target above zero (up to yaw 0.12000 pitch 0.00000): something else sets the targets"], lacks=["UNPARSED"])
+        check("F212: a store into the facade that faulted is PARTIAL", [neck(), ONFOOT212, HOOK_UP212, TALK212, BEGAN212, ENDED212, SUM212_FAULT, neck()], 0, [("PARTIAL", S212)],
+              has=["2 store(s) into the facade faulted"], lacks=["UNPARSED"])
+        END212_115 = R("native on foot (F115): native stereo on foot", "ended", 86333)
+        check("F212: native on foot and the hook's line before a --since window, a conversation state in it and no gated call is NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_UP212, neck(), TALK212, neck()], 3, [("NEVER APPLIED", S212)],
+              has=["hook armed", "a conversation state was logged with native on foot begun and the leaf was never called with native on foot active: the look was not held"],
+              lacks=["UNPARSED"], extra=["--since", "10:00:04"])
+        check("F212: the hook stood down before a --since window is named in the NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_DOWN212, neck(), TALK212, neck()], 3, [("NEVER APPLIED", S212)],
+              has=["hook stood down (the game build differs", "the hook stood down and a conversation state was logged with native on foot begun"], lacks=["UNPARSED"], extra=["--since", "10:00:04"])
+        check("F212: native stereo on foot ended before the --since window: the conversation state in it is not NEVER APPLIED",
+              [neck(), ONFOOT212, HOOK_UP212, END212_115, neck(), TALK212, neck()], 0, lacks=["NEVER APPLIED", "UNPARSED"], extra=["--since", "10:00:05"])
+        check("F212: the springs moved in a 10 s window with no gated call and no conversation state is PARTIAL (something else turned the look)",
+              [neck(), ONFOOT212, HOOK_UP212, SUM212_SPRINGS, neck()], 0, [("PARTIAL", S212)],
+              has=["the look springs moved in 1 10 s window(s) with no gated call: something other than the hooked leaf turned the look"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F212: a 10 s window with no gated call and springs at rest stays OK", [neck(), ONFOOT212, HOOK_UP212, SUM212_REST, neck()], 0, [("OK", S212)], lacks=["PARTIAL", "UNPARSED"])
+        check("F212: a line that drifted from its pattern is unparsed", [neck(), "conversation look (F212): the leaf is somewhere else"], 4, [("UNPARSED", S212)])
 
         # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
         B115 = "boarding reset (F115)"
@@ -20990,14 +22171,14 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
+                     1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
-        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, "the aim turns onto the head through the follower (the view stays)")
+        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, -4.0, 0.0, "after 9.0 s of mouse look", "the aim turns onto the head through the follower (the view stays)")
         NOT109 = R("native on foot look to aim (F109): not engaged:", "body align is off (fix.native_on_foot_body_align = off; the full-3P body needs body)")
         TRIP109 = R("native on foot look to aim (F109): GUARD TRIPPED", "GUARD TRIPPED: the view - head residual (the right eye's rows) grew for 0.5 s: yaw +9.0 pitch "
                     "+0.1 deg against the head's yaw +18.0 pitch +0.2; ratio yaw +0.50 pitch +0.50 (about -2: that axis's sign is inverted; about -1: the view does "
@@ -21022,7 +22203,7 @@ def self_test_health():
                    "rows gap 1; latched trips 1, re-armed 1", "the guard tripped (GUARD TRIPPED: the view - head residual"], lacks=["UNPARSED"])
         check("F109b look: the F109 build's 1 s line (no gate fields) still reads", [ENG109, R("native on foot look to aim (F109) 1 s:", "following", 0.0, 150, 12.0,
               -3.0, 12.0, -3.0, 12.0, -3.0, 0.0, 0.0, 0.2, -0.1, 0.5, "read", 30.0, -5.0, 0.3, 0, 2.0, 12.0, 88, 90, 0, 0, 0, 80, 2, 0, 0.85, 0.85, 0,
-              "not holding", 0, 0, 0.0, 0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
+              "not holding", 0, 0, 0.0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
         # F109c: the F109b flight's cutter (08:57:13-32): the reported head 20-61 deg above the aim for 20 s, the aim's pitch 25 deg apart from the carried
         check("F109c look: the aim held off the head, its pitch apart from the account", [ENG109, look109(foreign=12)] + [look109(hy=5.0, hp=10.0, ap=0.0, op=36.0,
               drift=25.0)] * 4, 0, [("PARTIAL", L109)], has=["F109c: foreign calls 12 (the gain's ends 1.00000 0.85335), the aim's pitch apart from the carried by 5 deg "
@@ -21030,6 +22211,136 @@ def self_test_health():
                                                               "the aim's pitch parted from the carried pitch"], lacks=["UNPARSED"])
         check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
               has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
+
+        # ---- F194: look to aim's eye height settles as mouse look's does (behaviour since F195b); the view's height at each edge. The lines of the earlier builds are still read ----
+        F194H = "look to aim eye height (F194)"
+
+        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, f139=0, taken=1, calls=90, raise_=-5.0, eye=19.0, secs=1):
+            """The height line, from the DLL's own format (formatSecond); secs is the window it covers (1 s in the detail log, 10 s by default, 1 to 10 when a disengage closes it: F125)."""
+            return R194("native on foot look to aim height (F194) %u s: the headset's pitch (LOCAL) mean %+.1f deg", secs, local, carried, root, off, f139, taken, calls, raise_, eye)
+
+        def view194(kind="engage", before="1.610 m, carried aim pitch +0.0 deg", a1="+0.0 cm (1.610 m), carried aim pitch -2.0 deg", a2="+0.0 cm (1.610 m), carried aim pitch -2.0 deg",
+                    a3="+0.0 cm (1.610 m), carried aim pitch -2.0 deg"):
+            """The edge's line, from the DLL's own format (HeightProbe::format)."""
+            return R194("native on foot look to aim height (F194) %s: the view's height", kind, before, a1, a2, a3)
+
+        # the 1 s lines of the builds before F195b, as those builds wrote them: with look to aim's own 10 deg gate in the settle field (F194b's), and with the picture-centre pitch before it (F194's)
+        OLD_SEC194B = ("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean +0.0 deg; carried aim pitch mean -3.0 deg (the game's aim -16.0 deg); the reported head's pitch from the aim "
+                       "mean +4.5 deg; the settle: look to aim's 10 deg gate would have refused (skipped) 60 of 90 pin calls, F138/F139's 20 deg gate refused 0, taken 1; the published raise mean -5.0 cm; "
+                       "the drawn eye over the animated neck mean +19.0 cm")
+        OLD_SEC194 = ("native on foot look to aim height (F194) 1 s: the picture-centre pitch in force -13.0 deg (look to aim aims at the picture's centre: on); the headset's pitch (LOCAL) mean +0.0 deg; "
+                      "carried aim pitch mean -3.0 deg (the game's aim -16.0 deg); the reported head's pitch from the aim mean: the forward axis +13.0 deg, the ray in force +0.2 deg; the settle: look to aim's "
+                      "10 deg gate would have refused (skipped) 60 of 90 pin calls, F138/F139's 20 deg gate refused 0, taken 1; the published raise mean -5.0 cm; the drawn eye over the animated neck mean +19.0 cm")
+        OLD_FRUSTUM194 = "native on foot look to aim (F194): the picture's centre is 13.0 deg below the headset's forward axis (up 0.966, down 1.428 tangents); look to aim aims at it: on"
+        OLD_KEYNOTE194 = ("native on foot look to aim height (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look is on -- look to aim's own settle gate is skipped: the eye "
+                          "height settles as it does under mouse look")
+
+        quest194 = [sec194()] * 3
+        check("F194: look to aim engaged, F139's gate refused nothing, a stance taken each second, an engage that moved nothing: OK with the figures",
+              quest194 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
+                   "engage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s +0.0 cm; carried aim pitch -2.0 deg at 3 s"], lacks=["UNPARSED", "PARTIAL", "NEVER", "10 deg gate"])
+        # the RC5 review: F194's line follows the on-foot log diet (F125): 10 s by default, a window a disengage closes early prints its own length. A log with no detail lines reads as it should.
+        check("F194: 10 s windows (the default log) are read as the seconds they cover: 20 engaged s, 1800 pin calls, OK", [sec194(secs=10, calls=900, taken=2)] * 2 + [view194()], 0, [("OK", F194H)],
+              has=["20 engaged s, 1800 pin calls: F138/F139's 20 deg gate refused 0, stances taken 4"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: a window the disengage closed early (4 s) beside 10 s windows counts its own seconds", [sec194(secs=10, calls=900), sec194(secs=4, calls=360), view194(kind="disengage")], 0, [("OK", F194H)],
+              has=["14 engaged s, 1260 pin calls"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: a log with no detail lines and one 10 s window per engagement is not NEVER APPLIED", [sec194(secs=10, calls=900)], 0, [("OK", F194H)], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F194: 10 engaged seconds in one window with no stance taken is still PARTIAL (the window's length counts)", [sec194(secs=10, calls=900, taken=0)], 0, [("PARTIAL", F194H)],
+              has=["no stance was taken in 10 engaged seconds"], lacks=["UNPARSED", "NEVER"])
+        check("F194: the 1 s line of the build with look to aim's own 10 deg gate is still read, and what that gate did is named, not judged",
+              [OLD_KEYNOTE194] + [OLD_SEC194B] * 3 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3", "[3 row(s) of a build with look to aim's own 10 deg gate: it would have refused (skipped) 180 calls]"],
+              lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: the lines of the build with part 1 (the frustum line, the 1 s line with the picture-centre pitch, the forward axis's and the ray's pitch) are still read: OK, nothing unparsed",
+              [OLD_FRUSTUM194, OLD_KEYNOTE194] + [OLD_SEC194] * 3 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3"], lacks=["UNPARSED", "PARTIAL", "NEVER", "picture centre (F194)"])
+        check("F194: the frustum line and the key note of those builds alone belong to no rule: no verdict, nothing unparsed", [OLD_FRUSTUM194, OLD_KEYNOTE194, f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F194H), row("IDLE", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H), row("PARTIAL", F194H), "UNPARSED"])
+        check("F194 height: an engage after which the view stood 11 cm lower 3 s on: PARTIAL, the pilot's drop",
+              quest194 + [view194(a1="-10.0 cm (1.510 m), carried aim pitch +13.0 deg", a2="-10.5 cm (1.505 m), carried aim pitch +13.0 deg", a3="-11.0 cm (1.500 m), carried aim pitch +13.0 deg")], 0,
+              [("PARTIAL", F194H)], has=["engage: 0.5 s -10.0 cm, 1 s -10.5 cm, 3 s -11.0 cm; carried aim pitch +13.0 deg at 3 s", "the view stood -11.0 cm from where it was after 1 engage(s)"],
+              lacks=["UNPARSED"])
+        check("F194 height: a disengage that moved the view is informational (not flagged)", quest194 + [view194(kind="disengage", a3="-9.0 cm (1.520 m), carried aim pitch +0.0 deg")], 0, [("OK", F194H)],
+              has=["disengage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s -9.0 cm"], lacks=["UNPARSED", "PARTIAL"])
+        check("F194 height: moments not read print as not read, not as 0 cm", quest194 + [view194(a1="not read", a2="not read (cut short by the next edge)", a3="not read (cut short by the next edge)", before="not read")], 0,
+              [("OK", F194H)], has=["engage: 0.5 s not read, 1 s not read, 3 s not read"], lacks=["UNPARSED", "PARTIAL"])
+        check("F194 height: the hook wrote no call to the window in any engaged second: NEVER APPLIED, the instrument did not run",
+              [sec194(calls=0, f139=0, taken=0, eye=0.0)] * 3, 3, [("NEVER APPLIED", F194H)],
+              has=["the pin hook wrote no call to the window in any engaged second"], lacks=["UNPARSED"])
+        check("F194 height: look to aim engaged (F109's 1 s lines) and no F194 1 s line: NEVER APPLIED, the instrument did not run", [ENG109, view194()] + [look109()] * 3, 3,
+              [("NEVER APPLIED", F194H)], has=["look to aim was engaged for 3 s (F109's 1 s lines) and no F194 1 s line was written"], lacks=["UNPARSED"])
+        check("F194 height: no stance taken in 12 engaged seconds: PARTIAL", [sec194(taken=0, f139=40)] * 12, 0, [("PARTIAL", F194H)],
+              has=["no stance was taken in 12 engaged seconds (F138/F139 refused 480 calls)"], lacks=["UNPARSED"])
+        check("F194 height: a few seconds with no stance taken is not flagged", [sec194(taken=0)] * 3, 0, [("OK", F194H)], lacks=["UNPARSED", "PARTIAL"])
+        check("F194: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F194H), row("IDLE", F194H), row("PARTIAL", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H)])
+        check("F194: lines that drifted from their patterns are unparsed", ["native on foot look to aim height (F194) 1 s: something else", "native on foot look to aim height (F194) engage: something else"], 4,
+              [("UNPARSED", F194H)])
+
+        # ---- F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (behaviour since F195b); the F109 rule takes the kept pitch off the standing offset ----
+        L195 = H195_NAME
+
+        def cen195(op=4.46, kept=None, cen=None, oy=12.0, why="after 9.0 s of mouse look"):
+            """F109's centred line with F195's ending and F197's reason, from the DLL's own format (ltaFollow); kept defaults to the offset clamped to +-15 deg (0 when the reason says not kept), centred to the rest."""
+            if kept is None:
+                kept = 0.0 if why.startswith("not kept") else max(-15.0, min(15.0, op))
+            if cen is None:
+                cen = op - kept
+            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, why, "the aim turns onto the head through the follower (the view stays)")
+
+        # the lines of the builds before F195b: the A/B build's (the ending says whether its key was on), and the F194 build's (the picture-centre pitch and the forward axis's angles before it)
+        def ab195(op, kept, cen, key):
+            return ("native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch %+.2f deg from the aim at the engage (22 ms after it); pitch kept %+.2f deg, centred %+.2f deg (F195: %s); "
+                    "the aim turns onto the head through the follower (the view stays)" % (op, kept, cen, key))
+
+        check("F195: the four flown engages kept whole (+0.77, +4.46, +4.79, +5.55 deg), centred 0: OK", [cen195(op) for op in (0.77, 4.46, 4.79, 5.55)], 0, [("OK", L195)],
+              has=["4 engage(s) centred: the reported head's pitch offset from the aim, kept and centred (deg):", "+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F195: a head pitched 26.4 deg up keeps 15 and centres 11.4: OK", [cen195(26.4)], 0, [("OK", L195)], has=["+26.40 kept +15.00 centred +11.40"], lacks=["UNPARSED"])
+        check("F195: every engage with a pitch offset centred it whole: NEVER APPLIED", [cen195(5.0, kept=0.0, cen=5.0)] * 3, 3, [("NEVER APPLIED", L195)],
+              has=["3 engage(s) had a pitch offset of 1 deg or more, but none kept it (the whole offset was centred)"], lacks=["UNPARSED"])
+        check("F195: one engage kept it and one did not: PARTIAL", [cen195(4.0), cen195(5.0, kept=0.0, cen=5.0)], 0, [("PARTIAL", L195)], has=["1 of 2 engage(s) with a pitch offset to keep did not keep it"], lacks=["UNPARSED"])
+        check("F195: engages with under 1 deg of pitch offset have nothing to keep: IDLE", [cen195(0.3), cen195(-0.5)], 0, [("IDLE", L195)], has=["no engage had a pitch offset of 1 deg or more to keep"], lacks=["UNPARSED"])
+        check("F195: the A/B build's lines with its key on are read and judged as the behaviour", [ab195(4.46, 4.46, 0.0, "on")] * 2, 0, [("OK", L195)], has=["2 engage(s) centred: "], lacks=["UNPARSED", "NEVER"])
+        check("F195: the A/B build's lines with its key off are named and not judged (the whole offset centred): IDLE", [ab195(5.0, 0.0, 5.0, "off")] * 2, 0, [("IDLE", L195)],
+              has=["0 engage(s) centred (and 2 of the A/B build with its key off: the whole offset centred, not judged)"], lacks=["UNPARSED", "NEVER"])
+        check("F195: the A/B build's lines of both kinds: the key-off ones do not count against the key-on ones", [ab195(5.0, 0.0, 5.0, "off"), ab195(4.0, 4.0, 0.0, "on")], 0, [("OK", L195)],
+              has=["1 engage(s) centred (and 1 of the A/B build with its key off"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F195: the centred line of the build that also had F194 part 1 (the picture-centre pitch and the forward axis's angles before F195's ending) is still read",
+              ["native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch +4.46 deg from the aim at the engage (22 ms after it); the picture-centre pitch in force +0.0 deg (F194), the forward axis "
+               "itself yaw +12.00 pitch +4.46 deg from the aim; pitch kept +4.46 deg, centred +0.00 deg (F195: on); the aim turns onto the head through the follower (the view stays)"], 0, [("OK", L195)],
+              has=["+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED"])
+        # F197: the keep applies only after a settled mouse aim; an engage that rightly did not keep is not a failure, and the F195b build's lines (no reason) are judged as before
+        FLOWN195B = ("native on foot look to aim (F109): centred: the reported head was yaw -19.92 pitch -18.81 deg from the aim at the engage (0 ms after it); pitch kept -15.00 deg, centred -3.81 deg; "
+                     "the aim turns onto the head through the follower (the view stays)")
+        check("F195 and F197: the first engage on foot centred whole (op -18.81, kept 0, centred -18.81) and the toggles from mouse look kept: OK, the first named as rightly not kept",
+              [cen195(-18.81, why="not kept: the first engage on foot"), cen195(-8.43, why="after 9.0 s of mouse look"), cen195(-9.3, why="after 12.4 s of mouse look")], 0, [("OK", L195)],
+              has=["3 engage(s) centred (and 1 did not keep the pitch offset by the rule: the first engage on foot 1): the reported head's pitch offset from the aim, kept and centred (deg): "
+                   "-8.43 kept -8.43 centred +0.00, -9.30 kept -9.30 centred +0.00"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F195 and F197: every engage was one that rightly did not keep (the first on foot, under a second, the end of a hold): IDLE, not a failure",
+              [cen195(-18.81, why="not kept: the first engage on foot"), cen195(-6.0, why="not kept: 0.4 s of mouse look, under 1 s"), cen195(-7.0, why="not kept: the end of a hold")], 0, [("IDLE", L195)],
+              has=["3 engage(s) centred (and 3 did not keep the pitch offset by the rule: 0.4 s of mouse look, under 1 s 1, the end of a hold 1, the first engage on foot 1)", "no engage followed a settled mouse aim"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F195 and F197: an engage after a settled mouse aim that centred the whole offset still reads NEVER APPLIED", [cen195(5.0, kept=0.0, cen=5.0, why="after 3.0 s of mouse look")] * 2, 3, [("NEVER APPLIED", L195)],
+              has=["2 engage(s) had a pitch offset of 1 deg or more, but none kept it"], lacks=["UNPARSED"])
+        check("F195 and F197: an engage that said not kept and kept the offset anyway: PARTIAL", [cen195(5.0, kept=5.0, cen=0.0, why="not kept: the end of a hold")], 0, [("PARTIAL", L195)],
+              has=["1 engage(s) said they did not keep the pitch offset and kept it"], lacks=["UNPARSED"])
+        check("F195 and F197: the F195b build's flown first engage (no reason text, kept -15 of -18.81) is still read and judged as before: OK", [FLOWN195B], 0, [("OK", L195)],
+              has=["-18.81 kept -15.00 centred -3.81"], lacks=["UNPARSED", "NEVER"])
+        check("F195 and F197: a kept 5 deg offset after a settled mouse aim and a whole-centred first engage: the F109 rule takes the kept pitch off the standing offset only for the first",
+              [ENG109, cen195(-18.81, why="not kept: the first engage on foot"), cen195(5.0, why="after 2.0 s of mouse look")] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("OK", L109), ("OK", L195)],
+              lacks=["UNPARSED", "stood off"])
+        check("F195: a centred line from a build before F195 (no ending) is read and gives no verdict",
+              ["native on foot look to aim (F109): centred: the reported head was yaw +12.50 pitch -4.00 deg from the aim at the engage (22 ms after it); the aim turns onto the head through the follower (the view stays)"], 0,
+              [], lacks=["UNPARSED", row("OK", L195), row("IDLE", L195), row("NEVER APPLIED", L195)])
+        check("F195: a centred line that drifted from its pattern is unparsed", ["native on foot look to aim (F109): centred: the reported head was something else"], 4, [("UNPARSED", L195)])
+        check("F195 and F109: a kept 5 deg pitch offset with the head still is not a standing offset (OK); the same seconds without the engage's line are",
+              [ENG109, cen195(5.0)] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("OK", L109), ("OK", L195)], lacks=["UNPARSED", "stood off"])
+        check("F109 control: the same seconds with no centred line stand 5 deg off the head with the head still: PARTIAL", [ENG109] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("PARTIAL", L109)],
+              has=["the aim stood off the head with the head still"], lacks=["UNPARSED"])
+        check("F109: the 1 s line of a build with the F98c fragment (the settle gate's count) is still read", [ENG109, "native on foot look to aim (F109) 1 s: following, item weight 0.00, smoothing 150 ms; head yaw +12.00 pitch -3.00 deg, asked +12.00 -3.00, applied "
+              "+12.00 -3.00, the player's own +0.00 +0.00; the reported head from the aim yaw +0.20 pitch -0.10 deg now (largest 0.50, read); seated yaw +30.00 pitch -5.00 deg carried; the guard: residual largest 0.30 deg (base "
+              "re-taken 0); the body's yaw from the aim +2.0 deg mean (largest 12.0, 88 frames); updates 90, dropped: stick 0, mouse 0, pitch 0; split: clean 80, dirty 2, unsplit 0, gain yaw 0.85000 pitch 0.85000; blocked 0 "
+              "(not holding, held 0 ticks), spring calls 0 (+0.00 deg); F98c's settle refused 7 calls (the aim pitched 10 deg or more); centred 1"], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED"])
 
         # ---- F129: the look processor's calls told apart, the asks' fate (an instrument: OK or PARTIAL, never NEVER APPLIED) ----
         P129 = "look paths (F129)"
@@ -21119,14 +22430,14 @@ def self_test_health():
         ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
-                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0, ref=None,
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, returned=1, retrefused=0, notneeded=0, ref=None,
                   detail=None):
             if ref is None:   # F170: the reference text the DLL prints (referenceText): the calls that chose one, by the one they used
                 ref = "settled %d, running 0, none 0" % (applied + measured)
             if detail is None:   # F171: the reference's figures (referenceDetailText): the calls that had one, last source, age, target, G, G now, the mean target published and its calls
                 detail = R138("reference detail (F171; the calls that had one", applied + measured, "settled", 3.0, 12.0, 16.0, 2.0, 20.0, applied)
             return R138("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why, ref,
-                        detail, up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
+                        detail, up, fwd, view, inside, insideof, refused, returned, retrefused, notneeded)
 
         def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
             return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
@@ -21135,7 +22446,7 @@ def self_test_health():
               has=["no second with a call at 10 deg of aim pitch or more"], lacks=["UNPARSED"])
         check("F138 pitched view: the sink added in pitched seconds of both modes, INSIDE none", [pv138(), pv138(mode="look to aim", aim=38.0)], 0, [("OK", P138)],
               has=["2 pitched s (120 calls; look to aim and mouse look), aim +30..+50 deg", "added in 2 s (116 calls, up to 18.0 cm), measured only 0 calls",
-                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0, not needed 0)",
+                   "the settle refused for the aim's pitch 80 calls; returned to the stance's raise 2 times (refused 0, not needed 0)",
                    "INSIDE 0 of 120 calls in the 2 applied second(s) with the aim up"], lacks=["UNPARSED"])
         check("F138 pitched view: an armed episode gave nothing back (not needed), the line says so", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60, returned=0, notneeded=1)], 0,
               [("IDLE", P138)], has=["returned to the stance's raise 0 times (refused 0, not needed 1)"], lacks=["UNPARSED"])
@@ -22176,6 +23487,11 @@ def self_test_health():
               has=["though the weapon eye offset line says a weapon was drawn for 2 s"])
         check("F85b: submits but the identification path is none", [pin_sec(540, "none"), pin_part()], 3, [("NEVER APPLIED", F85B)], has=["path none"])
         check("F85b: parts found and none bound", [pin_sec(), pin_part(bound=0)], 3, [("NEVER APPLIED", F85B)], has=["bound 0"])
+        # F201: the pilot's flight of 2026-10-31 (Anti-aliasing off): "decided 35740, bound 0, refused 0" -- named as the patch decided and never written; bound, it reads OK
+        check("F201 F85b: this flight's lines, parts decided and none bound at the issue", [pin_sec(540), pin_part(found=90, decided=90, bound=0), pin_part(found=90, decided=90, bound=0)], 3,
+              [("NEVER APPLIED", F85B)], has=["decided 180, bound 0", "180 draws decided and none bound at the issue: the patch was decided and never written"])
+        check("F201 F85b: the same parts, decided and bound", [pin_sec(540), pin_part(found=90, decided=90, bound=90), pin_part(found=90, decided=90, bound=90)], 0, [("OK", F85B)],
+              lacks=["never written"])
         check("F85b: submits that never reach a part line", [pin_sec(), pin_sec()], 3, [("NEVER APPLIED", F85B)], has=["found 0"])
         check("F85b: a tenth of the decisions refused", [pin_sec(), pin_part(found=100, decided=90, bound=90, refused=20, why="no scene rows for the eye 18, no K 2")], 0,
               [("PARTIAL", F85B)], has=["refused 20 [no scene rows for the eye 18, no K 2]"])
@@ -22220,11 +23536,21 @@ def self_test_health():
               [("OK", F85B)], has=["[+1 line(s) the rule's patterns do not match:", "place bind (F151): something else"])
 
         # ---- reticle depth (F85c) ----
-        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
+        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 11 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"], lacks=["assumed"])
         check("F85c: draws and no patch", [retic(patched=0, refs=(47,))] * 2, 3, [("NEVER APPLIED", F85C)], has=["patched 0 of 94", "refusals no depth view 94"])
         check("F85c: under half patched", [retic(draws=10, patched=3)], 0, [("PARTIAL", F85C)])
-        check("F85c: no key 10 draw and no weapon", [R("reticle depth (F85c): no key 10 composite")] * 2, 0, [("IDLE", F85C)])
-        check("F85c: no key 10 draw while a weapon is drawn", [R("reticle depth (F85c): no key 10 composite"), eyeoff()], 3, [("NEVER APPLIED", F85C)])
+        check("F85c: no reticle draw and no weapon", [retic_idle()] * 2, 0, [("IDLE", F85C)], has=["no reticle composite draw (2 idle lines"])
+        check("F85c: no reticle draw while a weapon is drawn", [retic_idle(), eyeoff()], 3, [("NEVER APPLIED", F85C)], has=["no reticle composite draw in 1 lines, though a weapon was drawn"])
+        # F191: the reticle is the key marker type 1001 uses: the lines name it (`key 11 (type 1001)`), and the key may walk as the reticle is re-created
+        check("F85c: the reticle on key 11, then 12 and 13 as it is re-created", [retic(key="11 (type 1001)"), retic(key="12 (type 1001)"), retic(key="13 (type 1001)", patched=30)], 0,
+              [("OK", F85C)], has=["patched 114 of 141 key 11, 12, 13 draws (81%) in 3 s"], lacks=["assumed"])
+        check("F85c: no type 1001 call seen: key 10 assumed is said so", [retic(key="10 (assumed: no type 1001 call seen yet)")] * 2, 0, [("OK", F85C)],
+              has=["patched 84 of 94 key 10 draws", "the reticle key was assumed to be 10, no type 1001 call seen"])
+        check("F85c: no reticle draw, the key waited for is named in the line", [retic_idle(key="11 (type 1001)"), retic_idle(key="12 (type 1001)")], 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        # a log of a build before F191 (key 10 by name) still reads, for draws and for idle
+        check("F85c: a log before F191 (key 10 draws) still reads", [retic_old(retic())] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s"], lacks=["assumed", "UNPARSED"])
+        check("F85c: a log before F191 (no key 10 composite draw) still reads", [retic_old(retic_idle())] * 2, 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        check("F85c: a log before F191, no key 10 draw while a weapon is drawn", [retic_old(retic_idle()), eyeoff()], 3, [("NEVER APPLIED", F85C)])
         check("F85c: the compute shader could not be created",
               ["reticle depth (F85c): precompiled compute shader reticle_depth_cs creation FAILED; standing down (0x80004005, 0.100 ms)."], 3,
               [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
@@ -22352,7 +23678,26 @@ def self_test_health():
               has=["patch applied eye 0 92% (23 of 25), eye 1 92% (23 of 25); named 113, outside 8 (F87c)"])
         check("marker fix: decisions and none bound", [mark(0, 25)] * 2, 3, [("NEVER APPLIED", MK)])
         check("marker fix: under half bound", [mark(10, 25)], 0, [("PARTIAL", MK)])
+        # F201: the pilot's flight of 2026-10-31 (Anti-aliasing off, 21:25): every decision made, none bound -- NEVER APPLIED naming the missing bind; bound, it reads OK
+        check("F201 marker fix: this flight's lines, 180 decisions an eye and none bound at the issue", [mark(0, 180, 0), mark(0, 180, 1)], 3, [("NEVER APPLIED", MK)],
+              has=["patch applied eye 0 0% (0 of 180), eye 1 0% (0 of 180)", "360 decisions and none bound at the issue: the patch was decided and never written"])
+        check("F201 marker fix: the same decisions, all bound", [mark(180, 180, 0), mark(180, 180, 1)], 0, [("OK", MK)], lacks=["never written"])
         check("marker fix: no decision at all", [mark_idle(0), mark_idle(1)], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"])
+        # F198: the pilot's flight (edvr_gfx_20261031_161247, Anti-aliasing off on foot): the marker probe counted 330 marker composite draws a second at the draw tee and every F62c
+        # line read "no decision this second (no marker composite draw of the eye reached the fix)" -- the draws' eye was named by the layer and ui depth only, and neither runs with
+        # Anti-aliasing off. That is the fix never running, not idle: NEVER APPLIED, with the count. Without the probe's lines (or with few draws) it is still idle.
+        check("F198 marker fix: draws at the tee, none reached the fix (Anti-aliasing off)", [tee100(), mark_idle(0), mark_idle(1), tee100(), mark_idle(0), mark_idle(1)], 3,
+              [("NEVER APPLIED", MK)], has=["the marker probe counted 1800 marker composite draws at the tee in the same log and none reached the fix in 4 s: their eye was never named"])
+        check("F198 marker fix: a few draws at the tee and none at the fix is still idle", [tee100().replace("marker composite 900", "marker composite 3"), mark_idle(0), mark_idle(1)], 0,
+              [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"], lacks=["never named"])
+        check("F198 marker fix: draws at the tee and decisions bound", [tee100(), mark(23, 25, 0), mark(23, 25, 1)], 0, [("OK", MK)],
+              lacks=["never named"])
+        SEYE198 = R("marker eye (F198): the eyes named by the submitted textures")
+        check("F198 marker fix: the eyes named by the submitted textures say so", [SEYE198, tee100(), mark(23, 25, 0), mark(23, 25, 1)], 0, [("OK", MK)],
+              has=["named by the submitted textures (F198) from 1 session(s)' first draw"], lacks=["UNPARSED"])
+        check("F198 marker fix: the real line's pointers parse",
+              ["marker eye (F198): the eyes named by the submitted textures (Anti-aliasing off): eye 0 000001F2A3B4C5D6, eye 1 000001F2A3B4C5E0", mark(23, 25, 0), mark(23, 25, 1)],
+              0, [("OK", MK)], has=["named by the submitted textures (F198)"], lacks=["UNPARSED"])
         # F125: a build before F125 (1 s lines with no window field) parses as before
         check("marker fix: the 1 s lines of a build before F125", [MARK_OLD, MARK_IDLE_OLD, MARK_WIN_OLD], 0, [("OK", MK)],
               has=["patch applied eye 0 96% (45 of 47); named 40, outside 2 (F87c)"], lacks=["UNPARSED"])
@@ -22512,8 +23857,8 @@ def self_test_health():
             print("health census is not newest tag first:\n%s" % out)
             ok = False
         check("census: a log with no tagged line", ["nothing here", "still nothing"], 0, has=["0 build-tagged lines, 0 tags", "no rule had a line"])
-        many = ["t%d (F%d): x" % (i, 200 + i) for i in range(12)]   # F200..F211: tags no rule reads (F100 has rules since F100)
-        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F211 ", "    F204 "], lacks=["    F203 "])
+        many = ["t%d (F%d): x" % (i, 300 + i) for i in range(12)]   # F300..F311: tags no rule reads (F205 has a rule since F205; this was F200..F211)
+        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F311 ", "    F304 "], lacks=["    F303 "])
 
         # ---- a format that drifts from its rule fails loudly ----
         check("a rule whose lines no longer match", [pistol().replace("keys forward", "knobs forward")] * 2, 4, [("UNPARSED", F90P)],
@@ -22573,7 +23918,7 @@ def self_test_health():
         check("F125 UI: reticle draws in five of ten seconds", [retic(wl=10, draw_secs=5)], 0, [("OK", F85C)], has=["in 5 s; readbacks"], lacks=["UNPARSED"])
         check("F125 UI: reticle 10 s and a short flush", [retic(wl=10, draw_secs=10), retic(wl=3, draw_secs=2)], 0,
               [("OK", F85C)], has=["in 12 s; readbacks"], lacks=["UNPARSED"])
-        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [R("reticle depth (F85c): no key 10 composite", 10), eyeoff()], 3,
+        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [retic_idle(wl=10), eyeoff()], 3,
               [("NEVER APPLIED", F85C)], lacks=["UNPARSED"])
         check("F125 UI: reticle cause uses second counts, never window thresholds", [ret118(reads=800, steps=10, flips=3, frames=900, run=120,
               fread=800, edge=400, wl=10, edge_secs=10, speed_secs=3)], 0, [("OK", F118)],
@@ -22600,7 +23945,7 @@ def self_test_health():
             ("eye %d: place bind (F151): seen by tag", ["w" * 299]),
             ("(F85b) eye %d: place bind (F151)", ["r" * 419]),
             ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
-            ("reticle depth (F85c): key 10 draws", []),
+            ("reticle depth (F85c): key %s draws", ["k" * 79]),
             ("reticle depth (F118) %u s", []),
             ("weapon readout size (F90) %u s", ["pistol ADS readout"]),
             ("weapon readout size (F91) %u s", ["p" * 599]),
@@ -23190,6 +24535,13 @@ def self_test_health():
         # the first frame of every press is at M 1: it is qualifying and not applied, so a press the door declined on every other frame is applied 0
         check("S1: the depth null on every frame and the first at M 1 is applied 0 of 201 and NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=200, open_=0)], 3, [("NEVER APPLIED", S1R)],
               has=["the door applied 0 of 201 qualifying; declined: depth unavailable 200", "the lens applied on none of the 1 press(es) it was due on (press 1)"], lacks=["the door counted no frame at all"])
+        # F202: the pilot's flight of 2026-11-01 (edvr_gfx_20261101_033457, Anti-aliasing off, the plasma sniper): the door ran on every qualifying frame and refused the game's own picture, "applied 0 of 612 ...
+        # format refused 612" and "applied 0 of 172 ... format refused 172" (the gunsight mark armed on every frame and never taken: there is no weapons layer with Anti-aliasing off). A session of format-refused
+        # presses alone is the lens never applied, with the count named.
+        check("S1: F202 the pilot's Anti-aliasing off presses, every qualifying frame format refused (612 and 172), are NEVER APPLIED naming the count",
+              [s1_announce(), s1_nohole(n=1, disp=0, noop=0, stale=0, depth=0, fmt=612, open_=0, mark_l=0, mark_r=0, armed=612, nodraw=612, gap=(0, 0, 612, 0, 0)),
+               s1_nohole(n=2, scope="no", ads="35.000", m="1.697", disp=0, noop=0, stale=0, depth=0, fmt=172, open_=0, mark_l=0, mark_r=0, armed=172, nodraw=172, gap=(0, 0, 172, 0, 0))], 3, [("NEVER APPLIED", S1R)],
+              has=["the door applied 0 of 784 qualifying; declined: format refused 784", "the lens applied on none of the 2 press(es) it was due on (press 1, 2)"], lacks=["UNPARSED", "the door counted no frame at all"])
         check("S1: the tick qualified and the door never ran is NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=0, stale=0, depth=0, open_=0, fq=200)], 3, [("NEVER APPLIED", S1R)],
               has=["the tick qualified 200 frame(s), the door applied 0 of 0 qualifying", "the door counted no frame at all in press 1 although the tick qualified 200 (uiLayerComposite never ran for the right eye"])
         check("S1: S never there (no S, counted by both sides) is a lens that never ran", [s1_announce(), s1_zero(nos=90)], 3, [("NEVER APPLIED", S1R)], has=["declined: no S 90"])
@@ -23231,6 +24583,71 @@ def self_test_health():
         check("S1: an announce that drifted from its pattern is unparsed", ["scope zoom (S1): maybe, reference FOV 56.3 deg"], 4, [("UNPARSED", S1R)])
         check("S1: its tag is listed with --health-all and S0's rules are untouched by it", [s1_announce(), s1_press(), s0_watch(), s0_vr(settled=0)], 0, [("OK", S1R), ("OK", SV0)],
               has=["every tag (* has a rule above):", "S1", "S0"], extra=["--health-all"])
+        # ---- F205: the ADS view circle, rendered from native_on_foot_f205.h's own format literals ----
+        F205R = H_F205
+
+        def c205_key(key="on"):
+            """The F205 build's own key line, written out as it was (the key was removed in F205b, so no source format holds it any more): the rule still reads it."""
+            return "native on foot ADS view circle (F205): fix.native_on_foot_ads_view_circle is %s -- while you aim down sights each eye shows its view inside a circle" % key
+
+        def c205_press(n=1, aa="off", rad=13.82, ads=15.0, hip=56.3, half=51.87, item="$wpn_m_sniper_plasma_charged_name;", scope="yes", on=True):
+            """The F205 build's press line, written out as it was (F206 removed its format from the source): the rule still reads it."""
+            return ("ADS view circle (F205): press %d, Anti-aliasing %s: radius %.2f deg (ADS FOV %.2f / hip FOV %.2f x the headset's half-FOV %.2f deg, vertical)%s; item %s, scope %s" %
+                    (n, aa, rad, ads, hip, half, "", item, scope)) + (" (the scope zoom is on)" if on else "")
+
+        def c205_scopeoff(n=1):
+            return "ADS view circle (F205): press %d: no circle (fix.native_on_foot_ads_scope_zoom is off)" % n
+
+        def c205_none(n=1, aa="off", why="the ADS FOV of the held weapon is not known", item="$wpn_m_unknown_name;", scope="no"):
+            return "ADS view circle (F205): press %d, Anti-aliasing %s: no circle: %s (item %s, scope %s)" % (n, aa, why, item, scope)
+
+        def c205_runtime(frames=410, rad=13.82, req=13.82, cut="", secs=4.2, refused=0, shared=410, peak=1.0, centre=(0.512, 0.488, 0.488, 0.488)):
+            return ("ADS view circle (F205) runtime: ADS view circle on %d frames, radius %.2f deg (the d3d11 half asked %.2f deg%s), over %.2f s; refused %d, with the share %d; weight peak %.2f; "
+                    "centre (u, v) left %.3f/%.3f right %.3f/%.3f" % (frames, rad, req, cut, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3]))
+
+        def c206_run(n=1, rad=39.42, edge=41.17, lo=38.9, hi=39.6, frames=410, secs=4.2, refused=0, shared=410, peak=1.0, centre=(0.512, 0.488, 0.488, 0.488), pitch=0.0, fup=46.8, fdn=-46.8):   # pitch None: the line as the build before F210b wrote it
+            """F206: the press's line, rendered from native_on_foot_f205.h's own format (formatRun)."""
+            return R205("ADS view circle (F206): press %u: radius", n, rad, edge, round(edge - rad, 2), lo, hi, frames, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3]) + (R205("; pitch %+.4f deg", pitch, fup, fdn) if pitch is not None else "")
+
+        def c206_none(n=1, why="the sight's far point was not known in both eyes while the full-detail view stood", item="$wpn_m_sniper_plasma_charged_name;", scope="yes"):
+            return R205("ADS view circle (F206): press %u: no circle:", n, why, item, scope)
+
+        check("F205: a press with a circle asked and the runtime's report of frames drawn is OK, with the radius and the mode", [c205_key(), c205_press(), c205_runtime()], 0, [("OK", F205R)],
+              has=["1 press(es) with a circle asked (Anti-aliasing off 1)", "the runtime drew it on 410 frame(s) in 1 run(s)", "radius 13.82 deg (ADS 15.00 / hip 56.30 x 51.87)"], lacks=["UNPARSED"])
+        check("F205: the same press with Anti-aliasing on reads the same, stating the mode", [c205_key(), c205_press(aa="on"), c205_runtime()], 0, [("OK", F205R)], has=["Anti-aliasing on 1"])
+        check("F205: a press with a circle asked and no runtime report is PARTIAL naming the press", [c205_key(), c205_press(n=3)], 0, [("PARTIAL", F205R)],
+              has=["the circle was asked for press 3 and the runtime drew it on no frame"])
+        check("F205: a press with a circle asked and a report of 0 frames is PARTIAL", [c205_key(), c205_press(n=2), c205_runtime(frames=0, shared=0, refused=40)], 0, [("PARTIAL", F205R)],
+              has=["press 2", "the runtime refused 40 frame(s)"])
+        check("F205: two presses, the second drawn on nothing, name the second alone", [c205_key(), c205_press(n=1), c205_runtime(), c205_press(n=2), c205_runtime(frames=0, shared=0)], 0,
+              [("PARTIAL", F205R)], has=["press 2 and"], lacks=["press 1 and"])
+        check("F205: a weapon whose ADS FOV is not known gets no circle and that is no failure", [c205_key(), c205_none()], 0, [("IDLE", F205R)],
+              has=["1 with none (the ADS FOV of the held weapon is not known x1)", "every press had no circle (not a failure)"])
+        check("F205: a press with a radius beside one with none is judged on the first", [c205_key(), c205_none(), c205_press(n=2), c205_runtime()], 0, [("OK", F205R)], has=["1 with none"])
+        check("F205: the cut to hide the full-detail scope's side bars is a note, not a failure", [c205_key(), c205_press(), c205_runtime(cut="; cut to the circle that hides the full-detail scope's side bars on some frames", rad=11.9)],
+              0, [("OK", F205R)], has=["cut to hide the full-detail scope's side bars in 1 run(s)"])
+        check("F205: the F205 build's own key line off is still read, as idle", [c205_key("off")], 0, [("IDLE", F205R)], has=["fix.native_on_foot_ads_view_circle is off"], lacks=["UNPARSED"])
+        check("F205b: a press with the scope zoom off says so and is idle, not a failure", [c205_scopeoff(1), c205_scopeoff(2)], 0, [("IDLE", F205R)],
+              has=["fix.native_on_foot_ads_scope_zoom is off for 2 press(es)", "no circle by the setting"], lacks=["UNPARSED", "PARTIAL"])
+        check("F205b: a press with the scope zoom off beside a press that drew its circle is OK, and notes the first", [c205_scopeoff(1), c205_press(n=2), c205_runtime()], 0, [("OK", F205R)],
+              has=["1 press(es) with the scope zoom off, no circle by the setting", "1 press(es) with a circle asked"], lacks=["UNPARSED"])
+        check("F205b: the radius line ends with what switched it, and a line from the F205 build without that ending is still the same press", [c205_press(n=1), c205_runtime(), c205_press(n=2, on=False), c205_runtime()], 0,
+              [("OK", F205R)], has=["2 press(es) with a circle asked"], lacks=["UNPARSED"])
+        check("F206: a B3 press whose circle was drawn is OK, with the radius, the nearest edge, the band and the run's range", [c206_run(n=1), c206_run(n=2, rad=39.1, lo=38.7, hi=39.5)], 0, [("OK", F205R)],
+              has=["2 B3 press(es) with the circle drawn", "radius 39.10/39.42 deg", "nearest edge 41.17 less the band 1.75", "over the run 38.70 to 39.60 deg", "on 820 frame(s) in 2 run(s)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F210b: the press line names the pitch the centre was turned by and the field's up and down: the Quest 3's -5.5 degrees, and the Pimax's 0", [c206_run(n=1, pitch=-5.5448, fup=41.99, fdn=-53.08), c206_run(n=2, pitch=0.0, fup=46.8, fdn=-46.8)], 0, [("OK", F205R)],
+              has=["the centre pitched by +0.0000 deg (the middle of the field: up +46.80, down -46.80 deg)/-5.5448 deg (the middle of the field: up +41.99, down -53.08 deg)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F210b: a press line from the build before it (no pitch) is still read", [c206_run(n=1, pitch=None), c206_run(n=2, pitch=-5.5448, fup=41.99, fdn=-53.08)], 0, [("OK", F205R)],
+              has=["2 B3 press(es) with the circle drawn", "the centre pitched by -5.5448 deg"], lacks=["UNPARSED", "PARTIAL"])
+        check("F206: a B3 press whose window stood and got no circle is PARTIAL, naming the press and the reason", [c206_run(n=1), c206_none(n=2)], 0, [("PARTIAL", F205R)],
+              has=["1 B3 press(es) with the circle drawn", "press 2", "the sight's far point was not known in both eyes while the full-detail view stood x1"], lacks=["UNPARSED"])
+        check("F206: a run the runtime reported on 0 frames is PARTIAL", [c206_run(n=3, frames=0, refused=40, shared=0)], 0, [("PARTIAL", F205R)], has=["press 3", "the runtime refused 40 frame(s)"], lacks=["UNPARSED"])
+        check("F206: the old F205 lines beside the new ones are still read (counted, not failed)", [c205_press(n=1), c205_runtime(), c206_run(n=2)], 0, [("OK", F205R)],
+              has=["1 B3 press(es) with the circle drawn", "2 line(s) from an earlier build's circle (F205)"], lacks=["UNPARSED"])
+        check("F205: a line that drifted from its pattern is unparsed", ["ADS view circle (F205): press x, a circle"], 4, [("UNPARSED", F205R)])
+        check("F205: the B3 sight-eye override line is read by the B3 rule, not unparsed", [R205("scope zoom (B3): the sight eye is both for this press", "right")], 0, lacks=["UNPARSED"])
+        check("F205: its tag is listed with --health-all", [c205_key(), c205_press(), c205_runtime()], 0, [("OK", F205R)], has=["F205"], extra=["--health-all"])
+
         # ---- scope zoom (B3): the scoped sniper's lens at full detail, rendered from scope_zoom_b3.h's and native_on_foot.cpp's own format literals ----
         B3R = H_B3
 
@@ -23529,6 +24946,355 @@ def self_test_health():
               has=["the setting was left_eye but no 10 s line and no stopped line shows a Present drawn"], lacks=["UNPARSED"])
         check("desktop window: a declined draw and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet")], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
+
+        # ---- the SRV turret view: the graphics log's untagged lines, rendered from the C format strings in src\d3d11\srv_turret.cpp and (the geometry shader's creation line) shader_swap.cpp ----
+        stsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "srv_turret.cpp"))
+
+        def RT(source, needle, *vals):
+            key = "st:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(source, needle)
+            if fmts[key] is None:
+                raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0, cards_up=0):   # thirteen keys: fixture values, not the shipped defaults
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up)
+
+        def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
+            return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat, "")
+
+        def st_view_early(frame=4100, flags=0x0, seat=0x4):   # the early edge: raised by the gunner sheet, Status.json not yet
+            return RT(stsrc, "srv turret view: %s at frame %u", "on", frame, flags, seat, " (the gunner sheet drew; Status.json not yet)")
+
+        def st_agreed(lag=187):
+            return RT(stsrc, "srv turret view: Status.json agreed %llu ms after the sheet", lag)
+
+        def st_latch_end(held=1043):
+            return RT(stsrc, "srv turret view: the gunner sheet latch expired after %llu ms", held)
+
+        def st_cam(back=0.60, serial=3):
+            if back:
+                return RT(stsrc, "srv turret camera: back %.2f m published", back, serial)
+            return RT(stsrc, "srv turret camera: back cleared", serial)
+
+        # The eleven hologram families the pass covers (srv_turret_math.h kFamilies: the first eight hex digits of each vertex shader, and the pixel shader's too for the four that share one) and the
+        # eleven signatures they and the gunner sheets fall into (kSignatures, named by the first family's vertex shader), each with a geometry shader. The first-draw and state lines name the family.
+        # The first two and the last two are the weapon panels' group, the other seven the radar's. The flight HUD's vectors (B7790CBF) are no longer in the pass.
+        STF = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94.EA02FAC2", "5559BD94.E95634B0", "81216C77.A2965EC2", "81216C77.B4786E0A")
+        STS = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94", "5DAD41AA", "81216C77", "A888D510")
+
+        # journal_watch.cpp: the vehicle latch's line, and srv_turret.cpp's line for a turret view in an SRV the journal does not call the Scorpion
+        jwsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "journal_watch.cpp"))
+
+        def st_vehicle(scorpion=True, event="LoadGame"):
+            return RT(jwsrc, "srv turret: the vehicle is %s (event %s)", "the Scorpion" if scorpion else "not the Scorpion", event)
+
+        def st_ignored(frame=4100, flags=0x4000000, seat=0x2):
+            return RT(stsrc, "srv turret view: not the Scorpion at frame %u", frame, flags, seat)
+
+        def st_gs(outcome="created", hr=0, ms=0.412, fam=STS[0]):
+            return RT(swap, "%s: precompiled geometry shader %s %s (0x%08X", "srv turret hud", "turret shift " + fam, outcome, hr, ms)
+
+        def st_gs_all():
+            return [(4, st_gs(fam=s)) for s in STS]
+
+        def st_first(frame=4102, eye=0, fam=STF[0]):
+            return RT(stsrc, "srv turret hud: first draw of family %s through the shader (frame %u, eye %d)", fam, frame, eye, "panels", 0.02, 1.00, "moves 1.10 m deeper", 0.05, 0.2, -0.1, 0.7)
+
+        def st_anchor(why="view on", x=0.05, y=0.2, z=-0.1):
+            return RT(stsrc, "srv turret anchor: latched at %.3f,%.3f,%.3f m seated (%s)", x, y, z, why)
+
+        def st_refused(reason="not-ready"):
+            return RT(stsrc, "srv turret hud: refused a draw (%s)", reason)
+
+        def st_group(g):
+            """One group's window as the 10 s line spells it: None is off, a negative gap the push-back (window 0.02 to 1.0 m), a positive one the first build's pull (gap + 0.10 to 4.0 m)."""
+            if g is None:
+                return "off"
+            if g == 0:
+                return RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", 0.0, 0.02, 1.00)   # the translation alone
+            return RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, 0.02, 1.00) if g < 0 else RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, g + 0.10, 4.00)
+
+        def st_sec(panels=-1.10, radar=-1.10, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), anchor=(0.05, 0.2, -0.1), offset=1.5, t=(0.0, 0.0, 0.7), ipd=63.5, p00=(0.912, 0.915), fams=(300, 180),
+                   tradar=(0.0, 0.0, 0.7), pose=(240, 240), opened=240):
+            counts = list(fams) + [0] * (len(STF) - len(fams))   # the matched draws of the first families; the rest drew none
+            return RT(stsrc, "srv turret hud: panels: %s", st_group(panels), st_group(radar), anchor[0], anchor[1], anchor[2], offset, t[0], t[1], t[2], tradar[0], tradar[1], tradar[2], ipd, p00[0], p00[1],
+                      left, right, bound, opened, pose[0], pose[1], *refused, ",".join(STF), ",".join(str(c) for c in counts))
+
+        def st_state(family=STF[2], eye=0, issue=1, target="game", w=2468, h=2208, fmt=10, dsv="yes", depth=(1, 2, 0), stencil=(0, 0, 0xFF, 0xFF, (8, 1, 1, 1)), blend=(1, 5, 6, 1, 1, 6, 1, 0xF),
+                     raster=(0, 0, (0, 0, 0, 0), 1, 1, 0), viewport=(0.0, 0.0, 2468.0, 2208.0)):
+            """One state line of a family's first scope: depth (enable, func, write), stencil (enable, ref, read, write, front (func, pass, fail, zfail)), blend (enable, src, dst, op, srcA, dstA, opA, mask),
+            raster (scissor, rects, first rect, depth clip, cull, front counter-clockwise), viewport (x, y, w, h)."""
+            return RT(stsrc, "srv turret hud state: family=%s eye=%d issue=%u target=%s", family, eye, issue, target, w, h, fmt, dsv, depth[0], depth[1], depth[2], stencil[0], stencil[1], stencil[2], stencil[3],
+                      *stencil[4], *blend, raster[0], raster[1], *raster[2], raster[3], raster[4], raster[5], *viewport)
+
+        def st_scissor(family=STF[2], rects=1, first=(0, 600, 2468, 1200), target=(2468, 2208), opened=True):
+            return RT(stsrc, "srv turret hud: family %s draws with the scissor test on", family, rects, *first, *target, "opened to the whole target" if opened else "kept as the game set it")
+
+        def st_flight(back=60, forward=70, panels=110, radar=110, gap=0, hud=True, cam=True, rforward=70):
+            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the eleven signatures' geometry shaders, the first draws of two families, a 10 s line, the view off,
+            the camera cleared."""
+            out = [(1, st_set(back, forward, panels, radar, gap, rforward)), (2, st_view())]
+            if cam:
+                out.append((3, st_cam()))
+            if hud:
+                out += st_gs_all() + [(4, st_anchor()), (5, st_first()), (5, st_first(4103, 1, STF[1]))] + [(12, st_sec())]
+            return out + [(14, st_view(False))] + ([st_cam(0)] if cam else [])
+
+        ST, st_ok = H_SRV_TURRET, [f90_part()]
+        check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
+        check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        st_set_old = st_set().replace(" (live; ", ", bracket cut 18 mm (live; ", 1)
+        checks += 1
+        if st_set_old == st_set() or "bracket cut 18 mm" not in st_set_old:   # a settings line whose format dropped " (live; " would make the next case a copy of the one above it
+            print("health: the srv turret settings line no longer holds ' (live; ': the bb545c8b case would not test the older line")
+            ok = False
+        check("srv turret: a settings line of bb545c8b, which also said the bracket cut (a key since baked and removed), still parses", st_ok + [st_set_old], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera back 0.60 m published 1 time(s)",
+                   "hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family 1989E6D3 at frame 4102 eye 0, first draw of family 2CECEC30 at frame 4103 eye 1",
+                   "anchor (0.050,0.200,-0.100) m seated, head offset 1.5 cm, T (0.000,0.000,0.700), radar T (0.000,0.000,0.700), ipd_elite 63.5 mm, P00[L,R] 0.912,0.915 (the last 10 s line)",
+                   "anchor latched 1 time(s), last at 0.050,0.200,-0.100 m seated (view on)",
+                   "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m)",
+                   "geometry shader " + ", ".join("turret shift %s created in 0.412 ms" % s for s in STS), "1 build-tagged lines"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL", "exit 3"])
+        check("srv turret: the camera key above 0 and no 'published' line is NEVER APPLIED", st_ok + st_flight(cam=False), 3, [("NEVER APPLIED", ST)],
+              has=["the turret view was on 1 time(s), the camera key was 60 cm, and no 'camera: back ... published' line shows it", "hud bound 480 of 480 draws"])
+        check("srv turret: the camera key at 0 is off by key, not a failure", st_ok + st_flight(back=0, cam=False), 0, [("OK", ST)], has=["camera off by key", "hud bound 480 of 480 draws"],
+              lacks=["NEVER APPLIED"])
+        check("srv turret: a 10 s line with nothing bound is NEVER APPLIED, and names the refusals", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 3, 477)))], 3,
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open) and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
+        check("srv turret: the 10 s lines' draws and refusals are summed", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(left=100, right=90, bound=0, refused=(0, 0, 0, 0, 190))),
+              (22, st_sec(left=10, right=20, bound=0, refused=(1, 0, 2, 0, 27)))], 3, [("NEVER APPLIED", ST)],
+              has=["the 2 10 s line(s) show nothing bound: draws[L,R] 110,110, refused no-eye 1, game-gs 0, topology 2, not-ready 0, no-geometry 217"])
+        check("srv turret: a hud key above 0, the view on for 20 s and no 10 s line and no first draw is NEVER APPLIED", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (22, st_view(False))], 3,
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open), the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
+        check("srv turret: a stay still open runs to the window's last turret line", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (30, st_refused("no-geometry"))], 3,
+              [("NEVER APPLIED", ST)], has=["the turret view was on for 28 s", "draw(s) refused, said once per reason: no-geometry"])
+        check("srv turret: the view on for 5 s and no 10 s line yet is idle for the hud, and no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (7, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
+        check("srv turret: an early edge raised by the gunner sheet, then Status.json agreeing, parse as the view's lines", st_ok + [(1, st_set()), (2, st_view_early()), (3, st_cam()), (3, st_agreed()), (7, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret: an early edge whose latch expired, and the off edge after it, parse as the view's lines", st_ok + [(1, st_set()), (2, st_view_early()), (3, st_cam()), (4, st_latch_end()), (4, st_view(False))], 0, [("OK", ST)],
+              lacks=["UNPARSED"])
+        check("srv turret: the press watcher's, the fallback's and the entry press lines are not this rule's: no UNPARSED, no change of verdict",
+              st_ok + [(1, st_set()),
+                       (1, "srv turret press: Elite's ToggleBuggyTurretButton in Custom.4.2.binds: 1 bound slot(s): [0] GamePad:GamePad_FaceUp (xinput pad); 1 watched, 0 cannot be seen. The press starts the entry fade."),
+                       (2, st_view_early()), (3, st_cam()),
+                       (3, "srv turret entry fade: entry 1: press at frame 4100; sheet +310 ms after the press; Status.json +430 ms after the press"),
+                       (3, "srv turret entry fade: entry 2: no press was seen (the press watcher saw nothing before the view went on: fallback); the view was raised by Status.json"),
+                       (4, "srv turret entry fade: press at frame 4300: the press raised no view in 2000 ms; the black fades back in over 200 ms, no camera move"),
+                       (4, "srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): the view went on with no press seen in the preceding 2000 ms, so the watcher is blind (a device it does not see)"),
+                       (5, "srv turret press: the bindings changed; the press is trusted again"), (7, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret: a drifted early-edge tail is UNPARSED", st_ok + [st_view_early().replace("Status.json not yet", "status unknown")], 4, [("UNPARSED", ST)])
+        check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
+              has=["camera off by key", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
+        check("srv turret: all four keys at 0 is idle", st_ok + [(1, st_set(0, 0, 0, 0, rforward=0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
+        check("srv turret: the last settings line is the one in force", st_ok + [(1, st_set()), (2, st_set(0, 0, 0, 0, rforward=0)), (3, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera off by key", "hud off by key"])
+        check("srv turret: a geometry shader that could not be made is NEVER APPLIED whatever else the log says", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()),
+              (4, st_gs("creation FAILED; standing down", 0x80004005, 1.2)), (5, st_refused("not-ready")), (12, st_sec())], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 1.200 ms) for turret shift 1989E6D3"])
+        check("srv turret: a geometry shader creation that faulted or was refused is NEVER APPLIED too", st_ok + [(1, st_set()), (2, st_gs("creation faulted/refused; standing down", 0x80004005, 0.5))], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation faulted/refused; standing down (0x80004005, 0.500 ms) for turret shift 1989E6D3"])
+        check("srv turret: one family's geometry shader failing is NEVER APPLIED, naming that family, whatever the other one and the rest of the log say",
+              st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (4, st_gs("creation FAILED; standing down", 0x80004005, 2.5, STF[1])), (5, st_first()), (12, st_sec())], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 2.500 ms) for turret shift 2CECEC30"], lacks=["for turret shift 1989E6D3"])
+        check("srv turret: the first draw of either family shows the shader was bound", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (4, st_gs(fam=STF[1])),
+              (5, st_first(4103, 1, STF[1])), (14, st_view(False))], 0, [("OK", ST)],
+              has=["hud bound 0 of 0 draws (L 0, R 0), first draw of family 2CECEC30 at frame 4103 eye 1"], lacks=["NEVER APPLIED", "first draw of family 1989E6D3"])
+        check("srv turret: only a drifted 10 s line is UNPARSED, not a quiet rule", st_ok + [st_sec().replace("srv turret hud: panels", "srv turret hud: panelz")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret: a drifted camera line is UNPARSED", st_ok + [st_cam().replace("camera: back", "camera: backed")], 4, [("UNPARSED", ST)])
+        check("srv turret: a drifted view line is UNPARSED", st_ok + [st_view().replace("at frame", "by frame")], 4, [("UNPARSED", ST)])
+        check("srv turret: a refusal reason the rule does not know is UNPARSED", st_ok + [st_refused("not-ready").replace("not-ready", "elsewhere")], 4, [("UNPARSED", ST)])
+        check("srv turret: a drifted 10 s line beside a flight is said in the detail, and the first draw still shows the hud applied",
+              st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()), (12, st_sec().replace("draws[L,R]", "draws[A,B]")), (14, st_view(False))], 0, [("OK", ST)],
+              has=["[+1 line(s) the rule's patterns do not match: "], lacks=["NEVER APPLIED"])
+        check("srv turret: under 90% of the draws bound is PARTIAL, naming how many were refused and why", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)],
+              has=["only 300 of 480 draws went through the shader (under 90%); refused: no-eye 0, game-gs 0, topology 180, not-ready 0, no-geometry 0"], lacks=["NEVER APPLIED"])
+        check("srv turret: exactly 90% of the draws bound is not partial", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=432, refused=(0, 0, 48, 0, 0))), (14, st_view(False))], 0, [("OK", ST)], lacks=["PARTIAL", "went through the shader"])
+        check("srv turret: draws refused for the readiness are PARTIAL even when most were bound", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=470, refused=(0, 0, 0, 10, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)], has=["draws refused for not-ready 10"], lacks=["went through the shader"])
+        check("srv turret: draws refused because the game has its own geometry shader are PARTIAL", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=480, refused=(0, 5, 0, 0, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)], has=["draws refused for game-gs 5"])
+        check("srv turret: a camera that never applied outranks a partial hud", st_ok + [(1, st_set()), (2, st_view()), (4, st_gs()), (5, st_first()), (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))),
+              (14, st_view(False))], 3, [("NEVER APPLIED", ST)], has=["no 'camera: back ... published' line shows it", "only 300 of 480 draws"])
+        check("srv turret: the rare lines (a refusal, the stage not put back, put back at the boundary) are read, not unparsed", st_ok + st_flight() + [
+              (20, st_refused("no-geometry")), (21, RT(stsrc, "srv turret hud: the game's geometry stage could not be put back after an issue")),
+              (22, RT(stsrc, "srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary"))], 0, [("OK", ST)],
+              has=["draw(s) refused, said once per reason: no-geometry", "the game's geometry stage could not be put back after an issue (put back at the frame boundary)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret: a window that opens with the turret view already on judges the hud on its 10 s line, the camera on nothing", st_ok + [(1, st_set()), (30, st_sec())], 0, [("OK", ST)],
+              has=["camera key 60 cm and no 'on' edge in this window", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED"])
+        check("srv turret: no settings line, the 10 s line's own windows say whether the hud was on", st_ok + [(2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 0, 480)))], 3,
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (from the last 10 s line: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m))",
+                                                    "(camera back unknown, hud forward unknown, radar forward unknown, panels back unknown, radar back unknown, hud gap unknown, hud depth unknown, hud scissor unknown)"])
+        check("srv turret: --since cuts the events and keeps the settings", st_ok + [(1, st_set()), (20, st_view()), (21, st_cam()), (22, st_gs()), (23, st_first()), (30, st_sec())], 0,
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+        check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
+              [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
+        # the eleven families in eleven signatures: the 10 s line's two comma lists, one geometry shader and twin per signature, the families that never reached the window
+        old_sec = st_sec().rsplit(" families[", 1)[0] + " families[1989E6D3,2CECEC30]=300,180"
+        flight_sec = lambda *secs: st_ok + [(1, st_set()), (2, st_view()), (3, st_cam())] + st_gs_all() + [(5, st_first())] + list(secs) + [(40, st_view(False))]
+        check("srv turret families: the 10 s line of the eleven families is read, and the families that drew are listed in its order", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "no family drew"])
+        check("srv turret families: the draws are summed per family over the 10 s lines, the dotted sphere families among them",
+              flight_sec((12, st_sec(fams=(300, 180, 0, 0, 0, 0, 0, 40, 0, 50, 0))), (22, st_sec(fams=(100, 0, 0, 0, 0, 0, 0, 0, 60, 0, 30)))), 0, [("OK", ST)],
+              has=["families 1989E6D3 400, 2CECEC30 180, 5559BD94.EA02FAC2 40, 5559BD94.E95634B0 60, 81216C77.A2965EC2 50, 81216C77.B4786E0A 30, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "B7790CBF"])
+        check("srv turret families: a 10 s line in which no family drew says so", flight_sec((12, st_sec(fams=(0,)))), 0, [("OK", ST)],
+              has=["hud bound 480 of 480 draws (L 240, R 240), no family drew, first draw of family"], lacks=["UNPARSED", "families 1989E6D3"])
+        check("srv turret families: an old 10 s line with two family names still parses", flight_sec((12, old_sec)), 0, [("OK", ST)],
+              has=["families 1989E6D3 300, 2CECEC30 180"], lacks=["UNPARSED"])
+        check("srv turret families: a 10 s line whose counts do not parse as a list is UNPARSED", st_ok + [st_sec().replace("=300,180,0", "=300;180,0")], 4, [("UNPARSED", ST)])
+        check("srv turret families: a geometry shader of one signature that could not be made is NEVER APPLIED, naming it", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam())] +
+              [(4, st_gs(fam=s)) for s in STS if s != "5559BD94"] + [(4, st_gs("creation FAILED; standing down", 0x80004005, 3.1, "5559BD94")), (5, st_first()), (12, st_sec())], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 3.100 ms) for turret shift 5559BD94"], lacks=["for turret shift 1989E6D3"])
+        # the vehicle latch's lines (journal_watch.cpp) and the turret view in an SRV the journal does not call the Scorpion
+        check("srv turret vehicle: the turret view on in a Scarab (keys 60/102) is idle, never a failure", st_ok + [(1, st_set()), (2, st_ignored())], 0, [("IDLE", ST)],
+              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"],
+              lacks=["NEVER APPLIED", "UNPARSED", "exit 3", "was not entered"])
+        check("srv turret vehicle: two stays in a Scarab are counted, with the vehicle latch's last line", st_ok + [(1, st_set()), (1, st_vehicle(True, "LoadGame")), (2, st_vehicle(False, "LaunchSRV")),
+              (3, st_ignored()), (20, st_ignored(5000))], 0, [("IDLE", ST)],
+              has=["the turret view was on 2 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design", "vehicle latch: not the Scorpion (event LaunchSRV), 2 change(s)"],
+              lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret vehicle: a Scarab visit and then a Scorpion visit judges the Scorpion's as ever, and counts the Scarab's", st_ok + [(0, st_ignored())] + st_flight(), 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)", "hud bound 480 of 480 draws", "the turret view was also on 1 time(s) in an SRV the journal does not call the Scorpion (nothing applied there, by design)"],
+              lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret vehicle: a Scorpion visit that applied nothing is still NEVER APPLIED beside a Scarab visit", st_ok + [(0, st_ignored())] + st_flight(cam=False), 3, [("NEVER APPLIED", ST)],
+              has=["the camera key was 60 cm, and no 'camera: back ... published' line shows it", "the turret view was also on 1 time(s) in an SRV"])
+        check("srv turret vehicle: the vehicle latch's lines in a healthy flight are said in the detail and change nothing", st_ok + [(0, st_vehicle(True, "LoadGame"))] + st_flight() + [(16, st_vehicle(False, "DockSRV"))], 0,
+              [("OK", ST)], has=["vehicle latch: not the Scorpion (event DockSRV), 2 change(s)", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret vehicle: the vehicle latch's line alone is not the rule's line: nothing is said", st_ok + [st_vehicle()], 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED", "UNPARSED"])
+        check("srv turret vehicle: the settings and the vehicle latch alone are idle, and say the latch", st_ok + [(1, st_set()), (1, st_vehicle())], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open); vehicle latch: the Scorpion (event LoadGame), 1 change(s)"], lacks=["NEVER APPLIED"])
+        check("srv turret vehicle: a drifted vehicle line is UNPARSED", st_ok + [st_vehicle().replace("vehicle is", "vehicle was")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret vehicle: a vehicle event the rule does not know is UNPARSED", st_ok + [st_vehicle(event="Docked")], 4, [("UNPARSED", ST)])
+        check("srv turret vehicle: a drifted 'not the Scorpion' line is UNPARSED", st_ok + [st_ignored().replace("not the Scorpion at frame", "not Scorpion at frame")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret vehicle: a drifted 'not the Scorpion' line beside a flight is said in the detail", st_ok + [(0, st_ignored().replace("at frame", "by frame"))] + st_flight(), 0, [("OK", ST)],
+              has=["[+1 line(s) the rule's patterns do not match: "], lacks=["NEVER APPLIED"])
+        check("srv turret vehicle: --since keeps the vehicle latch's lines and cuts a Scarab visit before the window", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (20, st_ignored())], 0,
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open); vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
+              lacks=["NEVER APPLIED", "does not call the Scorpion"], extra=["--since", "10:01:00"])
+        check("srv turret vehicle: a Scarab visit inside --since is counted", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (70, st_ignored())], 0, [("IDLE", ST)],
+              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design", "vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
+              lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+
+        # the push-back: two groups, each with its own key, and the first build's gap; the 10 s line carries each group's window, a negative gap is deeper
+        check("srv turret push: both push-backs above 0 and the gap at 0, with draws bound, is OK (never IDLE), says both keys and each group's window", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "hud bound 480 of 480 draws",
+                   "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m)"], lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED"])
+        check("srv turret push: only the panels pushed (radar back 0, gap 0): the radar group is off in the 10 s line, and the hud is OK",
+              st_ok + [(1, st_set(panels=110, radar=0)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(radar=None)), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret push: the gap alone above 0 (both push-backs 0) is the first build's pull: the windows read nearer, and the hud is OK",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=0, gap=96, rforward=0)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(panels=0.96, radar=0.96)), (14, st_view(False))], 0, [("OK", ST)],
+              has=["hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 96 cm, hud depth front, hud scissor open)", "; windows: panels pulled nearer by 0.96 m (window 1.06..4.00 m), radar pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret push: the radar's push-back alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming the three keys",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=110, rforward=0)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0 (hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open) and the 1 10 s line(s) show nothing bound"])
+        check("srv turret push: the push-backs and the gap all at 0 is the hud off by key, whatever the camera does", st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)", "hud off by key"], lacks=["NEVER APPLIED"])
+        old_set = "srv turret settings: camera back 60 cm, hud gap 96 cm (live; fix.srv_turret_camera_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)"
+        old_hud = ("srv turret hud: gap=0.96 m wMin=1.06 wMax=4.00 s[L,R]=+0.0412,-0.0412 ipd_elite=63.5mm P00[L,R]=0.912,0.915 draws[L,R]=240,240 bound=480 "
+                   "refused[no-eye,game-gs,topology,not-ready,no-geometry]=0/0/0/0/0 families[1989E6D3,2CECEC30]=300,180")
+        check("srv turret push: the lines of the build before the push-back keys (a settings line with the camera and the gap alone, a 10 s line with one window) still parse",
+              st_ok + [(1, old_set), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_hud), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud gap 96 cm)", "hud bound 480 of 480 draws", "; windows: all families pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret push: the old settings line with the gap at 0 is the hud off by key (the camera half, never published here, is judged on its own)", st_ok + [(1, old_set.replace("hud gap 96 cm", "hud gap 0 cm")), (2, st_view()), (20, st_view(False))], 3,
+              [("NEVER APPLIED", ST)], has=["the camera key was 60 cm", "hud off by key"])
+        # the anchored move: the HUD-forward key, the 3D move's anchor and its latches, the older lines
+        check("srv turret anchored: the translation alone (HUD forward above 0, no push, no gap) is OK, says it, and the groups read 'translated only'",
+              st_ok + [(1, st_set(forward=70, panels=0, radar=0)), (2, st_view()), (3, st_cam()), (4, st_anchor()), (5, st_first()), (12, st_sec(panels=0, radar=0)), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "; windows: panels translated only, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "IDLE"])
+        check("srv turret anchored: the HUD-forward key alone above 0 is a hud that is on, so a 10 s line with nothing bound is NEVER APPLIED and names it",
+              st_ok + [(1, st_set(forward=70, panels=0, radar=0)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=0, radar=0, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)"])
+        check("srv turret anchored: every HUD key at 0 (camera back and all) is the hud off by key", st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 0, [("OK", ST)],
+              has=["hud off by key"], lacks=["NEVER APPLIED"])
+        check("srv turret anchored: each latch of the anchor is counted, the last one named with its reason", st_ok + st_flight() + [(8, st_anchor("camera back changed", 0.06, 0.21, -0.09)), (9, st_anchor("recentre", 0.0, 0.2, 0.1))], 0, [("OK", ST)],
+              has=["anchor latched 3 time(s), last at 0.000,0.200,0.100 m seated (recentre)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret anchored: the 'head away' reason is read and counted in the summary", st_ok + st_flight() + [(8, st_anchor("head away", 0.1, 0.2, 0.3)), (20, st_anchor("recentre")), (30, st_anchor("head away", 0.4, 0.2, 0.3))], 0, [("OK", ST)],
+              has=["anchor latched 4 time(s) (2 head away), last at 0.400,0.200,0.300 m seated (head away)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret anchored: one 'head away' latch alone is counted too", st_ok + st_flight() + [(8, st_anchor("head away", 0.1, 0.2, 0.3))], 0, [("OK", ST)],
+              has=["anchor latched 2 time(s) (1 head away), last at 0.100,0.200,0.300 m seated (head away)"], lacks=["UNPARSED"])
+        check("srv turret anchored: the HUD-forward reason is read", st_ok + st_flight() + [(8, st_anchor("HUD forward changed"))], 0, [("OK", ST)], has=["anchor latched 2 time(s), last at 0.050,0.200,-0.100 m seated (HUD forward changed)"], lacks=["UNPARSED"])
+        check("srv turret radar forward: the radar-forward key alone above 0 is a hud that is on, OK with draws bound, and the 10 s line's radar T is said beside the panels' T",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=70)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(panels=None, radar=0, tradar=(0.0, 0.0, 0.3), t=(0.0, 0.0, 0.0))), (14, st_view(False))], 0, [("OK", ST)],
+              has=["hud forward 0 cm, radar forward 70 cm, panels back 0 cm", "T (0.000,0.000,0.000), radar T (0.000,0.000,0.300)", "; windows: panels off, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "hud off by key"])
+        check("srv turret systems: the systems-near key alone above 0 is a hud that is on, so a stay with no draw through the shader is NEVER APPLIED",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0, systems=40)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0"], lacks=["UNPARSED", "hud off by key"])
+        check("srv turret radar forward: the radar-forward key alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming it",
+              st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=70)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, radar=0, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0 (hud forward 0 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)"])
+        check("srv turret radar forward: the radar-forward reason is read", st_ok + st_flight() + [(8, st_anchor("radar forward changed"))], 0, [("OK", ST)],
+              has=["anchor latched 2 time(s), last at 0.050,0.200,-0.100 m seated (radar forward changed)"], lacks=["UNPARSED"])
+        check("srv turret radar forward: each group's T is said (the panels' by HUD forward, the radar's by its own key)", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["head offset 1.5 cm, T (0.000,0.000,0.700), radar T (0.000,0.000,0.700)"], lacks=["UNPARSED"])
+        check("srv turret pose: the frames whose pose the draw refreshed are summed over the 10 s lines and said (informational, never a failure)",
+              st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(pose=(100, 120))), (22, st_sec(pose=(20, 30))), (24, st_view(False))], 0, [("OK", ST)],
+              has=["pose refreshed at draw in 120 of 150 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("srv turret pose: none refreshed (the boundary tick already had the newest pose) is said and is no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(pose=(0, 238))), (14, st_view(False))], 0, [("OK", ST)],
+              has=["pose refreshed at draw in 0 of 238 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth front, hud scissor open, radar anchor on", "")
+        old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" scissor opened 240", "").replace(" pose refreshed at draw: 240 of 240 frames", "")
+        check("srv turret radar forward: the lines of the build with HUD forward and no radar forward or pose field (a five-key settings line, a 10 s line with T alone) still parse and judge",
+              st_ok + [(1, old_set5), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_sec5), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "head offset 1.5 cm, T (0.000,0.000,0.700), ipd_elite"],
+              lacks=["UNPARSED", "NEVER APPLIED", "radar T", "pose refreshed", "radar forward"])
+        check("srv turret pose: a drifted pose field in the 10 s line is UNPARSED", st_ok + [st_sec().replace("pose refreshed at draw", "pose refreshed on draw")], 4, [("UNPARSED", ST)])
+        check("srv turret radar forward: a drifted radar T field in the 10 s line is UNPARSED", st_ok + [st_sec().replace(" Tradar=(", " Tr=(")], 4, [("UNPARSED", ST)])
+        check("srv turret depth: the depth switch is on the settings line and in the keys the rule says", st_ok + [(1, st_set(depth="real")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0, [("OK", ST)],
+              has=["radar back 110 cm, hud gap 0 cm, hud depth real, hud scissor open)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret depth: a settings line with an unknown depth word is UNPARSED, not a quiet rule", st_ok + [st_set().replace("hud depth front", "hud depth sideways")], 4, [("UNPARSED", ST)])
+        check("srv turret probe: a first scope's state lines are said, the disc's whole and each other family's first issue",
+              st_ok + st_flight() + [(5, st_state(issue=1)), (5, st_state(issue=2, target="other", w=1234, h=1000, depth=(1, 4, 1), blend=(0, 2, 1, 1, 2, 1, 1, 0xF))),
+                                     (5, st_state(STF[0], issue=1, depth=(0, 1, 0))), (5, st_state(STF[0], issue=2))], 0, [("OK", ST)],
+              has=["state at each family's first matched draw: DF3503CD first scope: issue 1 game 2468x2208 fmt 10, depth LESS no write, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF, scissor off, cull NONE, viewport 2468x2208; "
+                   "issue 2 other 1234x1000 fmt 10, depth LESS_EQUAL write, stencil off, blend off mask 0xF, scissor off, cull NONE, viewport 2468x2208",
+                   "1989E6D3 first scope: issue 1 game 2468x2208 fmt 10, depth off, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF, scissor off, cull NONE, viewport 2468x2208 (2 issue(s))"], lacks=["UNPARSED"])
+        check("srv turret probe: a drifted state line is UNPARSED", st_ok + [st_state().replace("depth: enable", "depth: enabled")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: the key's word is on the settings line", st_ok + [(1, st_set(scissor="game")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0, [("OK", ST)],
+              has=["hud depth front, hud scissor game)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret scissor: a settings line with an unknown scissor word is UNPARSED", st_ok + [st_set().replace("hud scissor open", "hud scissor shut")], 4, [("UNPARSED", ST)])
+        check("srv turret radar anchor: the key's word on the settings line parses (reversed)", st_ok + [(1, st_set(anchor="reversed")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0,
+              [("OK", ST)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret radar anchor: a settings line from before the key (eight keys) still parses", st_ok + [st_set().replace(", radar anchor on", "")], 0, [("IDLE", ST)],
+              has=["hud depth front, hud scissor open)"], lacks=["UNPARSED"])
+        check("srv turret radar anchor: a settings line with an unknown anchor word is UNPARSED", st_ok + [st_set().replace("radar anchor on", "radar anchor maybe")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: a family found with the test on is said with the game's rectangle, and the draws that had it opened are counted over the 10 s lines",
+              st_ok + st_flight() + [(5, st_scissor()), (6, st_scissor(STF[0], rects=3, first=(1, 2, 30, 40), opened=False)), (22, st_sec(opened=100))], 0, [("OK", ST)],
+              has=["scissor: DF3503CD drew with the test on (1 rect(s), the game's first [0,600,2468,1200], target 2468x2208, opened to the whole target); 1989E6D3 drew with the test on (3 rect(s), the game's first [1,2,30,40], "
+                   "target 2468x2208, kept as the game set it), 340 draw(s) had it opened (the 10 s lines)"], lacks=["UNPARSED"])
+        check("srv turret scissor: no family found with the test on and none opened is not mentioned", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(opened=0)), (14, st_view(False))], 0, [("OK", ST)],
+              lacks=["scissor:", "UNPARSED"])
+        check("srv turret scissor: the game's rectangles that could not be put back are said", st_ok + st_flight() + [(8, RT(stsrc, "srv turret hud: the game's scissor rectangles could not be put back"))], 0, [("OK", ST)],
+              has=["the game's scissor rectangles could not be put back after an issue"], lacks=["UNPARSED"])
+        check("srv turret scissor: the state line's raster and viewport fields are said (scissor on with a rectangle, culling, a viewport that is not at the origin)",
+              st_ok + st_flight() + [(5, st_state(raster=(1, 1, (0, 600, 2468, 1200), 1, 2, 1), viewport=(10.0, 20.0, 1234.0, 1000.0)))], 0, [("OK", ST)],
+              has=["scissor on 1 rect(s) first [0,600,2468,1200], cull FRONT, front is counter-clockwise, viewport 1234x1000 at 10,20"], lacks=["UNPARSED"])
+        check("srv turret scissor: a state line from the build before the raster fields still parses and says nothing of them",
+              st_ok + st_flight() + [(5, st_state().split(" | raster:")[0])], 0, [("OK", ST)], has=["blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF"], lacks=["UNPARSED", "cull"])
+        check("srv turret scissor: a drifted scissor line is UNPARSED", st_ok + [st_scissor().replace("draws with the scissor test on", "draws with the scissor on")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: a drifted raster field is UNPARSED", st_ok + [st_state().replace("raster: scissor=", "raster: clip=")], 4, [("UNPARSED", ST)])
+        check("srv turret anchored: an anchor reason the rule does not know is UNPARSED", st_ok + [st_anchor().replace("view on", "somewhere")], 4, [("UNPARSED", ST)])
+        check("srv turret anchored: a drifted anchor line is UNPARSED", st_ok + [st_anchor().replace("latched at", "kept at")], 4, [("UNPARSED", ST)])
+        check("srv turret anchored: a drifted 10 s line (the anchor field gone) is UNPARSED", st_ok + [st_sec().replace(" anchor=(", " anchored=(")], 4, [("UNPARSED", ST)])
+        checks += 1
+        if "in 3D about the anchor" not in st_first() or "moves 1.10 m deeper" not in st_first() or "after the group's HUD moves 0.70 m forward" not in st_first():
+            print("health: the SRV turret first-draw line no longer says the move is in 3D about the anchor, which way, and the HUD-forward move")
+            ok = False
+        old_set4 = "srv turret settings: camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm (live; fix.srv_turret_camera_back, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)"
+        old_sec4 = ("srv turret hud: panels: gap=-1.10 m wMin=0.02 wMax=1.00; radar: gap=-1.10 m wMin=0.02 wMax=1.00; s[L,R]=+0.0412,-0.0412 ipd_elite=63.5mm P00[L,R]=0.912,0.915 draws[L,R]=240,240 bound=480 "
+                    "refused[no-eye,game-gs,topology,not-ready,no-geometry]=0/0/0/0/0 families[1989E6D3,2CECEC30]=300,180")
+        check("srv turret anchored: the lines of the build with the push-backs and the per-eye shift (four keys, s[L,R], wMin and wMax) still parse and judge",
+              st_ok + [(1, old_set4), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_sec4), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "s[L,R] +0.0412,-0.0412", "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m)"], lacks=["UNPARSED", "NEVER APPLIED"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1

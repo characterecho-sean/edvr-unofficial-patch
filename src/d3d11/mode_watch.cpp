@@ -60,6 +60,7 @@ std::atomic<uint32_t> g_hints{0};
 std::atomic<HANDLE> g_hintEvent{nullptr};
 std::atomic<bool> g_startCalled{false};
 std::atomic<bool> g_started{false};
+std::atomic<int> g_lastStereoValue{-1};   // F190: the StereoscopicMode of the last known read of Settings.xml (the launch's value until the first read)
 
 // The toast the menu shows once per commit. Written on the render thread, read by the menu's poll.
 std::mutex g_noticeMutex;
@@ -278,6 +279,7 @@ private:
             return;
         }
         retryAt_ = 0;
+        if (r.known) g_lastStereoValue.store(r.value, std::memory_order_relaxed);
         const Step s = watch_.onRead(now, r, readAfterWrite_);
         // An unknown read repeats while the file stays invalid, so its line is logged once a second at most; the next line printed says
         // how many were skipped.
@@ -495,6 +497,7 @@ void modeWatchStart() {
     readPatched(g_inEffect);  // the launch's values: what device creation reads, before any switch can change the file's
 
     const ModeRead launch = runtimeLaunchRead();
+    if (launch.known) g_lastStereoValue.store(launch.value, std::memory_order_relaxed);   // F190
     const std::wstring& path = runtimeSettingsPathWide();
     const size_t slash = path.find_last_of(L'\\');
     if (slash == std::wstring::npos) {
@@ -558,6 +561,8 @@ bool modeWatchNoticeDue(char* out, size_t size) {
     g_noticeDue.store(false, std::memory_order_release);
     return true;
 }
+
+int modeWatchStereoValue() { return g_lastStereoValue.load(std::memory_order_relaxed); }
 
 }  // namespace edvr
 

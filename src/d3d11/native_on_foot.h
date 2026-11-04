@@ -2,7 +2,9 @@
 // Native on-foot VR, flight F0 (docs\design-native-onfoot-vr-2026-10-13.md; the decisions are native_on_foot_core.h).
 //
 // THE HOOK (VR profile only). A CodeHook on the game's render-mode setter (EliteDangerous64.exe+0x2874920, build 334925), installed
-// by the first frame boundary. It is installed whether or not fix.native_on_foot is on, so every natural mode request is logged. An
+// by the first frame boundary of the VR profile (F190: a session that starts flat waits, and installs on the first VR frame after a live
+// switch, taking the game's mode from Settings.xml because the setter call for the switch has already passed). It is installed whether or
+// not fix.native_on_foot is on, so every natural mode request is logged. An
 // an incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4) when the key is on, the selector is the one frozen at the first valid call, and
 // the journal says a game session is live. Everything else is forwarded unchanged.
 //
@@ -435,6 +437,10 @@ inline bool nativeOnFootMarkerFixLive() {
 // reference in use resets the eye's baselines. Set by readKey; read by the render thread. F62c: the patch measures against the eye's scene
 // rows whatever this key says (drawtag::patchDecide; no trust gate); the key now steers only the F52 measure lines.
 inline std::atomic<int> g_nativeOnFootMarkerRefKey{1};
+// F201: the draw tee has decided the draw in flight and its patched b0 is waiting to be bound at the game's issue (set at the decision, cleared at Begin and at the next draw's tee). The
+// AA-off draw fast path reads it (draw_fast_path.h drawClaimed): a decided draw takes forwardWithVerdict, where the bind is. Relaxed: any context's thread asks.
+inline std::atomic<bool> g_nativeOnFootMarkerFixPending{false};
+inline bool nativeOnFootMarkerFixPending() { return g_nativeOnFootMarkerFixPending.load(std::memory_order_relaxed); }
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
 void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 
