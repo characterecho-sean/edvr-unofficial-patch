@@ -684,7 +684,27 @@ read as streaks, with a few thin bright streaks left. The rig now holds the perc
 legacy's) instead of percentiles over the max. Rig shader values with strength 4: dirt under the sun 0.2822 (wanted 0.2822), hangar
 0.05673 (0.05675), ice overlay 0.005642 (0.005645).
 
+## 14. The Vulture's canopy (RenderDoc, 2026-11-03)
+
+Sean's flights are in a Vulture. Section 12's Odyssey captures, and the legacy captures, are an Asp Explorer, on
+different meshes (legacy 2720 vertices, Odyssey 1208). One capture of Odyssey in the Vulture, no EDVR: frame 8848.
+
+- Same shader and constants as the Asp: intact q3 only; CB2[0], [3], [4], [6], [15], [17] identical, including
+  CB2[17].w = 0.95 (stock dirt off).
+- **Panes:** 14 components, 6 significant, each with one continuous unmirrored UV chart. A 50-degree texture
+  direction lands at 104, 171, 50, 62, 32 and 49 degrees on screen (area 27, 27, 13, 11, 11, 10%), tight within each
+  flat pane. On the Asp: 175, 76, 24, and 38 on the curved piece. Legacy's Asp: 30 to 62.
+- **Mask:** 37% of the visible pane has `masks.y` exactly 0 (Asp 34%); raw vertex blue mean 0.63 (Asp 0.52).
+- **Scale:** about 10 repeats per screen width (Asp 6.27, legacy's Asp 6.26), not stretched. There is no legacy
+  Vulture capture to compare with.
+- **Light:** sun colour 806 here, N.L 0.62 on the glass, against 350 and 0.47 on the Asp frame the ×16 replay
+  pictures came from, so about 3 times the sunlight on the dirt. This is one frame each, and sun colour varies by star.
+
 ## Ruled out
+
+- ruled out: rotating the stroke direction by the surface normal so panes differ, because both Odyssey meshes
+  measured already run a single texture direction several ways across their panes, through their UV charts
+  (section 14).
 
 - ruled out: porting legacy's ambient scale of 5, because legacy's VS cube is black in all three captures
   (section 12); the scale multiplied zero.
