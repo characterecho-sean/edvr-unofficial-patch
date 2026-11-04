@@ -785,9 +785,9 @@ static void mathCases() {
                   "the cards-up key adds 20 cm of seat-up on the two cards only");
             check(st::gunnerParamsFor(closer, gunner, false) && std::fabs(gunner.ty - 0.30f) < 1e-6f, "the curved sheet does not take the cards-up translation");
             check(!st::gunnerParamsFor(e, gunner), "a gunner move of 0 leaves the panel as the game placed it");
-            {   // the cards' content shifts: whole millimetres into metres, held to 0 to 30 mm, 7 and 7 by default
+            {   // the cards' content shifts: whole millimetres into metres, held to 0 to 30 mm, 7 and 5 by default
                 st::TurretParams sh;
-                bool ok = st::gunnerParamsFor(closer, sh) && sh.targetShiftM == 0.007f && sh.systemsShiftM == 0.007f;
+                bool ok = st::gunnerParamsFor(closer, sh) && sh.targetShiftM == 0.007f && sh.systemsShiftM == 0.005f;
                 ok = ok && st::gunnerParamsFor(closer, sh, false, 12, 3) && sh.targetShiftM == 0.012f && sh.systemsShiftM == 0.003f;
                 ok = ok && st::gunnerParamsFor(closer, sh, false, 99, -4) && sh.targetShiftM == 0.030f && sh.systemsShiftM == 0.0f;
                 ok = ok && st::gunnerParamsFor(closer, sh, true, 0, 0) && sh.targetShiftM == 0.0f && sh.systemsShiftM == 0.0f;
@@ -797,7 +797,7 @@ static void mathCases() {
                 bad = sh;
                 bad.systemsShiftM = -0.001f;
                 ok = ok && !st::paramsUsable(bad);
-                check(ok, "the cards' content shifts reach the sheet's constants in metres (7 and 7 mm by default, the keys' values otherwise, held to 0..30 mm) and a shift outside that range is refused");
+                check(ok, "the cards' content shifts reach the sheet's constants in metres (7 and 5 mm by default, the keys' values otherwise, held to 0..30 mm) and a shift outside that range is refused");
             }
             check(st::gunnerSignature(st::kGunnerCardsVs, 'X', 288) == st::kGunnerCardsSignature && st::gunnerSignature(st::kGunnerSheetVs, 'I', 2016) == st::kGunnerSheetSignature &&
                       st::gunnerSignature(st::kGunnerCardsVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 360) < 0 && st::gunnerSignature(st::kGunnerSheetVs, 'X', 6) < 0 &&
@@ -933,7 +933,7 @@ static void mathCases() {
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
     check(st::kBackDefaultCm == 80 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
-              st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 7 && st::kCardShiftMaxMm == 30 &&
+              st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 && st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 5 && st::kSystemsCardUpDefaultMm == 5 && st::kCardShiftMaxMm == 30 &&
               st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
           "the keys' defaults, the 2026-11-02 and 2026-11-03 flights: camera back 80, HUD forward 0, radar forward 0, panels back 0, radar back 0, gap 0, systems near 80, weapon panel up 10, gunner up 35");
 }
@@ -2778,21 +2778,52 @@ static void sheetClipCases(ID3D11GeometryShader* twin, Fails& f) {
         f.expect(r.wrote && r.c[0][1] > 0.0f && r.c[1][1] > 0.0f && r.c[2][1] < 0.0f,
                  "gunner sheet clip: a vertex at y -0.311 (the hook piece, above the art's top near -0.315) has clip.y below 0 and two at y -0.314 (the art) keep it above 0");
     }
-    {   // the label row on the right: a triangle across x 0.53 (x 0.45 to 0.56), and the label itself right of it
-        const float xyz[3][3] = {{0.45f, -0.55f, kRigSheetZ}, {0.56f, -0.55f, kRigSheetZ}, {0.50f, -0.50f, kRigSheetZ}};
-        const SheetClips r = sheetClipsOf(twin, xyz, true);
-        f.expect(r.wrote && std::fabs(r.c[0][0] - (xyz[0][0] - 0.53f)) < tol && std::fabs(r.c[1][0] - (xyz[1][0] - 0.53f)) < tol && std::fabs(r.c[2][0] - (xyz[2][0] - 0.53f)) < tol &&
-                     r.c[0][1] == 1.0f && r.c[1][1] == 1.0f && r.c[2][1] == 1.0f,
-                 "gunner sheet clip: in the label row on the right clip.x is the vertex's distance to the plane x 0.53 and clip.y is 1");
-        f.expect(r.wrote && r.c[0][0] < 0.0f && r.c[1][0] > 0.0f && r.c[2][0] < 0.0f, "gunner sheet clip: a label-row triangle across x 0.53 (0.45 to 0.56) has clip.x of both signs, so the dash is cut at the plane");
+    {   // the lower row, LEFT (Epic dump 125154858001): the plane along the tile edge v11 (0.5067,-0.4783) to v16 (0.4905,-0.5534), 0.2 mm right of it, for triangles with a centroid left of x 0.56
+        const auto xcut = [](float y) { return 0.5069f + 0.2157f * (y + 0.4783f); };
+        const float dash[3][3] = {{0.5067f, -0.4783f, kRigSheetZ}, {0.4905f, -0.5534f, kRigSheetZ}, {0.4269f, -0.5534f, kRigSheetZ}};   // triangle (11,16,17)
+        const SheetClips d = sheetClipsOf(twin, dash, true);
+        f.expect(d.wrote && std::fabs(d.c[0][0] - (dash[0][0] - xcut(dash[0][1]))) < tol && std::fabs(d.c[1][0] - (dash[1][0] - xcut(dash[1][1]))) < tol && std::fabs(d.c[2][0] - (dash[2][0] - xcut(dash[2][1]))) < tol &&
+                     d.c[0][1] == 1.0f && d.c[1][1] == 1.0f && d.c[2][1] == 1.0f,
+                 "gunner sheet clip: in the lower row on the left clip.x is the vertex's distance right of the slanted plane through the tile edge v11-v16 (0.2 mm right of it) and clip.y is 1");
+        f.expect(d.wrote && d.c[0][0] <= 0.0f && d.c[1][0] <= 0.0f && d.c[2][0] <= 0.0f, "gunner sheet clip: triangle (11,16,17), which holds the left L bracket, is gone whole (no vertex right of the plane)");
+        const float beside[3][3] = {{0.5510f, -0.5534f, kRigSheetZ}, {0.4905f, -0.5534f, kRigSheetZ}, {0.5067f, -0.4783f, kRigSheetZ}};   // triangle (3,16,11), the brown strip beside it
+        const SheetClips b = sheetClipsOf(twin, beside, true);
+        f.expect(b.wrote && b.c[0][0] > 0.05f && b.c[1][0] <= 0.0f && b.c[2][0] <= 0.0f, "gunner sheet clip: the triangle beside it, (3,16,11), keeps its right vertex (clip.x 60 mm) and has the two on the edge at or under 0, so the brown strip is kept");
+        const float corner[3][3] = {{0.5003f, -0.4911f, kRigSheetZ}, {0.5300f, -0.4911f, kRigSheetZ}, {0.5300f, -0.5300f, kRigSheetZ}};   // the L's foot end x 0.5003, and two points of the strip 29 mm right of it
+        const SheetClips c = sheetClipsOf(twin, corner, true);
+        f.expect(c.wrote && c.c[0][0] < -0.003f && c.c[1][0] > 0.02f && c.c[2][0] > 0.02f, "gunner sheet clip: the left L's foot end (0.5003,-0.4911) is 3.8 mm left of the plane, so cut with a margin; points 29 mm right of it are kept");
+        const float bar[3][3] = {{0.4966f, -0.4783f, kRigSheetZ}, {0.4966f, -0.5300f, kRigSheetZ}, {0.5300f, -0.5000f, kRigSheetZ}};   // the bar at the seam (x 0.4966) and below it
+        const SheetClips q = sheetClipsOf(twin, bar, true);
+        f.expect(q.wrote && q.c[0][0] < -0.009f, "gunner sheet clip: the bar of the left L at the seam (x 0.4966) is 10 mm left of the plane");
+        const float farTri[3][3] = {{0.45f, -0.55f, kRigSheetZ}, {0.56f, -0.55f, kRigSheetZ}, {0.50f, -0.50f, kRigSheetZ}};   // a triangle across the old x 0.53 plane
+        const SheetClips fr = sheetClipsOf(twin, farTri, true);
+        f.expect(fr.wrote && fr.c[0][0] < 0.0f && fr.c[1][0] > 0.0f && std::fabs(fr.c[1][0] - (0.56f - xcut(-0.55f))) < tol, "gunner sheet clip: the old plane x 0.53 is gone: the vertex at x 0.56 is clip.x +69 mm right of the new plane at its row");
+    }
+    {   // the lower row, RIGHT: triangle (302,10,9) has its part above y -0.4925 cut (clip.y), its part below kept; the label and the neighbour are untouched
+        const float wedge[3][3] = {{0.7556f, -0.5534f, kRigSheetZ}, {0.7092f, -0.5534f, kRigSheetZ}, {0.7326f, -0.4783f, kRigSheetZ}};   // triangle (302,10,9)
+        const SheetClips w = sheetClipsOf(twin, wedge, true);
+        f.expect(w.wrote && w.c[0][0] == 1.0f && w.c[1][0] == 1.0f && w.c[2][0] == 1.0f && std::fabs(w.c[0][1] - (-0.4925f + 0.5534f)) < tol && std::fabs(w.c[2][1] - (-0.4925f + 0.4783f)) < tol,
+                 "gunner sheet clip: triangle (302,10,9) has clip.x 1 and clip.y the vertex's distance below the plane y -0.4925");
+        f.expect(w.wrote && w.c[0][1] > 0.0f && w.c[1][1] > 0.0f && w.c[2][1] < 0.0f, "gunner sheet clip: its apex v9 (y -0.4783, where the brown wedge ends on the diagonal) is cut, the two vertices at y -0.5534 are kept");
+        const float foot[3][3] = {{0.7361f, -0.4905f, kRigSheetZ}, {0.7600f, -0.5534f, kRigSheetZ}, {0.7361f, -0.5534f, kRigSheetZ}};   // the right L's foot (x 0.7361, y -0.4895..-0.4915) and the row below
+        const SheetClips ft = sheetClipsOf(twin, foot, true);
+        f.expect(ft.wrote && ft.c[0][1] < 0.0f && ft.c[0][1] > -0.0021f && ft.c[1][1] > 0.0f && ft.c[2][1] > 0.0f, "gunner sheet clip: the right L's foot (y -0.4905, 2 mm above the plane) is cut, the vertices below are kept");
+        const float icon[3][3] = {{0.7300f, -0.5014f, kRigSheetZ}, {0.7600f, -0.5534f, kRigSheetZ}, {0.7600f, -0.5100f, kRigSheetZ}};   // the aperture icon's top (y -0.5014) is 8.9 mm below the plane
+        const SheetClips ic = sheetClipsOf(twin, icon, true);
+        f.expect(ic.wrote && std::fabs(ic.c[0][1] - 0.0089f) < tol && ic.c[1][1] > 0.0f && ic.c[2][1] > 0.0f, "gunner sheet clip: the aperture icon's top (y -0.5014) is kept, 8.9 mm below the plane");
+        const float neigh[3][3] = {{0.7092f, -0.5534f, kRigSheetZ}, {0.6607f, -0.5534f, kRigSheetZ}, {0.7326f, -0.4783f, kRigSheetZ}};   // triangle (9,10,0): centroid x 0.7008, not the wedge's
+        f.expect(isOne(sheetClipsOf(twin, neigh, true)), "gunner sheet clip: the neighbour (9,10,0), centroid x 0.7008, has clip (1, 1): the right plane is for centroids right of x 0.72");
         const float label[3][3] = {{0.60f, -0.55f, kRigSheetZ}, {0.70f, -0.55f, kRigSheetZ}, {0.65f, -0.50f, kRigSheetZ}};
         const SheetClips l = sheetClipsOf(twin, label, true);
-        f.expect(l.wrote && l.c[0][0] > 0.0f && l.c[1][0] > 0.0f && l.c[2][0] > 0.0f && l.c[0][1] == 1.0f && l.c[1][1] == 1.0f && l.c[2][1] == 1.0f,
-                 "gunner sheet clip: the GUNNER CAMERA label (x from 0.6) is right of the plane, so it is kept");
+        f.expect(l.wrote && l.c[0][0] == 1.0f && l.c[1][0] == 1.0f && l.c[2][0] == 1.0f && l.c[0][1] == 1.0f && l.c[1][1] == 1.0f && l.c[2][1] == 1.0f,
+                 "gunner sheet clip: the GUNNER CAMERA label (x from 0.6) is in neither plane's triangles, so every vertex of it is kept (clip (1, 1))");
     }
     {   // the systems card and the rest of the right side: no plane
         const float card[3][3] = {{0.55f, -0.45f, kRigSheetZ}, {0.65f, -0.45f, kRigSheetZ}, {0.60f, -0.35f, kRigSheetZ}};
         f.expect(isOne(sheetClipsOf(twin, card, true)), "gunner sheet clip: a triangle on the systems card (centroid above y -0.481) has clip (1, 1)");
+        const float cardLeft[3][3] = {{0.50f, -0.45f, kRigSheetZ}, {0.58f, -0.45f, kRigSheetZ}, {0.54f, -0.35f, kRigSheetZ}};    // centroid x 0.54: left of the lower row's left limit, but above the row
+        const float cardRight[3][3] = {{0.74f, -0.45f, kRigSheetZ}, {0.78f, -0.45f, kRigSheetZ}, {0.76f, -0.30f, kRigSheetZ}};   // centroid x 0.76: right of the lower row's right limit, but above the row
+        f.expect(isOne(sheetClipsOf(twin, cardLeft, true)) && isOne(sheetClipsOf(twin, cardRight, true)), "gunner sheet clip: triangles on the card itself, at the same x as the lower row's two planes, have clip (1, 1): the planes are for the lower row only");
         const float above[3][3] = {{0.55f, -0.30f, kRigSheetZ}, {0.65f, -0.30f, kRigSheetZ}, {0.60f, -0.25f, kRigSheetZ}};
         f.expect(isOne(sheetClipsOf(twin, above, true)), "gunner sheet clip: a triangle over the systems card's top edge has clip (1, 1)");
     }
@@ -2837,10 +2868,11 @@ static SheetMoves sheetMovesOf(ID3D11GeometryShader* twin, const float pts[3][3]
 static void sheetShiftCases(ID3D11GeometryShader* twin, Fails& f) {
     const float tz[3] = {0.0f, 0.0f, 0.3f};
     const double tol = 2.0e-5;
-    auto paramsOf = [&](int targetMm, int systemsMm) {
+    auto paramsOf = [&](int targetMm, int systemsMm, int upMm = 0) {
         st::TurretParams p = st::translateParamsFor(frameOfCam(Cam{}, nullptr, tz));
         p.targetShiftM = float(targetMm) / 1000.0f;
         p.systemsShiftM = float(systemsMm) / 1000.0f;
+        p.systemsUpM = float(upMm) / 1000.0f;
         return p;
     };
     // the eye-space shift of mm millimetres along an across vector (mesh (dx, dy, dz) is eye (dx, dy, -dz))
@@ -2868,11 +2900,11 @@ static void sheetShiftCases(ID3D11GeometryShader* twin, Fails& f) {
     const float label[3][3] = {{0.60f, -0.55f, kRigSheetZ}, {0.70f, -0.55f, kRigSheetZ}, {0.65f, -0.52f, kRigSheetZ}};
     double sT[3], sS[3];
     eyeShift(kRigAcrossTarget, 7, sT);
-    eyeShift(kRigAcrossSystems, 7, sS);
-    const st::TurretParams shipped = paramsOf(7, 7);
+    eyeShift(kRigAcrossSystems, 5, sS);
+    const st::TurretParams shipped = paramsOf(7, 5);
     f.expect(movesBy(sheetMovesOf(twin, target, shipped), sT), "gunner sheet shift: a target-card content triangle moves by the translation and the target key (7 mm) along U = (0.7451, 0, 0.6670), rightwards");
     f.expect(movesBy(sheetMovesOf(twin, bar, shipped), sT), "gunner sheet shift: ...and so does a triangle of the target region left of the fill (the cut follows it)");
-    f.expect(movesBy(sheetMovesOf(twin, systems, shipped), sS), "gunner sheet shift: a systems-card triangle moves by the translation and the systems key (7 mm) along its own U = (0.74314, 0, -0.66913)");
+    f.expect(movesBy(sheetMovesOf(twin, systems, shipped), sS), "gunner sheet shift: a systems-card triangle moves by the translation and the systems key (5 mm) along its own U = (0.74314, 0, -0.66913)");
     f.expect(movesBy(sheetMovesOf(twin, label, shipped), sS), "gunner sheet shift: a label-row triangle (the SRV SCORPION text, the dash, the GUNNER CAMERA label) moves with SYSTEMS, by the translation and the systems key along its U");
     {   // the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider: a vertex above it and a vertex below it must move by the same amount, or the letters and the divider tear
         const float above[3][3] = {{0.55f, -0.45f, kRigSheetZ}, {0.65f, -0.45f, kRigSheetZ}, {0.60f, -0.4783f, kRigSheetZ}};
@@ -2890,9 +2922,28 @@ static void sheetShiftCases(ID3D11GeometryShader* twin, Fails& f) {
                  "gunner sheet shift: the target card follows its key (12 mm), SYSTEMS and the label row below it the systems key (3 mm)");
         const st::TurretParams zero = paramsOf(0, 0);
         f.expect(movesBy(sheetMovesOf(twin, target, zero), none) && movesBy(sheetMovesOf(twin, systems, zero), none), "gunner sheet shift: a value of 0 means no shift");
-        const st::TurretParams onlyT = paramsOf(7, 0), onlyS = paramsOf(0, 7);
+        const st::TurretParams onlyT = paramsOf(7, 0), onlyS = paramsOf(0, 5);
         f.expect(movesBy(sheetMovesOf(twin, systems, onlyT), none) && movesBy(sheetMovesOf(twin, label, onlyT), none) && movesBy(sheetMovesOf(twin, target, onlyS), none),
                  "gunner sheet shift: each key moves its own card only (the target key never moves the label row, the systems key never moves the target card)");
+    }
+    {   // the SYSTEMS raise (experimental.srv_turret_systems_card_up, mm, up the fill's left edge (0.1652, 0.9502, 0.2642)): every drawn triangle on that side moves by it, with the across shift; the target card does not; 0 is no move
+        auto upShift = [](int mm, double out[3]) {
+            out[0] = mm * 0.001 * 0.1652;
+            out[1] = mm * 0.001 * 0.9502;
+            out[2] = -mm * 0.001 * 0.2642;
+        };
+        double u5[3], su[3], u0[3] = {0.0, 0.0, 0.0};
+        upShift(5, u5);
+        for (int k = 0; k < 3; ++k) su[k] = sS[k] + u5[k];
+        const st::TurretParams raised = paramsOf(7, 5, 5);
+        f.expect(movesBy(sheetMovesOf(twin, systems, raised), su), "gunner sheet raise: a SYSTEMS card triangle moves by the across shift and the raise (5 mm up the fill's left edge)");
+        f.expect(movesBy(sheetMovesOf(twin, label, raised), su), "gunner sheet raise: ...and so does a triangle of the row under it (the SRV SCORPION text, the GUNNER CAMERA label)");
+        const float above[3][3] = {{0.55f, -0.45f, kRigSheetZ}, {0.65f, -0.45f, kRigSheetZ}, {0.60f, -0.4783f, kRigSheetZ}};
+        const float below[3][3] = {{0.55f, -0.4783f, kRigSheetZ}, {0.65f, -0.4783f, kRigSheetZ}, {0.60f, -0.5534f, kRigSheetZ}};
+        f.expect(movesBy(sheetMovesOf(twin, above, raised), su) && movesBy(sheetMovesOf(twin, below, raised), su), "gunner sheet raise: a vertex above the seam and one below it move by the same amount, raise included");
+        f.expect(movesBy(sheetMovesOf(twin, target, raised), sT) && movesBy(sheetMovesOf(twin, bar, raised), sT), "gunner sheet raise: the target card does not take the raise");
+        f.expect(movesBy(sheetMovesOf(twin, systems, paramsOf(7, 0, 5)), u5) && movesBy(sheetMovesOf(twin, systems, paramsOf(7, 5, 0)), sS), "gunner sheet raise: the raise and the across shift are independent keys");
+        f.expect(movesBy(sheetMovesOf(twin, systems, paramsOf(7, 0, 0)), u0) && movesBy(sheetMovesOf(twin, label, paramsOf(7, 0, 0)), u0), "gunner sheet raise: 0 and 0 mean no move");
     }
     {   // the corner notches (dump 125141609001): the triangles holding the planet icon tile's upper-left vertex v112 (x -0.8330) and the last SYSTEMS header tile's upper-right vertex v292 (x 0.7856) are kept, and moved with their card
         const float t1[3][3] = {{-0.7678f, -0.3248f, 0.6266f}, {-0.8182f, -0.3248f, 0.5640f}, {-0.8330f, -0.2460f, 0.5741f}};
@@ -3127,7 +3178,16 @@ int main(int argc, char** argv) {
                 {"the left plane's distance dropped", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);", "return float2(1.0, kTargetCardTopY - p.y);"},
                 {"the top plane's distance dropped", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);", "return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, 1.0);"},
                 {"the top plane's sign", "kTargetCardTopY - p.y", "p.y - kTargetCardTopY"},
-                {"the label row's plane dropped", "return float2(p.x - kLabelRowLeftX, 1.0);", "return float2(1.0, 1.0);"},
+                {"the lower-left plane dropped", "if (cen.x < kLowerLeftEndX) return float2(p.x - (kLowerLeftEdgeX + kLowerLeftEdgeSlope * (p.y - kSeamY)), 1.0);", "if (cen.x < kLowerLeftEndX) return float2(1.0, 1.0);"},
+                {"the lower-left plane back at the vertical x 0.53", "p.x - (kLowerLeftEdgeX + kLowerLeftEdgeSlope * (p.y - kSeamY))", "p.x - 0.53"},
+                {"the lower-left plane vertical at the edge's top (not slanted)", "kLowerLeftEdgeSlope * (p.y - kSeamY)", "0.0"},
+                {"the lower-left plane too far left (the L back)", "kLowerLeftEdgeX = 0.5069;", "kLowerLeftEdgeX = 0.4900;"},
+                {"the lower-left plane on the other side", "return float2(p.x - (kLowerLeftEdgeX", "return float2((kLowerLeftEdgeX"},
+                {"the lower-right plane dropped", "return float2(1.0, kLowerRightCutY - p.y);", "return float2(1.0, 1.0);"},
+                {"the lower-right plane on the wrong side", "kLowerRightCutY - p.y", "p.y - kLowerRightCutY"},
+                {"the lower-right plane too low (the foot returns)", "kLowerRightCutY = -0.4925;", "kLowerRightCutY = -0.5100;"},
+                {"the lower-right plane too high (the icon cut)", "kLowerRightCutY = -0.4925;", "kLowerRightCutY = -0.4700;"},
+                {"the lower-right plane for the neighbour too", "cen.x > kLowerRightStartX", "cen.x > 0.60"},
                 {"the label row taken for the whole right side", "cen.x > 0.0 && cen.y < kCardRowBottomY", "cen.x > 0.0"},
                 {"the left region taken for the whole sheet", "cen.x < 0.0", "cen.x < 10.0"},
                 {"a vertex the view could not place clipped to nothing", ") : float2(1.0, 1.0);", ") : float2(-1.0, -1.0);"},
@@ -3154,6 +3214,10 @@ int main(int argc, char** argv) {
                 {"the systems shift read from the target key", "kSystemsCardAcross * s3.y", "kSystemsCardAcross * s3.x"},
                 {"the target shift's sign", "sd = kTargetCardAcross * s3.x", "sd = -kTargetCardAcross * s3.x"},
                 {"the systems shift's sign", "sd = kSystemsCardAcross * s3.y", "sd = -kSystemsCardAcross * s3.y"},
+                {"the systems raise ignored", " + kSystemsCardUp * s3.z;", ";"},
+                {"the systems raise reversed", "kSystemsCardUp * s3.z", "-kSystemsCardUp * s3.z"},
+                {"the systems raise read from the shift key", "kSystemsCardUp * s3.z", "kSystemsCardUp * s3.y"},
+                {"the target card taking the systems raise", "sd = kTargetCardAcross * s3.x;", "sd = kTargetCardAcross * s3.x + kSystemsCardUp * s3.z;"},
                 {"the systems shift along the target card's direction", "kSystemsCardAcross * s3.y", "kTargetCardAcross * s3.y"},
                 {"the seam restored (the label row left out of the SYSTEMS shift)", "return p.x > 0.0 && (inSystems(p) || inLabel(p));", "return p.x > 0.0 && inSystems(p);"},
                 {"the label row shifted with the target key", "else if (onSystemsSide(p0)", "else if (inLabel(p0) && inLabel(p1) && inLabel(p2)) sd = kTargetCardAcross * s3.x;\n        else if (onSystemsSide(p0)"},

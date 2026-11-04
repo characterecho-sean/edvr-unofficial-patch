@@ -822,7 +822,7 @@ static void wiringCases() {
               has(st, "const bool watching = gate.gateOpen && !on;") && has(st, "const bool drawGate = wanted || watching || (on && gate.gateOpen);") && !has(st, "const bool watching = scorpion && (journalSeatKind() & 4u) != 0 && !on;"),
           "the sheet's draw is timed on the draw path, and the draw gate follows the press gate, not the Scorpion's seat alone (the always-open gate is gone)");
     const std::string pm = readText("src/d3d11/srv_turret_press.cpp");
-    check(has(pm, "eliteBindsAction(\"ToggleBuggyTurretButton\", &w.bind)") && has(pm, "setGameMirrored(true)") && has(pm, "eliteBindsFingerprint()") && has(pm, "hotkey.read_game_bindings") && has(pm, "CANNOT be seen") &&
+    check(has(pm, "eliteBindsActionSrv(\"ToggleBuggyTurretButton\", &w.bind)") && has(pm, "setGameMirrored(true)") && has(pm, "eliteBindsFingerprint()") && has(pm, "hotkey.read_game_bindings") && has(pm, "CANNOT be seen") &&
               has(pm, "srv turret press: Elite's ToggleBuggyTurretButton in %s"),
           "the press watcher reads ToggleBuggyTurretButton through the shared action parser, watches each slot as a game-mirrored hotkey, re-reads on a bindings change and says which slots are watched and which cannot be seen");
     const std::string eb = readText("src/d3d11/elite_binds.cpp");

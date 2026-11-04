@@ -51,7 +51,7 @@ void readBindings(Watch& w) {
     w.readingOff = !Config::get().getBool("hotkey.read_game_bindings", true);
     w.readOk = false;
     if (!w.readingOff) {
-        w.readOk = eliteBindsAction("ToggleBuggyTurretButton", &w.bind) || w.bind.filesSeen > 0;
+        w.readOk = eliteBindsActionSrv("ToggleBuggyTurretButton", &w.bind) || w.bind.filesSeen > 0;
         for (int i = 0; i < w.bind.count && i < 2; ++i) {
             if (!w.bind.slot[i].observable) continue;
             char text[96];

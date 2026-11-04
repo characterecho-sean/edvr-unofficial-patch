@@ -10403,7 +10403,7 @@ H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
 # the push-back), so the newer keys are optional and the rule reads their absence as the older line
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
-                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)?(?:, target card shift (?P<tcshift>\d+) mm)?(?:, systems card shift (?P<scshift>\d+) mm)?(?:, bracket cut (?P<bracketcut>\d+) mm)? \(live; ")
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off|camera))?)?)?(?:, systems near (?P<systems>\d+) cm)?(?:, hud up (?P<hudup>\d+) cm)?(?:, gunner up (?P<gunnerup>\d+) cm)?(?:, cards up (?P<cardsup>\d+) cm)?(?:, target card shift (?P<tcshift>\d+) mm)?(?:, systems card shift (?P<scshift>\d+) mm)?(?:, systems card up (?P<scup>\d+) mm)?(?:, bracket cut (?P<bracketcut>\d+) mm)? \(live; ")
 # An "on" edge the gunner sheet's draw raised before Status.json said so (the early edge, srv_turret_sheet_latch.h) carries the tail " (the gunner sheet drew; Status.json not yet)": the group "early".
 H_SRV_TURRET_VIEW = (r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)"
                      r"(?P<early> \(the gunner sheet drew; Status\.json not yet\))?$")
@@ -24460,8 +24460,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0, cards_up=0, target_shift=0, systems_shift=0):   # fifteen keys: fixture values, not the shipped defaults
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up, target_shift, systems_shift)
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on", systems=0, hud_up=0, gunner_up=0, cards_up=0, target_shift=0, systems_shift=0, systems_up=0):   # fifteen keys: fixture values, not the shipped defaults
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor, systems, hud_up, gunner_up, cards_up, target_shift, systems_shift, systems_up)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat, "")

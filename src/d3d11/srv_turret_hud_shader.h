@@ -74,7 +74,7 @@ namespace edvr {
     "    float4 s0;   // row 0 of seat-from-math-eye. Identity except on the gunner sheet, where it keeps the border test still as the head turns\n" \
     "    float4 s1;\n" \
     "    float4 s2;\n" \
-    "    float4 s3;   // x: the target card content shift, metres; y: the SYSTEMS card content shift, metres (the gunner sheet only). z, w: padding, stay 0\n" \
+    "    float4 s3;   // x: the target card content shift, metres; y: the SYSTEMS card content shift, metres, along the card; z: the SYSTEMS side raise, metres, up the fill's left edge (the gunner sheet only). w: padding, stays 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -237,14 +237,25 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "static const float kBracketCutM = 0.003;\n" \
     "// Dump 131322664001. The card's top edge is y -0.3115 at all its top vertices; Triangles (106,111,112) and (112,113,106), kept for the notch, also hold a piece of the bracket's top hook just below y -0.309, which drew as a bright orange dash above the card's upper-left. From Sean's screenshot of 2026-11-03 (about 0.56 mm a pixel, so good to a pixel or two, 1 mm): the brown card art's top is near y -0.315 and the dash's bottom near y -0.3105. The plane sits between the hook piece and the art, not 2 mm above the fill.\n" \
     "static const float kTargetCardTopY = -0.3125;\n" \
-    "// The systems card's fill ends its row at y -0.481. Below that, on the right, the label row: its dash lies left of x 0.51 and the label starts near 0.6.\n" \
+    "// The systems card's fill ends its row at y -0.481. Below that, on the right, the lower row (y -0.4783 to -0.5534): the card's bottom strip, the SRV SCORPION text, the GUNNER CAMERA label and the corner brackets.\n" \
     "static const float kCardRowBottomY = -0.481;\n" \
-    "static const float kLabelRowLeftX = 0.53;\n" \
+    "// The lower row's cuts, measured on Epic dump 125154858001 (the game's own untrimmed card, vs A888D510 draw of frame 38367, mesh projected through cb0[4..7] and cb1[275] onto FinalCrisp_LOverview.bmp: the tile corners v11, v9 and the brackets landed within 3 px).\n" \
+    "// The card's two corner brackets are bright orange L's that stay put while the content moves, so they are cut. Left L: vertical bar x 0.4932..0.4966 (leaning), foot at y -0.4895..-0.4915 reaching x 0.5003. Right L: bar x 0.7416..0.7495, foot y -0.4895..-0.4915, x 0.7361..0.7418. The panel's brown ends at y -0.4865 (a tint step along x 0.62 to 0.72), the dark fill at -0.481.\n" \
+    "// LEFT: the tile edge v11 (0.5067,-0.4783) to v16 (0.4905,-0.5534) leans by 0.2157 m of x a metre of y; every lower-row triangle left of it (centroid x below kLowerLeftEndX) is cut, so the L is gone with a margin of 3.8 mm at the foot and 10 mm at the seam, and the brown strip right of the edge stays. The plane sits 0.2 mm right of the edge so that triangle (11,16,17) is gone whole.\n" \
+    "// RIGHT: triangle (302,10,9) (centroid x above kLowerRightStartX) holds half of the quad whose other half, (9,301,302), is dropped, so its brown above the panel edge ended on the diagonal v9 to v302 (a wedge). Its part above y -0.4925 is cut: that is 6 mm below the brown's edge and 1 mm below the foot of the right L, and the aperture icon below it starts at y -0.5014, the label text lower still.\n" \
+    "static const float kSeamY = -0.4783;\n" \
+    "static const float kLowerLeftEndX = 0.56;\n" \
+    "static const float kLowerLeftEdgeX = 0.5069;\n" \
+    "static const float kLowerLeftEdgeSlope = 0.2157;\n" \
+    "static const float kLowerRightStartX = 0.72;\n" \
+    "static const float kLowerRightCutY = -0.4925;\n" \
     "// The cards show their content off-centre in their dark fills. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the target card (left) fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, the SYSTEMS card (right) fill top edge along U = (0.74314, 0, -0.66913), the sheet curving the other way on that side.\n" \
     "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That makes 6.9 mm and 9.0 mm rightwards in all; the keys default to 7 and 9 (SYSTEMS since moved to 7, see experimental.srv_turret_systems_card_shift).\n" \
-    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. On the SYSTEMS side the card and the label row below it move together as one rigid piece: the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider, triangles above it are inSystems and triangles in the row y -0.4783..-0.5534 have vertices in the label region, and shifting only the first left the letters' bottoms one shift to the left of their tops (the cut-off look) and a notch in the divider (Epic dump 125141609001). So every drawn triangle on that side, inSystems or label (the dash, the SRV SCORPION text and the GUNNER CAMERA label all lie in that row), takes the SYSTEMS shift. The target card's test comes first and the label starts at x 0.12, so the target card never takes it. Everything else stays. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
+    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. On the SYSTEMS side the card and the label row below it move together as one rigid piece: the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider, triangles above it are inSystems and triangles in the row y -0.4783..-0.5534 have vertices in the label region, and shifting only the first left the letters' bottoms one shift to the left of their tops (the cut-off look) and a notch in the divider (Epic dump 125141609001). So every drawn triangle on that side, inSystems or label (the dash, the SRV SCORPION text and the GUNNER CAMERA label all lie in that row), takes the SYSTEMS shift. The target card's test comes first and the label starts at x 0.12, so the target card never takes it. The raise s3.z goes with it, for every drawn triangle on that side. Everything else stays. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
     "static const float3 kTargetCardAcross = float3(0.7451, 0.0, 0.6670);\n" \
     "static const float3 kSystemsCardAcross = float3(0.74314, 0.0, -0.66913);\n" \
+    "// Up the SYSTEMS fill's left edge (Epic dump 125154858001: (0.4934,-0.4810,0.7916) to (0.5229,-0.3114,0.8388) in mesh metres, unit (0.1652, 0.9502, 0.2642)). The art's bottom edge is 5.5 mm below the fill's and the dark shows 5.5 mm above its header.\n" \
+    "static const float3 kSystemsCardUp = float3(0.1652, 0.9502, 0.2642);\n" \
     "float4x4 sheetInv(float4x4 m, out float det) {\n" \
     "    const float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2], a03 = m[0][3];\n" \
     "    const float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2], a13 = m[1][3];\n" \
@@ -297,7 +308,10 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "}\n" \
     "float2 sheetClip(float3 p, float3 cen) {\n" \
     "    if (cen.x < 0.0) return float2(dot(kTargetCardNormal, p) + kTargetCardEdgeOffset + kBracketCutM, kTargetCardTopY - p.y);\n" \
-    "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) return float2(p.x - kLabelRowLeftX, 1.0);\n" \
+    "    if (cen.x > 0.0 && cen.y < kCardRowBottomY) {\n" \
+    "        if (cen.x < kLowerLeftEndX) return float2(p.x - (kLowerLeftEdgeX + kLowerLeftEdgeSlope * (p.y - kSeamY)), 1.0);\n" \
+    "        if (cen.x > kLowerRightStartX) return float2(1.0, kLowerRightCutY - p.y);\n" \
+    "    }\n" \
     "    return float2(1.0, 1.0);\n" \
     "}\n" \
     "[maxvertexcount(3)]\n" \
@@ -317,7 +331,7 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    if (live && draw) {\n" \
     "        float3 sd = float3(0.0, 0.0, 0.0);\n" \
     "        if (inTarget(p0) && inTarget(p1) && inTarget(p2)) sd = kTargetCardAcross * s3.x;\n" \
-    "        else if (onSystemsSide(p0) && onSystemsSide(p1) && onSystemsSide(p2)) sd = kSystemsCardAcross * s3.y;\n" \
+    "        else if (onSystemsSide(p0) && onSystemsSide(p1) && onSystemsSide(p2)) sd = kSystemsCardAcross * s3.y + kSystemsCardUp * s3.z;\n" \
     "        shiftClip = float4(dot(clipRows[4].xyz, sd), dot(clipRows[5].xyz, sd), dot(clipRows[6].xyz, sd), dot(clipRows[7].xyz, sd));\n" \
     "    }\n" \
     "    const bool locked = an.w > 0.5;\n" \
