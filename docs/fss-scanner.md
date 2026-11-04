@@ -3281,6 +3281,9 @@ to be settled from the code, without a flight. Read-only throughout.
   first used.
 - No file on C: or D: is named after either hash.
 - The game's `ShaderCache` folder is empty.
+- (Corrected 2026-11-03, `cockpit-glass-legacy-port.md`: the scan below used
+  the standard FNV basis, not EDVR's; the archives do hold the game's DXBC,
+  readable with `tools\effects_arc.py`.)
 - `Win64\EffectsBinary\Effects*_Win64_SM50.arc` (16.8 MB) holds no raw DXBC:
   a scan for the `DXBC` magic, FNV-1a-64 hashed the way EDVR hashes a shader,
   found 0 blobs. The archives are packed in a format I could not decode, and
