@@ -1169,8 +1169,8 @@ static void selfTest() {
     // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
     // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
-    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 144-byte constant buffer, Turret at b0 (srv_turret_math.h's
-    // TurretParams: nine registers; signature H also GameVS at b1; signatures I and K (the gunner sheet, and that sheet with Disable GUI effects off) also SheetClip at b1 and SheetCam at b2, and ends its output with SV_ClipDistance0, two components,
+    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 128-byte constant buffer, Turret at b0 (srv_turret_math.h's
+    // TurretParams: eight registers; signature H also GameVS at b1; signatures I and K (the gunner sheet, and that sheet with Disable GUI effects off) also SheetClip at b1 and SheetCam at b2, and ends its output with SV_ClipDistance0, two components,
     // after TURRETPRE). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
@@ -1237,7 +1237,7 @@ static void selfTest() {
                 // Signature I reads the draw's VS b0 at GS b1 (SheetClip) and VS b1 at GS b2 (SheetCam) and keeps only the card interior.
                 const bool scene = i == stm::kSceneSignature;
                 const bool turret = SUCCEEDED(reflection ? reflection->GetResourceBindingDescByName("Turret", &bind) : E_FAIL) && bind.Type == D3D_SIT_CBUFFER &&
-                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 144;
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 128;
                 if (sheet) {
                     D3D11_SHADER_INPUT_BIND_DESC clipBind{};
                     D3D11_SHADER_BUFFER_DESC clipDesc{};
@@ -1250,7 +1250,7 @@ static void selfTest() {
                           "...the gunner sheet reads Turret, SheetClip at b1 and SheetCam at b2");
                 } else {
                     check(reflection && turret && desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
-                          "...reading one 144-byte constant buffer, Turret at b0, and nothing else (signature H also GameVS at b1)");
+                          "...reading one 128-byte constant buffer, Turret at b0, and nothing else (signature H also GameVS at b1)");
                 }
                 if (scene) {
                     D3D11_SHADER_INPUT_BIND_DESC sceneBind{};
