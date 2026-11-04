@@ -26,7 +26,7 @@
 namespace edvr {
 // Rig-only accessors in engine_velocity.cpp (EDVR_ENGINE_VELOCITY_RIG).
 size_t engineVelocityRememberedForRig(bool pixel);
-bool engineVelocityFamilyStateForRig(int f, bool* derivedFlat, bool* skin);
+bool engineVelocityFamilyStateForRig(int f, bool* derivedFlat, bool* skin, bool* derivedSkin = nullptr);
 }  // namespace edvr
 
 namespace profile_switch_tests {
@@ -150,10 +150,71 @@ inline void run(const lifecycle_tests::Harness& h) {
                 "W3: ... derived again under flat, with no second skin carried over from VR");
     }
 
+    // W4: a session that starts in flat arms the second skin at its first switch to VR, not at the next restart of engine motion.
+    // Engine motion is configured once when it goes live; the switch reaches engineVelocityConfigure(true) again with it already
+    // live, and that call is what asks (the flight of 2026-11-04 13:03 had no `second skin is live` line from the switch to the
+    // F7 restart 28 s later). Every check's text starts "profile switch W4:" (tools\engine_velocity_test\mutants.py names it).
+    {
+        const int f = familyOfVs(0x61AE8EB05FDC18DDull);
+        h.check(f >= 0 && kFamilies[f].skinned, "profile switch W4: vs_61AE is a skinned family");
+        engineVelocityShutdown();   // a new session: the families are underived, the remembered shaders stay
+        lifecycle_fake::g_hookArms = 0;
+        lifecycle_fake::g_hookGate = false;
+        g_runtimeProfile = RuntimeProfile::Flat;
+        engineVelocityConfigure(true);
+        h.check(!engineVelocitySkinWanted() && lifecycle_fake::g_hookArms == 0 && !lifecycle_fake::g_hookGate,
+                "profile switch W4: engine motion that goes live under flat declines the second skin");
+
+        // The game draws one skinned family's pair after the switch and before the sweep that configures engine motion again.
+        const Pair p = create(kFamilies[f].vs, kFamilies[f].ps[0]);
+        g_runtimeProfile = RuntimeProfile::Vr;
+        remember(p);
+        g.ordinaryFrame();
+        bool derivedFlat = true, skin = true, derivedSkin = true;
+        h.check(drawPair(p), "profile switch W4: a skinned family substitutes in VR before the second skin is armed");
+        h.check(engineVelocityFamilyStateForRig(f, &derivedFlat, &skin, &derivedSkin) && !derivedFlat && !derivedSkin && !skin,
+                "profile switch W4: ... derived under VR without the second skin");
+
+        // The sweep after the switch.
+        const size_t mark = lifecycle_tests::g_log.size();
+        engineVelocityConfigure(true);
+        h.check(engineVelocitySkinWanted() && lifecycle_fake::g_hookArms == 1 && lifecycle_fake::g_hookGate,
+                "profile switch W4: the configure after the switch to VR arms the second skin and opens the hook's gate");
+        h.check(lifecycle_tests::logged("skin join: the second skin is live (VR)", mark) &&
+                    lifecycle_tests::logged("skin join: the session started in the flat profile and is now in VR", mark),
+                "profile switch W4: ... and the log says it armed at the switch");
+        h.check(drawPair(p) && engineVelocityFamilyStateForRig(f, &derivedFlat, &skin, &derivedSkin) && !derivedFlat && derivedSkin,
+                "profile switch W4: a skinned family derived before the arm is derived again once it is armed");
+        engineVelocityConfigure(true);
+        engineVelocityConfigure(true);
+        h.check(lifecycle_fake::g_hookArms == 1, "profile switch W4: the second skin is armed once, not at every configure");
+
+        // A session that starts in VR is unchanged: armed at the start, and nothing at a later configure arms it again.
+        engineVelocityShutdown();
+        lifecycle_fake::g_hookArms = 0;
+        const size_t startMark = lifecycle_tests::g_log.size();
+        engineVelocityConfigure(true);
+        engineVelocityConfigure(true);
+        h.check(engineVelocitySkinWanted() && lifecycle_fake::g_hookArms == 1 &&
+                    !lifecycle_tests::logged("skin join: the session started in the flat profile", startMark),
+                "profile switch W4: a session that starts in VR arms the second skin once, at the start");
+
+        // A flat start that engine motion leaves (F7, a mode change) before any switch: the next start under VR arms once, like any VR start.
+        engineVelocityShutdown();
+        lifecycle_fake::g_hookArms = 0;
+        g_runtimeProfile = RuntimeProfile::Flat;
+        engineVelocityConfigure(true);
+        engineVelocityShutdown();
+        g_runtimeProfile = RuntimeProfile::Vr;
+        engineVelocityConfigure(true);
+        engineVelocityConfigure(true);
+        h.check(lifecycle_fake::g_hookArms == 1, "profile switch W4: a flat start that engine motion left before the switch: the next start under VR arms once");
+    }
+
     engineVelocityShutdown();
     g_runtimeProfile = previous;
     std::printf("  profile switch: a flat-only family's shaders created under VR, and a VR-only family's created under flat, "
                 "are remembered and substitute in their own profile only; a family derived under one profile is derived again "
-                "under the other\n");
+                "under the other; a session that started flat arms the second skin at its first switch to VR\n");
 }
 }  // namespace profile_switch_tests
