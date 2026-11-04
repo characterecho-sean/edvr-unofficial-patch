@@ -35,9 +35,14 @@
   copied 69% of requested, `streamUnmapCopy` 0.697 to 0.506 ms (R5), nothing
   else up 0.1 ms. B1: 607 of 676 non-eye draws are depth-only into one
   512x512 target (one VS); the rest are three odd-sized colour+depth targets
-  and a downsample chain. Next: name that 512x512 pass; the A3 pass
-  (`hookedMap`, `hookedUnmap`, the map-bounce gates). Ruled out: skipping
-  windows during an escalation (escalations only on arrival).
+  and a downsample chain. Ruled out: skipping windows during an escalation
+  (escalations only on arrival).
+- **Own time (2026-11-03, "EDVR's own time versus the calls it
+  forwards"):** the arc's per-function "self" included the D3D calls each
+  hook forwards. EDVR's own R1 time is 4.72 ms: the draw path 3.29, `Unmap`
+  0.39, `Map` 0.26, the bind hooks about 0.3. Ruled out: the bind hooks as a
+  large target. A3 (map/unmap) is worth at most 0.65 ms. Next: build 4's
+  scope (A3 alone, or with the draw path), then name the 512x512 pass.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is
   held as not scene depth, the tee never goes fast and F113 reports `none`
   100%. Key on: fast path 36-46%, F113 scene meshes 94%.
@@ -1578,3 +1583,64 @@ Formats are DXGI numbers.
   which is post-processing, not geometry.
 - Next on B1: name the 512x512 pass (its 607 draws are the only bulk),
   then decide whether it is a candidate for a ledger entry or dropped.
+
+## EDVR's own time versus the calls it forwards (2026-11-03)
+
+The "innermost" figure this arc has ranked targets by (the per-function
+"self" in build 2's and build 3's tables, and the A3 figures) is not EDVR's
+own time. A sample's innermost EDVR frame is the sampled instruction when the
+CPU was in EDVR code, but when the CPU was below EDVR (the D3D runtime, the
+driver, EDHM, the kernel) it is the return address of EDVR's call into that
+code. So a hook that forwards to the real D3D call is charged with that call.
+Build 2's table said so in a footnote ("only the leaf row is pure EDVR"); the
+targets were still ranked by innermost.
+
+**Evidence.** Build 3's capture, windows 3-20, R1, 2,649 frames.
+- `hookedMap`'s hottest address, 0x526409 (1,172 of its 1,526 samples), and
+  `hookedUnmap`'s, 0x527f41 (918 of 1,141), are each the instruction right
+  after `call rax`, the call to `s->realMap` (`vscreen.cpp:3492`) and
+  `s->realUnmap` (`:3761`) (`dumpbin /disasm` of the flown `d3d11.dll`).
+- A script splits every sampled address the same way: an address is a return
+  address when an x64 call instruction, confirmed by disassembly, ends
+  exactly at it. It gives 8.794 ms innermost = 4.719 own + 4.075 below EDVR.
+  The own total matches the analyzer's independent "EDVR leaf" for the same
+  windows (4.699 ms), which counts samples whose top frame is in EDVR's
+  module. Addresses with fewer than 3 samples (1.05 ms) are counted as own,
+  so own is an upper bound. Scripts and output, outside the repo:
+  `profile-b3\leaf_rank.py`, `leaf_rank.txt`.
+
+Own time, ms a frame (own | below EDVR):
+
+| | own | below |
+|---|---|---|
+| `hookedDrawIndexedInstanced` and all it calls | 3.29 | 1.11 |
+| of which `beginPanelOverride` | 0.56 | |
+| `forwardWithVerdict` (the draw lambda's) | 0.39 | |
+| `hookedDrawIndexedInstanced` itself | 0.31 | |
+| the draw lambda (`vscreen.cpp:5514`) | 0.16 | 0.37 |
+| `uiDepthOnEyeDraw`, `viewIsSurface`, `engineVelocityBeforeDraw`, `depthProbeNoteDraw` | 0.13, 0.11, 0.11, 0.11 | |
+| `hookedUnmap` and all it calls | 0.39 | 0.40 |
+| `hookedMap` and all it calls | 0.26 | 0.53 |
+| `hookedPSSetShaderResources` and all it calls | 0.05 | 0.79 |
+| `hookedVSSetConstantBuffers` | 0.09 | 0.25 |
+| `hookedPSSetConstantBuffers` | 0.11 | 0.00 |
+| `flushIaObserved` | 0.02 | 0.37 |
+| `hookedEnd` | 0.00 | 0.13 |
+
+- **What this changes.** A3 was priced at `hookedMap` 0.58 + `hookedUnmap`
+  0.50 ms "self"; EDVR's own code under both hooks is 0.65 ms in all, of
+  which the hooks' bodies are 0.17. Under `hookedUnmap`: the engine-velocity
+  hash map 0.046, `flatRuntimeMapBounceBeginUnmap` 0.034, the marker probe
+  0.031, `AnimatedVertexHistory::resourceWritten` 0.029. Under `hookedMap`:
+  the marker probe 0.052, `mapBufferDesc` (the `mapMemo` misses) 0.028,
+  `mapBounce` 0.012.
+- **Ruled out:** the bind hooks as a large target.
+  `hookedPSSetShaderResources` (ranked first at 0.82-0.90 ms) is 0.05 ms of
+  EDVR code; `flushIaObserved` is 0.02. The rest is the game's own D3D calls,
+  which EDVR forwards and cannot remove.
+- **The largest EDVR cost is the draw path:** 3.29 of the 4.72 ms own,
+  1.42 of it in the ladder (`beginPanelOverride`, `forwardWithVerdict`, the
+  hook, the lambda) and the rest in per-draw subscribers.
+- Builds 2 and 3 are unaffected: the byte's targets and the marker copy are
+  EDVR's own code (the copy is `streamCopyGuarded`'s reads of write-combined
+  memory, all own).
