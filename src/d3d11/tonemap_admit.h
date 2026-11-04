@@ -26,6 +26,8 @@
 
 #include <cstdint>
 
+#include "ui_layer_math.h"   // kUiPsMapTone: the map frame's tonemap, admitted at a narrower b2
+
 namespace edvr {
 
 namespace tone_admit_detail {
@@ -116,7 +118,9 @@ inline bool tonemapAdmitStructure(ID3D11DeviceContext* ctx, uint64_t ps, ToneAdm
     if (!cb) return false;
     D3D11_BUFFER_DESC cbd{};
     cb->GetDesc(&cbd);
-    if (cbd.ByteWidth < 256) return false;
+    // The Galaxy Map frame's tonemap (ui_layer_math.h kUiPsMapTone) declares CB2[11], 176 bytes; its buffer's width is not measured, so that one pixel shader
+    // is admitted at 176 and every other at 256.
+    if (cbd.ByteWidth < (ps == kUiPsMapTone ? 176u : 256u)) return false;
     out.b2 = cbd.ByteWidth;
     out.rtvFmt = rd.Format;
     Ptr<ID3D11Resource> res;

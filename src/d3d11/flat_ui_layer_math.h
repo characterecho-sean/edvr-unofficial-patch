@@ -44,15 +44,16 @@ inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
 // those maps is open AND the target is the HDR class: the same pairs with no map open, or on another target, are not the
 // family. The canvas is the always-on composite the 2026-09-23 VR session also saw (docs\ui-layer-2026-09-23.md), which is
 // why no VR classifier names it: this rule is flat's, and GuiFocus-gated.
-constexpr uint64_t kFlatUiMapCanvasVs = 0x12382D2EA45E9632ull;
-constexpr uint64_t kFlatUiMapCanvasPs = 0x855C469156AB997Full;
-constexpr uint64_t kFlatUiMapSpriteVs = 0xC31238331D8AC3D4ull;
-constexpr uint64_t kFlatUiMapSpritePsA = 0xBD0FEB3276C8B2D7ull;  // the 64x64 / 128x128 BC3 / BC7 icons (Galaxy, Orrery)
-constexpr uint64_t kFlatUiMapSpritePsB = 0x539A4858CE3A3477ull;  // the System Map's sprites (n=12)
+// The pair constants live in ui_layer_math.h (VR's layer names the same pairs with a map open); these are aliases.
+constexpr uint64_t kFlatUiMapCanvasVs = kUiVsMapCanvas;
+constexpr uint64_t kFlatUiMapCanvasPs = kUiPsMapCanvas;
+constexpr uint64_t kFlatUiMapSpriteVs = kUiVsMapSprite;
+constexpr uint64_t kFlatUiMapSpritePsA = kUiPsMapSpriteA;  // the 64x64 / 128x128 BC3 / BC7 icons (Galaxy, Orrery)
+constexpr uint64_t kFlatUiMapSpritePsB = kUiPsMapSpriteB;  // the System Map's sprites (n=12)
 // The Galaxy Map's icons since game build 334473 (2026-10-20): the same n=6 BC3 64x64 / 128x128 icons as A, 174 a frame, the same
 // VS, target and state (no depth test, stencil write only), with this PS. A was in no Galaxy Map census after the update and every
 // Galaxy session read `sprite asked=0` (census 8 of edvr_gfx_20261022_101031). The layer's own depth-stencil refusal still applies.
-constexpr uint64_t kFlatUiMapSpritePsC = 0x964221955A9E77E7ull;
+constexpr uint64_t kFlatUiMapSpritePsC = kUiPsMapSpriteC;
 inline UiLayerFamily flatUiMapFamilyOf(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget) {
     if (!mapOpen || !hdrTarget) return UiLayerFamily::kNone;
     if (vs == kFlatUiMapCanvasVs && ps == kFlatUiMapCanvasPs) return UiLayerFamily::kMapCanvas;

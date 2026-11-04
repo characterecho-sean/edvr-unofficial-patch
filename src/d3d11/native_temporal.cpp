@@ -10,6 +10,7 @@
 #include "native_on_foot.h"    // the F0 gate counters (log only): the route's engagements while native stereo is on foot
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "journal_watch.h"      // journalGuiFocus: the map gate (a map open: no jitter, no history)
+#include "flat_stationary_camera_capture.h"   // mapCameraAnyOpen: the map camera's stage is named (the gate's other term, and the pass's signal)
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
 #include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter, and whether eye 0 is zoomed
@@ -456,14 +457,15 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // journal watcher's last read (up to half a second behind the game, as flat's is); one read per frame, here.
   {
     uint32_t focus=0; const bool known=edvr::journalGuiFocus(&focus);
-    s->mapWasOpen=s->mapOpen; s->mapOpen=edvr::temporalMapOpen(known,focus);
+    s->mapWasOpen=s->mapOpen; s->mapOpen=edvr::temporalMapOpen(edvr::mapCameraAnyOpen(),known,focus);
+    edvr::temporalMapGateFlag().store(s->mapOpen,std::memory_order_release);   // the draw thread's one load (the UI layer's map families)
     if(s->mapOpen){++s->mapFrames;s->mapFocus=focus;}
     // The pass's verdict on the last map frame is not this map's after an edge (it opens or closes): the first frame of a map has no history to keep.
     if(s->mapOpen!=s->mapWasOpen)edvr::temporalMapStillBits().store(0,std::memory_order_relaxed);
     if(s->mapOpen!=s->mapWasOpen&&s->mapNotes<32){
       ++s->mapNotes;
-      if(s->mapOpen) edvr::Log::get().note("native temporal: map aa: on %s (GuiFocus %u) the pass keeps jitter and history while the camera follows the head and resets them while the map moves; sequence %llu.",
-          focus==6?"the Galaxy Map":focus==7?"the System Map":"the Orrery",focus,(unsigned long long)f->sequence);
+      if(s->mapOpen) edvr::Log::get().note("native temporal: map aa: on %s (GuiFocus %s%u, camera view %s) the pass keeps jitter and history while the map camera is at rest and resets them while it moves; sequence %llu.",
+          !known?"a map":focus==6?"the Galaxy Map":focus==7?"the System Map":focus==8?"the Orrery":"a map",known?"":"unknown ",known?focus:0u,edvr::mapCameraAnyOpen()?"named":"not named",(unsigned long long)f->sequence);
       else edvr::Log::get().note("native temporal: map aa: jitter and history back after the map (GuiFocus %s, was %u); %llu map frames so far.",
           known?"known":"unknown",s->mapFocus,(unsigned long long)s->mapFrames);
     }

@@ -36,7 +36,6 @@
 #include "native_on_foot_hooks.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "shop_screen_core.h"   // F209: the once-a-second shop line (shop::formatSecond), the Pioneer Supplies buy screens' signal
 #include "journal_watch.h"
-#include "../common/temporal_mode.h"   // temporalMapOpen: the VR map gate's one predicate (the pointer probe on a map)
 #include "mode_watch.h"   // F190: modeWatchStereoValue, the mode a late install takes (the setter call for the switch has passed)
 #include "native_on_foot_core.h"
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
@@ -6254,22 +6253,8 @@ void f111RefreshGates() {
     const bool observer=open&&g_menuInput.active();
     // F135/F131c: every panel hook's relay gate is open while native stereo is on foot (VR): the F135 probe counts their calls, and F131 holds look to aim while the cursor window or
     // owner transform hook runs (the Esc menu, an inventory panel).
-    // The VR Galaxy Map, System Map and Orrery, aboard (2026-11-03, the cursor offset: the arrow and the star the game picks are far apart in VR, flat has them on one point): the observe-only pointer
-    // instruments (F111's hooks and F114b's owner transform hook) run while one is open, so the log names the pointer's NDC, its direction, the sprite and the OS cursor for the map. NOTHING that
-    // writes opens here: F154's placement hook (the lever's undo), the observer and the legacy update stay on foot's.
-    uint32_t mapFocus = 0;
-    const bool mapFocusKnown = !open && !runtimeFlatProfile() && journalGuiFocus(&mapFocus);   // its own statement: C++ does not order a call's arguments, and MSVC read mapFocus (0) before this call wrote it (the 2026-11-04 flight: the probe never opened)
-    const bool mapProbe = temporalMapOpen(mapFocusKnown, mapFocus);
-    static bool s_mapProbeWas = false;   // frame thread only: the edge is said (so "no panel pointer lines" is told from "the observers never opened")
-    static uint32_t s_mapProbeNotes = 0;
-    if (mapProbe != s_mapProbeWas && s_mapProbeNotes < 16) {
-        ++s_mapProbeNotes;
-        Log::get().note("panel pointer (F111) map probe: the observe-only pointer hooks are %s while the map is open (GuiFocus %u); only F111's and F114b's instruments, no placement or look change.",
-                        mapProbe ? "open" : "closed again", mapFocus);
-    }
-    s_mapProbeWas = mapProbe;
-    const bool probe=(open||mapProbe)&&!runtimeFlatProfile();
-    const int gateState = (vrOpen ? 1 : 0) | (vrOpen ? 2 : 0) | (observer?4:0) | (mapProbe?8:0);
+    const bool probe=open&&!runtimeFlatProfile();
+    const int gateState = (vrOpen ? 1 : 0) | (vrOpen ? 2 : 0) | (observer?4:0);
     if (gateState != g_f111GateState) {
         g_f111GateState = gateState;
         std::lock_guard<std::mutex> lock(g_f111Mu);

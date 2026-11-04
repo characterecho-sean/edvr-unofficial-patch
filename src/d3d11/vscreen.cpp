@@ -4139,6 +4139,12 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
         f.scopeMark = uiScopeMarkFacts(
             f.vs, kind, count, instances, [] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); }, [] { return bindingShaderHash(BindSlot::Ps); }, [] { return uiDepthSampledSurfaceSlot() >= 0; }, &f.ps);
     }
+    // A map is open (VR; native_temporal's begin() publishes the gate, one atomic load a draw, false with the map shut): the map's four overlay vertex
+    // shaders read their pixel shader's hash (ui_layer_math.h uiLayerMapFamilyOf names the pairs). Every other draw, and every draw with no map open, reads nothing more.
+    if (f.targetKind == 1 && temporalMapGateFlag().load(std::memory_order_acquire)) {
+        f.mapOpen = true;
+        if (uiVsIsMapOverlay(f.vs)) f.ps = bindingShaderHash(BindSlot::Ps);
+    }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
         // which samples a stale surface and draws nothing, and the ini's

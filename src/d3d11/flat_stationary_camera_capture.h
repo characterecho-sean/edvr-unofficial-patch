@@ -29,4 +29,20 @@ void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callN
                                  // Already observed against the loaded module; never resolve as a build binding.
                                  uint64_t observedCallerOffset, uint32_t kind) noexcept;
 
+// The VR map camera (docs/galaxy-map-vr-2026-11-03.md, Fix 2). In the VR profile the renderer hook stays installed and reads only stage 0 of each camera
+// source ("GalaxyMapView", "SystemMapView"), publishing its head-free pose across threads. mapCameraFrame runs once a frame on the render thread that
+// installs the other hooks (device_hook.cpp, the native on foot tick): it installs the hook (bounded retries), decides "open" (a view published this frame
+// or within the last 8) and says the stage names it saw. The readers below are safe from any thread. In the flat profile the watch is off and they say
+// closed, 0 changes and no pose.
+struct MapCameraPose {
+    float rows[3][3];
+    float position[3];
+};
+void mapCameraFrame() noexcept;
+bool mapCameraGalaxyOpen() noexcept;
+bool mapCameraAnyOpen() noexcept;
+// Publishes that moved the map: a different view, or a different bit in the rows or position of the same view's last publish.
+uint64_t mapCameraChanges() noexcept;
+bool mapCameraPose(MapCameraPose& out) noexcept;
+
 } // namespace edvr

@@ -112,6 +112,9 @@ namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes
 // The journal watcher's GuiFocus (src/d3d11/journal_watch.cpp), which begin() reads once a frame for the map gate: scripted here.
 bool mapFocusKnown=false;uint32_t mapFocus=0;
 namespace edvr{bool journalGuiFocus(uint32_t* focus){if(focus)*focus=mapFocus;return mapFocusKnown;}}
+// The VR map camera (src/d3d11/flat_stationary_camera_capture.cpp), which begin() asks whether a map view is named: scripted here.
+bool mapViewNamed=false;
+namespace edvr{bool mapCameraAnyOpen() noexcept{return mapViewNamed;}}
 // The light grid cache's jitter probe (src/d3d11/light_grid_cache_hook.cpp), which begin() tells this frame's jitter: recorded here, asserted below.
 unsigned jitterNotes=0;float jitterLastShift[2][2]{};
 namespace edvr{void lightGridCacheNoteJitter(uint64_t,float,float,const float shift[2][2]){++jitterNotes;std::memcpy(jitterLastShift,shift,sizeof(jitterLastShift));}}
@@ -438,6 +441,12 @@ void run(){
     check(treat(t,16,0,source.Get())==S_OK&&(calls.back().flags&1)&&!(calls.back().flags&edvr::kTemporalFlagMapKeep),"map gate: and the frame after the map still takes no history (the map is not carried out)");treat(t,16,1,source.Get());
     fm=frame(11,17);pm=begin(t,fm);check(shiftedNow(pm)&&treat(t,17,0,source.Get())==S_OK&&!(calls.back().flags&1)&&!(calls.back().flags&edvr::kTemporalFlagMapKeep),"map gate: then the history is back");treat(t,17,1,source.Get());
     mapFocusKnown=false;mapFocus=6;fm=frame(11,18);pm=begin(t,fm);check(shiftedNow(pm),"map gate: a focus the journal cannot state is not a map, whatever the stale value");
+    check(!edvr::temporalMapGateFlag().load(),"map gate: the draw thread's flag is down with no map");
+    // The camera source's stage 0 names a map view with the journal silent (on foot, a menu, the half second before the field is read): the gate opens on that frame, edge and all.
+    mapFocusKnown=false;mapFocus=0;mapViewNamed=true;fm=frame(11,19);pm=begin(t,fm);
+    check(!shiftedNow(pm)&&edvr::temporalMapGateFlag().load(),"map gate: a map view named by its camera opens the gate with the journal silent, and the draw thread's flag goes up");
+    mapViewNamed=false;fm=frame(11,20);pm=begin(t,fm);
+    check(shiftedNow(pm)&&!edvr::temporalMapGateFlag().load(),"map gate: the view no longer named closes the gate and the flag");
     mapFocusKnown=false;mapFocus=0;
   }
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");

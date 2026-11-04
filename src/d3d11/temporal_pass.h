@@ -341,9 +341,9 @@ extern "C" {
 //            read by the pass's own diagnostics; native_temporal.cpp's treat()
 //            (the ABI's one caller) never sets them. Bit 8 -- a map is open
 //            (temporal_mode.h temporalMapOpen): the pass resets this eye's
-//            history itself on a frame where the game's camera does not move
-//            as the head does (temporalMapCameraStill) and says which in
-//            temporalMapStillBits().
+//            history itself on a frame where the map camera's pose changed
+//            (temporalMapMoved over mapCameraChanges()), or no map view is
+//            named, and says which in temporalMapStillBits().
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

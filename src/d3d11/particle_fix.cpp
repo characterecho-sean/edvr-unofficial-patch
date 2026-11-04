@@ -224,20 +224,26 @@ uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
 // Five of the original sixteen moved to kVariants on 2026-10-16: 9F4BBCFCD3B68BC9, BBAD1CA808E1E292 and 9AEC596A2B036EA6
 // (the explosion), then AFBCD3ADB9092F78 and 4BDE4DBF88C2BA27 (the fireball puffs, found by the eye dump): a roll-free
 // basis kept the camera's forward, so the explosion flexed with head pitch.
-constexpr int kRollFreeCount = 11;
+//
+// 2026-11-04: 12382D2EA45E9632, 94EA991C3A03DBD9 and C31238331D8AC3D4 left the table. They are the Galaxy Map's
+// sprites (labels and grid, rings, icons). On the map world up (0,1,0) is galactic up and the camera is pitched 45
+// degrees down onto the plane, so billboard_rollfree.h's basis (right = cross((0,1,0), row 279)) rolled them against
+// the eye with every head yaw: measured within 0.4 degrees in three dumps (docs/galaxy-map-vr-2026-11-03.md, Fix 1).
+// The game's own rows 277/278 are the eye's axes there and stock quads stay upright.
+constexpr int kRollFreeCount = 8;
 constexpr uint64_t kRollFreeVs[kRollFreeCount] = {
     0x1B285CBC9F185D4Dull,
     0x78F5F08D02EE38CCull,   // drew around the explosion
     0x1FBA99C4911D7ACFull, 0x2BF557356A28AA0Dull, 0xDB113566B6A59C5Bull,
     0x68DDDEF04D9894AFull,   // the stretched sky billboard (direct span)
     0xF7A6E916F14A3B1Aull,   // direct span
-    0x12382D2EA45E9632ull, 0x94EA991C3A03DBD9ull, 0xC31238331D8AC3D4ull, 0xF1502353BE051A2Dull};   // pool-record sprites (direct span)
+    0xF1502353BE051A2Dull};  // pool-record sprite (direct span)
 constexpr bool rollFreeTableAgrees() {
     for (int i = 0; i < kRollFreeCount; ++i)
         if (kRollFreeVs[i] != detail::kBillboardVs[kVariantCount + i]) return false;
     return true;
 }
-static_assert(rollFreeTableAgrees() && kVariantCount + kRollFreeCount == 18,
+static_assert(rollFreeTableAgrees() && kVariantCount + kRollFreeCount == 15,
               "particle_fix.h's kBillboardVs must list the transcriptions and then kRollFreeVs in order");
 
 int rollFreeIndexOf(uint64_t h) {

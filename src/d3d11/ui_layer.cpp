@@ -33,6 +33,7 @@
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
 #include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
+#include "flat_compute_readback.h"   // FlatComputeInternalScope: the map tone's patched constant buffer is EDVR's own call
 #include "flat_mono_frame.h"  // kToneDofCompositePs: the one tone input the re-issue blends rather than adds
 
 #include "binding_shadow.h"
@@ -4716,6 +4717,9 @@ struct CrispToneSave {
     uint8_t step = 0;
     bool hud = false, weapons = false, fellBack = false, faulted = false;
     const char* plainWhy = nullptr;   // why the matched composite was not made when fellBack (a literal), for the mark's reason line
+    // The map tone's patched PS b2 (crispMapToneBindB2): the game's own buffer, put back at End and on Begin's fault path; mapB2 is true while ours is bound.
+    Ptr<ID3D11Buffer> gameB2;
+    bool mapB2 = false;
 };
 CrispToneSave g_crispSave;
 FaultBudget g_crispToneBudget("uiLayer.crispTone", 4);
@@ -5882,6 +5886,74 @@ void crispFindSceneImages(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* ga
                     inputs.empty() ? "none in t0..t15" : inputs.c_str());
 }
 
+// THE MAP TONE'S BLOOM BLEND (docs/galaxy-map-vr-2026-11-03.md, Fix 2). The Galaxy Map frame's tonemap (ui_layer_math.h kUiVsMapTone, kUiPsMapTone) reads the scene at t0
+// and its bloom at t1 and combines them as cb2[1].w >= 0 ? lerp(scene, bloom, w) : scene + bloom. The re-issue zeroes t1 (crispFindSceneImages), so with w >= 0 the layer
+// would come out scaled by (1 - w), and w is not known. The re-issue for this pixel shader alone binds, at PS slot 2, a copy of the game's b2 with cb2[1].w (byte 28)
+// set to -1.0f: the additive branch, so a zero bloom leaves T(L) exactly, whatever w was. The copy is a DEFAULT buffer of the game's width (CopyResource from the
+// game's, as billboard_rollfree.h's copyBlock does), the four bytes a CopySubresourceRegion from a 16-byte patch buffer. Any failure declines to the plain re-issue.
+struct MapToneB2 {
+    Ptr<ID3D11Buffer> copy, patch;
+    uint32_t width = 0;
+    bool onNoted = false, declineNoted = false;
+};
+MapToneB2 g_mapTone;
+constexpr uint32_t kMapToneBloomBlendOffset = 28;   // cb2[1].w
+bool crispMapToneBindB2(ID3D11DeviceContext* ctx, const char** why) {
+    FlatComputeInternalScope internal;
+    *why = "";
+    Ptr<ID3D11Buffer> game;
+    ctx->PSGetConstantBuffers(2, 1, &game);
+    if (!game) { *why = "no buffer at PS b2"; return false; }
+    D3D11_BUFFER_DESC gd{};
+    game->GetDesc(&gd);
+    if (gd.ByteWidth < kMapToneBloomBlendOffset + 4 || !(gd.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) { *why = "PS b2 is not a constant buffer wide enough for cb2[1].w"; return false; }
+    Ptr<ID3D11DeviceContext1> ctx1;
+    if (SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) {
+        Ptr<ID3D11Buffer> again;
+        UINT first = 0, count = 0;
+        ctx1->PSGetConstantBuffers1(2, 1, &again, &first, &count);
+        if (first) { *why = "PS b2 is bound at a constant offset"; return false; }
+    }
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev) { *why = "no device"; return false; }
+    if (!g_mapTone.copy || g_mapTone.width != gd.ByteWidth) {
+        g_mapTone.copy.Reset();
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = gd.ByteWidth;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &g_mapTone.copy))) { *why = "the copy buffer could not be made"; return false; }
+        g_mapTone.width = gd.ByteWidth;
+    }
+    if (!g_mapTone.patch) {
+        const float minusOne[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = sizeof(minusOne);
+        d.Usage = D3D11_USAGE_DEFAULT;
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = minusOne;
+        if (FAILED(dev->CreateBuffer(&d, &init, &g_mapTone.patch))) { *why = "the patch buffer could not be made"; return false; }
+    }
+    ctx->CopyResource(g_mapTone.copy.Get(), game.Get());
+    const D3D11_BOX box{0, 0, 0, 4, 1, 1};
+    ctx->CopySubresourceRegion(g_mapTone.copy.Get(), 0, kMapToneBloomBlendOffset, 0, 0, g_mapTone.patch.Get(), 0, &box);
+    ID3D11Buffer* ours = g_mapTone.copy.Get();
+    ctx->PSSetConstantBuffers(2, 1, &ours);
+    g_crispSave.gameB2 = game;
+    g_crispSave.mapB2 = true;
+    return true;
+}
+// Puts the game's b2 back (End, and Begin's fault path).
+void crispMapToneRestoreB2(ID3D11DeviceContext* ctx) {
+    if (!g_crispSave.mapB2) return;
+    g_crispSave.mapB2 = false;
+    FlatComputeInternalScope internal;
+    ID3D11Buffer* was = g_crispSave.gameB2.Get();
+    ctx->PSSetConstantBuffers(2, 1, &was);
+    g_crispSave.gameB2.Reset();
+}
+
 // After the admitted draw's own issue (vscreen's forwardWithVerdict, around
 // its pureDrawReissue): re-issue it once, tonemapping the HDR layer into the
 // 8-bit layer's colour. False -- state untouched, the draw long since run
@@ -6048,6 +6120,19 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         g_crispSave.plainWhy = plainWhy;
         crispFindSceneImages(ctx, gameHdr.Get(), p.hdrSlot, p.vs, p.ps);
         crispBindStep(ctx, plan.steps[0]);
+        if (p.ps == kUiPsMapTone && !runtimeFlatProfile()) {
+            const char* b2Why = "";
+            const bool patched = crispMapToneBindB2(ctx, &b2Why);
+            if (patched && !g_mapTone.onNoted) {
+                g_mapTone.onNoted = true;
+                Log::get().note("crisp hud: the map tonemap (vs %016llX ps %016llX, PS b2 %u bytes): the re-issue binds a copy of the game's b2 with cb2[1].w = -1, the additive bloom branch, "
+                                "so the zeroed bloom leaves the layer's light as the tone gives it (said once).",
+                                static_cast<unsigned long long>(p.vs), static_cast<unsigned long long>(p.ps), g_mapTone.width);
+            } else if (!patched && !g_mapTone.declineNoted) {
+                g_mapTone.declineNoted = true;
+                Log::get().note("crisp hud: the map tonemap's b2 patch declined (%s): the plain re-issue, so the layer is scaled by 1 - cb2[1].w when the game's w is not negative (said once).", b2Why);
+            }
+        }
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
         g_crispSave.active = true;
         ok = true;
@@ -6075,6 +6160,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
                                                    1, &gameHdr);
                 }
                 crispRestoreSceneImages(ctx);
+                crispMapToneRestoreB2(ctx);
             });
         }
         g_crispSave = CrispToneSave{};
@@ -6136,6 +6222,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
             ID3D11ShaderResourceView* gameHdr = g_crispSave.gameHdrSrv.Get();
             vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(hdrSlot), 1, &gameHdr);
             crispRestoreSceneImages(ctx);
+            crispMapToneRestoreB2(ctx);
         })) {
         crispStandDown("a fault while putting the game's state back after the tonemap re-issue");
     }

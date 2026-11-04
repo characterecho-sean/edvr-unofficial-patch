@@ -91,6 +91,7 @@
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
 #include "../../src/d3d11/ui_layer_math.h"
+#include "../../src/d3d11/map_camera_core.h"       // the VR map camera's publisher and the open hold
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
 #include "../../src/d3d11/ui_sizing_math.h"
@@ -2527,11 +2528,11 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
                                fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark ||
-                               fam == UiLayerFamily::kNormalSpaceDust;
+                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark and the normal-space dust");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust and the VR map rings and stems");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the two dusts have no width to give: they are exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
@@ -2834,11 +2835,149 @@ void testSupercruiseLines() {
     n.vs = kUiVsSupercruiseBars;
     n.ps = kUiPsSupercruiseBars;
     check(uiLayerFamilyFor(n) == UiLayerFamily::kSupercruiseBars, "ND1f: ...and the bars the bars");
-    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "ND1g: the family is appended after the scope mark, last before kCount (no older family's number moved)");
+    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, last before kCount (no older family's number moved)");
     check(uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, false, true) &&
               !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kNormalSpaceDust),
           "ND1h: fix.ui_quality's half governs it (not the weapons layer's)");
+
+    // ---------------------------------------------------------------------------------------------------------------------------------
+    // THE VR MAP FAMILIES (2026-11-04, docs\galaxy-map-vr-2026-11-03.md Fix 2): the Galaxy Map's canvas, icons, rings and stems, named by their shader pairs on the lit HDR
+    // target while a map is open (UiFamilyFacts.mapOpen), and by nothing otherwise; flat's rule never sets mapOpen and never names the rings and stems.
+    {
+        struct MapPair { uint64_t vs, ps; UiLayerFamily family; const char* name; };
+        const MapPair pairs[] = {
+            {0x12382D2EA45E9632ull, 0x855C469156AB997Full, UiLayerFamily::kMapCanvas, "canvas"},
+            {0xC31238331D8AC3D4ull, 0xBD0FEB3276C8B2D7ull, UiLayerFamily::kMapSprite, "sprite A"},
+            {0xC31238331D8AC3D4ull, 0x539A4858CE3A3477ull, UiLayerFamily::kMapSprite, "sprite B"},
+            {0xC31238331D8AC3D4ull, 0x964221955A9E77E7ull, UiLayerFamily::kMapSprite, "sprite C"},
+            {0x94EA991C3A03DBD9ull, 0x65DAC561B5613454ull, UiLayerFamily::kMapMarks, "rings"},
+            {0x3028E7C6E0E097F9ull, 0x6C28D59784CC493Dull, UiLayerFamily::kMapMarks, "stems"},
+        };
+        bool namedOpen = true, namedShut = true, flatNames = true, otherTargets = true, directWhy = true, aliases = true;
+        for (const MapPair& p : pairs) {
+            UiFamilyFacts f;
+            f.targetKind = 1;
+            f.vs = p.vs;
+            f.ps = p.ps;
+            UiFamilyWhy why = UiFamilyWhy::kOther;
+            namedShut = namedShut && uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone;
+            f.mapOpen = true;
+            namedOpen = namedOpen && uiLayerFamilyFor(f, &why) == p.family;
+            directWhy = directWhy && why == UiFamilyWhy::kDirect;
+            for (int kind : {0, 2}) {
+                UiFamilyFacts g = f;
+                g.targetKind = kind;
+                otherTargets = otherTargets && uiLayerFamilyFor(g) == UiLayerFamily::kNone;
+            }
+            const UiLayerFamily viaFlat = flatUiFamilyOf(p.vs, p.ps);
+            flatNames = flatNames && viaFlat != UiLayerFamily::kMapMarks && viaFlat == UiLayerFamily::kNone;
+        }
+        aliases = kFlatUiMapCanvasVs == kUiVsMapCanvas && kFlatUiMapCanvasPs == kUiPsMapCanvas && kFlatUiMapSpriteVs == kUiVsMapSprite &&
+                  kFlatUiMapSpritePsA == kUiPsMapSpriteA && kFlatUiMapSpritePsB == kUiPsMapSpriteB && kFlatUiMapSpritePsC == kUiPsMapSpriteC;
+        check(namedOpen, "MP1: with a map open each of the six pairs names its family (canvas, the three icon pixel shaders, rings, stems) on the lit HDR target");
+        check(directWhy, "MP2: ...as a direct shader");
+        check(namedShut, "MP3: with no map open none of them names a family (the VR take is what it was)");
+        check(otherTargets, "MP4: with a map open the pairs name nothing on a target that is not the lit HDR one");
+        check(flatNames, "MP5: flat's rule (flatUiFamilyOf, mapOpen never set) names none of the six, the rings and stems included");
+        check(aliases, "MP6: flat_ui_layer_math.h's kFlatUiMap* are aliases of the shared constants, values unchanged");
+        // The pair is the key.
+        bool pairKey = true;
+        UiFamilyFacts f;
+        f.targetKind = 1;
+        f.mapOpen = true;
+        const uint64_t vss[] = {0x12382D2EA45E9632ull, 0xC31238331D8AC3D4ull, 0x94EA991C3A03DBD9ull, 0x3028E7C6E0E097F9ull};
+        const uint64_t pss[] = {0x855C469156AB997Full, 0xBD0FEB3276C8B2D7ull, 0x65DAC561B5613454ull, 0x6C28D59784CC493Dull, 0ull};
+        for (size_t i = 0; i < 4; ++i)
+            for (size_t j = 0; j < 5; ++j) {
+                f.vs = vss[i];
+                f.ps = pss[j];
+                const bool expect = (i == 0 && j == 0) || (i == 1 && j == 1) || (i == 2 && j == 2) || (i == 3 && j == 3);
+                pairKey = pairKey && ((uiLayerFamilyFor(f) != UiLayerFamily::kNone) == expect);
+            }
+        check(pairKey, "MP7: only the exact pairs name a family (the icons' vertex shader with the rings' pixel shader, a zero pixel shader and the rest name none)");
+        check(uiVsIsMapOverlay(0x12382D2EA45E9632ull) && uiVsIsMapOverlay(0xC31238331D8AC3D4ull) && uiVsIsMapOverlay(0x94EA991C3A03DBD9ull) &&
+                  uiVsIsMapOverlay(0x3028E7C6E0E097F9ull) && !uiVsIsMapOverlay(kVsNormalSpaceDust) && !uiVsIsMapOverlay(0),
+              "MP8: the pixel shader is read for the four overlay vertex shaders and no other");
+        check(uiLayerFamilyTakesHdr(UiLayerFamily::kMapMarks) && !flatUiLayerTakesFamily(UiLayerFamily::kMapMarks) &&
+                  flatUiLayerTakesFamily(UiLayerFamily::kMapCanvas) && flatUiLayerTakesFamily(UiLayerFamily::kMapSprite),
+              "MP9: the rings and stems go to the VR HDR layer and not to flat's; flat keeps its canvas and sprites");
+        check(uiLayerFamilyEnabled(UiLayerFamily::kMapMarks, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kMapMarks, false, true) &&
+                  !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kMapMarks) && !uiLayerFamilyIsSceneLines(UiLayerFamily::kMapMarks),
+              "MP10: fix.ui_quality's half governs the rings and stems, which are not scene lines (no density rule)");
+        check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kMapMarks), "map rings and stems") == 0, "MP11: the family is named \"map rings and stems\"");
+        check(kUiVsMapTone == 0x6F4B7B60C6C15BBFull && kUiPsMapTone == 0x5EC48683F6C86A42ull, "MP12: the map frame's tonemap pair is the dumps' (vs 6F4B7B60C6C15BBF / ps 5EC48683F6C86A42)");
+        // Rings and stems are SRC_ALPHA, ONE with no depth or stencil; icons and labels SRC_ALPHA, INV_SRC_ALPHA: both shapes convert (the layer's alpha stays transmittance).
+        UiBlendRt over;
+        over.enable = true;
+        over.src = uiblend::kSrcAlpha;
+        over.dst = uiblend::kInvSrcAlpha;
+        over.srcA = uiblend::kOne;
+        over.dstA = uiblend::kInvSrcAlpha;
+        UiBlendRt conv;
+        check(uiLayerBlendShape(over) == UiBlendShape::kOver && uiLayerConvertBlend(over, &conv) && conv.srcA == uiblend::kZero && conv.dstA == uiblend::kInvSrcAlpha,
+              "MP13: the icons' and labels' blend converts as the over shape (layer alpha T' = T (1 - a))");
+        UiBlendRt scaledMap;
+        scaledMap.enable = true;
+        scaledMap.src = uiblend::kSrcAlpha;
+        scaledMap.dst = uiblend::kOne;
+        check(uiLayerBlendShape(scaledMap) == UiBlendShape::kScaledAdditive && uiLayerConvertBlend(scaledMap, &conv) && conv.srcA == uiblend::kZero && conv.dstA == uiblend::kOne,
+              "MP14: the rings' and stems' blend converts as the scaled-additive shape (covers nothing, T' = T)");
+    }
+    // The map camera's publisher and the open hold (src\d3d11\map_camera_core.h).
+    {
+        check(mapcam::kHoldFrames == kFlatUiMapCanvasHoldFrames, "MC1: the open hold is the hold flat gives its map canvas (8 frames)");
+        mapcam::Hold h;
+        bool hold = !h.step(1, 0) && !h.step(2, 0);
+        hold = hold && h.step(3, 1) && h.step(4, 1) && h.step(3 + mapcam::kHoldFrames, 1) && !h.step(4 + mapcam::kHoldFrames, 1);
+        hold = hold && h.step(20, 2) && h.step(21, 2);
+        check(hold, "MC2: a counter that never advanced is not open; an advance opens it, it stays open for the hold's frames and then closes; the next advance reopens it");
+        check(mapcam::viewOfName("GalaxyMapView") == mapcam::View::kGalaxy && mapcam::viewOfName("SystemMapView") == mapcam::View::kSystem && mapcam::viewOfName("") == mapcam::View::kNone &&
+                  mapcam::viewOfName("GalaxyMapViewX") == mapcam::View::kNone && mapcam::viewOfName("galaxymapview") == mapcam::View::kNone && mapcam::viewOfName(nullptr) == mapcam::View::kNone,
+              "MC3: the two stage names are exact; anything else is no view");
+        mapcam::Publisher pub;
+        float pose[16] = {1, 0, 0, 0, 0, 0.7071f, 0.7071f, 0, 0, -0.7071f, 0.7071f, 0, 49996.656f, 41092.668f, 23990.863f, 1};
+        mapcam::View v = mapcam::View::kNone;
+        mapcam::Pose out{};
+        check(!pub.read(v, out) && pub.changes() == 0 && pub.galaxyPublishes() == 0, "MC4: before a publish there is nothing to read and no change");
+        check(pub.observe("SomeOtherView", pose) && pub.galaxyPublishes() == 0 && pub.systemPublishes() == 0 && pub.changes() == 0 && !pub.read(v, out),
+              "MC5: a stage 0 with another name publishes nothing and changes nothing");
+        check(pub.nameCount() == 1 && std::strcmp(pub.nameAt(0), "SomeOtherView") == 0 && pub.namePosition(0)[0] == 49996.656f, "MC6: ...but its name and position are kept for the log, once");
+        pub.observe("SomeOtherView", pose);
+        check(pub.nameCount() == 1, "MC7: the same name again is not a new name");
+        pub.observe("GalaxyMapView", pose);
+        check(pub.galaxyPublishes() == 1 && pub.changes() == 1 && pub.read(v, out) && v == mapcam::View::kGalaxy && out.position[0] == 49996.656f && out.rows[1][1] == 0.7071f && out.rows[2][1] == -0.7071f &&
+                  pub.nameCount() == 2,
+              "MC8: the first Galaxy Map publish counts as a change and reads back its rows and position");
+        for (int i = 0; i < 100; ++i) pub.observe("GalaxyMapView", pose);
+        check(pub.galaxyPublishes() == 101 && pub.changes() == 1, "MC9: the same pose a hundred more times is a hundred publishes and no change (rest noise is zero)");
+        float nudged[16];
+        std::memcpy(nudged, pose, sizeof(nudged));
+        uint32_t bits;
+        std::memcpy(&bits, &nudged[12], 4);
+        bits ^= 1u;   // one bit of the position's mantissa
+        std::memcpy(&nudged[12], &bits, 4);
+        pub.observe("GalaxyMapView", nudged);
+        check(pub.changes() == 2, "MC10: one bit of the position is a change: there is no threshold");
+        float rowNudged[16];
+        std::memcpy(rowNudged, nudged, sizeof(rowNudged));
+        std::memcpy(&bits, &rowNudged[5], 4);
+        bits ^= 1u;
+        std::memcpy(&rowNudged[5], &bits, 4);
+        pub.observe("GalaxyMapView", rowNudged);
+        check(pub.changes() == 3, "MC11: one bit of a row is a change");
+        pub.observe("GalaxyMapView", rowNudged);
+        pub.observe("SystemMapView", rowNudged);
+        check(pub.systemPublishes() == 1 && pub.changes() == 4, "MC12: the same bits under another view's name is a change (the view changed)");
+        pub.observe("SystemMapView", rowNudged);
+        pub.observe("GalaxyMapView", rowNudged);
+        check(pub.changes() == 5, "MC13: and back is another; the same view's repeat is not");
+        float fourth[16];
+        std::memcpy(fourth, rowNudged, sizeof(fourth));
+        fourth[3] = 123.0f;   // lanes outside the rows and the position are not the map's pose
+        pub.observe("GalaxyMapView", fourth);
+        check(pub.changes() == 5, "MC14: a fourth lane is not part of the pose");
+    }
 
     UiDsState normalDs;  // depth tested, no write; no stencil
     normalDs.depthEnable = true;
