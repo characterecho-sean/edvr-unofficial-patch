@@ -3878,6 +3878,21 @@ if errorlevel 1 ( echo [edvr] ERROR: galaxy map vs test build failed & exit /b 1
 "%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_map_run_test
+echo [edvr] === map_run_test.exe ===
+REM The VR Galaxy Map's run of sprites (src\d3d11\map_run_core.h; docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): the state machine's binds (one begin and one end for a run of
+REM sprites, the test fails above two), the game's own sets of the same or other targets, the draws and calls that end a run, and a WARP run with the sprites' real depth-stencil states that
+REM leaves the game's targets bound again after the end (OMGetRenderTargets).
+if not exist "%OBJ%\maprun" mkdir "%OBJ%\maprun"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\maprun\\" /Fe"%OBJ%\maprun\map_run_test.exe" ^
+    "tools\map_run_test\map_run_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: map run test build failed & exit /b 1 )
+"%OBJ%\maprun\map_run_test.exe" --dry-run || exit /b 1
+"%OBJ%\maprun\map_run_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_visor_axis_test
 echo [edvr] === visor_axis_test.exe ===
 REM F121: the on-foot helmet visor's axis-centred vertex shader (src\d3d11\visor_axis_vs.h, the build's bytecode kVisorAxisVsBytecode; src\d3d11\visor_axis_math.h) against the game's own

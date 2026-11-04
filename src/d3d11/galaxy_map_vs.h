@@ -17,37 +17,30 @@
 //     clip = (p' + cb1[277].xyz * b.x + cb1[278].xyz * b.y) . (cb1[270], cb1[271], cb1[272]) + cb1[273]
 // cb1[277] and cb1[278] are the EYE's right and up axes with the quad's size in their lengths, so the b span turns with the head.
 //
-// EVERY MAP QUAD IS FIXED IN THE WORLD. A quad's axes come from the ray from the eye to the quad and a head-free up, never from the eye's rotation:
-//     F = normalize(ray);  c = cross(up, F);  R = length(c) > 0.02 ? c / length(c) : the eye's right made orthogonal to F;  U = cross(F, R)
-// (right x up = forward in this game's frame; with the map camera's rows (1,0,0), (0,.7071,.7071), (0,-.7071,.7071) these are the map camera's axes when the ray is its
-// forward and `up` is its up). `up` is stage 0's rows[1] of the map camera's pose (flat_stationary_camera_capture.h mapCameraPose), the direction the tracked up lands in; it
-// reaches the shaders in a 64-byte constant buffer at vertex slot 10 (MapCam: mapUp, mapPos and the two eyes' offsets, see THE WOBBLE; galaxy_map_ui.cpp binds it; the game's 329 vertex
-// shaders declare only slots 0, 1, 2, 3, 12, 13).
-// Turning the head changes nothing in the world, only moving it does, by parallax. Spanning the quads on the eye's axes (build bf17a80a) locked them to the eye, and so does
-// the game's own b span: the n=12 triangles, whose quaternion is the identity, are spanned by b alone.
+// EVERY MAP QUAD IS FIXED IN THE WORLD, ON ONE PAIR OF AXES FOR THE FRAME (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"). The axes are R, U and F = normalize(cross(R, U)), written by
+// the CPU into MapCam (galaxy_map_axes.h mapCamAxes) from stage 0's rows of the map camera's pose (right rows[0], up rows[1], forward rows[2]). By default every quad is spanned on rows[0]
+// and rows[1]: the game's own planes, with the triangles joining them. The temporary key experimental.galaxy_map_icon_up = stems spans them on the camera's right with its y taken out, the
+// grid's horizontal, and the grid's vertical scaled by 1/dot(vertical, rows[1]) to keep a quad's height at the map's centre, the direction a stem has, handed over to the camera's up as the
+// camera's forward nears the vertical. That plane stands vertical while the camera looks down: with the camera 45 degrees down, a quad at view tangents (x, y) has 1 + y times its height at
+// the centre and shears by atan(x / (1 + y)). No ray, no eye row and no position enters an axis, so turning the head changes nothing in the world (only moving it does, by parallax) and a camera moved sideways turns no quad. An axis pair from each quad's own ray
+// (builds ca707034 to e02c6248) turned every quad about the grid's vertical as the camera moved sideways, 14 degrees per unit at 4 units, and fanned the label baselines from +29 to -17
+// degrees across one image; spanning the quads on the eye's axes (build bf17a80a) locked them to the eye, and so does the game's own b span: the n=12 triangles, whose quaternion is the
+// identity, are spanned by b alone. MapCam reaches the shaders in a 96-byte constant buffer at vertex slot 10 (R, U, F, then the position and the two eyes' offsets, see THE WOBBLE;
+// galaxy_map_ui.cpp binds it; the game's 329 vertex shaders declare only slots 0, 1, 2, 3, 12, 13). Right x up = forward in this game's frame.
 //
 // THE ICONS (C31238331D8AC3D4 and 12382D2EA45E9632, which differs only in the uv: `o0 = uv * cb2[1].xy * 16 + cb2[1].zw`). Their records carry a quaternion the CPU
 // writes facing the HEAD-FREE map camera (rotate(q, ex) = -baseRight, rotate(q, ey) = +baseUp, rotate(q, ez) = -baseForward). Three kinds of record:
 //   * W with |W|^2 <= 1e6: the UI frame's own records (map records sit at y of about 41070), left exactly as the game draws them, b span included;
 //   * a world record (|W|^2 > 1e6) that does not face: a quad flat on the galactic plane (rotate(q, ez).y within 0.0005 of 1, the "10 : 88 : -100" labels and discs) or the
 //     identity quaternion (rotate(q, ez).z at or above 0.9995, the n=12 triangles). The position is the game's maths;
-//   * a world record that faces (the `faces` test): p' = pc' + s * (-v.x * R + v.y * U - v.z * F), pc' the quad's centre in the frame the clip rows read and R, U, F the axes
-//     above from ray = pc' and up' = mapUp rotated by cb0[9..11]. The signs -v.x, +v.y, -v.z reproduce rotate(q, v).
+//   * a world record that faces (the `faces` test): p' = pc' + s * (-v.x * R + v.y * U - v.z * F), pc' the quad's centre in the frame the clip rows read and R, U, F the MapCam axes in
+//     that frame (each through cb0[9..11] with w = 0). The signs -v.x, +v.y, -v.z reproduce rotate(q, v).
 // Every world record takes its b span in the same axes: R * b.x * sx * lx + U * b.y * sy * ly, lx and ly the lengths of cb1[277].xyz and cb1[278].xyz and sx and sy the
 // signs of their dots with the eye's right and up (the eye's axes from cb1[270..272]: the x and y columns made orthogonal to the w column). The game's scale and sign stay,
-// only the direction changes.
+// only the direction changes. Icons and labels share one main.
 //
-// THE ICONS AND LABELS POINT DOWN AT THE GRID (docs/galaxy-map-vr-2026-11-03.md, "After the third flight"). The up handed to mapAxes is mapIconUp for the icons (C31238331D8AC3D4), the
-// labels (12382D2EA45E9632) and the rings (94EA991C3A03DBD9): the grid's vertical, galactic up, because a triangle's record sits on the plane (y of about 41070) with its apex at the
-// star's foot, so its axis is the grid's vertical and it leans in the image by the grid's perspective like the stems beside it. A ray within about 35 degrees of the vertical has no
-// usable lean (the quad would spin about the nadir), so the up hands over to the camera's, fully at 16 degrees. At the map camera's own forward both ups give the same axes:
-// cross((0,1,0), forward) and cross(up, forward) point the same way, so R is the camera's right, and U = cross(F, R) is the camera's up either way (tools/galaxy_map_vs_test G3 holds
-// the icon's corners equal to the label's there). The labels took the camera's up until the fifth build (text fanned out by 26 degrees at tan 0.5 reads badly); the pilot's request
-// that the text lie parallel to the flat grid below ("Text parallel to the grid") put them on the grid's up: R = cross(gridUp, ray) has no y component, so a label's baseline lies in
-// the grid's plane, away from the hand-over.
-//
-// THE RINGS (94EA991C3A03DBD9) span a per-instance world position v1 on cb1[277] and cb1[278] and take the clip rows cb0[4..7]; only the span's directions change: ray = v1 -
-// cb1[275].xyz, up = mapUp, and the eye's axes from cb0[4].xyz, cb0[5].xyz and cb0[7].xyz.
+// THE RINGS (94EA991C3A03DBD9) span a per-instance world position v1 on cb1[277] and cb1[278] and take the clip rows cb0[4..7]; only the span's directions change: R and U are MapCam's,
+// as they are (the rings are in the world frame already), and the eye's axes, from cb0[4].xyz, cb0[5].xyz and cb0[7].xyz, give the signs.
 //
 // THE WOBBLE (docs/galaxy-map-vr-2026-11-03.md, "The wobble"). The game's eye position in the map frame, cb1[275].xyz, is a float32 at about 50000 units where one step is
 // 0.0039, and it moves in jumps of several steps; every quad's position is W - cb1[275].xyz, so an overlay 4 units from the eye shifts by pixels from frame to frame. The precise parts
@@ -130,28 +123,9 @@ float3 mapRotate(float4 q, float3 v) {
     r = dot(q.xyz, v) * (q.xyz + q.xyz) + r;
     return c * (q.w + q.w) + r;
 }
-
-// A map quad's axes (see the header): the forward from the ray, the right from the head-free up, and the eye's right (orthogonal to the forward) where the ray is within
-// about a degree of the up and there is no right. Fe is the eye's forward, taken when the ray is zero.
-void mapAxes(float3 ray, float3 up, float3 Fe, float3 Re, out float3 F, out float3 R, out float3 U) {
-    F = (dot(ray, ray) > 1e-12) ? normalize(ray) : Fe;
-    float3 c = cross(up, F);
-    float cl = length(c);
-    R = (cl > 0.02) ? c / cl : normalize(Re - dot(Re, F) * F);
-    U = cross(F, R);
-}
-
-// The up an icon or a ring is spanned on (see the header): the grid's vertical, and the camera's up near the nadir. kIconUpLean is the |cos| of the ray with the vertical below
-// which the up is fully the grid's (cos 35 degrees); kIconUpNadir the |cos| above which it is fully the camera's (cos 16 degrees); a smoothstep between. A zero ray has |cos| 0.
-static const float kIconUpLean = 0.82;
-static const float kIconUpNadir = 0.96;
-float3 mapIconUp(float3 ray, float3 gridUp, float3 cameraUp) {
-    float a = (dot(ray, ray) > 1e-12) ? abs(dot(normalize(ray), gridUp)) : 0.0;
-    return normalize(lerp(gridUp, cameraUp, smoothstep(kIconUpLean, kIconUpNadir, a)));
-}
 )HLSL"
 
-// The map camera's constants at vertex slot 10, and the precise position relative to the eye (see THE WOBBLE). mapUp.xyz is stage 0's up; mapPos.xyz its position and mapPos.w 1 when the
+// The map camera's constants at vertex slot 10, and the precise position relative to the eye (see THE WOBBLE). mapR, mapU and mapF are the one pair of axes the world quads are spanned on and their forward (galaxy_map_axes.h; w 0); mapPos.xyz is stage 0's position and mapPos.w 1 when the
 // two eyes' offsets are valid, 0 when not; mapEye[i].xyz is eye i's offset from mapPos in the map frame. kMapEyeBand is the distance in units, 0.04, within which the game's rounded
 // eye has to be of one of the two parts' eyes for the parts to be used: several steps of float32 at 50000 units (0.0039 each), more than the game's rounding ever shows at rest; while the
 // map moves its pose can lag a frame behind the eye, and the game's own eye is right then.
@@ -161,7 +135,7 @@ float3 mapIconUp(float3 ray, float3 gridUp, float3 cameraUp) {
 #define EDVR_MAP_CAM_HLSL \
     "static const float kMapEyeBand = " EDVR_MAP_STR(EDVR_MAP_EYE_BAND) ";" \
     R"HLSL(
-cbuffer MapCam : register(b10) { float4 mapUp; float4 mapPos; float4 mapEye[2]; };
+cbuffer MapCam : register(b10) { float4 mapR; float4 mapU; float4 mapF; float4 mapPos; float4 mapEye[2]; };
 
 // eyeGame is the game's rounded eye. False when the precise parts do not apply, and rel is then the game's W - eyeGame.
 bool mapEyeRel(float3 W, float3 eyeGame, out float3 rel) {
@@ -179,7 +153,7 @@ bool mapEyeRel(float3 W, float3 eyeGame, out float3 rel) {
 
 constexpr float kMapEyeBand = static_cast<float>(EDVR_MAP_EYE_BAND);
 
-// C31238331D8AC3D4. EDVR_MAP_ICON_UV is the uv statement; 12382D2EA45E9632 adds b2. Both are spanned on mapIconUp.
+// C31238331D8AC3D4. EDVR_MAP_ICON_UV is the uv statement; 12382D2EA45E9632 adds b2. Both are spanned on MapCam's one pair of axes.
 #define EDVR_MAP_ICON_MAIN_HLSL R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[12]; };
 cbuffer CB1 : register(b1) { float4 cb1[279]; };
@@ -213,12 +187,10 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
         float3 Re = normalize(Rx - dot(Rx, Fe) * Fe);
         float3 Ry = float3(cb1[270].y, cb1[271].y, cb1[272].y);
         float3 Ue = normalize(Ry - dot(Ry, Fe) * Fe);
-        float4 up4 = float4(mapUp.xyz, 0.0);
-        float4 grid4 = float4(0.0, 1.0, 0.0, 0.0);
-        float3 ray = float3(dot(pc, cb0[9]), dot(pc, cb0[10]), dot(pc, cb0[11]));
-        float3 cameraUp = float3(dot(up4, cb0[9]), dot(up4, cb0[10]), dot(up4, cb0[11]));
-        float3 gridUp = float3(dot(grid4, cb0[9]), dot(grid4, cb0[10]), dot(grid4, cb0[11]));
-        mapAxes(ray, mapIconUp(ray, gridUp, cameraUp), Fe, Re, F, R, U);
+        float4 R4 = float4(mapR.xyz, 0.0), U4 = float4(mapU.xyz, 0.0), F4 = float4(mapF.xyz, 0.0);
+        R = float3(dot(R4, cb0[9]), dot(R4, cb0[10]), dot(R4, cb0[11]));
+        U = float3(dot(U4, cb0[9]), dot(U4, cb0[10]), dot(U4, cb0[11]));
+        F = float3(dot(F4, cb0[9]), dot(F4, cb0[10]), dot(F4, cb0[11]));
         sx = (dot(cb1[277].xyz, Re) < 0.0) ? -1.0 : 1.0;
         sy = (dot(cb1[278].xyz, Ue) < 0.0) ? -1.0 : 1.0;
     }
@@ -282,7 +254,7 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
 }
 )HLSL";
 
-// 94EA991C3A03DBD9: the rings. The game's shader, with the span's two directions (cb1[277] and cb1[278], the eye's right and up) put on the ray's axes (see the header), and the clip
+// 94EA991C3A03DBD9: the rings. The game's shader, with the span's two directions (cb1[277] and cb1[278], the eye's right and up) put on MapCam's axes (see the header), and the clip
 // position from the eye-relative position when mapEyeRel holds: the clip rows' xyw take the eye to (0, 0, 0) (their translation is minus the rows . the eye), and the z row is the
 // constant cb0[6].w. o2 stays the game's world position.
 constexpr char kMapRingVS[] =
@@ -306,10 +278,9 @@ void main(float4 v0 : TEXCOORD0, float3 v1 : POSITION0, float4 v2 : POSITION2, f
     float3 Re = normalize(Rx - dot(Rx, Fe) * Fe);
     float3 Ry = cb0[5].xyz;
     float3 Ue = normalize(Ry - dot(Ry, Fe) * Fe);
-    float3 F, R, U;
     float3 ray;
     const bool steady = mapEyeRel(v1, cb1[275].xyz, ray);
-    mapAxes(ray, mapIconUp(ray, float3(0.0, 1.0, 0.0), mapUp.xyz), Fe, Re, F, R, U);
+    float3 R = mapR.xyz, U = mapU.xyz;
     float sx = (dot(cb1[277].xyz, Re) < 0.0) ? -1.0 : 1.0;
     float sy = (dot(cb1[278].xyz, Ue) < 0.0) ? -1.0 : 1.0;
     float3 spanR = R * (b.x * sx * length(cb1[277].xyz));

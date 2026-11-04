@@ -3150,6 +3150,30 @@ void testSupercruiseLines() {
                   pointer.find("NO write carried the eyes") != std::string::npos && pointer.find("with the two eyes' offsets, which changed") != std::string::npos &&
                   edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 5 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
               "GP25: the write-back is declined for the map's sprites and canvases while the map is open in VR and before anything is bound, the depth issue keeps the layer's target under write mask 0, and the 30 s line counts the declined write-backs, the stems swapped and the eyes");
+        // The run of sprites (map_run_core.h, docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): every way into a draw or an output-merger call ends or settles it.
+        auto count = [](const std::string& hay, const char* needle) {
+            size_t n = 0;
+            for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+            return n;
+        };
+        auto strip = [](std::string s) { s.erase(std::remove(s.begin(), s.end(), '\r'), s.end()); return s; };
+        const std::string sharpen = slurp("src/d3d11/native_sharpen.cpp"), temporal = slurp("src/d3d11/native_temporal.cpp"), screenN = strip(screen), layerN = strip(layer);
+        check(count(screenN, "\n    mapRunBeforeDraw(self);\n") == 5 && count(screenN, "mapRunBeforeIndirectDraw(self);") == 2 &&
+                  screenN.find("!uiVsIsMapOverlay(bindingShaderHash(BindSlot::Vs))) uiLayerMapRunEnd(self);") != std::string::npos &&
+                  count(screenN, "if (!layered) uiLayerMapRunEnd(self);") == 3 && count(screenN, "uiLayerMapRunEnd(self);   // the fast path skips") + count(screenN, "uiLayerMapRunEnd(self);   // as in hookedDraw") == 3,
+              "GP26: all seven draw hooks end the run at their top unless the bound vertex shader is one of the run's four, the fast paths end it, and the three layer brackets of forwardWithVerdict end it when the draw is not taken");
+        check(screenN.find("uiLayerMapRunGameSet(self, n, rtvs, dsv, false)") != std::string::npos && screenN.find("uiLayerMapRunGameSet(self, n, rtvs, dsv, uavCount != 0)") != std::string::npos &&
+                  count(screenN, "uiLayerMapRunGameSetsOwn(self, n, rtvs, dsv)") == 2 &&
+                  screenN.find("if (self == s->ownerCtx) uiLayerMapRunDrop();") != std::string::npos && screenN.find("uiLayerMapRunEnd(self);   // a command list runs on the context's state") != std::string::npos &&
+                  screenN.find("if (self == g_state->ownerCtx) uiLayerMapRunEnd(self);") != std::string::npos,
+              "GP27: the game's own sets of targets keep or drop the run, its set of the layer's own read back changes nothing, ClearState drops it, and a context-state swap and a command list end it first");
+        check(layerN.find("g_mapRun.core.begin(mapRunIssue, g_draw.eye, target, mapDsv)") != std::string::npos && layerN.find("if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);") != std::string::npos &&
+                  layerN.find("if (g_draw.mapRunBound) {") != std::string::npos && layerN.find("g_mapRun.core.handOver(") != std::string::npos &&
+                  layerN.find("    uiLayerMapRunEnd(ctx);\n    settleIssueFence(ctx);") != std::string::npos &&
+                  layerN.find("if (g_mapRun.core.held) {\n            // A run of map sprites is held: the context has the layer's one target") != std::string::npos &&
+                  sharpen.find("edvr::uiLayerMapRunEnd(nullptr);") != std::string::npos && temporal.find("edvr::uiLayerMapRunEnd(nullptr);") != std::string::npos &&
+                  pointer.find("render target binds for the map's sprites") != std::string::npos && pointer.find("runs of sprites started") != std::string::npos,
+              "GP28: an issue of the run's kind binds nothing when the run is held for its layer and D16, restore() hands the game's targets to the run, the decision reads the game's targets from the run, the frame boundary and the doors end it, and the 30 s line counts the binds and the runs");
     }
 
     UiDsState normalDs;  // depth tested, no write; no stencil

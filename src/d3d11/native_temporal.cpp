@@ -495,6 +495,7 @@ HRESULT WINAPI noteProjection(void* p,uint64_t seq,uint32_t eye,float nearZ,floa
 
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* box,ID3D11Texture2D** output,float* outBox) {
   if(output)*output=nullptr;if(outBox)std::memset(outBox,0,16);std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
+  edvr::uiLayerMapRunEnd(nullptr);   // the Galaxy Map's run of sprites leaves EDVR's targets bound; this pass reads and sets the output merger (ui_layer.h)
   struct InsideTreat{InsideTreat(){t_insideTreat=true;}~InsideTreat(){t_insideTreat=false;}} insideTreat;
   if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||!source||!output||!outBox||eye>1||seq!=s->sequence||s->treated[eye]||!s->begun||!sameDevice(s->device,source))return E_INVALIDARG;
   if(box&&(!finite(box,4)||box[0]==box[2]||box[1]==box[3]))return E_INVALIDARG;
@@ -633,6 +634,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
 }
 HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
+  edvr::uiLayerMapRunEnd(nullptr);   // as in treat
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
   // The transition-flash fix withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)

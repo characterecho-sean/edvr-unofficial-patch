@@ -62,6 +62,8 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 struct ID3D11ShaderResourceView;
 
 struct ID3D11Texture2D;
@@ -85,6 +87,7 @@ extern bool g_uiLayerWatching;
 extern bool g_uiSeedDiagnostics;
 extern bool g_uiLayerRedirecting;
 extern bool g_uiLayerIssueBlocked;
+extern bool g_uiLayerMapRunHeld;
 extern bool g_uiLayerCrispOn;
 extern bool g_uiLayerCrispPending;
 extern bool g_uiLayerHudGlowPending;
@@ -113,6 +116,23 @@ bool uiLayerRippleLive();
 // after eight failed boundaries). The layer itself stays stood down for the
 // session either way.
 inline bool uiLayerIssueBlocked() { return detail::g_uiLayerIssueBlocked; }
+
+// The VR Galaxy Map's run of sprites (map_run_core.h, docs/galaxy-map-vr-2026-11-03.md "After the fifth flight"): while it is held the real context has the HDR layer and the eye's
+// private D16 bound and the game believes its own targets are bound. Every way into code that reads or sets the output merger ends it first; each is one load while no run is held.
+inline bool uiLayerMapRunHeld() { return detail::g_uiLayerMapRunHeld; }
+// Binds the game's targets back and lets the run go. Idempotent. Ignored from a thread other than the one that holds the run.
+void uiLayerMapRunEndSlow(ID3D11DeviceContext* ctx);
+inline void uiLayerMapRunEnd(ID3D11DeviceContext* ctx) {
+    if (detail::g_uiLayerMapRunHeld) uiLayerMapRunEndSlow(ctx);
+}
+// Lets the run go with no bind: the targets were replaced by the game's own call or a ClearState, or a view was released.
+void uiLayerMapRunDrop();
+// The game sets render targets while a run may be held. True: it sets exactly the targets the run saved, so the caller keeps its shadow and does not make the real call. False: the
+// call is made (a run for other targets has been dropped).
+bool uiLayerMapRunGameSet(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, bool hasUav);
+// The game sets the layer's own targets while a run is held, having read them back: nothing hooks OMGetRenderTargets. True: the caller leaves its shadow alone and does not make the real
+// call, so the game's targets stay the saved ones and the layer is never taken for them.
+bool uiLayerMapRunGameSetsOwn(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv);
 
 // Reads fix.ui_quality and fix.temporal_aa. Live: an "off" composites the frame in flight and
 // redirects nothing from the next draw.

@@ -13,8 +13,8 @@
 //     true (the game's arrow). "On a panel" is the mask under the tip, or under a point within reach on both opposite sides along one of four axes (kMapProbePS), so the
 //     gaps between panels close.
 //
-// THE MAP CAMERA'S CONSTANTS. The icons', labels', rings' and stems' replacement shaders (C31238, 12382D, 94EA99, 3028E7) take a head-free up, the map camera's position and the two eyes'
-// offsets from a 64-byte constant buffer at vertex slot 10 (MapCam), written from mapCameraPose's stage 0 (rows[1], position) and mapCameraEyes (flat_stationary_camera_capture.h) when
+// THE MAP CAMERA'S CONSTANTS. The icons', labels', rings' and stems' replacement shaders (C31238, 12382D, 94EA99, 3028E7) take the one pair of axes the world quads are spanned on (galaxy_map_axes.h), the map camera's position and the two eyes'
+// offsets from a 96-byte constant buffer at vertex slot 10 (MapCam), written from mapCameraPose's stage 0 (rows, position) and mapCameraEyes (flat_stationary_camera_capture.h) when
 // mapCameraChanges() has moved since the last write or the eyes' pair has changed. A draw is swapped only once the pose has answered; before that it is the game's, counted
 // (Counters::noPose). Before the eyes' pair is whole the buffer says so (mapPos.w 0) and the shaders keep the game's eye. The buffer is bound at the first swap of each draw when
 // slot 10 does not already hold it, and left bound after the map closes: no vertex shader of the game declares slot 10.
@@ -72,8 +72,8 @@ inline D3D11_BLEND_DESC probeBlendDesc() {
 // THE SPRITES' DEPTH (docs/galaxy-map-vr-2026-11-03.md, "Sprite order"). The game draws the map's sprites with depth off, so a far sprite drawn late paints over a near one. While a Galaxy
 // Map is open in VR the layer gives each eye a D16_UNORM depth at the HDR layer's size and the sprites' colour issue tests it (no write); a second issue, with the HDR layer's render
 // target kept at write mask 0 (the probe's blend), writes it where the sprite is solid (kMapDepthAlpha, galaxy_map_vs.h). The stencil write-back into the game's depth-stencil is not made
-// for the map's sprites and canvases while the map is open in VR (ui_layer.cpp uiLayerWriteBackBegin): alternating the private D16 with the game's depth-stencil per draw cost 5.5 ms
-// of GPU a frame against 0.5 ms (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"), and nothing reads the bit. The game's depth is reversed (clip.z 0.1, clip.w the distance, nearer larger:
+// for the map's sprites and canvases while the map is open in VR (ui_layer.cpp uiLayerWriteBackBegin), and nothing reads the bit; the write-backs were one of two alternations of the private D16 with the game's depth-stencil,
+// the rest was restore() after every issue, which one bind for the run of sprites replaces (map_run_core.h, docs/galaxy-map-vr-2026-11-03.md "After the fifth flight"); any draw on the game's buffer inside a run would end it. The game's depth is reversed (clip.z 0.1, clip.w the distance, nearer larger:
 // fixed_shader_source.h, dlaa.cpp), so the test is GREATER_EQUAL, the clear 0, and the bias that pulls a written value farther is negative.
 constexpr uint64_t kPsSprite = 0x964221955A9E77E7ull, kPsCanvas = 0x855C469156AB997Full;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D16_UNORM;
@@ -114,6 +114,17 @@ struct DepthCounters {
 inline DepthCounters g_depth;
 // Stencil write-backs declined for the map's sprites and canvases while the map is open in VR (ui_layer.cpp uiLayerWriteBackBegin), since the last 30 s line.
 inline std::atomic<uint64_t> g_writeBackDeclined{0};
+
+// The run of sprites (map_run_core.h), since the last 30 s line. Inline for the same reason as the depth's: ui_layer.cpp counts them.
+struct RunCounters {
+    std::atomic<uint64_t> binds;        // real render target binds the run path made: an issue's bind of a run kind, and every end
+    std::atomic<uint64_t> started;      // runs started
+    std::atomic<uint64_t> ended;        // runs ended, by a bind or dropped
+    std::atomic<uint64_t> setsKept;     // the game's own sets of the targets the run saved, inside a run (the real call not made)
+    std::atomic<uint64_t> setsDropped;  // the game's sets of other targets inside a run (the run dropped)
+    std::atomic<uint64_t> setsOwn;      // the game's sets of the layer's own targets inside a run, read back from the context (the real call not made)
+};
+inline RunCounters g_run;
 
 enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapCount };
 
@@ -172,6 +183,11 @@ struct DepthDraw {
     void* user = nullptr;
 };
 bool depthIssue(ID3D11DeviceContext* ctx, uint64_t ps, const DepthDraw& dd);
+
+// The temporary key experimental.galaxy_map_icon_up (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"): true (camera, the default) spans the world quads on the map camera's own
+// up, false (stems) on the grid's vertical. Read from the ini at each opening of the map and logged then.
+inline std::atomic<bool> g_iconUpCamera{true};
+void readIconUpKey();
 
 // The gate states from the frame tick (a close lets the queries and the answers go at the next probe, and over is false).
 void setGates(bool vrOpen, bool pointerOpen);

@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build BUILT, full build green, NOT FLOWN: the frame rate back by dropping the sprites' stencil write-backs, overlays held steady against the game's rounded eye, text parallel to the grid (see "After the fourth flight"). On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course is BUILT as the sixth build and the code has had a second adversarial review, NOT FLOWN. On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -17,13 +17,16 @@ Decided (Sean, 2026-11-04, after flying it): panels at the game's depth, the arr
 
 Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0, and no System Map was opened on the flight). The hover pointer block's class ([vis+0x110]) is now of no consequence. System Map and Orrery hover are not read, so fix 3 and the facing icons are Galaxy Map only.
 
-Temporary: none left. The self-check, the F111 map probe and the stillness bounds are gone. No new keys.
+Temporary: `experimental.galaxy_map_icon_up` (`camera`, the default, or `stems`); one flight decides, then it goes. The self-check, the F111 map probe and the stillness bounds are gone.
 
-Next: the flight (fifth card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: Sean flies the sixth build (card below). Then decide on the evidence: the key, the sprite depth (about 0.9 ms, 65 MB), `mapEyeRel` and the stems' swap. Before merge: move this doc's pinned build addresses to the arc's `docs\build-<build>.md` (CODING_STANDARDS). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: B10B032BDFD46700 as a panel, because its n=6 records sit in the UI frame at their own depth: the hover halo round the hovered star (dump 123832862001, record 1258) and the heading text. In the mask, the halo put the arrow at panel depth whenever a star was hovered.
-- ruled out: the map camera's up for the sprites, because it leaves triangles upright in the image while the stems beside them lean by the grid's perspective (Sean: "They should always be pointed down towards the flat grid plane").
+- ruled out: dropping the stencil write-backs as the whole frame-rate fix, because `restore()` still rebinds the game's D32S8 around every sprite issue (ui_layer.cpp:2217), so the private D16 and the game's depth-stencil still alternate 2,600 to 3,500 times a frame. The benchmark behind that fix had no restore. Flight 14:13: about 60 fps.
+- ruled out: `transfer` in `native timing CPU` as a frame-rate gate, because it is a single frame's sample in each 10 s. Use `xr_end_frame` p50: 0.21 ms on the third build, 5.09 on the fifth.
+- ruled out: axes from each quad's own ray, because they turn every quad as the camera moves (14 degrees per unit of sideways move at 4 units) and fan label baselines from +29 to -17 degrees across one image. No report asked a quad to face the eye; that was this doc's addition.
+- withdrawn: an earlier line here ruled out the map camera's up for the sprites. Its reasoning did not fit its own report: the camera's up and the grid's up drew the same complaint under the same motion, and what they shared was the ray.
 - ruled out: spanning the map's quads on the eye's axes (build bf17a80a), because that locks them to the eye. Dump 110152762001: every icon's top edge measures 0.00 degrees in the image while the head turns from yaw 19.6 to 4.7. Sean: "the icons and text yaw with my head".
 - ruled out: panels at star depth, because they clip through the map's content in stereo (flight of 09:50, Sean).
 - ruled out: K's camera following the head, because the self-check printed its view rows equal to the head-free map camera's, with projection 0.939 on both axes.
@@ -171,6 +174,8 @@ Log edvr_gfx_20261104_132124, build 759ec617, dump 132601814001, Pimax Crystal S
 
 ### The frame rate
 
+(This section's conclusion was wrong: see "After the fifth flight". The table's patterns D and E are a path the game never takes.)
+
 MEASURED. `native timing CPU`: 450 frames in 10 s on the map against 900 on the build before; transfer 5 ms against 0.2 ms, so the GPU was behind, and `draw hook CPU` rose only from about 1.1 to 1.56 ms. A micro-benchmark on this RTX 5090 (560 sprites a frame at 4032x4034, GPU ms by timestamps):
 
 | Pattern | GPU ms |
@@ -193,7 +198,37 @@ The precise parts exist. Stage 0's position is constant at rest, and the UI fram
 
 The labels take the same up as the icons, so a baseline's direction, cross(gridUp, ray), lies in the grid's plane; rig: its y component is at most 1e-6 of its length. Labels on the plane stay on it. The cost is the one named when this was first decided the other way: text fans out by about 26 degrees at tan 0.5, with the grid's own lines.
 
-## Flight card, fifth build (VR, cockpit, Galaxy Map open)
+## After the fifth flight
+
+Log edvr_gfx_20261104_141340, build e02c6248, dump 141733701001. Sean: "moving the camera left/right causes the icon and text to rotate around its y axis, also performance is still quite poor"; on main (11ef91d5, Epic, edvr_gfx_20261104_142228), "the galaxy map there runs at 90 fps mostly". The adversarial review is `reviews\galaxy-map-perf-review-2026-11-04.md` (git-ignored); its benchmark is in the session's scratchpad, not in the repository.
+
+**The frame rate.** `uiLayerEnd` runs `restore()` after every issue (vscreen.cpp:4676, ui_layer.cpp:2217, read and confirmed), so one sprite is layer+D16, draw, game+D32S8, layer+D16, draw, game+D32S8. A benchmark of that real sequence on this RTX 5090, at the dump's 432 sprites an eye, with the game closed: 11.1 ms as it runs, 1.0 ms with one bind for the run, 0.92 ms for the third build, 0.10 ms for main; 3 times the sprite size gives 11.6 ms, so it is not fill. MEASURED in the benchmark; that it is the whole miss is INFERRED, since sprite GPU time has never been timed in the game. One unknown, about 8 ms for the rest of the frame, fits all three builds' frame rates. Fix 2's "Cost" line had already named the answer: bracket the contiguous run with one target switch.
+
+**The rotation.** Reports against builds are tabled in the review. What Sean has asked for is orientation that follows neither the head nor the camera's translation, in a fixed relation to the grid. Proposed: one pair of axes a frame shared by every world quad, with no ray, eye or position term. R is the camera's horizontal, in the grid's plane. U is either the grid's vertical (along the stems, scaled to keep height at the map's centre) or the camera's up (the game's own planes, with the triangles joining them), carried on one temporary key so one flight decides. Cost of `camera`: a quad off the map's forward foreshortens by the cosine of that angle, 0.89 at tan 0.5, as the game's planes always did. Cost of `stems`, corrected by the second review (this line first gave 0.89 for both): that plane stands vertical while the camera looks 45 degrees down, so a quad at view tangents (x, y) has 1 + y times its height at the centre and shears by atan(x / (1 + y)). That is 2.0 at y +1, 0.5 at -0.5, 0.2 at -0.8, edge-on at the nadir, and 45 degrees of shear at (0.5, -0.5). So `camera` is the default. In exchange a triangle off the view's middle leans off its stem by atan(x / (1 + y)), 27 degrees at (0.5, 0). OPEN: 759ec617 had the same icon formula and drew "basically works" with no rotation report.
+
+**Also open.** The wobble fix is unproven: this dump cannot test it and the report does not mention it. The stencil removal's proof covers raster draws only, not a stencil-plane SRV or the 36 dispatches a frame.
+
+**The course, built as the sixth build (NOT FLOWN):** one bind for the run, covering every owner draw path, EDVR's own readers of the targets, and the frame boundary; the shared axes with the temporary key; gate on `native_frame_cycle_window` and `xr_end_frame` with `advanced.app_gpu_timing` on and one press of the GPU pass profile on the map, plus depth-stencil binds a frame in the 30 s line and a rig test that fails on more than two binds a run. Then decide the sprite depth (about 0.9 ms, 65 MB) and whether `mapEyeRel` and the stems' swap stay, on the evidence. Correct the false comment in `ui_layer.cpp` and `galaxy_map_ui.h`, and move this doc's ten pinned build addresses (CODING_STANDARDS; not done yet, before merge).
+
+**The sixth build.** A run is held from a map sprite's restore until something other than a map sprite needs the output merger (`map_run_core.h`, `tools\map_run_test`). The axes are one set a frame from stage 0's rows (`galaxy_map_axes.h`). A second adversarial review read the code. It traced the real path by hand and found no per-sprite bind: the dump's census gives one run an eye, 433 to 435 draws, 2 binds a frame. Its benchmark of the sequence as built, GPU ms on this RTX 5090, fifth build against sixth: 8.22 and 0.76 at 326 sprites an eye, 11.02 and 0.95 at 432, 12.26 and 1.08 at 485. Predicted frame about 8.9 ms, so 90 fps: the benchmark is MEASURED, the frame rate INFERRED. It raised these, all taken in this build: the `stems` default above; a `OMGetRenderTargets` read then set inside a run would bind the layer as the game's target, since nothing hooks the read (now kept, and counted as `of the layer's own read back` in the 30 s line); and a context-state swap now ends the run rather than dropping it. Stage 0's right is (1,0,0) in all twelve dumps checked, so `camera` baselines run with the grid at that pose; no dump is at an orbited pose. Not checked: the game's own sets of targets inside a run, the game's 116 candidate reads of the targets, EDHM or 3Dmigoto overrides, GPU cost in the game itself.
+
+A dump's census names the layer and the D16 for draws inside a run (`draw_census.cpp`, `object_probe.cpp`), so an `r=` filter stops matching there. No state is harmed; read a dump knowing it.
+
+## Flight card, sixth build (not flown)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`. `advanced.app_gpu_timing` is on in the Frontier ini for this flight.
+
+1. Open the map, read the fps. Expect 90, as the third build held and main mostly holds. Press F4 once on the map for the GPU pass profile.
+2. Pan left and right, then orbit, then turn the head. Expect: icons and text do not rotate. Look at the bottom of the view: nothing flattens.
+3. Look at the triangles. With `camera` they all point the same way and lean off their stems away from the view's middle. Is that acceptable?
+4. Compare: set `galaxy_map_icon_up = stems` in `[experimental]` in the Frontier `edvr.ini` with the game running, close and reopen the map. Expect: triangles along their stems, flatter towards the bottom of the view. Say which is better; the other goes.
+5. Hold still and move the head slowly near a close star. Do nearby icons still wobble? This decides `mapEyeRel` and the stems' swap.
+6. Check nothing was lost: hover, selection, the panels and the gaps between them, the bookmark behind the triangle stays hidden. Insert dump.
+7. If sprites land in one corner of an eye or draw over the wrong thing, that is the run: say so and note the time.
+
+Log gates: `xr_end_frame` p50 under 1 ms (0.21 on the third build, 5.09 on the fifth); few late frames in `native_frame_cycle_window`; the `map pointer:` 30 s line with render target binds about 2 a frame, runs started about 2 a frame, `of others` and `read back` near 0 (a high `of others` means the game breaks runs; a `-- 0 runs` tail means this never ran); `galaxy map: experimental.galaxy_map_icon_up = ...` at each opening.
+
+## Flight card, fifth build (flown 14:13)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 

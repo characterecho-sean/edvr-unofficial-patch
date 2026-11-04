@@ -16,6 +16,7 @@
 #include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
+#include "map_run_core.h"   // the Galaxy Map's run of sprites: when the real context's render targets change
 #include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
 #include "flat_star_glow_math.h"  // visual.star_glow: the blend equation of the star pass
 #include "ui_scene_composites.h"  // the census of the interface composites left in the scene, and its line
@@ -88,6 +89,7 @@ bool g_uiLayerWatching = false;
 bool g_uiSeedDiagnostics = false;
 bool g_uiLayerRedirecting = false;
 bool g_uiLayerIssueBlocked = false;
+bool g_uiLayerMapRunHeld = false;   // the VR Galaxy Map's run of sprites is held (ui_layer.h)
 bool g_uiLayerCrispOn = false;      // the HDR HUD take/re-issue armed this frame (with the layer)
 bool g_uiLayerCrispPending = false; // a tonemap draw was admitted; its re-issue follows its draw
 bool g_uiLayerHudGlowPending = false; // an eye's HDR HUD layer holds this frame's light that no first-level draw has taken (headset bloom)
@@ -616,6 +618,11 @@ struct Draw {
     bool dsStateSaved = false;
     ID3D11RasterizerState* rsState = nullptr;
     bool rsStateSaved = false;
+    // The Galaxy Map's run of sprites (map_run_core.h): this issue bound (or kept) the eye's HDR layer and D16, so restore() hands the game's targets to the run instead of binding them.
+    bool mapRunBound = false;
+    int mapRunEye = -1;
+    ID3D11RenderTargetView* mapRunRtv = nullptr;   // identity only until the run starts, then a reference is taken
+    ID3D11DepthStencilView* mapRunDsv = nullptr;
     // The write-back's own save (the game's targets, while its depth-only
     // re-issue runs with no colour target bound).
     ID3D11RenderTargetView* wbRtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -1660,11 +1667,58 @@ void releaseLayerDs(LayerDs& l) {
     l.seedJx = l.seedJy = 0.0f;
 }
 
+// THE GALAXY MAP'S RUN OF SPRITES (map_run_core.h). The state machine decides; this holds what it points at: the game's render targets (references, taken from the issue that starts the
+// run), the layer's HDR RTV and the eye's D16 (references, so an address cannot be reused while the context holds them), the owner context and the thread. References are never held
+// across a frame: uiLayerFrameBoundary ends the run.
+struct MapRun {
+    maprun::Core core;
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11RenderTargetView* layerRtv = nullptr;
+    ID3D11DepthStencilView* layerDsv = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    DWORD thread = 0;
+};
+MapRun g_mapRun;
+
+// The core's counters into mapui::g_run (inline atomics: the 30 s line reads them in another translation unit).
+void mapRunCount() {
+    const maprun::Core::Counts c = g_mapRun.core.take();
+    if (c.binds) mapui::g_run.binds.fetch_add(c.binds, std::memory_order_relaxed);
+    if (c.started) mapui::g_run.started.fetch_add(c.started, std::memory_order_relaxed);
+    if (c.ended) mapui::g_run.ended.fetch_add(c.ended, std::memory_order_relaxed);
+    if (c.setsKept) mapui::g_run.setsKept.fetch_add(c.setsKept, std::memory_order_relaxed);
+    if (c.setsDropped) mapui::g_run.setsDropped.fetch_add(c.setsDropped, std::memory_order_relaxed);
+    if (c.setsOwn) mapui::g_run.setsOwn.fetch_add(c.setsOwn, std::memory_order_relaxed);
+}
+
+void mapRunReleaseRefs() {
+    for (auto*& r : g_mapRun.rtv) {
+        if (r) r->Release();
+        r = nullptr;
+    }
+    if (g_mapRun.dsv) g_mapRun.dsv->Release();
+    g_mapRun.dsv = nullptr;
+    if (g_mapRun.layerRtv) g_mapRun.layerRtv->Release();
+    g_mapRun.layerRtv = nullptr;
+    if (g_mapRun.layerDsv) g_mapRun.layerDsv->Release();
+    g_mapRun.layerDsv = nullptr;
+    g_mapRun.ctx = nullptr;
+    g_mapRun.thread = 0;
+    detail::g_uiLayerMapRunHeld = false;
+}
+
 // Every layer, transmittance, depth target and composite output released
 // (the door state kept): the key went off, the pass went away, or the layer
 // stood down. About 380 MB at 1.25 on a 4340x4284 eye is not left resident
 // for a feature that is off.
 bool releaseLayers() {
+    // The run holds the HDR layer's view and the eye's D16: let it go (the layer is released with no context at hand, so nothing is bound back; the game's next set replaces ours).
+    if (g_mapRun.core.held) {
+        g_mapRun.core.drop();
+        mapRunReleaseRefs();
+        mapRunCount();
+    }
     bool any = false;
     for (Eye& e : g_eye) {
         any = any || e.tex || e.mTex || e.maskTex || e.mapDepthTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
@@ -2203,6 +2257,12 @@ UINT boundCount(ID3D11RenderTargetView* const* rtvs) {
     return n;
 }
 
+// The run is over and the context is given the game's targets back (the core has counted the end). The references go whatever happens to the bind.
+void mapRunRebind(ID3D11DeviceContext* ctx) {
+    guarded("uiLayer.mapRunEnd", [&] { vScreenSetRenderTargetsRaw(ctx, boundCount(g_mapRun.rtv), g_mapRun.rtv, g_mapRun.dsv); });
+    mapRunReleaseRefs();
+}
+
 void restore(ID3D11DeviceContext* ctx) {
     // Restore the private shader/CB first, with independent guarded setters:
     // an OM/RS restoration fault must not leave the game's PS replaced.
@@ -2214,7 +2274,37 @@ void restore(ID3D11DeviceContext* ctx) {
     if (holoRestore.retried)
         standDown(holoRestore.restored ? "a hologram shader/b13 restoration fault recovered on the bounded retry"
                                      : "hologram shader/b13 restoration failed; original state untrusted, owner draw issues suppressed until the frame boundary puts it back");
-    vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
+    if (g_draw.mapRunBound) {
+        // A map sprite issue left the layer and the eye's D16 bound: they stay bound for the next issue of the run (the viewports, scissor, blend and states below still go back each
+        // issue; they do not flush a depth surface, a render target change does). The game's targets pass to the run, which puts them back at its end.
+        const void* game[maprun::kTargets] = {};
+        for (int i = 0; i < maprun::kTargets; ++i) game[i] = g_draw.rtv[i];
+        if (g_mapRun.core.handOver(g_draw.mapRunEye, g_draw.mapRunRtv, g_draw.mapRunDsv, game, g_draw.dsv)) {
+            for (int i = 0; i < maprun::kTargets; ++i) {
+                g_mapRun.rtv[i] = g_draw.rtv[i];
+                g_draw.rtv[i] = nullptr;
+            }
+            g_mapRun.dsv = g_draw.dsv;
+            g_draw.dsv = nullptr;
+            g_mapRun.layerRtv = g_draw.mapRunRtv;
+            g_mapRun.layerDsv = g_draw.mapRunDsv;
+            g_mapRun.layerRtv->AddRef();
+            g_mapRun.layerDsv->AddRef();
+            g_mapRun.ctx = ctx;
+            g_mapRun.thread = GetCurrentThreadId();
+            detail::g_uiLayerMapRunHeld = true;
+        }
+        mapRunCount();
+    } else {
+        vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
+        // The game's targets are on the context again, so a run held for others is over (a fault between the issue's start and its bind comes here).
+        if (g_mapRun.core.held) {
+            g_mapRun.core.drop();
+            mapRunReleaseRefs();
+            mapRunCount();
+        }
+    }
+    g_draw.mapRunBound = false;
     vScreenRSSetViewportsRaw(ctx, g_draw.vpCount, g_draw.vp);
     if (g_draw.scissorSet) ctx->RSSetScissorRects(g_draw.scCount, g_draw.sc);
     ctx->OMSetBlendState(g_draw.blend, g_draw.factor, g_draw.sampleMask);
@@ -2398,8 +2488,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // The Galaxy Map's own issues (which 2: into the panel mask, which 3: the arrow's probe into the layer with nothing written) take their own blend and test no depth.
     const bool mapIssue = which >= 2;
     // The Galaxy Map's sprite depth (galaxy_map_ui.h, THE SPRITES' DEPTH): a map sprite's colour issue into the HDR layer binds the eye's D16 depth and tests it (which 0), and which 4 is the
-    // depth issue that writes it. The depth issue keeps the HDR layer's render target bound with the probe's write mask 0, so the two issues share one set of targets and the GPU does
-    // not change them between the colour issue and the depth issue (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"). Both only while a Galaxy Map is open in VR.
+    // depth issue that writes it. The depth issue keeps the HDR layer's render target bound with the probe's write mask 0, so the two issues share one set of targets. Between issues the targets change only if the context's are changed: restore() used to rebind the game's R11G11B10 and D32S8 after every issue, which alternated the private D16 and the game's depth-stencil 2,600 to 3,500 times a frame (11.1 ms of GPU measured at 432 sprites an eye; docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"), and now keeps them bound as a run (map_run_core.h). The earlier claim that the GPU does
+    // not change them between those two issues was false. Both only while a Galaxy Map is open in VR.
     const bool mapDepthIssue = which == 4;
     const bool mapDepthColour = which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && mapDepthTests(g_draw.family) && mapui::vrOpen();
     ID3D11RenderTargetView* target =
@@ -2568,7 +2658,23 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     g_draw.blend = bs;
     std::memcpy(g_draw.factor, factor, sizeof(factor));
     g_draw.sampleMask = sampleMask;
-    ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.rtv, &g_draw.dsv);
+    // The Galaxy Map's run of sprites (map_run_core.h): an issue of a run kind that finds a run held for its own eye, layer and D16 binds nothing; anything else ends a held run here,
+    // before the game's targets are read, so the context holds the game's again.
+    const bool mapRunIssue = mapDsv && (mapDepthColour || mapDepthIssue);
+    const maprun::Step mapRunStep = g_mapRun.core.begin(mapRunIssue, g_draw.eye, target, mapDsv);
+    if (mapRunStep == maprun::Step::kEndThenBind) mapRunRebind(ctx);
+    if (mapRunStep == maprun::Step::kKeep) {
+        // The context holds the layer's targets; the game's are the run's.
+        for (int i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+            g_draw.rtv[i] = g_mapRun.rtv[i];
+            if (g_draw.rtv[i]) g_draw.rtv[i]->AddRef();
+        }
+        g_draw.dsv = g_mapRun.dsv;
+        if (g_draw.dsv) g_draw.dsv->AddRef();
+    } else {
+        ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.rtv, &g_draw.dsv);
+    }
+    mapRunCount();
     g_draw.vpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetViewports(&g_draw.vpCount, g_draw.vp);
     g_draw.scissorSet = false;
@@ -2737,7 +2843,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
-    vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    if (mapRunIssue) {
+        g_draw.mapRunBound = true;
+        g_draw.mapRunEye = g_draw.eye;
+        g_draw.mapRunRtv = target;
+        g_draw.mapRunDsv = mapDsv;
+    }
     if (mapDsv) {
         // The game's depth-stencil state (and, for the depth issue, rasterizer state) is held and put back at restore; the layer's own go in through the raw setters.
         ctx->OMGetDepthStencilState(&g_draw.dsState, &g_draw.dsRef);
@@ -4592,8 +4704,19 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
         ID3D11DepthStencilView* dsv = nullptr;
         ID3D11UnorderedAccessView* uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
-        ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs,
-                                                       &dsv, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        if (g_mapRun.core.held) {
+            // A run of map sprites is held: the context has the layer's one target and the eye's D16, and the game's are the run's (map_run_core.h). The decision reads the game's, as it
+            // did before the run existed; no UAV is bound on a held run.
+            for (int i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+                rtvs[i] = g_mapRun.rtv[i];
+                if (rtvs[i]) rtvs[i]->AddRef();
+            }
+            dsv = g_mapRun.dsv;
+            if (dsv) dsv->AddRef();
+        } else {
+            ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs,
+                                                           &dsv, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        }
         bool anyUav = false;
         for (auto* u : uavs) {
             if (u) {
@@ -4813,6 +4936,37 @@ void uiLayerEnd(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerRedirecting = false;
 }
 
+void uiLayerMapRunEndSlow(ID3D11DeviceContext* ctx) {
+    if (!g_mapRun.core.held || g_mapRun.thread != GetCurrentThreadId()) return;
+    if (!ctx) ctx = g_mapRun.ctx;
+    if (ctx != g_mapRun.ctx) return;
+    g_mapRun.core.end();
+    mapRunRebind(ctx);
+    mapRunCount();
+}
+
+void uiLayerMapRunDrop() {
+    if (!g_mapRun.core.held) return;
+    g_mapRun.core.drop();
+    mapRunReleaseRefs();
+    mapRunCount();
+}
+
+bool uiLayerMapRunGameSet(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, bool hasUav) {
+    if (!g_mapRun.core.held || ctx != g_mapRun.ctx || g_mapRun.thread != GetCurrentThreadId()) return false;
+    const maprun::GameSet r = g_mapRun.core.onGameSet(n, reinterpret_cast<const void* const*>(rtvs), dsv, hasUav);
+    if (r == maprun::GameSet::kDrop) mapRunReleaseRefs();   // the game's call replaces the targets; nothing is bound back
+    mapRunCount();
+    return r == maprun::GameSet::kKeep;
+}
+
+bool uiLayerMapRunGameSetsOwn(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    if (!g_mapRun.core.held || ctx != g_mapRun.ctx || g_mapRun.thread != GetCurrentThreadId()) return false;
+    if (!g_mapRun.core.onOwnSet(n, reinterpret_cast<const void* const*>(rtvs), dsv)) return false;
+    mapRunCount();
+    return true;
+}
+
 bool uiLayerMultiplyBegin(ID3D11DeviceContext* ctx) {
     if (!g_draw.decided || g_draw.shape != UiBlendShape::kMultiply) return false;
     return beginGuarded(ctx, 1);
@@ -4823,8 +4977,8 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
     if (!g_draw.decided || !g_draw.counted || !g_draw.ds.writes() || g_draw.active || !ctx)
         return false;
     // The Galaxy Map's sprites and canvases write the stencil's bit 0x04 and nothing reads it: in the census of all three captured frames the only draws that test stencil are
-    // FC1193AFFC596F74 at #1 and #2, and each eye's depth-stencil is cleared with depth and stencil immediately before them. Going back to the game's buffer for every sprite
-    // while the map's private D16 is in play costs 5.5 ms of GPU a frame against 0.5 ms without (docs/galaxy-map-vr-2026-11-03.md, "The frame rate"). Flat keeps its write-backs.
+    // FC1193AFFC596F74 at #1 and #2, and each eye's depth-stencil is cleared with depth and stencil immediately before them. Going back to the game's buffer for a sprite would end the run of sprites (map_run_core.h), whose single bind is what keeps the private D16 and the game's depth-stencil from alternating; the write-backs' own alternation was one of two, the other was restore() (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight").
+    // Flat keeps its write-backs.
     if (mapui::vrOpen() && (g_draw.family == UiLayerFamily::kMapCanvas || g_draw.family == UiLayerFamily::kMapSprite)) {
         static bool said = false;
         if (!said) {
@@ -4834,6 +4988,7 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
         mapui::g_writeBackDeclined.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    uiLayerMapRunEnd(ctx);   // the colourless re-issue reads the context's targets as the game's: a held run is over (the sprites' own are declined above)
     bool ok = false;
     guarded("uiLayer.writeBack", [&] {
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.wbRtv, &g_draw.wbDsv);
@@ -7402,6 +7557,8 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
+    // A run of map sprites never outlives a frame: its references are let go and the game's targets are on the context for everything the boundary and the next frame do.
+    uiLayerMapRunEnd(ctx);
     settleIssueFence(ctx);
     // The Galaxy Map's sprite depth (40.6 MB for both eyes at 4508x4510) is let go once the map is shut.
     if (!mapui::vrOpen() && (g_eye[0].mapDepthTex || g_eye[1].mapDepthTex)) {

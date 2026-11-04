@@ -150,6 +150,8 @@ namespace edvr{
 bool vrWorldRouteOwnsNextFrame(){return routeOwns;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the route's re-issued world, or a map's or menu's 2D screen
 // the layer took under the on-foot maps gate. The door cannot tell which, so one stub answers for both.
+namespace detail { bool g_uiLayerMapRunHeld=false; } // the Galaxy Map's run of sprites is never held in this rig; the doors only ask (src/d3d11/ui_layer.h)
+void uiLayerMapRunEndSlow(ID3D11DeviceContext*){}
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&routeTookEye[eye]&&seq!=0&&routeTookSeq==seq;}
 int uiLayerWorldDoorGap(uint64_t,uint32_t,ID3D11Texture2D* frame){++gapCalls;gapFrame=frame;return gapAnswer;}
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const float colour[4]){++rawClears;c->ClearRenderTargetView(v,colour);}

@@ -77,6 +77,7 @@ struct State {
     bool open = false;
     unsigned edgeNotes = 0;
     bool openedInWindow = false;
+    uint64_t openFrames = 0;   // frames with the map open since the last 30 s line
     uint64_t lastLineMs = 0;
     bool cursorSaid = false;
     const char* why = "";
@@ -234,6 +235,19 @@ void thirtySecondLine(State& s, uint64_t now) {
     const bool wasOpen = s.openedInWindow;
     s.openedInWindow = s.open;
     s.lastLineMs = now;
+    // The run of sprites (map_run_core.h): the render target binds the map's sprites cost. Said whenever the map was open in the window, even with no run: the line then says 0 runs.
+    const uint64_t runBinds = g_run.binds.exchange(0, std::memory_order_relaxed), runsStarted = g_run.started.exchange(0, std::memory_order_relaxed);
+    const uint64_t runsEnded = g_run.ended.exchange(0, std::memory_order_relaxed), setsKept = g_run.setsKept.exchange(0, std::memory_order_relaxed);
+    const uint64_t setsDropped = g_run.setsDropped.exchange(0, std::memory_order_relaxed), setsOwn = g_run.setsOwn.exchange(0, std::memory_order_relaxed), frames = s.openFrames;
+    s.openFrames = 0;
+    if (wasOpen || runBinds || runsStarted)
+        Log::get().note("map pointer: render target binds for the map's sprites %.1f a frame (%llu in all over %llu map frames); runs of sprites started %.2f a frame (%llu), ended %.2f a frame (%llu); "
+                        "the game's own sets of the saved targets inside a run kept %llu, of others %llu, of the layer's own read back %llu%s",
+                        frames ? static_cast<double>(runBinds) / static_cast<double>(frames) : 0.0, static_cast<unsigned long long>(runBinds), static_cast<unsigned long long>(frames),
+                        frames ? static_cast<double>(runsStarted) / static_cast<double>(frames) : 0.0, static_cast<unsigned long long>(runsStarted),
+                        frames ? static_cast<double>(runsEnded) / static_cast<double>(frames) : 0.0, static_cast<unsigned long long>(runsEnded),
+                        static_cast<unsigned long long>(setsKept), static_cast<unsigned long long>(setsDropped), static_cast<unsigned long long>(setsOwn),
+                        runsStarted ? "" : (frames ? " -- 0 runs: the sprites were not drawn in a run" : ""));
     const uint64_t declinesTotal = ringFull + perFrameFull + probeFaults + unavailable + maskLate;
     if (!wasOpen && !calls && !swappedTotal && !maskTotal && !probes && !answered && !declinesTotal && !depthMade && !depthUnavailable && !depthTested && !depthIssued && !depthFaults && !writeBackDeclined && !eyesValid) return;
     char reasons[256] = "";
@@ -309,6 +323,7 @@ void mapPointerFrame() noexcept {
                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.cursor.hook.target()) - s.base),
                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.project.hook.target()) - s.base), static_cast<unsigned long long>(s.pointerReturn - s.base));
     }
+    if (open) ++s.openFrames;
     if (open != s.open) {
         if (open) s.openedInWindow = true;
         s.open = open;

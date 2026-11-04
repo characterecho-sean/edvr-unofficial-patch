@@ -1,5 +1,6 @@
 #include "temporal_shader_bytecode.h"   // kMapIconFacingVsBytecode and the rest: the build's compiles of galaxy_map_vs.h
 #include "galaxy_map_ui.h"
+#include "galaxy_map_axes.h"        // mapCamAxes: the one pair of axes the world quads are spanned on
 
 #include <windows.h>
 
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <new>
 
+#include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "flat_compute_readback.h"   // FlatComputeInternalScope: EDVR's own calls do not reach the game's tees
@@ -58,9 +60,10 @@ struct State {
     bool failed = false;
     const char* said[4] = {};
     unsigned flips = 0;
-    ComPtr<ID3D11Buffer> camBuf;      // MapCam at vertex slot 10: the map camera's up (stage 0 rows[1]), its position and the two eyes' offsets
+    ComPtr<ID3D11Buffer> camBuf;      // MapCam at vertex slot 10: the world quads' axes (R, U, F), the map camera's position and the two eyes' offsets
     bool camWritten = false;
     uint64_t camChanges = 0;          // mapCameraChanges() at the last write
+    bool camCameraUp = false;         // the key choice (g_iconUpCamera) at the last write
     uint64_t eyeGen = 0;              // mapCameraEyes' generation at the last write that carried the eyes
     bool eyesWritten = false;         // the last write carried the eyes (mapPos.w 1)
     bool camBoundSaid = false, camFailedSaid = false, eyesSaid = false;
@@ -104,8 +107,8 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     if (dev) dev->Release();   // identity only
 }
 
-// The map camera's constants in the MapCam buffer, bound at slot 10 (galaxy_map_vs.h): mapUp, mapPos (stage 0's position, w 1 when the eyes are valid) and the two eyes' offsets as vectors
-// in the map frame. The buffer is written when mapCameraChanges() has moved since the last write (the first write included), or the eyes' pair has changed or become valid or invalid,
+// The map camera's constants in the MapCam buffer, bound at slot 10 (galaxy_map_vs.h): the one pair of axes the world quads are spanned on (galaxy_map_axes.h) and its forward, mapPos (stage 0's position, w 1 when the eyes are valid) and the two eyes' offsets as vectors
+// in the map frame. The buffer is written when mapCameraChanges() has moved since the last write (the first write included), or the eyes' pair has changed or become valid or invalid, or the temporary key has changed the choice of up,
 // and slot 10 is read and set only when it does not hold ours: there can be 500 such draws a frame, and the read catches a game call that cleared the slots. False until the pose has
 // answered once; after that the last answer stands when the camera's reader has none. Without the eyes mapPos.w is 0 and the shaders use the game's own eye.
 bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
@@ -113,22 +116,25 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
     float eyes[2][3] = {};
     uint64_t eyeGen = 0;
     const bool eyesOk = mapCameraEyes(eyes, &eyeGen);
-    float cam[16] = {0.0f, 1.0f, 0.0f, 0.0f};
+    // R, U, F at floats 0..11 (w 0), the position at 12..15 (w 1 when the eyes are valid), the two eyes' offsets at 16..19 and 20..23. Before the pose answers the camera's own default axes.
+    float cam[24] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     const bool eyesMoved = eyesOk ? (!s.eyesWritten || eyeGen != s.eyeGen) : s.eyesWritten;
-    if (!s.camBuf || !s.camWritten || changes != s.camChanges || eyesMoved) {
+    const bool cameraUp = g_iconUpCamera.load(std::memory_order_relaxed);
+    if (!s.camBuf || !s.camWritten || changes != s.camChanges || eyesMoved || cameraUp != s.camCameraUp) {
         MapCameraPose pose;
         if (mapCameraPose(pose)) {
-            cam[0] = pose.rows[1][0];
-            cam[1] = pose.rows[1][1];
-            cam[2] = pose.rows[1][2];
-            cam[4] = pose.position[0];
-            cam[5] = pose.position[1];
-            cam[6] = pose.position[2];
-            cam[7] = eyesOk ? 1.0f : 0.0f;
+            const MapAxes axes = mapCamAxes(pose.rows, cameraUp);
+            for (int k = 0; k < 3; ++k) {
+                cam[k] = axes.R[k];
+                cam[4 + k] = axes.U[k];
+                cam[8 + k] = axes.F[k];
+                cam[12 + k] = pose.position[k];
+            }
+            cam[15] = eyesOk ? 1.0f : 0.0f;
             if (eyesOk) {
                 for (int e = 0; e < 2; ++e)
                     for (int k = 0; k < 3; ++k)
-                        cam[8 + 4 * e + k] = eyes[e][0] * pose.rows[0][k] + eyes[e][1] * pose.rows[1][k] + eyes[e][2] * pose.rows[2][k];
+                        cam[16 + 4 * e + k] = eyes[e][0] * pose.rows[0][k] + eyes[e][1] * pose.rows[1][k] + eyes[e][2] * pose.rows[2][k];
             }
             if (!s.camBuf) {
                 ComPtr<ID3D11Device> dev;
@@ -151,13 +157,14 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
             }
             s.camWritten = true;
             s.camChanges = changes;
+            s.camCameraUp = cameraUp;
             if (eyesOk) {
                 g_counters.eyeGenSteps.fetch_add(s.eyesWritten && eyeGen > s.eyeGen ? eyeGen - s.eyeGen : 1, std::memory_order_relaxed);
                 g_counters.eyesValid.fetch_add(1, std::memory_order_relaxed);
                 if (!s.eyesSaid) {
                     s.eyesSaid = true;
                     Log::get().note("galaxy map: the two eyes' offsets from the map camera's position are published (eye 0 %.4f %.4f %.4f, eye 1 %.4f %.4f %.4f in the map frame): the overlays are held against the game's rounded eye",
-                                    cam[8], cam[9], cam[10], cam[12], cam[13], cam[14]);
+                                    cam[16], cam[17], cam[18], cam[20], cam[21], cam[22]);
                 }
             }
             s.eyesWritten = eyesOk;
@@ -175,8 +182,8 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
         ctx->VSSetConstantBuffers(kCamSlot, 1, &ours);
         if (!s.camBoundSaid) {
             s.camBoundSaid = true;
-            Log::get().note("galaxy map: the map camera's constants are bound at vertex constant slot %u for the icons, labels, rings and stems (slot held %s before; first up %.3f %.3f %.3f, eyes %s)", kCamSlot,
-                            held ? "another buffer" : "nothing", cam[0], cam[1], cam[2], eyesOk ? "valid" : "not yet published: the game's eye");
+            Log::get().note("galaxy map: the map camera's constants are bound at vertex constant slot %u for the icons, labels, rings and stems (slot held %s before; first up axis %.3f %.3f %.3f, %s, eyes %s)", kCamSlot,
+                            held ? "another buffer" : "nothing", cam[4], cam[5], cam[6], cameraUp ? "the camera's up" : "the grid's vertical", eyesOk ? "valid" : "not yet published: the game's eye");
         }
     }
     if (held) held->Release();
@@ -237,9 +244,18 @@ void drain(State& s, ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
 
 } // namespace
 
+void readIconUpKey() {
+    const std::string value = Config::get().getString("experimental.galaxy_map_icon_up", "camera");
+    const bool camera = value != "stems";
+    g_iconUpCamera.store(camera, std::memory_order_relaxed);
+    Log::get().note("galaxy map: experimental.galaxy_map_icon_up = %s at this opening: the world quads' up is %s%s", value.c_str(),
+                    camera ? "the camera's up (the game's own planes, with the triangles joining them)" : "the grid's vertical (the stems' direction)",
+                    !camera || value == "camera" ? "" : " (not a value the key takes: camera)");
+}
+
 void setGates(bool vr, bool pointer) {
     const bool wasPointer = g_pointerOpen.exchange(pointer, std::memory_order_relaxed);
-    g_vrOpen.store(vr, std::memory_order_relaxed);
+    if (!g_vrOpen.exchange(vr, std::memory_order_relaxed) && vr) readIconUpKey();   // read at each opening of the map, so a change of the ini takes effect at the next one
     if (wasPointer && !pointer) {
         g_over.store(false, std::memory_order_relaxed);
         if (g_st) g_st->resetPending.store(true, std::memory_order_release);   // the render thread lets the queries go at its next probe

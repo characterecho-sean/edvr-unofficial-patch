@@ -2944,6 +2944,15 @@ __declspec(noinline) void noteStaleForwardOnce(State* s, size_t slot, const void
     }
 }
 
+// The VR Galaxy Map's run of sprites (ui_layer.h, map_run_core.h) leaves EDVR's own targets bound between two map overlay draws, and the first call of every draw hook ends it unless the
+// draw's bound vertex shader is one of the four the run is made of. One load of a plain bool for any draw while no run is held. The indirect draws are never a map overlay's.
+inline void mapRunBeforeDraw(ID3D11DeviceContext* self) {
+    if (uiLayerMapRunHeld() && self == g_state->ownerCtx && !uiVsIsMapOverlay(bindingShaderHash(BindSlot::Vs))) uiLayerMapRunEnd(self);
+}
+inline void mapRunBeforeIndirectDraw(ID3D11DeviceContext* self) {
+    if (uiLayerMapRunHeld() && self == g_state->ownerCtx) uiLayerMapRunEnd(self);
+}
+
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearRtv(self, rtv, c); return; }
@@ -3049,6 +3058,17 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
         g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
         return;
     }
+    // The Galaxy Map's run of sprites (ui_layer.h): the game sets the targets the run saved, which it believes are bound: its shadow takes the call as below and the real call is not made,
+    // so the run stays held. Any other set drops the run (the game's call replaces ours) and goes on as below. The layer's own targets, read back from the context, change nothing at all.
+    if (uiLayerMapRunHeld() && uiLayerMapRunGameSetsOwn(self, n, rtvs, dsv)) return;
+    if (uiLayerMapRunHeld() && uiLayerMapRunGameSet(self, n, rtvs, dsv, false)) {
+        bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
+        bindingSet(BindSlot::Dsv0, dsv);
+        if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
+        if (temporalPassWantsFssChrome()) temporalPassNoteOmSet(n);
+        if (gpuPassProfileCapturing()) gpuPassProfileNoteOm(self, n, rtvs, dsv);
+        return;
+    }
     // The depth probe reads an eye-draw depth target at the moment the
     // game switches away from it: its contents complete, and -- once the
     // stage is cleared here -- no longer bound as a target, which is the
@@ -3100,6 +3120,21 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
     // not be treated as a rebind. Spelled out rather than named: the SDK header
     // this builds against does not define the constant.
     constexpr UINT kKeepRenderTargetsUnchanged = 0xFFFFFFFFu;
+    // The Galaxy Map's run of sprites (ui_layer.h). Targets kept with UAVs set beside them: the game's targets go back first (the UAVs would sit beside ours). Targets set with no UAV: as in
+    // hookedOMSetRenderTargets. Any other set drops the run.
+    if (uiLayerMapRunHeld()) {
+        if (n == kKeepRenderTargetsUnchanged) {
+            if (uavCount) uiLayerMapRunEnd(self);
+        } else if (uavCount == 0 && uiLayerMapRunGameSetsOwn(self, n, rtvs, dsv)) {
+            return;
+        } else if (uiLayerMapRunGameSet(self, n, rtvs, dsv, uavCount != 0)) {
+            bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
+            bindingSet(BindSlot::Dsv0, dsv);
+            if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
+            if (temporalPassWantsFssChrome()) temporalPassNoteOmSet(n);
+            return;
+        }
+    }
     if (n != kKeepRenderTargetsUnchanged) {
         void* cur = bindingGet(BindSlot::Dsv0);
         if (depthProbeWantsSample(cur, dsv)) {
@@ -3248,6 +3283,7 @@ void STDMETHODCALLTYPE hookedDiscardView(ID3D11DeviceContext* self, ID3D11View* 
 void STDMETHODCALLTYPE hookedSwapDeviceContextState(ID3D11DeviceContext* self, ID3DDeviceContextState* state,
                                                     ID3DDeviceContextState** previous) {
     if (!foreignContext(self)) flatIssueEpochRevoke();
+    if (self == g_state->ownerCtx) uiLayerMapRunEnd(self);   // the state this swap puts away must hold the game's targets (ui_layer.h)
     g_state->realSwapDeviceContextState(self, state, previous);
 }
 
@@ -3353,6 +3389,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
         Log::get().note("vScreen: ClearState seen (slot %zu); bindings dropped with it",
                         kSlotClearState);
     }
+    if (self == s->ownerCtx) uiLayerMapRunDrop();   // the targets are cleared with the rest of the state: no bind back (ui_layer.h)
     forgetBindings(s);
     if (flatRuntimeActive()) flatRuntimeClearBindings();
     if (flatTemporalCapturing()) {
@@ -3384,6 +3421,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         "lists invalidate resource history.",
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
+    uiLayerMapRunEnd(self);   // a command list runs on the context's state, which must be the game's (ui_layer.h)
     const bool privateExecution = graphicsBridgeConsumePermit(self, list, restoreContextState);
     // A recorded command list runs on the state the context holds: the game's, not engine motion's.
     if (flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kExecuteCommandList);
@@ -4533,6 +4571,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // The resized panel, which swallows the draw only when it succeeds.
     if (v == DrawVerdict::kLoaderPanel) {
         const bool layered = uiLayer && uiLayerBegin(self);
+        if (!layered) uiLayerMapRunEnd(self);   // a draw the layer does not take is drawn into the game's targets (the Galaxy Map's run, ui_layer.h)
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
@@ -4558,6 +4597,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             seedOutcome.substituted = true;
             seedOutcome.known = false; // surviving ranges may issue zero or several commands
         }
+        uiLayerMapRunEnd(self);   // the surviving ranges are drawn into the game's targets
         forwardQuadSkip(self);
         return;
     }
@@ -4567,6 +4607,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (g_state->curveThisDraw) {
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
+        if (!layered) uiLayerMapRunEnd(self);   // as above
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
         // The strip's own motion pass is the per-eye one the game's tail ends with, which the flat screen skips while the VR
         // world route owns the frame (worldReissue.on: the route's re-issue below makes the eye layer-only); so does this.
@@ -4616,6 +4657,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // other verdict inside its fix's state change. A handful of loads and compares on a
     // draw that is none of them.
     // A Verdict-class draw also carries the fix that wraps it (alteredFixOf): the census names each.
+    if (!layered) uiLayerMapRunEnd(self);   // the game's own issue below goes to the game's targets, as above
     const AlteredDrawClass alteredClass = classifyAlteredDraw(owner, v == DrawVerdict::kNone,
                                                               engineVelocityDrawSubstituted(), layered);
     // F47 (TEMPORARY, fix.native_on_foot_marker_fix, default on since F98c): the marker composite's private b0 (rows 4 and 5 moved by the eye's NDC
@@ -4904,6 +4946,7 @@ static inline void nativeOnFootMarkerTee(ID3D11DeviceContext* self, uint32_t ins
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
@@ -4939,6 +4982,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
@@ -5320,6 +5364,7 @@ private:
 };
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
@@ -5366,6 +5411,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
+        uiLayerMapRunEnd(self);   // the fast path skips forwardWithVerdict's brackets: the draw is the game's, into the game's targets
         // forwardWithVerdict's own return for the owner's blocked UI layer is kept; the game's draw otherwise as it is issued there.
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -5387,6 +5433,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
+    mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
@@ -5408,6 +5455,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
@@ -5453,6 +5501,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
+        uiLayerMapRunEnd(self);   // as in hookedDraw
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
@@ -5475,6 +5524,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    mapRunBeforeDraw(self);
     // The FSS reveal fix (fss_reveal.h; VR profile only, one bool when the scanner is not on show): at the first reveal composite of a frame the frame's first downsample of the ring layer is
     // replayed from the finished layer. First in the thunk and through the game's own un-hooked entry points, so nothing that tracks state sees the replay.
     if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {
@@ -5546,6 +5596,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
+        uiLayerMapRunEnd(self);   // as in hookedDraw
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance);
@@ -5570,6 +5621,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
