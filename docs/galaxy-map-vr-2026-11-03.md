@@ -1,33 +1,151 @@
-# VR Galaxy Map: motion and the cursor
+# VR Galaxy Map: motion, icons and the cursor
 
 ## Status
 
-State (2026-11-04): flight 1 (v0.22.0-rc.6-20-g948fa347, Frontier, VR, Galaxy Map, three Insert dumps 044759689001 / 044822729002 / 044858398003): the no-jitter, no-history gate WORKED (log line, map_frames=11164, every dump frame jitter 0 and dlss_reset true) but the text and icons SHIMMER at rest. Fix 2 BUILT (full build green), NOT FLOWN: jitter and history are kept while the game's camera follows the head and reset only while the map moves. Cursor: cause still NOT found; the flight-1 probe never opened (a bug, fixed); the user's reading: the cursor lives on the UI panel's plane, not in the stars' space.
+State (2026-11-04): all four reported symptoms have a named cause; the design below is NOT BUILT. Branch `claude/galaxy-map-motion-cursor-e864cb` holds fix 2 of the motion gate and the pointer probe (7c1544a0), both flown. Nothing is merged.
 
-Flight 1 findings (2026-11-04):
-- Shimmer: with no history every frame is a standalone, un-antialiased upscale (4508x4510 from 2254x2255) and the game camera tremors 0.04 to 0.15 deg a frame at rest, about one input pixel, so each thin edge is requantised each frame (consecutive frames differ in 1 to 3% of pixels by over 24 levels). In the history-on dump 193401951001 the pass's motion field was clean: a smooth rotation field, median 0.42 px, std 0.006 px across 40 px patches. History is right at rest; what it cannot know is the map itself moving.
-- Rest figures that set the bounds (dump 193401951001, 16 frames): the rows' delta against the head's 0.012 to 0.050 deg; the rows' translation 0.0002 to 0.0122 (float32's step at the camera's 69018 units is 0.0078). Bounds kMapStillDiffDeg 0.15, kMapStillMove 0.05 (temporal_mode.h). NOT calibrated on a pan, orbit or zoom: the first flight of fix 2 must read `temporal aa map:` at close (kept, reset, the largest figures each side).
-- Probe bug: f111RefreshGates called temporalMapOpen(journalGuiFocus(&mapFocus), mapFocus); MSVC evaluated mapFocus (0) before the call wrote it, so the probe never opened (no `map probe` line, no F111 lines). Fixed with a separate statement.
-- Cursor, from the three dumps: the hover ring is on POLLUX in all three while the arrow is elsewhere, and between dumps 1 and 2 the stars moved about 0.24 tan in view while the arrow moved about 0.05: the arrow is mostly fixed in view (panel-locked), the ring is in star space. This fits M2 or M3 (the sprite on the panel plane), not M1; the probe's sprite tan per NDC unit still separates M2 from M3.
+Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
-Evidence (flight 0): Frontier eye dump stamp 193401951001 (log edvr_gfx_20261103_192955, v0.22.0-rc.6-19-gd85658fc, DLSS performance, 2016x2017 in, 4032x4034 out, preset K), Galaxy Map open (GuiFocus 6 in the 19:33:55 window).
+| Symptom | Cause | Standing | Fix |
+|---|---|---|---|
+| Yawing rotates icons | EDVR's own roll-free basis (`fix.particle_billboard`) uses galactic up on a map camera pitched 45 degrees | MEASURED, within 0.4 degrees in all three dumps | Take three shaders out of the roll-free table |
+| Map movement smears lines and text | 360 to 450 overlay draws per eye are in the scene and reach DLSS; only flat has them in the UI layer. The stillness bound also keeps history on slow moves | MEASURED | VR map families in the UI layer; reset on the map camera's exact change |
+| Cursor does not select stars | Arrow is at about 1 m on the panel shell; the hover uses a different point, about 1.83 times the arrow's angle | Arrow MEASURED; hover gain INFERRED, fits better than gain 1 | Hover from the arrow's direction, far away; arrow and panels at star depth |
+| Moving the headset changes the system | The hover point and the arrow are near, the stars are at infinity. The head's move between dumps carried the eyes 6.7 cm (about 0.065 tan at 1 m); labelled stars near the pointer are 0.02 to 0.05 tan apart | Geometry MEASURED; that this is the mechanism is INFERRED (K's camera OPEN) | Same fix; it does not depend on K's camera |
 
-Motion (built, fix 2):
-- The VR pass ran with jitter and history on the map. The map writes no depth (flat finding, docs\design-flat-temporal-aa-2026-09-23.md, 2026-10-10), so the pass has only the head's delta, which is wrong whenever the map itself moves.
-- Fix 1 (flown, shimmers): GuiFocus 6, 7 or 8 (temporalMapOpen, src\common\temporal_mode.h) took away the jitter and all history. Fix 2: native_temporal.cpp hands the pass flags bit 8 on the steady map frames; temporal_pass.cpp compares the rows' delta with the head's (temporalMapCameraStill) and keeps the history or resets it, and says which in temporalMapStillBits(); begin() jitters only behind a frame both eyes kept. The frames a map opens and closes on take no history. The pass still upscales, so the HUD layer and the sharpen stay on. The Full System Scanner (9) is not included: its own latch owns it in VR.
-- Known gaps: the journal lags up to 0.5 s, so the first frames after opening still jitter (flat has the same lag). On foot GuiFocus is absent, so the on-foot VR map gets no fix yet (flat infers it from the map canvas draw, FlatUiMapCanvasLatch; VR has nothing equivalent).
-- Flight check (fix 2): log `native temporal: map aa: on the Galaxy Map (GuiFocus 6) the pass keeps jitter and history ...`; at close `native temporal map aa: map_frames=N` and `temporal aa map: K eye-frames kept their history (...), R reset it (...)`. At rest in an eye dump: jitter0/jitter1 nonzero and dlss_reset false on all but the first frames; while panning, orbiting and zooming: no ghost, and R grows with the largest figures far past the bounds. If a slow pan ghosts, lower the bounds from those figures.
+Decision needed: panels at star depth (recommended; see "Fix 3") or kept at about 1.2 m. Kept means an over-panel test, for which the game offers no signal found so far.
 
-Cursor (open):
-- Dump: right eye, tan x right / y up, the glowing hover ring is at (0.008, 0.176); the arrow sprite centre at (0.135, 0.072), hot spot (0.124, 0.088). Left eye ring (0.000, 0.180); the arrow is outside the 1400 px left crop in all 16 frames. Ring disparity is zero: the map is at infinity.
-- RE (analysis-inbox 20261103-202226-galaxy-map-pointer, build 334925): the hover is a screen-space nearest-star test (0x3ADE6F0 over 0x3B91D80, GalaxyMapVisualisation 0x438 bytes), not a ray and not a Flash hit test. The arrow is the MouseCursor component (0x474A740, pose from 0x4505680 = controller +0x110..+0x14F), placed in the world from the pick camera C2 at the pick mesh's depth, plus a second matrix S * C2.proj * inverse(C1.proj) * C1.pose. INFERRED: the hover reads the sprite position (controller +0x140), so rewriting that position would move the hovered star too.
-- Candidates, not separable by the one dump: M1 the on-foot rho lever (fits only with the pick axis 8 deg up; would invert mouse motion), M2 the pointer ray is right but the sprite sits near (about 0.56 m) while the stars are at infinity (needs the game camera 6.5 cm right of and 4.9 cm below the right eye), M3 the sprite lands on the UI-fov-scaled panel while the hover uses the camera fov (k = tan(0.5 x 1.0) / tan(0.5 x 1.571) = 0.546; predicts arrow (0.09, 0.096)).
-- Discriminator: the sprite's tan per NDC unit. Camera tangent (1.065) = M2; UI tangent (about 0.58) = M3; negative = M1. Head translation moves the offset in M2 only.
-- Instrument built: while GuiFocus 6, 7 or 8 aboard, native_on_foot.cpp f111RefreshGates opens the observe-only F111 pointer hooks and F114b's owner transform hook (no F154 placement, no look change). Log: `panel pointer (F111) map probe: ... open`, then the usual `panel pointer (F111) move:` and `1 s:` lines (detail log).
-- Not found: the draw that consumes the cursor component's matrices, the projector K's class, the map panel's owner type (is it the 0x47299F0 screen-space owner, S+0x1C0 != 0?), System Map and Orrery hover.
+Open, none blocks the build: who writes K's matrices (0x2894A50 reads W+0x420 and W+0x460); the hover pointer block's class ([vis+0x110]); whether a click re-tests the star (candidate: vis+0x2C0 copied from +0x2B0; the fix logs any other caller of K's projection); System Map and Orrery hover (not read, so fix 3 is Galaxy Map only).
 
-Next flight (fix 2 and the fixed probe): cockpit, Galaxy Map open. Rest: one Insert dump. Move: pan, orbit and zoom the map, looking for ghosts. Cursor: three Insert eye dumps with the cursor held over three well-separated stars (wider left crop), detail log on; read the F111 lines against each dump's timestamp. If the map probe line never appears or there are no F111 cycles, the hooks did not open: widen the instrument (F154's owner hook for the owner type and S+0x1C0, and a hook on 0x3ADE6F0 to log K's projection of the pointer and the picked star).
+Temporary to remove when this closes: the F111 map probe (native_on_foot.cpp f111RefreshGates), `temporalMapCameraStill` and its two bounds. No new keys.
 
-Candidate fix (not built, wait for the flight): hook 0x4505680 and rewrite the pose copy's position after the original returns; that changes only the picture, not controller +0x140. Scaling the position also shrinks the sprite unless the size setter 0x1407B6DC0 or the rows are scaled too.
+Next: build fixes 1, 2 and 3 in that order, one flight (card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
-Ruled out: no jitter and no history for the whole map (fix 1), because every frame is then a single un-antialiased upscale and the 0.05 deg a frame of tremor makes thin text and icons shimmer at rest (flight 1, 2026-11-04). A symmetric-vs-asymmetric frustum mismatch alone (it gives a constant tan offset of 0.19 in x only; the observed offset has a y part of -0.104). Head-pose latency (head rows about identity in the dump; 0.13 tan is about 7.5 degrees).
+Ruled out:
+- ruled out: the left eye missing panels and the arrow in play, because it is the dump's first frame only. At each run's start the log says `eye unknown` for the interface and cursor draws and counts one swap (5400 of 5400 eyes matched in the window before); frames 1 to 15 have the UI in both eyes. The overview images are taken from frame 0, so do not read a left-eye overview for the UI. Eye dumps lose frame 0's left UI: a small bug in the dump's arming, not looked into.
+- ruled out: the arrow being head-locked, because its record's direction stays within 0.01 degrees while the head yaws 8.7 degrees in dump 061416462001.
+- ruled out: the rho lever (M1) on the map, because the panel's pick owner is the upright 0x4526E40.
+- ruled out: no jitter and no history for the whole map (fix 1), because every frame is then a single un-antialiased upscale and the tremor makes thin text shimmer.
+- ruled out: the labels' fixed quaternion as the yaw symptom, because those quads are world-fixed and do not turn; the triangles do.
+- ruled out: a symmetric-vs-asymmetric frustum mismatch alone (it gives a constant 0.19 tan in x only). Head-pose latency (head rows are about identity frame to frame).
+
+## What the dumps show
+
+**Two frames, one head-free pose.** Each frame has four cameras (refresh hook, kind 5): left and right in the map frame, left and right in a UI frame. The UI frame's axes are the map camera's base rotation, its origin (0,0,0). The head enters both as rotation and as a real-scale eye offset (eye separation about 0.056 in each frame's units).
+
+The camera source's stage 0, named `GalaxyMapView`, holds the head-free pose: rows (1,0,0), (0,0.7071,0.7071), (0,-0.7071,0.7071), position (49996.656, 41092.668, 23990.863), identical to the last digit in all three dumps while the head swings 45 degrees (`pool\camera_<stamp>.json`, read by flat_stationary_camera_capture.cpp's hook on 0x2874290). This is the map's exact motion signal and the base for every direction below.
+
+**The frame's draws, per eye, in order** (census at 06:14:50):
+
+| Order | Draws | What | Today |
+|---|---|---|---|
+| 1 | 9A94, 78411B x2, 88DCF1 | sky, Milky Way | scene |
+| 2 | E9A2F9 (n=576), 41C518 (52472 instances), 7D26BC (15291), 39D858 (384) | stars, dust | scene |
+| 3 | CFA918, B60790, DEF19B | bloom | scene |
+| 4 | C31238 ps 964221 (n=6 167 to 254, n=12 102 to 118), 12382D ps 855C46 (70 to 76), 94EA99 ps 65DAC5 (348 instances), 3028E7 ps 6C28D5 (315 instances) | icons and triangles, labels and grid, rings, stems | scene, reaches DLSS |
+| 5 | 6F4B7B ps 5EC486 (scene at t0, bloom at t1), 20F383 ps DED879 | tonemap, copy to RGBA8 | game |
+| 6 | C4B4B3, B10B03, 5DAD41, 4EF6DD | panels, popups, arrow | UI layer already |
+
+Everything the map moves that has an edge is in row 4, after the bloom.
+
+**Three classes of quad** (pool records joined to draws through the instance buffer, `pool\pool_*`, `inst_*`):
+- Labels and n=6 icons: a quaternion the CPU writes, equal to the base pose with a 180 degree flip, the same in all three dumps. Fitted from text baselines and icon edges their right axis is world (1.00, 0.00, -0.01) and up (0.00, 0.70, 0.71) in every dump. They are fixed in the world and do not turn with the head. Leave them.
+- n=12 triangles: identity quaternion, spanned on cb1[277] and cb1[278]. These turn.
+- On-plane labels ("10 : 88 : -100") and discs: quaternion flat on the galactic plane. Correct.
+
+**The arrow.** Pool record with scale about -0.43 (RE: the 0.4 size). P = (-0.336, 0.338, 0.916), |P| = 1.032, in the UI frame. Direction fixed to 0.01 degrees while the head moves, so C2's rotation is head-free on the map (on foot the 2026-10-28 RE note measured it head-tracked). That the draw reads this record also answers the 11-03 question: it reads the scene object (RE block b), whose tan is P.x/P.z, and not the block rescaled by the two projections.
+
+| Dump | Head yaw, pitch | Arrow tan in the UI frame | Selected-star popup tan |
+|---|---|---|---|
+| 061416462001 | -28.2, +4.1 | (-0.367, +0.368) | (-0.641, +0.780) |
+| 061443363002 | -2.6, +8.0 | (-0.123, +0.256) | (-0.366, +0.416) |
+| 061450674003 | +17.4, -0.6 | (+0.516, -0.032) | none |
+
+Left and right eye together put the arrow at 0.049 tan of disparity (dump 061443363002, frame 8), the panel's text at 0.053, stars at 0.004. The eye origins explain it: 0.05 / 1.03 = 0.049.
+
+**The hover** (RE, READ unless marked): GalaxyMapVisualisation 0x3B91D80 and 0x3ADE6F0 compare viewport x, y of the pointer and each star, both through K = 0x28948F0 over 0x2894A50, which treats its input as a world POSITION. The pointer block is INFERRED to be the cursor's second matrix MC+0x60, `sprite * C2.proj * inverse(C1.proj) * C1.pose`: the sprite's x and y scaled by tan(C1)/tan(C2) = 1.83 and placed about 1 unit from the camera.
+
+Test against the 382 star positions in the pool: at gain 1.83 the popup's star is the 12th and 19th nearest to the pointer, at gain 1 the 170th and 87th. Better, not exact (the game weights by star size and holds a hover for 0.3 s). The fix replaces this point, so it does not rest on the fit. Dump 3 shows the symptom: the arrow is on Orobriges, gain 1.83 puts the pointer at tan 0.94, and nothing is selected.
+
+## Fix 1: icons (EDVR's bug, the smallest change)
+
+`fix.particle_billboard`'s roll-free rebind builds right = cross((0,1,0), row 279). In cockpit space that is horizontal. On the map (0,1,0) is galactic up and the camera looks 45 degrees down onto the plane, so the basis rolls against the eye with every yaw.
+
+| Dump | EDVR's basis predicts | Clean magenta triangles measure |
+|---|---|---|
+| 061416462001 | +20.7 degrees | +20.3 (3 triangles) |
+| 061443363002 | +2.4 | +2.8 (5) |
+| 061450674003 | -14.3 | -14.6 (6) |
+
+The match also shows row 279 is the eye's forward, so the game's own rows 277 and 278 are the eye's axes and stock quads stay upright in the eye.
+
+Change: remove 12382D2EA45E9632, 94EA991C3A03DBD9 and C31238331D8AC3D4 from the roll-free table (particle_fix.cpp:234, particle_fix.h:62, the static checks' count). They appear in no other scene: 31 of 639 roll-free windows across the last 25 Frontier logs name them, all at map rates (over 100 draws a frame). This also drops the 5 block copies a frame the map pays today. F1502353BE051A2D is in no recent window; leave it.
+
+Tests: the rollfree rig's table, plus a basis check that names the map case so the table cannot regrow.
+
+## Fix 2: lines and text in the UI layer
+
+Take row 4 of the table into the HDR layer while a map is open, and let DLSS keep only what has no edges to smear.
+
+- **Families.** flat_ui_layer_math.h names kMapCanvas and kMapSprite (including ps 964221955A9E77E7) and the path exists: begin, issue, tone re-issue, composite. VR gets the same pairs behind the same gate, plus a new family for the rings (94EA99 ps 65DAC5) and stems (3028E7 ps 6C28D5), which flat leaves in its scene. Flat's rule does not change.
+- **Tone.** Add 6F4B7B60C6C15BBF with 5EC48683F6C86A42 to the map's UI-layer tone table: the scene is t0, as in flat's map tone. Like flat's, it stays out of the shared registry (flat_ui_layer_math.h, "THE MAP FRAMES' TONEMAP").
+- **Order.** Row 4 is contiguous and after the bloom, and the panels land on top after the re-issue, so the picture's order holds.
+- **History.** Stars, dust and sky stay in DLSS with jitter and history at rest, which is what fix 2 of the gate gave them. A reset is decided by stage 0's pose changing: any change between frames, no threshold. This replaces `temporalMapCameraStill` and its 0.15 degree and 0.05 bounds. Those are the slow-move smear: position noise at rest peaks at 0.016, the bound was three times that, and the flight's kept frames reached 0.049.
+- **Gate.** The same hook gives the stage name, so `GalaxyMapView` opens the Galaxy Map's gate on its first frame instead of up to 0.5 s later. GuiFocus still gates 7 and 8 until a dump names their stages. RE also found IsInGalaxyMap (0x3B36E70, 0x3B85110) if the hook proves unsuitable. The hook on 0x2874290 exists for the dump's capture; the fix keeps it installed and reads only stage 0, and publishes the pose across threads (the capture saw the source on one thread and the camera refreshes on another).
+- **Cost.** 360 to 450 redirected draws per eye against about 6 today, plus stencil write-backs. Map frames have room (7.4 ms wait in the flight's timing line). Read `draw hook CPU` in the flight; if it matters, bracket the contiguous run with one target switch rather than per-draw state.
+
+This also ends the at-rest text shimmer for good: text is drawn at output resolution with no jitter, and owes DLSS nothing.
+
+## Fix 3: one space for arrow, panels and stars
+
+The map is at infinity; the panels and arrow sit about 1 m away in a frame only the UI uses. Make everything in the map share the stars' depth, and make the hover read the arrow.
+
+**(a) Panels and arrow at star depth.** All four UI vertex shaders (C4B4B3, B10B03, 5DAD41, 4EF6DD) subtract cb1[275], the eye's origin in the UI frame, and their clip rows are camera-relative. While the Galaxy Map is open, bind VS slot 1 with row 275 = (0,0,0), through roll-free's existing copy route (billboard_rollfree.h, patch row generalised). Rows 270 to 273 keep the head's rotation.
+
+Each eye then sees the UI from the frame's origin. Disparity goes to zero, head translation stops mattering, and the arrow's direction is exactly the direction the pick ray used, so panel clicks land where the arrow is drawn. Only the pixel's depth changes; the pick mesh, Flash and the game's arrow stay as they are.
+
+Cost of this choice: the panels lose their stereo depth and read at the stars' distance. The map's content is already there, so nothing needs re-converging. The alternative keeps panels at 1.2 m and moves only the arrow, which then doubles over a panel unless an over-panel test switches it. RE found no such signal: controller +0x100 is mesh-level, reads the same over empty shell and a button, and 0x455A720 only pushes into the movie. That leaves Scaleform's cursor event (untraced) or reading the layer's alpha back under the arrow.
+
+**(b) Hover from the arrow.** Hook K's projection (0x28948F0, prologue `48 89 5C 24 08`, 5 bytes) and act only on return address 0x3B91EE9, the pointer's call in 0x3B91D80. Replace the input point with `position + 100000 * (R * normalize(P))`, R and position from stage 0, P the sprite position (ui_mgr+0x530, controller+0x140).
+
+At that distance K's result depends only on direction, so the hovered star is the one behind the arrow whatever K's camera is, and a far point removes the head's parallax. Star calls (0x3ADE6F0) pass untouched. Hook chosen over a patch inside 0x3B91D80 (0x3B91EDF) because it leaves the function's bytes alone and returns the game's own viewport units.
+
+A self-check runs in the hook. It computes what the model says the game passed, `position + R * diag(g, g, 1) * P` with g from the two cameras' projections, compares it with the game's point, and logs the residual once a second for the first ten seconds. That line settles the pointer block's identity and the 1.83 with no extra flight. Any other return address reaching K with a point near the camera is logged once with its RVA: that is how a second test at click time shows itself.
+
+**What each symptom becomes.** The arrow stays on a star whatever the head does; the star it covers is the one selected; moving the headset changes neither.
+
+**Known limits.**
+- Reach: the arrow's range is the UI camera's, about tan 0.546 (28.6 degrees) each side of the map's forward, where the hover's was about 45. Stars past it need the map turned. Dump 3's arrow is at NDC 0.94 on Orobriges, so this will be felt. Scaling the mouse would need a depth or mode switch for the panels, so it is not in this design.
+- K returns false for a direction behind eye 0, so looking more than 90 degrees from the arrow clears the hover.
+- System Map and Orrery get fixes 1 and 2, not 3, until their hover is read (CursorCircle, OrreryCursor).
+- On foot: the VR map has no GuiFocus; stage 0's name may open the gate there, unproven.
+
+## Flight card (one flight, VR, cockpit, Galaxy Map open)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
+
+1. Rest, then yaw the head side to side with the mouse still. Expect: triangles stay upright; the arrow stays on its star; the same system stays selected. Insert dump.
+2. Pan, orbit and zoom, fast then slowly to a stop. Expect: labels, icons, rings and stems crisp with no trail. Stars may soften while moving.
+3. Hold the arrow on three separated stars and click each. Expect: that star is selected. Click a side tab and the search box to check panels.
+
+Log: `billboard roll-free` no longer names the three shaders; `ui quality: layer` shows map families at 720 to 900 a frame and `composites left in the scene` no longer lists 12382D2E; the new map pointer line gives the residual and g; `draw hook CPU` for the cost.
+
+If the arrow lands on a star but another is selected, read the pointer line's residual first, then the other-callers line.
+
+## Journal
+
+### 2026-11-04, flight 2 (7c1544a0), the reports this design answers
+
+"The mouse cursor is not functional for selecting stars"; "yawing the headset rotates the icons around their axis"; "moving the headset causes different systems to be selected"; "moving the map itself causes lines and text to appear smeared or ghosted like they have not been put into the UI layer".
+
+Log: `temporal aa map: 18636 eye-frames kept their history (at most 0.001 deg and 0.0490 off it), 1552 reset it (up to 161.846 deg and 69744.6940)`. The rotation bound was never close; the translation bound was reached. The probe opened (`map probe` line, F114b names owner 0x4526E40), but with no detail log there are no F111 cycle lines: the pool records gave the answer instead.
+
+Rest figures from these dumps (16 frames each): rows' move 0 to 0.016, head translation 0.00002 to 0.0046. Head moving 0.45 to 1.9 degrees a frame in dump 1 and the rows follow within 0.002 degrees.
+
+### 2026-11-04, flight 1 (948fa347), fix 2 of the gate
+
+The no-jitter, no-history gate worked (map_frames=11164, every dump frame jitter 0 and reset) and text and icons shimmered at rest: each frame is a standalone upscale and the camera tremors about one input pixel a frame. In the history-on dump 193401951001 the pass's motion field was a clean rotation field, so history is right at rest. Built fix 2: jitter and history kept while the rows follow the head (flags bit 8, `temporalMapStillBits`). The pointer probe never opened on this flight: `temporalMapOpen(journalGuiFocus(&mapFocus), mapFocus)`, MSVC read mapFocus before the call wrote it. Fixed with a separate statement.
+
+### 2026-11-03, flight 0 (d85658fc)
+
+Dump 193401951001. The pass ran with jitter and history on the map; the map writes no depth (flat finding, docs\design-flat-temporal-aa-2026-09-23.md, 2026-10-10), so the pass has only the head's delta. Static RE of the cursor and the hover: analysis-inbox 20261103-202226-galaxy-map-pointer, models M1 (lever), M2 (near sprite), M3 (fov scale). The dumps of 11-04 settle it: M1 out, M2 and M3 both present (near, and scaled).
