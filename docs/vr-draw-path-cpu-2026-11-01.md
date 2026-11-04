@@ -18,14 +18,10 @@
   map hooks, the post-R1 split, the layer-A fade gate. Ruled out or
   deferred: the tee trap under DLAA (0.08 ms), the sub-pixel floor, the EDHM
   bypass, offscreen/concourse culling until a census says what those draws are.
-- **Build 3 (#180, `cfa5e806`; flown 2026-11-03, "Flight 2026-11-03 (build
-  3)"):** both eyes' marker windows merged and copied once per Unmap, no key.
-  Passed: coverage held (`outside 0`, `escalated 0`, `faults 0`, named 3.0),
-  copied 69% of requested, `streamUnmapCopy` 0.697 to 0.506 ms (R5), nothing
-  else up 0.1 ms. B1: 607 of 676 non-eye draws are depth-only into one 512x512
-  target (one VS); the rest are three odd-sized colour+depth targets and a
-  downsample chain. Ruled out: skipping windows during an escalation
-  (escalations only on arrival).
+- **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
+  marker windows copied once per Unmap. Passed: coverage held, R5
+  `streamUnmapCopy` 0.697 to 0.506 ms. B1: 607 of 676 non-eye draws are
+  depth-only into one 512x512 target (one VS); not yet identified.
 - **Own time (2026-11-03, "EDVR's own time versus the calls it forwards"):**
   the arc's per-function "self" included the D3D calls each hook forwards.
   EDVR's own R1 time is 4.72 ms: the draw path 3.29, `Unmap` 0.39, `Map` 0.26,
@@ -44,10 +40,10 @@
 - **Build 5 (designed 2026-11-03, "Build 5: the per-draw calls that decline
   at once"; reviewed 2026-11-04):** star glow's call gated inline,
   `uiDepthOnEyeDraw`'s memo hit inline, a `viewIsSurface` front cache, one
-  engine-velocity generation, two TLS flags per call; temporary counts for
-  #184 and S2. Expected 0.21-0.34 ms. Asked: the cross-profile probe.
-  Antigravity's review is in "Review of the build 5 plan (2026-11-04,
-  Antigravity)". Next: Argon's critique, then Opus's reply.
+  engine-velocity generation; temporary counts for #184 (all three flags)
+  and S2 (would-hit and would-disagree). Expected 0.19-0.30 ms. Asked: the
+  cross-profile probe. Argon's review and the reply follow the design. Next:
+  Argon's agreement, then a fresh Opus review.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2205,11 +2201,23 @@ outside the repo: `b5-survey.md`) checked each candidate; anchors are at
    non-default value; and `g_holoDraw`'s readers (`:2953`, `:3260`, `:3354`)
    need a field only a classify sets. The reset therefore runs on the miss
    path and after any draw that classified: a `dirty` flag set before
-   `classifyEyeDraw` (`:2901`) and at `:3355`. Expected 0.04-0.06.
+   `classifyEyeDraw` (`:2901`) and at `:3355`. Belt and braces: the eye
+   memo is stored valid only on a plain decline, which writes no
+   non-default field, so the draw after any write always misses (Argon
+   review); the flag keeps exactness from resting on the classifier's exits.
+   The inline order stays the callee's: reset if dirty, then the
+   `g_uiDepthOn`/stood-down test, then `bindingEyeKeyGeneration()`, which
+   both rigs stub with `std::abort()` (`ui_depth_test.cpp:53`,
+   `hologram_depth_test.cpp:78`). Build 4's rig check
+   (`ui_depth_test.cpp:200-220`) dirties the struct by hand and asserts the
+   `g_holoDraw` copy on an off call; it sets the dirty flag, and asserts the
+   copy on a miss instead. Expected 0.04-0.06.
 3. **A front cache for `viewIsSurface`** (`ui_depth.cpp:862-871`, 0.102 ms a
    frame at `:865`): `g_viewMemo.get` hashes and probes up to 4 slots of a
    24 KB table that is cold after the game's draw. One front entry per PS slot
-   0-3: `{view, answer, frame, classifierEpoch, putSeq}`, hit when all five
+   0-3, indexed by the slot both loops already walk (`:2419`,
+   `uiDepthSampledSurfaceSlot`; `:2656`, `classifyEyeDraw`); the log caller
+   at `ui_layer.cpp:3985` keeps the uncached call. Each entry: `{view, answer, frame, classifierEpoch, putSeq}`, hit when all five
    match. New `g_viewMemoPuts`, bumped beside each `g_viewMemo.put` (`:869`,
    `:2566`) and by `clear()` (`:4590`). Exact: with no put since the fill the
    memo slot is unchanged, the same frame cannot newly fail the life test
@@ -2220,32 +2228,38 @@ outside the repo: `b5-survey.md`) checked each candidate; anchors are at
 4. **Engine velocity's five generation compares become one**
    (`engine_velocity.h:175-179`). A new aggregate `g_bindingEvKeyGen`, bumped
    by a second slot mask in `noteEyeKeySlot`'s style
-   (`binding_shadow.cpp:27-35`) for Vs, Ps, Rtv0, Dsv0 and Blend, and by
-   `bindingForgetAll` (`:148`) and `bindingFrameBoundary` (`:157`);
-   `beforeDrawSlow` stores it (`engine_velocity.cpp:3126-3130`). The two
+   (`binding_shadow.cpp:27-35`) for Vs, Ps, Rtv0, Dsv0 and Blend, so every
+   per-slot bump that calls `noteEyeKeySlot` (`bindingSet`,
+   `bindingInvalidate`, `bindingSetShader`, the last including
+   `psShadowProbe`'s heal) moves it; and bumped by `bindingForgetAll`
+   (`:148`) and `bindingFrameBoundary` (`:157`), the only other per-slot
+   bump sites. `beforeDrawSlow` stores it (`engine_velocity.cpp:3126-3130`).
+   It starts at 1 and `DrawCache::evGen` at 0, as per-slot `gen` starts at 1
+   (`binding_shadow.h:125`) against `DrawCache`'s zeros
+   (`engine_velocity.h:109`): `DrawCache` has no valid flag, so a fresh or
+   reset cache (`cache = DrawCache{}`, seven sites) is stale only because 0
+   never equals a generation (Argon review). The two
    pointer compares, `eye` and the guarded `srv3` compare stay. Exact: the
    aggregate moves if and only if a member's generation moves. Not folding
    `PsSrv3` in: it is compared only while `cache.guarded`, and folding it in
    would add slow paths, which are counted and call `restore()`. Expected
    0.02-0.04.
-5. **Two of the three per-draw thread-local flags passed per call.**
-   `t_uiDepthThisDraw` and `t_compositeThisDraw` (`vscreen.cpp:1624-1636`)
-   exist only to hand a fact from `beginPanelOverride` to the same draw's
-   `UiDepthScope` (comment at `:1618-1623`); both are cleared at the top of
-   every draw (`:2143-2144`), so a per-call value is the same value. Each
-   `thread_local` access goes through the TEB and `_tls_index`: about 11 per
-   draw, part of the 0.057 at `:2143` and of `:4339`. They move into a small
-   struct that `beginPanelOverride` fills beside its verdict and the thunk
-   passes to `forwardWithVerdict`. `t_holoDepthThisDraw` stays
-   `thread_local`: it is not cleared per draw (#184), so moving it would
-   change which draw consumes a lingering flag; item 6 counts whether that
-   ever happens. Expected 0.02-0.04.
+5. *(Moved to build 6 after review.)* `t_uiDepthThisDraw` and
+   `t_compositeThisDraw` passed per call. Not exact: they are cleared at
+   `vscreen.cpp:2143-2144`, after the foreign-context return (`:2101-2111`)
+   and the skip returns (`:2096`, `:2116`, `:2118`). A flag an owner draw set
+   and left at the blocked return (`:4308`) is consumed by the next
+   foreign-context draw on the render thread, whose `UiDepthScope` then calls
+   `uiDepthEnd` (`:4332`). That is #184's shape for all three flags, not only
+   the hologram one (Argon review). Item 6 counts it; the fix and the
+   per-call move go together.
 6. **TEMPORARY counts, one line beside `draw mask:`**, replacing build 4's
    `binding re-sets:` line (its counts are recorded above, and its
    `bindSetNote` call in `bindingSet` goes):
-   - #184: blocked owner returns (`vscreen.cpp:4308`) with
-     `t_holoDepthThisDraw` set, and `UiDepthScope` constructions that consume
-     a set flag on a draw whose `beginPanelOverride` did not set it.
+   - #184, for each of the three flags: blocked owner returns
+     (`vscreen.cpp:4308`) with it set, and `UiDepthScope` constructions that
+     consume it set on a draw whose `beginPanelOverride` did not set it (a
+     per-draw sequence number stamped where the flag is set).
    - S2's size: eye-memo misses (`ui_depth.cpp:2899`) and hologram-memo
      misses (`:3619`), and of each, how many a pointer-only aggregate would
      have hit. The pointer-only aggregate is a second counter, bumped on a
@@ -2253,7 +2267,15 @@ outside the repo: `b5-survey.md`) checked each candidate; anchors are at
      set as today; it decides nothing. Every same-pointer SRV re-set moves
      today's eye-key aggregate (`binding_shadow.cpp:28-34`, `:112-118`) and
      makes the next eye draw a miss, which runs the classifier with up to
-     four `viewIsSurface` calls (`:2655-2660`).
+     four `viewIsSurface` calls (`:2655-2660`). Shadow memos for the eye and
+     hologram memos, keyed on the pointer-only aggregate in place of today's,
+     mirror every store and invalidation of the real ones
+     (`ui_depth.cpp:2902`, `:3622`, `:4592`). On each real miss the line
+     counts `ptr_would_hit` (the shadow hits and the classifier then makes a
+     plain decline: S2's saving) and `ptr_would_disagree` (the shadow hits
+     and the classifier does not: S2 would have changed an answer). Zero
+     disagreements over the flight answer S2's exactness question on the real
+     frame stream (Argon review).
    - Item 3's front-cache lookups and hits.
 
    `edvr_log.py`: a regex, a fixture and a self-test; `--perf-windows` prints
@@ -2289,7 +2311,8 @@ outside the repo: `b5-survey.md`) checked each candidate; anchors are at
   Ruled out: a per-frame snapshot, because stand-downs, the issue fence
   (`ui_layer.cpp:1867`) and probe arms flip mid-frame, so a snapshot can be
   stale-false. Expected 0.05-0.15; it touches about 15 writers.
-- `t_holoDepthThisDraw` per call and the #184 fix, by item 6's counts.
+- The three per-draw flags per call and the #184 fix, by item 6's counts
+  (item 5 above).
 - Star glow's decline with star glow on (an inline Rtv0-generation target
   test, `vr_star_glow.cpp:317-357`): not needed while the pilot flies with
   star glow off.
@@ -2315,9 +2338,9 @@ outside the repo: `b5-survey.md`) checked each candidate; anchors are at
 - Item 4: `tools\engine_velocity_test`: the aggregate moves exactly when one
   of the five generations moves, including forget-all and the frame
   boundary.
-- Item 5: `tools\ui_depth_test` / `hologram_depth_test`: the scope sees the
-  same two flags as before for eye, non-eye and early-return draws.
-- Item 6: `edvr_log.py --self-test`.
+- Item 4 also: a reset `DrawCache{}` takes the slow path before any bind.
+- Item 6: `edvr_log.py --self-test`; in `ui_depth_test`, a same-pointer
+  re-set makes the real memo miss and the shadow memo hit.
 
 ### What the log and profile show if the code never ran
 
@@ -2336,8 +2359,8 @@ one 100 s capture. No census.
 - **Each item, in the profile, per full-path draw:** `starGlowAfterDraw` and
   `vrStarGlowAfterDraw` gone; `uiDepthOnEyeDraw` own down by at least half;
   `viewIsSurface` own down; the `engine_velocity.h:175` line down. Judged
-  per item, because the expected total (0.21-0.34 ms a frame at 17,148
-  draws, about 0.17-0.27 at build 3's count) is within two standard errors
+  per item, because the expected total (0.19-0.30 ms a frame at 17,148
+  draws, about 0.15-0.24 at build 3's count) is within two standard errors
   of the difference between two flights (about 0.09 ms).
 - **The total:** own time per full-path draw not up; reported against
   build 4.
@@ -2515,3 +2538,17 @@ during implementation.
      empty-span timing in VR (option a or b, with Sean's approval) recovers
      ~0.08 ms of pure instrumentation overhead with zero effect on flat-profile
      behaviour.
+
+### Reply to the build 5 review (2026-11-04)
+
+Each point checked at `c86670bd`; the design above now carries the outcome.
+
+| # | Argon's point | Disposition |
+|---|---|---|
+| 1 | Item 4: the aggregate must start at 1 against `DrawCache::evGen = 0` | Agreed and taken. Checked: per-slot `gen` starts at 1 for the same reason (`binding_shadow.h:125`), `DrawCache`'s generations are 0 (`engine_velocity.h:109`), and it has seven `cache = DrawCache{}` resets. `psShadowProbe`'s heal goes through `bindingSetShader`, which calls `noteEyeKeySlot` (`binding_shadow.cpp:128-135`), so it moves the aggregate; the five per-slot bump sites are listed in item 4. |
+| 2 | Item 2: the rigs abort on `bindingEyeKeyGeneration()` before the on test; build 4's rig check asserts the reset and `g_holoDraw` copy on an off call | Agreed and taken: the inline keeps the callee's order, and the rig check moves to a miss (`ui_depth_test.cpp:200-220`, checked). The plain-decline invariant is agreed too; the dirty flag stays as the guard that does not depend on it. |
+| 3 | Item 1 exact | Agreed. |
+| 4 | Item 3 exact; a second loop calls `viewIsSurface` | Agreed; the second loop is at `ui_depth.cpp:2419` (`uiDepthSampledSurfaceSlot`) at this commit, not `:2739-2745`, which is the HUD family test. Both loops index the front cache by slot. |
+| 5 | Item 5 exact, and better than today on a foreign draw | Not exact, by this point's own finding: the foreign-context return (`vscreen.cpp:2101-2111`) and the skip returns come before the clears at `:2143-2144`, so today a foreign draw can consume a flag a blocked owner draw left (`:4308`), and a per-call value would change that. Better, perhaps, but a behaviour change; the rule for this arc is that nothing a feature decides changes. Item 5 moves to build 6 with #184, and item 6 now counts the case for all three flags. Its 0.02-0.04 ms comes out of the total. |
+| 6 | Shadow pointer-only memos counting would-hit and would-disagree | Taken. |
+| 7 | The cross-profile probe | Still the maintainer's question. Its call count is not measured; "about 17k a frame" is an estimate. |
