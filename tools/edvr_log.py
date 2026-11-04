@@ -17385,6 +17385,9 @@ def _perf_window_of(line):
 #   marker fix (F87c) Unmap copy: U Unmaps, requested R bytes, copied C bytes in N ranges (J windows joined), whole stream W bytes, faults F, M ms; over S s        build 3
 PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
 PERF_QUERY_RE = re.compile(r"gpu timing queries: \d+-frame window ending (?P<end>\d+); (?P<per>[\d.]+) EDVR timing-query Ends a frame over \d+ frames \((?P<all>\d+) in all\); by owner a frame: (?P<rest>.*)\.$")
+# TEMPORARY (build 4, item 7; src/d3d11/bind_set_line.h): mapMemo misses and bindingSet re-sets, beside `draw mask:` on the same window. Decides build 5 (S2, mapMemo sizing).
+PERF_BIND_RE = re.compile(r"binding re-sets: \d+-frame window ending (?P<end>\d+); mapMemo lookups (?P<lookups>\d+), misses (?P<misses>\d+); "
+                          r"bindingSet calls/same pointer/null to null: (?P<rest>.*)\.$")
 PERF_GATE_RE = re.compile(r"draw gate holders: (?P<n>\d+) of (?P<of>\d+) terms hold the gate open: (?P<names>.*)\.$")
 PERF_COPY_RE = re.compile(r"marker fix \(F87c\) eye (?P<eye>\d): .*?Unmap copy (?P<copies>\d+) copies, (?P<bytes>\d+) bytes, (?P<ms>[\d.]+) ms")
 PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Unmaps, requested (?P<req>\d+) bytes, copied (?P<copied>\d+) bytes in (?P<ranges>\d+) ranges "
@@ -17392,10 +17395,13 @@ PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Un
 
 
 def perf_extra_of(msg):
-    """The build-2 or build-3 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures) or merged (build 3's one line)."""
+    """The build-2, build-3 or build-4 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures), merged (build 3's one line) or bind (build 4's TEMPORARY re-set counters)."""
     m = PERF_MASK_RE.search(msg)
     if m:
         return "mask", {"end": int(m.group("end")), "draws": int(m.group("draws")), "rest": m.group("rest")}
+    m = PERF_BIND_RE.search(msg)
+    if m:
+        return "bind", {"end": int(m.group("end")), "lookups": int(m.group("lookups")), "misses": int(m.group("misses")), "rest": m.group("rest")}
     m = PERF_QUERY_RE.search(msg)
     if m:
         return "query", {"end": int(m.group("end")), "per": float(m.group("per")), "all": int(m.group("all")), "rest": m.group("rest")}
@@ -17444,7 +17450,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
     the runtime windows whose span overlaps the window, weighted by the seconds they overlap. since and until: seconds of the day, bounding the window's closing stamp.
     Returns the process exit code: 1 when there is no window to report."""
     wins, rt = [], {}
-    extra = {"mask": {}, "query": {}}
+    extra = {"mask": {}, "query": {}, "bind": {}}
     gates, copies, merged = [], [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures (build 2's per-eye lines, build 3's merged line)
 
     def on_gfx(msg, t):
@@ -17526,6 +17532,9 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
         # build 2: what the may-want byte skipped, who issued the timing queries, what held the draw gate, the marker fix's Unmap copy
         mk, qy = extra["mask"].get(w["end"]), extra["query"].get(w["end"])
         parts.append("draw mask: %d draws through the full path, skipped %s" % (mk["draws"], mk["rest"]) if mk else "draw mask: NO LINE (a build without the may-want byte)")
+        bd = extra["bind"].get(w["end"])   # build 4, item 7 (TEMPORARY)
+        parts.append("binding re-sets: mapMemo %d lookups, %d misses; bindingSet calls/same pointer/null to null: %s" % (bd["lookups"], bd["misses"], bd["rest"]) if bd
+                     else "binding re-sets: NO LINE (a build without the item-7 counters)")
         parts.append("timing queries a frame: %.3f (%s)" % (qy["per"], qy["rest"]) if qy else "timing queries: NO LINE (a build without the counter)")
         held = [g for t, g in gates if t <= w["close"]]
         parts.append("gate held by %s" % ("%d of %d: %s" % (held[-1]["n"], held[-1]["of"], held[-1]["names"]) if held else "n/a (no `draw gate holders:` line before this window)"))
@@ -24328,6 +24337,8 @@ def self_test_perf_windows():
         fail("a window with none of the build-2 lines should say each is absent:\n%s" % bare)
     mask = ("draw mask: 1800-frame window ending 1800; 14000 draws through the full path; calls skipped by the vertex shader's may-want byte: "
             "ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3.")
+    bind = ("binding re-sets: 1800-frame window ending 1800; mapMemo lookups 52000, misses 310; bindingSet calls/same pointer/null to null: "
+            "rtv0 9000/4200/0, dsv0 9000/4100/12, ps_srv0 40000/9000/700, ps_srv1 40000/8000/20000, ps_srv2 40000/8000/21000, ps_srv3 40000/8000/22000.")
     qry = ("gpu timing queries: 1800-frame window ending 1800; 6.500 EDVR timing-query Ends a frame over 1800 frames (11700 in all); by owner a frame: "
            "other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000.")
     gate = "draw gate holders: 2 of 28 terms hold the gate open: ui_depth, footprint."
@@ -24335,18 +24346,25 @@ def self_test_perf_windows():
            "eye-1 first/last ring -; over 10 s")
     cp1 = cp0.replace("eye 0", "eye 1").replace("600 copies", "300 copies")
     mtext = ("[10:00:00.000] version v0.0.0 (build 00000000)\n[10:00:01.000] " + gate + "\n[10:00:01.500] " + cp0 + "\n[10:00:01.600] " + cp1 + "\n" +
-             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n")
+             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n[10:00:02.003] " + bind + "\n")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(mtext)
     mo = buf.getvalue()
     for want in ("draw mask: 14000 draws through the full path, skipped ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3",
+                 "binding re-sets: mapMemo 52000 lookups, 310 misses; bindingSet calls/same pointer/null to null: rtv0 9000/4200/0, dsv0 9000/4100/12, ps_srv0 40000/9000/700, "
+                 "ps_srv1 40000/8000/20000, ps_srv2 40000/8000/21000, ps_srv3 40000/8000/22000",
                  "timing queries a frame: 6.500 (other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000)",
                  "gate held by 2 of 28: ui_depth, footprint", "marker copy (F87c lines in window): eye 0 600 copies 4800000 bytes 120.500 ms, eye 1 300 copies 4800000 bytes 120.500 ms"):
         if want not in mo:
             fail("--perf-windows with the build-2 lines lacks %r:\n%s" % (want, mo))
-    if perf_extra_of("draw mask: nothing like it") is not None:
-        fail("a line of another instrument parsed as a build-2 line")
+    if perf_extra_of("draw mask: nothing like it") is not None or perf_extra_of("binding re-sets: nothing like it") is not None:
+        fail("a line of another instrument parsed as a build-2 or build-4 line")
+    bk, bdict = perf_extra_of(bind) or (None, {})
+    if bk != "bind" or (bdict.get("end"), bdict.get("lookups"), bdict.get("misses")) != (1800, 52000, 310) or not bdict.get("rest", "").startswith("rtv0 9000/4200/0, "):
+        fail("the build-4 binding re-sets line did not parse: %r" % (perf_extra_of(bind),))
+    if "binding re-sets: NO LINE" not in bare:
+        fail("a window without the build-4 line should say it is absent:"+chr(10)+"%s" % bare)
     # Build 3: the merged copy line and the per-eye text it brings. A build-3 log prints the merged copy; an L2-style (build 2) log keeps the per-eye figures.
     mg = ("marker fix (F87c) Unmap copy: 600 Unmaps, requested 9600000 bytes, copied 7200000 bytes in 1200 ranges (900 windows joined), whole stream 0 bytes, "
           "faults 2, 150.250 ms; over 10 s")
@@ -24374,6 +24392,7 @@ def self_test_perf_windows():
     # The formatters' own text: the fragments the parser reads are held to the sources, so a formatter that drifts fails here.
     srcdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11")
     for name, frags in (("draw_mask_line.h", ("draw mask: 1800-frame window ending %u; %u draws through the full path; calls skipped by the vertex shader's may-want byte: ",)),
+                        ("bind_set_line.h", ("binding re-sets: 1800-frame window ending %u; mapMemo lookups %u, misses %u; bindingSet calls/same pointer/null to null: ",)),
                         ("gpu_query_count.h", ("gpu timing queries: 1800-frame window ending %u; %.3f EDVR timing-query Ends a frame over %u frames (%llu in all); by owner a frame: ",)),
                         ("draw_gate_holders.h", ("draw gate holders: %u of %u terms hold the gate open: ",)),
                         ("native_on_foot.cpp", ("Unmap copy %llu copies, requested %llu bytes; eye-%d first/last ring %s; over %u s",

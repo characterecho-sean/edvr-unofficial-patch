@@ -1,5 +1,6 @@
 #pragma once
 // The optimized station (fix.optimized_stations = on | off). See optimized_station.cpp for the rules and docs\optimized-station-2026-10-12.md.
+#include <atomic>
 #include <cstdint>
 
 namespace edvr {
@@ -12,6 +13,12 @@ bool optimizedStationOn() noexcept;
 bool optimizedStationGathers() noexcept;
 // Whether the station is sealed in a hangar this frame (one atomic load). The draw path and the hooks read it.
 bool optimizedStationSealed() noexcept;
+namespace detail {
+extern std::atomic<bool> g_sunOff;   // the sun skip is on (optimized_station.cpp writes it with release)
+}
+// The sun skip's own first test, inline for the draw path: optimizedStationSkipsDraw returns false at once while it is false, so a caller tests this before
+// building the call's two hash arguments. The same acquire load.
+inline bool optimizedStationSunOff() noexcept { return detail::g_sunOff.load(std::memory_order_acquire); }
 // The draw path asks: true skips the draw (the sun pair, while the sun skip is on).
 bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept;
 // Built 2026-10-21: how the flat draw path carried out a skipped sun draw (the VR path never issues it and does not report). kNotIssued: the real draw call was

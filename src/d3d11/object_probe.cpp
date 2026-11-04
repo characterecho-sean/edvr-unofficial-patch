@@ -1493,7 +1493,7 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
     g_tonemapSnapshot.end(ctx);
 }
 
-void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
+void objectProbeCandidateDrawIssuedLedgered(ID3D11DeviceContext* ctx,bool issued) {
     if(detail::g_objectProbeLedgerOn && ctx){
         ID3D11VertexShader* vs=nullptr;ID3D11PixelShader* ps=nullptr;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
         const uint64_t vsHash=vs?lookupShaderHash(vs):0,psHash=ps?lookupShaderHash(ps):0;if(vs)vs->Release();if(ps)ps->Release();

@@ -189,6 +189,35 @@ int main(int argc, char** argv) {
     hr(created);
     check(gpuTimingBind(dev.Get(),ctx.Get()),"bind canonical WARP timer owner");
     ComPtr<ID3D11InfoQueue> info; dev.As(&info);
+    // Build 4, item 5: uiDepthOnEyeDraw's per-draw outputs are one struct, reset as one block. Its defaults are the twelve resets the call used to make
+    // one by one (mode none, nothing pending, both eyes -1, no shader, mask slot 0), and the ui_depth.h accessors read the same values after a draw.
+    {
+        const detail::UiDepthDraw d0{};
+        check(d0.mode == Mode::kNone && !d0.planetPending && !d0.planetSolarPending && !d0.worldScreenPending && !d0.composite &&
+              !d0.coronaPending && !d0.coronaMotion && !d0.wantRebind && !d0.wantMask && d0.rebindEye == -1 && d0.drawEye == -1 &&
+              d0.reissueMaskSlot == 0 && d0.reissueShader == nullptr,
+              "ui depth draw outputs: the struct's defaults are the old resets (-1 for both eye fields)");
+        detail::UiDepthDraw& g = detail::g_uiDepthDraw;
+        g.mode = Mode::kReissueScene; g.planetPending = g.planetSolarPending = g.worldScreenPending = g.composite = true;
+        g.coronaPending = g.coronaMotion = g.wantRebind = g.wantMask = true;
+        g.rebindEye = g.drawEye = 1; g.reissueMaskSlot = 3; g.reissueShader = &g_depthShaders[1];
+        check(uiDepthPlanetPending() && uiDepthWorldScreenPending() && uiDepthDrawSampledSurface() && uiDepthWantsReissue(),
+              "ui depth draw outputs: the accessors read the fields (control: dirty values are seen)");
+        const bool wasOn = detail::g_uiDepthOn;
+        detail::g_uiDepthOn = false;   // the call resets, then declines on this flag
+        check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 6, 1, 0, 0, 0}), "ui depth draw outputs: a draw with the pass off declines");
+        detail::g_uiDepthOn = wasOn;
+        check(g.mode == d0.mode && g.planetPending == d0.planetPending && g.planetSolarPending == d0.planetSolarPending &&
+              g.worldScreenPending == d0.worldScreenPending && g.composite == d0.composite && g.coronaPending == d0.coronaPending &&
+              g.coronaMotion == d0.coronaMotion && g.wantRebind == d0.wantRebind && g.wantMask == d0.wantMask && g.rebindEye == -1 &&
+              g.drawEye == -1 && g.reissueMaskSlot == 0 && g.reissueShader == nullptr,
+              "ui depth draw outputs: one call leaves every output at its default");
+        check(!uiDepthPlanetPending() && !uiDepthWorldScreenPending() && !uiDepthDrawSampledSurface() && !uiDepthWantsReissue(),
+              "ui depth draw outputs: the ui_depth.h accessors return the reset values after a draw");
+        const UiDepthDrawProbe pr = uiDepthDrawProbe();
+        check(!pr.coverage && !pr.wantMask && pr.maskSlot == 0 && pr.drawEye == -1, "ui depth draw outputs: the draw probe reads the reset values");
+        check(g_holoDraw.kind == 'X' && g_holoDraw.count == 6 && g_holoDraw.instances == 1, "ui depth draw outputs: the input draw is still copied");
+    }
     // Create every actual generated production coverage shader.
     for (DepthShader& entry : g_depthShaders) {
         hr(dev->CreatePixelShader(entry.bytecode, entry.len, nullptr, &entry.shader));
@@ -231,10 +260,10 @@ int main(int argc, char** argv) {
     auto coverage = [&](bool menu, bool mark) {
         ComPtr<ID3D11DepthStencilState> before; UINT beforeRef=0;
         ctx->OMGetDepthStencilState(&before,&beforeRef);
-        detail::g_uiDepthOn = true; detail::g_uiDepthMode = menu ? Mode::kReissue : Mode::kReissueScene;
-        g_reissueShader = &g_depthShaders[2]; g_drawEye = 0; g_reissueMaskSlot = 1;
-        g_rebindW = g_rebindH = 8; g_wantRebind = menu; g_rebindEye = 0;
-        g_wantMask = mark;
+        detail::g_uiDepthOn = true; detail::g_uiDepthDraw.mode = menu ? Mode::kReissue : Mode::kReissueScene;
+        detail::g_uiDepthDraw.reissueShader = &g_depthShaders[2]; detail::g_uiDepthDraw.drawEye = 0; detail::g_uiDepthDraw.reissueMaskSlot = 1;
+        g_rebindW = g_rebindH = 8; detail::g_uiDepthDraw.wantRebind = menu; detail::g_uiDepthDraw.rebindEye = 0;
+        detail::g_uiDepthDraw.wantMask = mark;
         check(uiDepthReissueBegin(ctx.Get()), "production coverage begins");
         ctx->Draw(3, 0); uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11Buffer> cb; ctx->PSGetConstantBuffers(13, 1, &cb);
@@ -333,9 +362,9 @@ int main(int argc, char** argv) {
         const unsigned slot=holoSurfaceSlot(material);
         ctx->PSSetShaderResources(slot==1?2:1,1,&none);
         ctx->PSSetShaderResources(slot,1,surfSrv.GetAddressOf()); ctx->PSSetSamplers(1,1,sampler.GetAddressOf());
-        detail::g_uiDepthOn=true; detail::g_uiDepthMode=Mode::kReissueScene; g_reissueShader=depthShaderFor(ctx.Get(),material,kHoloPanel,slot);
-        check(g_reissueShader && holoShader(g_reissueShader) && g_reissueShader->slot==slot,"verified holo material selects its own surface binding and motion family");
-        g_drawEye=0; g_reissueMaskSlot=1; g_rebindW=g_rebindH=8; g_wantMask=true;
+        detail::g_uiDepthOn=true; detail::g_uiDepthDraw.mode=Mode::kReissueScene; detail::g_uiDepthDraw.reissueShader=depthShaderFor(ctx.Get(),material,kHoloPanel,slot);
+        check(detail::g_uiDepthDraw.reissueShader && holoShader(detail::g_uiDepthDraw.reissueShader) && detail::g_uiDepthDraw.reissueShader->slot==slot,"verified holo material selects its own surface binding and motion family");
+        detail::g_uiDepthDraw.drawEye=0; detail::g_uiDepthDraw.reissueMaskSlot=1; g_rebindW=g_rebindH=8; detail::g_uiDepthDraw.wantMask=true;
         check(uiDepthReissueBegin(ctx.Get()),"holo coverage begins"); ctx->Draw(3,0); uiDepthReissueEnd(ctx.Get());
         check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&ui),"holo private depth published");
         ui->GetResource(privateRes.ReleaseAndGetAddressOf());
@@ -465,8 +494,8 @@ o.tc9.w=1;o.tc13.w=1;o.tc17.x=v.z;o.tc18=float3(.5,0,0);return o;}
                 std::printf("HUD reference case %d: alpha %.6f\n",kind,actualAlpha[0]);
             }
             detail::g_uiDepthOn=true;g_trained=trained;
-            detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[1];g_drawEye=0;
-            g_reissueMaskSlot=2;g_rebindW=g_rebindH=8;g_wantMask=true;
+            detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[1];detail::g_uiDepthDraw.drawEye=0;
+            detail::g_uiDepthDraw.reissueMaskSlot=2;g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;
             check(uiDepthReissueBegin(ctx.Get()),"HUD coverage at zero reactivity begins");
             ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
             ComPtr<ID3D11ShaderResourceView> restoredHudSrv;
@@ -510,9 +539,9 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
             const float actualScene=read(dev.Get(),ctx.Get(),target.tex.Get())[1];
             bind(target.dsv.Get());setZ(metres);ctx->VSSetShader(spriteVs.Get(),nullptr,0);
             ctx->PSSetShaderResources(2,1,surfSrv.GetAddressOf());
-            detail::g_uiDepthOn=true;g_trained=trained;detail::g_uiDepthMode=Mode::kReissueScene;
-            g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
-            g_rebindW=g_rebindH=8;g_wantRebind=false;g_wantMask=true;
+            detail::g_uiDepthOn=true;g_trained=trained;detail::g_uiDepthDraw.mode=Mode::kReissueScene;
+            detail::g_uiDepthDraw.reissueShader=&g_depthShaders[5];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=1;
+            g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantRebind=false;detail::g_uiDepthDraw.wantMask=true;
             check(uiDepthReissueBegin(ctx.Get()),"sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());
             ComPtr<ID3D11ShaderResourceView> restored;ctx->PSGetShaderResources(2,1,&restored);
             check(restored.Get()==surfSrv.Get(),"sprite restores caller t2");
@@ -557,7 +586,7 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
             ctx->RSSetState(raster.Get());D3D11_VIEWPORT orbitalVp{0,0,8,8,0,1};ctx->RSSetViewports(1,&orbitalVp);ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),scene.dsv.Get());
         };
         ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();bindOrbital();
-        detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        detail::g_uiDepthOn=true;detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[7];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=0;g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;g_holoDraw={'N',4,2,0,0,0};
         check(uiDepthReissueBegin(ctx.Get()),"orbital private reissue begins");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11VertexShader> afterVs;ctx->VSGetShader(&afterVs,nullptr,nullptr);check(afterVs.Get()==vs.Get(),"orbital reissue restores original vertex shader");
         ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();
@@ -575,7 +604,7 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
                 orbital_width::detail::g_factor.store(f);
                 ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoMotion[0]=HoloMotion{};
                 ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();bindOrbital();
-                detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+                detail::g_uiDepthOn=true;detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[7];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=0;g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;g_holoDraw={'N',4,2,0,0,0};
                 check(uiDepthReissueBegin(ctx.Get()),"orbital twin begins at a scaled factor");
                 ComPtr<ID3D11Buffer> bound;ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&bound);
                 check(bound.Get()!=savedCb.Get(),"the twin binds its own b13, not the caller's");
@@ -603,7 +632,7 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         // disabled for this coverage family.
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,.05f,0);
         testScene=scene.tex.Get();bindOrbital();
-        detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        detail::g_uiDepthOn=true;detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[7];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=0;g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;g_holoDraw={'N',4,2,0,0,0};
         check(uiDepthReissueBegin(ctx.Get()),"orbital coverage begins behind a nearer hull");
         const float hcSentinel[4]={91,.123f,0,0};ctx->ClearRenderTargetView(g_holoMotion[0].target(),hcSentinel);
         // The sentinel is cleared after Begin, then the depth-tested draw is
@@ -622,7 +651,7 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         instances[23]*=2;instances[24]*=2;instances[25]*=2;
         ctx->UpdateSubresource(vb1.Get(),0,nullptr,instances,0,0);
         ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,.00625f,0);bindOrbital();
-        detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+        detail::g_uiDepthOn=true;detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[7];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=0;g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;g_holoDraw={'N',4,2,0,0,0};
         check(uiDepthReissueBegin(ctx.Get()),"overlapping orbital coverage begins over farther physical depth");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
         views[0]=views[1]=nullptr;g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> overlapCoverage;views[0]->GetResource(&overlapCoverage);
         auto overlapIndices=read(dev.Get(),ctx.Get(),overlapCoverage.Get()),overlapDepth=read(dev.Get(),ctx.Get(),overlapCoverage.Get(),1);unsigned overlapCount=0;
@@ -955,8 +984,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         for(unsigned f=0;f<3;++f) {
             uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
             bind(scene.dsv.Get());setZ(.6f);ctx->PSSetShaderResources(0,1,uiView.GetAddressOf());
-            detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
-            g_rebindW=g_rebindH=8;g_wantMask=true;g_wantRebind=false;
+            detail::g_uiDepthOn=true;detail::g_uiDepthDraw.mode=Mode::kReissueScene;detail::g_uiDepthDraw.reissueShader=&g_depthShaders[5];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=1;
+            g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantMask=true;detail::g_uiDepthDraw.wantRebind=false;
             check(uiDepthReissueBegin(ctx.Get()),"scrolling sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
             auto mark=valuesOf(g_mask[0].srv),edit=valuesOf(uiDepthContentChanges(8,8,0));
             if(f<2)check(mark[3*8+3]>0,"faint sprite stroke retains motion and antialiasing coverage");

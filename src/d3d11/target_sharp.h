@@ -67,6 +67,15 @@ inline bool targetSharpWantsDraws() {
     return detail::g_targetSharpSharp && !detail::g_targetSharpFailed;
 }
 
+// The composite's shape, from the census A/B that named it: an indexed draw of 6 indices, one instance. One definition, read by the draw path
+// (before targetSharpWantsDraws, pure register compares) and by targetSharpOnEyeDraw's own shape test.
+constexpr char     kTargetSharpKind = 'X';
+constexpr uint32_t kTargetSharpIndices = 6;
+constexpr uint32_t kTargetSharpInstances = 1;
+inline bool targetSharpShape(char kind, uint32_t count, uint32_t instances) {
+    return kind == kTargetSharpKind && count == kTargetSharpIndices && instances == kTargetSharpInstances;
+}
+
 // Is this eye draw the indicator's composite? Shape first (6 indices, one
 // instance), then slot 0 being a non-eye-sized Texture2D with slots 1-3
 // unbound, then the vertex shader's content hash -- cheapest test first,

@@ -6084,7 +6084,7 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool temporalPassWantsRigidDraw(int eye) {
-    if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1) return false;
+    if (!temporalPassRigidDrawMayWant(eye)) return false;
     return !g_rigidDraw[eye].seen || g_rigidDraw[eye].frame != g_rowsFrame;
 }
 

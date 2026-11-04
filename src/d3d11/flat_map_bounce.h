@@ -97,6 +97,9 @@ public:
         if (trip_.load()!=Trip::None) state_.store(State::Tripped);
     }
     Mode mode() const { return mode_.load(); }
+    // Whether any Map is bounced right now: the same acquire load of open_ that preMap, beginUnmap and present each test first, so a caller that tests this
+    // and skips the call changes nothing (those three return at that test while it reads 0).
+    bool anyOpen() const { return open_.load(std::memory_order_acquire)!=0; }
     State decision() const { return trip_.load()!=Trip::None ? State::Tripped : state_.load(); }
     Trip tripReason() const { return trip_.load(); }
     uint32_t samples() const { return samples_; }

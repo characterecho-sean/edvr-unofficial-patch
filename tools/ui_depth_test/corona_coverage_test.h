@@ -95,11 +95,11 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
             auto privateBefore=read(dev,ctx,privateResource.Get());std::vector<float> colourBefore[4];
             for(UINT channel=0;channel<4;++channel)colourBefore[channel]=read(dev,ctx,colour.Get(),channel);
             bind(44);
-            g_coronaPending=enabled!=0;g_coronaMotion=false;g_holoDraw={'X',3,1,0,0,0};detail::g_uiDepthMode=Mode::kReissueScene;
-            g_reissueShader=&g_depthShaders[4];g_drawEye=0;g_reissueMaskSlot=3;
-            g_rebindW=g_rebindH=8;g_wantRebind=false;g_wantMask=true;
+            detail::g_uiDepthDraw.coronaPending=enabled!=0;detail::g_uiDepthDraw.coronaMotion=false;g_holoDraw={'X',3,1,0,0,0};detail::g_uiDepthDraw.mode=Mode::kReissueScene;
+            detail::g_uiDepthDraw.reissueShader=&g_depthShaders[4];detail::g_uiDepthDraw.drawEye=0;detail::g_uiDepthDraw.reissueMaskSlot=3;
+            g_rebindW=g_rebindH=8;detail::g_uiDepthDraw.wantRebind=false;detail::g_uiDepthDraw.wantMask=true;
             check(uiDepthReissueBegin(ctx),"production smoke/corona coverage begins");
-            check(g_coronaMotion==(enabled!=0),"corona test actually selects the optional production motion shader");
+            check(detail::g_uiDepthDraw.coronaMotion==(enabled!=0),"corona test actually selects the optional production motion shader");
             ctx->DrawIndexedInstanced(3,1,0,0,0);uiDepthReissueEnd(ctx);
             ComPtr<ID3D11PixelShader> restoredPs;ComPtr<ID3D11ShaderResourceView> restoredSrv;
             ComPtr<ID3D11Buffer> restored12,restored13;ctx->PSGetShader(&restoredPs,nullptr,nullptr);ctx->PSGetShaderResources(2,1,&restoredSrv);
@@ -126,5 +126,5 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
         }
         check(results[0].smoke==results[1].smoke&&results[0].mask==results[1].mask,"motion extension preserves legacy private depth and classification bit for bit");
     }
-    ctx->ClearState();uiDepthFrameBoundary(ctx);g_coronaPending=g_coronaMotion=false;g_holoDraw={};
+    ctx->ClearState();uiDepthFrameBoundary(ctx);detail::g_uiDepthDraw.coronaPending=detail::g_uiDepthDraw.coronaMotion=false;g_holoDraw={};
 }

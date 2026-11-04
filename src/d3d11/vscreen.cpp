@@ -123,6 +123,8 @@ std::atomic<bool> g_shadowsSkipped{false};
 // perf_monitor.cpp reads them (vScreenDrawMaskCounts) and subtracts the last window's.
 std::atomic<uint32_t> g_maskDraws{0};
 std::atomic<uint32_t> g_maskSkips[kMaskSkips];
+// TEMPORARY (build 4, item 7, bind_set_line.h): hookedMap's mapMemo lookups and misses. Plain counters; the memo is the owner's.
+uint32_t g_mapMemoLookups = 0, g_mapMemoMisses = 0;
 inline void maskNoteSkip(MaskSkip k) {
     std::atomic<uint32_t>& a = g_maskSkips[static_cast<size_t>(k)];
     a.store(a.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
@@ -406,7 +408,31 @@ typedef void(STDMETHODCALLTYPE* PFN_DiscardView)(ID3D11DeviceContext*, ID3D11Vie
 typedef void(STDMETHODCALLTYPE* PFN_SwapDeviceContextState)(ID3D11DeviceContext*,
                                                             ID3DDeviceContextState*, ID3DDeviceContextState**);
 
-struct State {
+// The fields the per-draw ladder reads on nearly every draw, in one 64-byte-aligned block at the head of State (build 4, item 2): the game's draw between
+// two hooks evicts cache lines, and these used to sit on a dozen of them, up to 50 KB into State. Layout only: State is a base-class aggregate, nothing
+// takes offsetof or copies it, and `new` honours the 64-byte alignment under C++17. Not glareClamp: foreign threads write it, and in this block it would
+// share the owner's busiest line.
+struct alignas(64) DrawHot {
+    ID3D11DeviceContext* ownerCtx = nullptr;   // the context these hooks were installed for (see State)
+    uint32_t frameNo = 0;                      // frames since the hooks were installed
+    uint32_t eyeDrawsThisFrame = 0;
+    uint32_t rtv0EyeGen = 0;                   // the binding generation rtv0Eye and rtv0Cand were derived at
+    uint32_t bindAuditSeq = 0;                 // the binding shadow's audit: every 1024th owner draw
+    uint32_t censusSkipCount = 0;
+    uint32_t censusSkipRangeCount = 0;
+    uint32_t censusSkipOffCount = 0;
+    uint32_t censusAutoW = 0;
+    uint32_t fssBodyFrame = 0;
+    int      rtv0Cand = -1;                    // which scene candidate the bound target is; -1 for none
+    bool     rtv0Eye = false;                  // the bound target is an eye texture
+    bool     curveThisDraw = false;
+    bool     introCurveThisDraw = false;
+    bool     quadSkipArmed = false;
+    bool     distanceEnabled = false;
+};
+static_assert(sizeof(DrawHot) == 64 && alignof(DrawHot) == 64, "DrawHot is one 64-byte cache line: growing it spills the per-draw fields onto a second line");
+
+struct State : DrawHot {
     VTableHook hook;
 
     // The context these hooks were installed for. Identity only -- it is
@@ -417,7 +443,7 @@ struct State {
     // creates, and the internal ones a wrapper mod like ReShade owns. Acting
     // on those would attribute another context's draws to the panel and
     // corrupt state nobody can see is wrong. See vtable_hook.h.
-    ID3D11DeviceContext* ownerCtx = nullptr;
+    // ownerCtx: declared in DrawHot, the head of State.
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetConstantBuffers   realPSSetConstantBuffers = nullptr;  // flat diagnostic observer only
@@ -463,7 +489,7 @@ struct State {
     ShaderMemo vsMemo, psMemo;
     // The shadow's audit (bindingAudit): every 1024th draw of the owner's
     // compared with the context's own answer, and the shader hooks' counts.
-    uint32_t bindAuditSeq = 0;
+    // bindAuditSeq: declared in DrawHot, the head of State.
     uint64_t auditSampled = 0, auditNull = 0, auditPtr = 0, auditHash = 0;
     uint64_t auditNoted = 0, auditNoteMs = 0;
     uint64_t auditLastShadow = 0, auditLastGet = 0;
@@ -528,7 +554,7 @@ struct State {
     // world-quad pipeline, and recognising it by hash alone moved the
     // loading screen's text quad on 2026-08-25; drawing the scanner's
     // body is the one thing only the scanner does.
-    uint32_t fssBodyFrame = 0;
+    // fssBodyFrame: declared in DrawHot, the head of State.
     // The chrome tracker's stamp and the arrival-mono frame count.
     uint32_t fssChromeFrame = 0;
     uint32_t fssChromeSkipFrame = 0;
@@ -553,7 +579,7 @@ struct State {
     uint32_t relearns = 0;
 
     bool  blackVoid = true;
-    bool  distanceEnabled = false;
+    // distanceEnabled: declared in DrawHot, the head of State.
     float distanceScale = 1.0f;
     uint32_t distanceIndex = 47;
 
@@ -611,7 +637,7 @@ struct State {
     void*     partData = nullptr;
     uint32_t  partBytes = 0;
     SkipSpec  censusSkip[8] = {};
-    uint32_t  censusSkipCount = 0;
+    // censusSkipCount: declared in DrawHot, the head of State.
     // The bisection form of the same probe: skip eye draws by their POSITION
     // in the frame (the census line's # number), inclusive. Exists because
     // the differential census has a blind spot the first probe round walked
@@ -631,7 +657,7 @@ struct State {
     // region skipped, bisect the other. Count 0 is off.
     struct SkipRange { uint32_t lo; uint32_t hi; };
     SkipRange censusSkipRange[4] = {};
-    uint32_t  censusSkipRangeCount = 0;
+    // censusSkipRangeCount: declared in DrawHot, the head of State.
     // The offscreen form: glare and bloom are BUILT in offscreen buffers
     // and fused onto the eye by a pass that cannot be skipped without
     // freezing the image; the builders can. A size names a buffer.
@@ -669,7 +695,7 @@ struct State {
         uint32_t lo, hi;    // quads to omit, inclusive
     };
     QuadSkip  quadSkip = {};
-    bool      quadSkipArmed = false;
+    // quadSkipArmed: declared in DrawHot, the head of State.
     // CLIP rather than omit. The field asked the better question: the loading
     // dialog's dark rectangle is not unwanted, it is the wrong SIZE -- it
     // spans the view when it only needs to sit behind the dialog. Omitting it
@@ -691,7 +717,7 @@ struct State {
     UINT      qsStartIndex = 0;
     INT       qsBaseVertex = 0;
     UINT      qsStartInstance = 0;
-    uint32_t  censusSkipOffCount = 0;
+    // censusSkipOffCount: declared in DrawHot, the head of State.
     // Set per glare-train draw by beginPanelOverride, consumed by the
     // DrawInstanced thunk in the same call stack: the first:K clamp,
     // composable with the steady verdict. 0 = no clamp this draw.
@@ -722,7 +748,7 @@ struct State {
     uint32_t  clearProbeW = 0;
     uint32_t  clearProbeH = 0;
     uint32_t  clearProbeSeen = 0;
-    uint32_t  censusAutoW = 0;
+    // censusAutoW: declared in DrawHot, the head of State.
     uint32_t  censusAutoH = 0;
     uint32_t  censusAutoGen = 0;     // generation censusAutoMatch was derived at
     bool      censusAutoMatch = false;
@@ -735,11 +761,11 @@ struct State {
     // exposure fix so the two cannot drift into opposite policies again. What
     // stays here is only what this file DERIVES from them, tagged with the
     // generation it was derived at.
-    bool     rtv0Eye = false;
-    uint32_t rtv0EyeGen = 0;
+    // rtv0Eye: declared in DrawHot, the head of State.
+    // rtv0EyeGen: declared in DrawHot, the head of State.
     // Which scene candidate the bound target is, resolved with rtv0Eye and
     // valid for the same binding generation. -1 for none.
-    int      rtv0Cand = -1;
+    // rtv0Cand: declared in DrawHot, the head of State.
     bool     psSrv0Panel = false;
     uint32_t psSrv0PanelGen = 0;
     // The bound target's whole resolve, the rtv0Eye pattern once more, for
@@ -760,13 +786,13 @@ struct State {
     // and the substituted transform has to serve the substituted mesh. Cleared
     // at the top of every beginPanelOverride, so it can never outlive the draw
     // that set it.
-    bool     curveThisDraw = false;
+    // curveThisDraw: declared in DrawHot, the head of State.
 
     // Set by beginPanelOverride when intro_curve.h recognised this draw as the splash's (or a menu loop's) game-placed world-space composite, to
     // be drawn as the surface strip, consumed by forwardWithVerdict and put away by the thunk. A flag for curveThisDraw's reason and NOT curveThisDraw
     // itself: that one is the on-foot screen's, and its branch returns before the verdict's Begin and the splash dim. Cleared at the top of every
     // beginPanelOverride, so it can never outlive the draw that set it.
-    bool     introCurveThisDraw = false;
+    // introCurveThisDraw: declared in DrawHot, the head of State.
 
     void*    compositeCb = nullptr;
     uint8_t  shadow[512] = {};
@@ -802,11 +828,11 @@ struct State {
     void*    bbData = nullptr;
     uint32_t bbBytes = 0;
 
-    uint32_t eyeDrawsThisFrame = 0;
+    // eyeDrawsThisFrame: declared in DrawHot, the head of State.
     uint32_t eyeDrawsLastFrame = 0;
     // Frames since the hooks were installed. The per-frame instruments' log
     // lines use it to say which frame they mean.
-    uint32_t frameNo = 0;
+    // frameNo: declared in DrawHot, the head of State.
     uint64_t voidClears = 0;
     // Grey voids forced to black in one frame, and the smallest and largest
     // counts seen SINCE THE LAST REPORT.
@@ -1896,6 +1922,8 @@ __forceinline bool desktopWindowSkipsDraw(State* s, ID3D11DeviceContext* self, c
 // on its own whether a run is armed and this is its frame. Unconfigured
 // costs the one bool load pixelProbeWantsDraws() is for; nothing below it
 // runs.
+// The first test of both halves below, inline at every draw thunk so an unconfigured probe costs no call: both halves keep it as their first line.
+__forceinline bool pixelProbeLive(State* s) { return pixelProbeWantsDraws() && s->rtv0Eye; }
 void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
     if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
     const ResourceInfo* info = rtv0Resolved(s);
@@ -1993,11 +2021,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // and the stamp this tracker bumps is how the pass knows it is.
     if (kind == 'X' && count == 6) {
         bool chromeMatched = false;
-        guardedBudget(g_panelCbBudget, [&] {
-            const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
-            if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) {
-                return;
-            }
+        // The hash test is a pure shadow read, so it goes before the guard: a draw that is not one of the two pipelines never sets it up
+        // (a spent budget skips the lambda either way).
+        const uint64_t fssVs = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
+        if (fssVs == 0xA888D51024D9798Eull || fssVs == 0xB018D143700AB803ull) guardedBudget(g_panelCbBudget, [&] {
+            const uint64_t h = fssVs;
             // The hash names the engine's GENERAL world-quad pipeline --
             // the round-9 lesson, relearned in the field when the first
             // tracker fired outside the scanner. What only the scanner
@@ -2084,7 +2112,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
-    if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
+    // The callee's own first test (g_sunOff, an acquire load) goes first, before its two hash arguments are read; the callee keeps it.
+    if (optimizedStationSunOff() && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
     // visual.desktop_window: Elite's own draw into the swap chain's buffer, while the eye image is drawn there instead (the other draw thunks ask the same, below).
     if (desktopWindowSkipsDraw(s, self, kind)) return DrawVerdict::kSkip;
     // F157: the coat outfit's pack, a draw of the local body, is left out of both eyes while the coat outfit is armed (native on foot active, Gear_Back decided as the outer garment).
@@ -2510,7 +2539,17 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     // The generic hologram/icon depth pass (ui_depth.h): its own family
     // list, checked independently of the classification above.
-    if (uiDepthHologramWantsDraws()) t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
+    // The vertex shader's may-want byte (vs_may_want.h) skips the call whose first declines would reject this hash: the one store a decline
+    // leaves, g_holoEye = -1, is made inline, and the flag is false as the call's return would make it.
+    if (uiDepthHologramWantsDraws()) {
+        if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {
+            uiDepthHologramSkippedDraw();
+            t_holoDepthThisDraw = false;
+            maskNoteSkip(MaskSkip::HoloDepth);
+        } else {
+            t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
+        }
+    }
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2675,14 +2714,16 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
 
     // The loading hologram's pattern fix, same placement for the same reason.
     // Shape first, inline (holo_fix.h), as for the RemLok overlay above.
-    if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
+    // Build 4: the shape is pure register compares, so it goes before the flag's load (the same two terms, the other order).
+    if (holoPatternShape(kind, count, instances) && holoWantsDraws() &&
         holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
     }
 
     // The target indicator's composite, recognised the same way and in the
     // same place: shape, then what it samples, then its shader's hash.
-    if (targetSharpWantsDraws() &&
+    // Shape first, inline (target_sharp.h targetSharpShape), then the flag; the callee keeps both tests.
+    if (targetSharpShape(kind, count, instances) && targetSharpWantsDraws() &&
         targetSharpOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kTargetSharp;
     }
@@ -2705,7 +2746,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // slot 0 for one draw and put the game's texture back after.
     // The composite's shape first, inline (backdrop_fix.h): the call per eye
     // draw failed on it (30 innermost samples of the parked-5 window).
-    if (backdropWantsDraws() && backdropCompositeShape(kind, count, instances) &&
+    if (backdropCompositeShape(kind, count, instances) && backdropWantsDraws() &&
         backdropOnComposite(self, kind, count, instances)) {
         return DrawVerdict::kBackdrop;
     }
@@ -3448,7 +3489,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
     // Every Map can reuse an address whose earlier bounced mapping was
     // abandoned. Drop that record before the driver can recycle its pointer.
-    flatRuntimeMapBouncePreMap(res);
+    // Skipped while nothing is bounced (flat_runtime.h): PreMap returns at that same test.
+    if (flatRuntimeMapBounceAnyOpen()) flatRuntimeMapBouncePreMap(res);
     if (g_flatComputeInternal) {
         if (!foreignContext(self) && type != D3D11_MAP_READ) flatIssueEpochNoteResource(res);
         const HRESULT hr=g_state->realMap(self,res,sub,type,flags,mapped);
@@ -3509,7 +3551,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // The window's counters are read only by the flat profile's report (flat_runtime.cpp reportMapBounce), so the VR
     // profile does not pay the three locked increments per Map, nor the call across to flat_runtime.cpp.
     if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
-    if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
+    // Install refuses unless flatRuntimeActive() (flat_runtime.cpp), so the call is made only for the term it would test.
+    if (mapData0 && flatRuntimeActive()) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
     if (mapData0 && flatRuntimeActive()) {
         if (type != D3D11_MAP_READ) {
             auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Map,"Map");
@@ -3580,7 +3623,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // A recycled address gives the detector one wrong size for one
         // observe, which it survives.
         State::MapMemo& mm = s->mapMemo[(reinterpret_cast<uintptr_t>(res) >> 6) & 63];
+        ++g_mapMemoLookups;   // TEMPORARY (item 7)
         if (mm.res != res) {
+            ++g_mapMemoMisses;   // TEMPORARY (item 7)
             mm.res = res;
             mm.byteWidth = 0;
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
@@ -3635,7 +3680,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
                                     UINT sub) {
     // Flush independently of the current mode, owner thread, and projection
     // lifetime. The game's pointer remains valid for every tee below.
-    auto bounceLease=flatRuntimeMapBounceBeginUnmap(self,res);
+    // Skipped while nothing is bounced: BeginUnmap returns an empty lease at that same test. A bounce left open across a flat-to-VR switch still flushes.
+    auto bounceLease = flatRuntimeMapBounceAnyOpen() ? flatRuntimeMapBounceBeginUnmap(self,res) : FlatMapBounce::Lease{};
     if (g_flatComputeInternal) { bounceLease.finish(); g_state->realUnmap(self, res, sub); return; }
     // See hookedMap: necessary, not sufficient, for gpuFrameCommand to do
     // anything but return.
@@ -4358,7 +4404,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         // The may-want byte (vs_may_want.h): on the HDR target a vertex shader the family rule never names is kNone without the check. Inside this branch
         // alone, so the probe branch below is reached or not exactly as before; kind 2 always runs the check.
-        const bool skipFamily = vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKind() == 1;
+        const bool skipFamily = vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1;
         if (skipFamily) maskNoteSkip(MaskSkip::UiFamily);
         const UiLayerFamily uiFamily = skipFamily ? UiLayerFamily::kNone : uiLayerFamilyOf(g_state, kind, count, instances);
         compositeCounted = uiDepthScope.composite;
@@ -4832,13 +4878,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-        pixelProbeBefore(g_state, self);
+        if (pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
     // Indirect: the GPU-side argument buffer means count/instances are not
     // knowable here, the same reason drawCensusDrawDirect above logs 0,0.
-    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+    if (!foreignContext(self) && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, 0, 0, true);
 }
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
@@ -4867,11 +4913,11 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-        pixelProbeBefore(g_state, self);
+        if (pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     }
     g_state->realDrawInstancedIndirect(self, args, off);
-    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+    if (!foreignContext(self) && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, 0, 0, true);
 }
 
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
@@ -5231,7 +5277,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
@@ -5253,7 +5299,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'D', count, 1, args, v);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
@@ -5314,7 +5360,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
@@ -5335,7 +5381,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'I', count, 1, args, v);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
@@ -5397,7 +5443,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
     }
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the tone is a DrawInstanced triangle: the route's trigger
     // The glare clamp only ever applies in this thunk -- the train is
     // DrawInstanced -- so it lives here rather than in the shared tail,
@@ -5425,7 +5471,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
@@ -5495,7 +5541,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
     }
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
     if (starGlow) vrStarGlowBeforeDraw(self);
@@ -5541,15 +5587,16 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             const uint64_t sceneVs = eyeGeometry ? bindingShaderHash(BindSlot::Vs) : 0;
             const bool recognisedScene = eyeGeometry && glitchFrameIsSceneDraw(sceneVs);
             int temporalEye = -1;
-            if (recognisedScene && (temporalPassWantsRigidDraw(0) ||
-                                    temporalPassWantsRigidDraw(1))) {
+            // temporalPassRigidDrawMayWant is the callee's own first test (temporal_pass.h), inline, so a build without the temporal pass makes no call.
+            if (recognisedScene && ((temporalPassRigidDrawMayWant(0) && temporalPassWantsRigidDraw(0)) ||
+                                    (temporalPassRigidDrawMayWant(1) && temporalPassWantsRigidDraw(1)))) {
                 int targetIndex = -1;
                 depthProbeCurrentSceneEyeOf(
                     static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),
                     &temporalEye, &targetIndex);
             }
             const bool temporalWantsScene = recognisedScene &&
-                temporalPassWantsRigidDraw(temporalEye);
+                temporalPassRigidDrawMayWant(temporalEye) && temporalPassWantsRigidDraw(temporalEye);
             // At most one temporal VS-b1 query per identified eye/frame. A null
             // binding is still recorded by the temporal provenance as a seen
             // draw with no mapped write, rather than silently retried later.
@@ -5601,7 +5648,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         introCurveEndDraw();
     }
     if (starGlow) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
+    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -6154,6 +6201,13 @@ uint32_t vScreenEyeDrawsThisFrame() {
 }
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
+
+BindSetCounts vScreenBindSetCounts() {
+    BindSetCounts c = bindingSetCounts();
+    c.mapMemoLookups = g_mapMemoLookups;
+    c.mapMemoMisses = g_mapMemoMisses;
+    return c;
+}
 
 DrawMaskCounts vScreenDrawMaskCounts() {
     DrawMaskCounts c;

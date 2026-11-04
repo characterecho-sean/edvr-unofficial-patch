@@ -104,8 +104,14 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
 
 }  // namespace
 
+// TEMPORARY (build 4, item 7, bind_set_line.h). Plain counters: every bindingSet caller is the owner context's draw thread.
+static BindSetCounts g_bindSetCounts;
+
+BindSetCounts bindingSetCounts() { return g_bindSetCounts; }
+
 void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
+    bindSetNote(g_bindSetCounts, static_cast<size_t>(slot), s.ptr, ptr);   // compared before the pointer is overwritten
     s.ptr = ptr;
     ++s.gen;
     noteEyeKeySlot(slot);
@@ -114,6 +120,7 @@ void bindingSet(BindSlot slot, void* ptr) {
 void bindingInvalidate(BindSlot slot) {
     Slot& s = slotOf(slot);
     s.ptr = nullptr;
+    s.mayWant = 0xFF;   // a cleared shader slot must not keep a stale may-want byte (vs_may_want.h)
     ++s.gen;
     noteEyeKeySlot(slot);
 }

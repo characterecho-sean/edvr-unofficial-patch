@@ -662,19 +662,19 @@ void pins() {
     const std::string onEye = functionBody(depth, "bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {") +
                               functionBody(depth, "static bool classifyEyeDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {");
     const auto depthPlaces = [](const std::string& body) {
-        return inOrder(body, {"detail::g_uiDepthDrawComposite = false;", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
-                              "const bool composite = surfaceSlot >= 0;", "detail::g_uiDepthDrawComposite = composite;", "const uint64_t h = boundVsHash(ctx);"}) &&
-               countOf(body, "detail::g_uiDepthDrawComposite=composite;") == 1 && countOf(body, "detail::g_uiDepthDrawComposite=false;") == 1;
+        return inOrder(body, {"detail::g_uiDepthDraw = detail::UiDepthDraw{};", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
+                              "const bool composite = surfaceSlot >= 0;", "detail::g_uiDepthDraw.composite = composite;", "const uint64_t h = boundVsHash(ctx);"}) &&
+               countOf(body, "detail::g_uiDepthDraw.composite=composite;") == 1 && countOf(body, "detail::g_uiDepthDraw=detail::UiDepthDraw{};") == 1;
     };
     check(depthPlaces(onEye),
           "P2a: uiDepthOnEyeDraw clears the composite flag first (before its early returns) and sets it once, from the composite it classifies by");
     {
         std::string late = onEye, missing = onEye, twice = onEye;
-        late = edited(late, "detail::g_uiDepthDrawComposite = false;", "");
+        late = edited(late, "detail::g_uiDepthDraw = detail::UiDepthDraw{};", "");
         late = edited(late, "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
-                      "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false; detail::g_uiDepthDrawComposite = false;");
-        missing = edited(missing, "detail::g_uiDepthDrawComposite = composite;", "");
-        twice = edited(twice, "detail::g_uiDepthDrawComposite = composite;", "detail::g_uiDepthDrawComposite = composite; detail::g_uiDepthDrawComposite = composite;");
+                      "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false; detail::g_uiDepthDraw = detail::UiDepthDraw{};");
+        missing = edited(missing, "detail::g_uiDepthDraw.composite = composite;", "");
+        twice = edited(twice, "detail::g_uiDepthDraw.composite = composite;", "detail::g_uiDepthDraw.composite = composite; detail::g_uiDepthDraw.composite = composite;");
         check(!depthPlaces(late) && !depthPlaces(missing) && !depthPlaces(twice),
               "P2a control: cleared after the early returns, never set, or set twice, the pin fails");
     }

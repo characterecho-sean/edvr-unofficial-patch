@@ -2,6 +2,7 @@
 #include "config_refresh_line.h"
 #include "draw_reissue_line.h"
 #include "draw_mask_line.h"
+#include "bind_set_line.h"   // TEMPORARY (build 4, item 7)
 #include "gpu_query_count.h"
 #include "cross_profile_cost.h"
 #include "engine_motion_cpu.h"
@@ -1274,6 +1275,21 @@ void perfMonitorFrame(ID3D11Device* dev) {
         char maskLine[320];
         formatDrawMaskWindow(maskLine, sizeof(maskLine), s.frameNo, maskWindow);
         Log::get().note("%s", maskLine);
+        // TEMPORARY (build 4, item 7, bind_set_line.h): the mapMemo misses and the bindingSet re-sets that decide build 5, on the same window, written every window.
+        static BindSetCounts lastBind;
+        const BindSetCounts bindNow = vScreenBindSetCounts();
+        BindSetCounts bindWindow;
+        bindWindow.mapMemoLookups = bindNow.mapMemoLookups - lastBind.mapMemoLookups;
+        bindWindow.mapMemoMisses = bindNow.mapMemoMisses - lastBind.mapMemoMisses;
+        for (size_t k = 0; k < kBindSetSlots; ++k) {
+            bindWindow.slots[k].calls = bindNow.slots[k].calls - lastBind.slots[k].calls;
+            bindWindow.slots[k].samePtr = bindNow.slots[k].samePtr - lastBind.slots[k].samePtr;
+            bindWindow.slots[k].nullToNull = bindNow.slots[k].nullToNull - lastBind.slots[k].nullToNull;
+        }
+        lastBind = bindNow;
+        char bindLine[448];
+        formatBindSetWindow(bindLine, sizeof(bindLine), s.frameNo, bindWindow);
+        Log::get().note("%s", bindLine);
         const GpuQueryCounts queriesNow = gpuQueryCountsNow();
         GpuQueryCounts queriesWindow;
         for (size_t o = 0; o < kGpuQueryOwners; ++o) queriesWindow.ends[o] = queriesNow.ends[o] - lastQueries.ends[o];

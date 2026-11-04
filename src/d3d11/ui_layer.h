@@ -89,6 +89,8 @@ extern bool g_uiLayerWorldReissue;
 extern bool g_uiLayerMapsOn;
 extern uint64_t g_uiLayerGateFrame;
 extern uint64_t g_uiLayerNamedAt;
+extern uint32_t g_uiLayerTargetGen;
+extern int g_uiLayerTargetKindCache;
 }  // namespace detail
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
@@ -120,6 +122,11 @@ void uiLayerConfigure(Config& cfg);
 // lit HDR target, the G-buffer), 2 an eye target viewed as 8-bit UNORM (the
 // post-tonemap target the UI composites draw into).
 int uiLayerTargetKind();
+// uiLayerTargetKind with its first test inline: `rtv0Gen` is bindingGeneration(BindSlot::Rtv0). When it equals the generation the cache answered for, the cached kind is
+// returned, which is what the callee's first two lines do; otherwise the callee runs. The draw path calls this for every eye draw.
+inline int uiLayerTargetKindAt(uint32_t rtv0Gen) {
+    return rtv0Gen == detail::g_uiLayerTargetGen ? detail::g_uiLayerTargetKindCache : uiLayerTargetKind();
+}
 
 // For an owner-context draw whose family vscreen.cpp recognised
 // (ui_layer_math.h's UiLayerFamily, as an int): true when the draw goes to

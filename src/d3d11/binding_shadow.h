@@ -42,6 +42,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "bind_set_line.h"   // TEMPORARY (build 4, item 7): BindSetCounts
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -162,6 +164,8 @@ uint32_t bindingEyeKeyGeneration();
 // unchanged: an identical address after a rebind is not evidence of an identical
 // object, which is the bug that shipped as 0.5.2.
 void bindingSet(BindSlot slot, void* ptr);
+// TEMPORARY (build 4, item 7, bind_set_line.h): bindingSet's call counts for the six cached slots since the start, for the perf window line.
+BindSetCounts bindingSetCounts();
 
 // The slot's binding is unknown: the pointer becomes null and the generation moves, so no cached answer and no
 // pointer compare can take it for the old binding. For a slot whose recording was skipped for a while

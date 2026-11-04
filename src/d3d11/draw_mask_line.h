@@ -8,11 +8,11 @@
 
 namespace edvr {
 
-enum class MaskSkip : uint8_t { UiFamily, ScreenUi, ScreenRecognize, WeaponMotion, Count };
+enum class MaskSkip : uint8_t { UiFamily, ScreenUi, ScreenRecognize, WeaponMotion, HoloDepth, Count };
 constexpr size_t kMaskSkips = static_cast<size_t>(MaskSkip::Count);
 
 inline const char* maskSkipName(size_t k) {
-    static const char* const names[kMaskSkips] = {"ui_family", "screen_motion_ui", "screen_motion", "weapon_motion"};
+    static const char* const names[kMaskSkips] = {"ui_family", "screen_motion_ui", "screen_motion", "weapon_motion", "hologram_depth"};
     return k < kMaskSkips ? names[k] : "unknown";
 }
 

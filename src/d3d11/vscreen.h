@@ -21,6 +21,7 @@
 
 #include "../common/vtable_hook.h"  // HookMode
 #include "draw_mask_line.h"         // DrawMaskCounts
+#include "bind_set_line.h"          // BindSetCounts (TEMPORARY, build 4)
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -125,6 +126,8 @@ uint32_t vScreenEyeDrawsThisFrame();
 bool vScreenAaOffForDraws();
 // The may-want byte's counters since the start (draw_mask_line.h), for the perf window line.
 DrawMaskCounts vScreenDrawMaskCounts();
+// TEMPORARY (build 4, item 7, bind_set_line.h): the binding re-set and mapMemo counters since the start, for the perf window line.
+BindSetCounts vScreenBindSetCounts();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

@@ -97,7 +97,7 @@ static bool wiredUiDepth(const std::string& t) {
     if (!found(begin) || !found(end) || !found(shutdown) || !(begin < end && end < shutdown)) return false;
     const size_t made = t.find("g_orbitalWidthCb.get(ctx,orbital_width::factor())", begin);
     const size_t gate = t.find("(orbital && g_orbitalVs && orbitalWidth)", begin);
-    const size_t prepared = t.find("holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0,shader->slot);", begin);
+    const size_t prepared = t.find("holo=g_holoMotion[detail::g_uiDepthDraw.drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0,shader->slot);", begin);
     const size_t saved = t.find("ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&g_savedOrbitalWidth);", begin);
     const size_t bindVs = t.find("ctx->VSSetShader(g_orbitalVs.Get(),nullptr,0);", begin);
     const size_t bindCb = t.find("ctx->VSSetConstantBuffers(orbital_width::kSlot,1,&orbitalWidth);", begin);
