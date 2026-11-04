@@ -314,6 +314,23 @@ minutes after a flight finally reproduced the effect being chased.
 ## Git
 
 - Solo project: **branch, commit, merge to main, push.** No pull requests.
+- **Merge a branch with `git merge --no-ff -F <file> <branch>`.** Do not
+  fast-forward or squash it. That gives main one commit per branch:
+  `git log --first-parent` lists them, `git bisect start --first-parent`
+  steps by them when each step can cost a flight, and `git revert -m 1
+  <merge>` undoes one. The branch's own commits stay reachable from main,
+  and those are the hashes flight logs and `docs\` cite. The merge's subject
+  says what the branch did, with any issue number: that is the line
+  `--first-parent` shows, and `Merge branch 'claude/admiring-leakey-2a6065'`
+  tells the reader nothing.
+- **If the push is rejected because main moved,** redo the merge:
+  `git fetch origin`, `git reset --keep origin/main`, merge again, push. A
+  plain `git pull` hides the other branch's merge from `--first-parent`, and
+  `git pull --rebase=merges` rewrites the branch's commits, so their hashes
+  leave main.
+- **A log flown from the branch names the branch commit, not the merge.** On
+  main, `--expect-build HEAD` exits 2 for it, so pass
+  `--expect-build <branch commit>`.
 - **The task is not done until it is pushed.** After merging run
   `git push`, then `git log origin/main -1` and confirm the commit is
   actually there. A commit made and never pushed has been noticed from the
