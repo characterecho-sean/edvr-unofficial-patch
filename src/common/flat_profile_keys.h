@@ -36,7 +36,7 @@ inline bool flatProfileReadsKey(const char* key) {
         // The Visual tab's row. Unlisted, getString answers "off" here, which the reader takes for the stock 100.
         std::strcmp(key, "visual.star_glow") == 0 ||
         // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
-        // profiles, the Visual tab's Smoke and steam plumes row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
+        // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
         // running stock", so the row could never turn the fix on.
         std::strcmp(key, "fix.particle_billboard") == 0 ||
         // The AA comparison key (aa_compare.cpp): turns EDVR's temporal AA off for a side-by-side look and back, runtime only. Unlisted, a hotkey
