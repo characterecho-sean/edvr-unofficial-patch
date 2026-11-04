@@ -852,7 +852,7 @@ bool flatRuntimeMapOpenFrame() {
 // term can see: a walking step near it reaches the upscaler quantised.
 // The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
 // journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
-// (known and not on foot); the last gate seen is what the 5 s line reports.
+// (known and not on foot); the last gate seen is what the 30 s line reports.
 static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
 static void fillVehicleFrame(FlatMonoResolveFrame& f) {
     bool onFoot=false;

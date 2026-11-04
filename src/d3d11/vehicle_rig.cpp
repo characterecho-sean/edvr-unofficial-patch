@@ -173,10 +173,19 @@ std::atomic<uint32_t> g_cockpitGen{0};           // bumped whenever the cockpit 
 std::atomic<uint32_t> g_sphereBits[4] = {};      // the root's sphere in its own frame: centre xyz, radius, as float bits
 std::atomic<uint64_t> g_rigNameWords[6] = {};    // the rig's name, 48 bytes
 uint64_t g_cockpitKey = 0;                       // refresh-owned
+uint64_t g_cockpitUnreadKey = 0;                 // refresh-owned: the rig whose root sphere last failed to read, and when
+int64_t g_cockpitUnreadAt = 0;
 std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
 
+// The old root goes before the generation moves, and the tap reads the generation before the root: a tap holding the new generation can only see no root or the new one, so one
+// generation's poses all come from one rig. The new root goes last, so a reader that sees it sees the whole sphere.
+void retireCockpit() noexcept {
+    g_cockpitRoot.store(0, std::memory_order_release);
+    g_cockpitGen.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void publishCockpit(uint64_t root, const float sphere[4], const char* name) noexcept {
-    g_cockpitGen.fetch_add(1, std::memory_order_release);
+    retireCockpit();
     for (int i = 0; i < 4; ++i) {
         uint32_t b = 0;
         std::memcpy(&b, &sphere[i], 4);
@@ -212,17 +221,23 @@ void logReady(const Slot& s, const vr::RigRead& rr) noexcept {
 void trackCockpit(const vr::RigRead& rr, uint64_t key) noexcept {
     const uint64_t ck = key ^ (rr.lo * 0x9E3779B97F4A7C15ull) ^ (rr.count * 0xC2B2AE3D27D4EB4Full);
     if (ck == g_cockpitKey && g_cockpitRoot.load(std::memory_order_relaxed) == rr.lo) return;
+    // A rig whose root sphere did not read is tried again once a second and reported once, not on every refresh.
+    const int64_t now = ticks();
+    if (ck == g_cockpitUnreadKey && now - g_cockpitUnreadAt < g_ticksPerSec) return;
     g_cockpitKey = ck;
     vr::RigInfo info;
     vr::describeRig(g_mem, rr, false, &info);
     if (!info.haveRoot || !std::isfinite(info.rootSphere[3]) || !(info.rootSphere[3] > 0) || !std::isfinite(info.rootSphere[0]) || !std::isfinite(info.rootSphere[1]) ||
         !std::isfinite(info.rootSphere[2])) {
-        g_cockpitGen.fetch_add(1, std::memory_order_release);
-        g_cockpitRoot.store(0, std::memory_order_release);
-        if (g_statusLines.fetch_add(1, std::memory_order_relaxed) < kStatusLineCap)
-            Log::get().note("vehicle_rig: the cockpit rig's root sphere could not be read (or is not a sphere); no vehicle frame for this rig");
+        retireCockpit();
+        const bool first = ck != g_cockpitUnreadKey;
+        g_cockpitUnreadKey = ck;
+        g_cockpitUnreadAt = now;
+        if (first && g_statusLines.fetch_add(1, std::memory_order_relaxed) < kStatusLineCap)
+            Log::get().note("vehicle_rig: the cockpit rig's root sphere could not be read (or is not a sphere); no vehicle frame for this rig until it can");
         return;
     }
+    g_cockpitUnreadKey = 0;
     publishCockpit(rr.lo, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
 }
 
@@ -269,8 +284,7 @@ void refresh() noexcept {
         }
         if (!cockpitReady && g_cockpitRoot.load(std::memory_order_relaxed) != 0) {
             g_cockpitKey = 0;
-            g_cockpitGen.fetch_add(1, std::memory_order_release);
-            g_cockpitRoot.store(0, std::memory_order_release);
+            retireCockpit();
         }
     }
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
@@ -280,12 +294,13 @@ void refresh() noexcept {
 
 // ---- the emit tap (job threads, only while the game's evaluator gate is open for engine motion) -----------------------------------------------------------------------
 void emitTap(uintptr_t record) noexcept {
-    const uint64_t root = g_cockpitRoot.load(std::memory_order_relaxed);
+    const uint32_t gen = g_cockpitGen.load(std::memory_order_acquire);   // before the root: retireCockpit
+    const uint64_t root = g_cockpitRoot.load(std::memory_order_acquire);
     if (root && record == root) {
         // The cockpit rig's root, right after the game's own emit: its pose is what the pool holds. Keyed by the clock the emit folds into its markers.
         vframe::Pose pose;
         if (g_mem.read(pose.pos, static_cast<uintptr_t>(record + vr::kRecPos), 12) && g_mem.read(pose.quat, static_cast<uintptr_t>(record + vr::kRecQuat), 8))
-            g_frameRing.record(engineVelocityPresentClock(), g_cockpitGen.load(std::memory_order_acquire), pose);
+            g_frameRing.record(engineVelocityPresentClock(), gen, pose);
     }
     thread_local uint32_t t_calls = 0;
     if ((++t_calls & 15u) == 0) {
@@ -480,8 +495,8 @@ void vehicleRigInstall() {
     const bool identityRead = gameBuildIdentity(nullptr, nullptr);
     const uintptr_t at = identityRead ? gameRva(kSetTargetRva) : 0;
     if (!identityRead || !gameBuildKnown()) {
-        // The token, vtable and offset constants are build 334925's and none of them is in the signature table: on any other build nothing is read.
-        Log::get().note("vehicle_rig: not installed: %s is not build 334925; the data this reads (the component token, the vtable) are that build's, so it reads nothing and patches "
+        // The handle, rig and record offsets (vehicle_rig_core.h) are build 334925's and no signature can find them: on any other build nothing is read.
+        Log::get().note("vehicle_rig: not installed: %s is not build 334925; the offsets this reads through are that build's, so it reads nothing and patches "
                         "nothing (SetTarget %s by signature).", gameBuildText(), at ? "was found" : "was not found");
         return;
     }
@@ -539,6 +554,7 @@ vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out) {
                 const uint32_t b = g_sphereBits[i].load(std::memory_order_relaxed);
                 std::memcpy(&out->sphere[i], &b, 4);
             }
+            std::atomic_thread_fence(std::memory_order_acquire);
             if (g_cockpitGen.load(std::memory_order_acquire) != gen || !g_cockpitRoot.load(std::memory_order_acquire)) why = vframe::Why::kChanged;
         }
     }
