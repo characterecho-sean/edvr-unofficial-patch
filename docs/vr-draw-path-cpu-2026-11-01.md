@@ -45,7 +45,7 @@
   a hot `State` block, the map bounce gated on its own `open_` test, shape
   and hash before flag, the hologram pass by VS bit, counters for build 5,
   own time in the analyzer. Expected 0.34-0.51 ms. Item 3 dropped (#184).
-  Temporary: item 7's counter line. Next: re-review 2.
+  Temporary: item 7's counter line. Approved on re-review 2. Next: spec, build.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -1810,7 +1810,9 @@ themselves.
      decline, `g_holoEye = -1` (`ui_depth.cpp:3628`), which
      `uiDepthHologramContributionBegin` reads (`:3651`): `g_holoEye`
      becomes `detail::g_holoEye` with an inline setter (an out-of-line one
-     would cost the call the item removes). It sets `t_holoDepthThisDraw`
+     would cost the call the item removes; the hologram rig's unqualified
+     uses, `tools\hologram_depth_test\hologram_depth_test.cpp:311` and
+     six more, take `using detail::g_holoEye;`). It sets `t_holoDepthThisDraw`
      false, as the call returns on a decline, so #184's behaviour is
      unchanged.
    - A skipped call stores nothing in `g_holoMemo`. Its key repeats only
@@ -1819,7 +1821,12 @@ themselves.
      one (re-review, proven).
    - Counted: a `MaskSkip::HoloDepth` count on the `draw mask:` line, as
      build 2's byte skips are (`vscreen.cpp:5585-5588`), so the log shows
-     item 9 ran.
+     item 9 ran. It goes last in the enum, before `Count`, with the token
+     `hologram_depth` last in `names[]` (`draw_mask_line.h:11`, `:15`).
+   - `bindingInvalidate` leaves `mayWant` unchanged
+     (`binding_shadow.cpp:114-119`); it is called only for `VsSrv33` and
+     `Blend` today (`vscreen.cpp:6430-6431`). It resets `mayWant` to 0xFF,
+     so a future call for `Vs` cannot leave a stale byte.
    Own 0.06 ms (`uiDepthHologramOnEyeDraw`); expected 0.03-0.05.
 
 Expected total: 0.34-0.51 ms a frame of EDVR's own time (items 1, 2, 4, 5,
@@ -1864,7 +1871,8 @@ Expected total: 0.34-0.51 ms a frame of EDVR's own time (items 1, 2, 4, 5,
 - Item 8: the analyzer's tests gain an own/below case, and its own total
   equals `callerSamplesTopFrameInEdvr`.
 - Item 9: a clear bit implies `classifyHologramDraw` declines, over every
-  hash in the three lists, hash 0 and random hashes, with the runtime list
+  hash in the three lists, `kNullPsMesh`, hash 0 and random hashes, with
+  the runtime list
   both empty and configured; `kVsMayWantAll` includes the bit; a skipped
   draw leaves `g_holoEye` at -1.
 
@@ -1900,8 +1908,7 @@ No census.
   of them (re-review). That is the within-flight spread only; the spread
   between flights of the same build is not known. Item 4's part scales
   with Map/Unmap calls, not draws, so own time a frame is reported too.
-- **Nothing changed on screen:** within flight-to-flight spread against
-  build 3, `ui depth totals:` (`ui_depth.cpp:4507`), `ui quality:
+- **Nothing changed on screen:** against build 3, `ui depth totals:` (`ui_depth.cpp:4507`), `ui quality:
   composites left in the scene:` (`ui_scene_composites.h:137`) and `vscreen
   footprint:`; `--health` with no new NEVER APPLIED. Tolerance: each
   count per full-path draw within the min-max range of build 3's own
@@ -2072,3 +2079,14 @@ resolved. Notes outside the repo: `b4-rereview.md`.
 | 6 | Sum is 0.34-0.51; 0.2 ms is about two SEs of a difference; item 4 scales with maps; no tolerance | All fixed in the text |
 | 7 | The item 7 line is missing from Status | Added |
 | 8 | Optional: count item 9's skips on `draw mask:` | Taken; also its never-ran signature |
+
+**Re-review 2 (Opus, fresh context, against `d398e131`): approved.** Item 9
+is exact against the code: the three lists are `constexpr`, the runtime list
+is always a subset, widening `kVsMayWantAll` changes no subscriber (each
+tests only its own bit), nothing reads `g_holoEye` between the skip and the
+next call, and the one-slot memo's key covers what a plain decline reads
+(`classifier_memo.h:40-42`). Its five non-blocking notes are in the text:
+the hologram rig's `g_holoEye` uses, the enum position and token,
+`kNullPsMesh` in the test, `bindingInvalidate` resetting `mayWant`, and the
+contradictory "flight-to-flight spread" phrase removed. Notes outside the
+repo: `b4-rereview2.md`.
