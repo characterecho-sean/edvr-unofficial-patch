@@ -29,20 +29,15 @@
   deferred: the tee trap under DLAA (0.08 ms), the sub-pixel floor, the EDHM
   bypass, offscreen/concourse culling until a census/RTV check says what those
   draws are.
-- **Build 3 (designed, reviewed and revised 2026-11-03, "Build 3: one marker
-  copy for both eyes" and "Review of the build 3 design", Opus, fresh
-  context; arc #157, spec #180):** `mergePlans` and one copy per Unmap, sized
-  for up to 14 ranges and 65,536 entries so disjoint eye plans never truncate;
-  same coverage by construction, so no key. The F87c per-eye line carries
-  requested bytes and its own ring; a new line carries requested against
-  copied bytes and copy faults (a merged fault zeroes the plan windows inside
-  its range). The logs bound the saving at 0-86% of the copy (0-0.61 ms); the
-  flight measures it. B1 (what the non-eye draws are: 4,070 a frame in one
-  log, 514 in the other) goes through the existing draw census and
-  `edvr_log.py --tally offscreen`, one press after the profile capture, with
-  flight-only `census_offscreen` and `census_lines` settings. The map-bounce
-  gates wait for the A3 pass. Ruled out: skipping the windows during an
-  escalation (escalations only on arrival). Next: the build 3 flight.
+- **Build 3 (#180, `cfa5e806`; flown 2026-11-03, "Flight 2026-11-03 (build
+  3)"):** both eyes' marker windows merged and copied once per Unmap, no key.
+  Passed: coverage held (`outside 0`, `escalated 0`, `faults 0`, named 3.0),
+  copied 69% of requested, `streamUnmapCopy` 0.697 to 0.506 ms (R5), nothing
+  else up 0.1 ms. B1: 607 of 676 non-eye draws are depth-only into one
+  512x512 target (one VS); the rest are three odd-sized colour+depth targets
+  and a downsample chain. Next: name that 512x512 pass; the A3 pass
+  (`hookedMap`, `hookedUnmap`, the map-bounce gates). Ruled out: skipping
+  windows during an escalation (escalations only on arrival).
 - **Confirmed (item 1):** with AA off and the key off, every world draw is
   held as not scene depth, the tee never goes fast and F113 reports `none`
   100%. Key on: fast path 36-46%, F113 scene meshes 94%.
@@ -1511,3 +1506,74 @@ transcript of this project's sessions records its model, and none records
 Fable needs usage credits this account does not have. So "Review of the
 mask design (2026-11-02)" is an Opus review, independent only in that it
 ran with a fresh context.
+
+## Flight 2026-11-03 (build 3)
+
+Build `cfa5e806` (`EDVR_PROFILE_SYMBOLS=1`), the L2 spot (Shamash 1 a, the
+concourse), standing still, DLAA. Log `edvr_gfx_20261103_184210.log`;
+`edvr_log.py --expect-build HEAD` matches. A 100 s `cpu_profile.py` capture
+from 18:44:35 (pid 26996, 2,926 frames in windows 1-20, 0 events lost,
+symbols matched 2 of 2), then one census press (census frame 19271). The
+flight-only ini settings are reverted; the live `edvr.ini` matches its
+pre-flight backup.
+
+**Coverage held (pass).** From 18:44:49 to the end, every F87c window shows
+`outside 0`, `escalated 0` for both eyes, and `faults 0` on the new line.
+Named per copy is 3.0 an eye (for example 927 named in 309 copies at
+18:45:39). The two windows before 18:44:49 (arrival) escalated 66 and 72
+times and missed 30 and 48 entries on eye 1, as L2's arrival did; `--health`
+sums them as `outside 78`.
+
+**The cut (pass).** The new line, steady state (18:44:49 to 18:46:40, 12
+windows): copied is 68-69% of requested (for example 97,945,584 of
+141,754,368 bytes at 18:45:39), so 31% of the bytes are gone. In each 10 s log
+window about 3,400 plan windows join into about 620 ranges, two an Unmap. The function's own time on
+the line is 0.48-0.54 ms an Unmap (147.652 ms over 309 Unmaps at 18:45:39),
+1.5 ns a copied byte, the same rate as before.
+
+The profile, windows 1-20 against build 2's windows 1-20 (R5, inclusive, ms a
+frame; the same method and scripts as build 2, notes outside the repo in
+`profile-b3\`):
+
+| | build 2 | build 3 |
+|---|---|---|
+| `streamUnmapCopy` | 0.697 | 0.506 |
+| `streamCopyGuarded` (the copy itself) | 0.696 | 0.504 |
+| `hookedUnmap` | 0.734 | 0.543 |
+
+- A 27% fall, against 31% predicted from the bytes (0.697 x 0.69 = 0.48).
+  Windows 3-20 alone, after arrival, give 0.507, so the arrival's
+  escalations do not explain the gap. The planning and merge cost about
+  0.003 ms (`streamUnmapCopy` less `streamCopyGuarded`); the rest is the copy
+  running at about 1.59 ns a byte here against 1.45-1.57 before.
+- **Nothing else rose by 0.1 ms (pass).** The largest rises: R5
+  `hookedPresent` +0.058, `hookedCreateTexture2D` +0.074, `presentFrameBoundary`
+  +0.044. In R1 no named function rose by 0.05 ms. The draw-hook lambdas
+  were renamed by the build (new hashes), and each fell when paired by
+  file:line: the draw lambda (`vscreen.cpp:5514`) 0.608 to 0.526,
+  `forwardWithVerdict` (`:4688`) 0.449 to 0.413, `guarded` 0.145 to 0.136.
+- R1 fell from 26.15 to 24.08 ms and EDVR's leaf from 4.97 to 4.72, but the
+  game exe also fell 1.24 ms, so the scene differs and the totals are not
+  this build's saving. Build 3's saving is the copy's 0.19 ms, post-submit.
+
+**B1, what the non-eye draws are.** `edvr_log.py --tally offscreen`: one
+census frame, 676 `DCO` lines, `off=` 676, none cut. The eye is 2632x2684.
+Formats are DXGI numbers.
+
+| draws | RTV0 | DSV0 | top VS |
+|---|---|---|---|
+| 607 | none | 512x512, 53 (R16 typeless) | `C2208C162D010083` (585) |
+| 20 | 1844x1639, 27 (RGBA8 typeless) | 1844x1639, 44 (R24G8) | `1E8D013722FE71B8`, `A3E5D3FCBC1165F8` |
+| 12 | 2057x1235, 27 | 2057x1235, 44 | the same two |
+| 7 | 2360x2032, 27 | 2360x2032, 44 | the same two |
+| 28 | a chain at 1316x1342, 658x671, 329x335, 164x167, 82x83 (half, quarter ... of the eye), mostly 26 (R11G11B10 float) | none, or 658x671 39 | `129F602B2A9CA439`, `DFED8E1C9E191BEC`, `DEF19B035D5EDEDC` |
+| 1 | 1024x1024, 33 | 1024x1024, 53 | `AB6D504EE6B5398D` |
+
+- 90% of the non-eye draws are depth-only into one 512x512 16-bit target,
+  nearly all with one vertex shader. That is the shape of a shadow or
+  depth-map pass; which light or view it serves is not yet known.
+- 39 draw colour and depth into three larger targets that match no eye size.
+- The chain is a downsample of an eye-sized image, one or two draws a level,
+  which is post-processing, not geometry.
+- Next on B1: name the 512x512 pass (its 607 draws are the only bulk),
+  then decide whether it is a candidate for a ledger entry or dropped.
