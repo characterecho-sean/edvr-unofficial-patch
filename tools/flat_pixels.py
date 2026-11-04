@@ -132,6 +132,10 @@ def load_manifest(path):
     static_scene = manifest.get("static_scene", False)
     if type(static_scene) is not bool:
         raise CaptureError(f"{path}: static_scene must be a boolean")
+    # The frame carried the vehicle frame (FlatMonoResolveFrame::vehicleFrame; absent in older captures: off). The replay cannot redo it.
+    vehicle_frame = manifest.get("vehicle_frame", False)
+    if type(vehicle_frame) is not bool:
+        raise CaptureError(f"{path}: vehicle_frame must be a boolean")
     if manifest.get("mode") not in ("dlss", "dlaa"):
         raise CaptureError(f"{path}: mode must be dlss or dlaa")
     for field in ("binary_version", "binary_compiled"):
@@ -275,7 +279,7 @@ def load_manifest(path):
         "path": path, "version": version, "frame_id": frame, "jitter": jitter,
         "previous_jitter": previous_jitter, "reset": manifest["reset"],
         "rows_jitter": rows_jitter, "previous_rows_jitter": previous_rows_jitter,
-        "static_scene": static_scene, "mode": manifest["mode"],
+        "static_scene": static_scene, "vehicle_frame": vehicle_frame, "mode": manifest["mode"],
         "binary_version": manifest.get("binary_version"),
         "binary_compiled": manifest.get("binary_compiled"),
         "configured_dlss_preset": preset,

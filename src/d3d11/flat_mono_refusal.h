@@ -31,8 +31,8 @@ constexpr uint32_t kFlatMonoClassWeapon = 12;         // an attached first-perso
 constexpr uint32_t kFlatMonoClassWeaponRefused = 13;  // an attached first-person pixel the map cannot place: REFUSED
 constexpr uint32_t kFlatMonoClassReset = 14;          // a reset frame, every pixel refused: never sampled, never painted
 constexpr uint32_t kFlatMonoClassSkinned = 15;        // VR world route, F2 on foot: a skinned character's pixel whose target-7 texel is valid: its exact motion. FLAT profile, in a ship: a near pixel that
-                                                       // rides the ship's record (FlatMonoResolveFrame::shipRecordTerm), kept where last frame's depth confirms it (painted teal). ACCEPTED either way, so it
-                                                       // is counted in its own census slot (kFlatMonoRefusalSkinned; the flat census line calls it ship-record=), never among the refused; a VR skinned pixel with no valid texel is kFlatMonoClassMasked
+                                                       // rides the vehicle frame (FlatMonoResolveFrame::vehicleFrame: the cockpit rig's root), kept where last frame's depth confirms it (painted teal). ACCEPTED either way, so it
+                                                       // is counted in its own census slot (kFlatMonoRefusalSkinned; the flat census line calls it vehicle-frame=), never among the refused; a VR skinned pixel with no valid texel is kFlatMonoClassMasked
 constexpr uint32_t kFlatMonoClassRefusedBit = 0x80u;  // the prep refused this pixel's history
 constexpr uint32_t kFlatMonoClassMask = 0x0Fu;        // the class, bits 0-3: the highest is 15, so the next bits are free
 constexpr uint32_t kFlatMonoClassReasonShift = 4;
@@ -65,7 +65,7 @@ constexpr uint32_t kFlatMonoRefusalEvery = 4;
 constexpr uint32_t kFlatMonoRefusalStripes = 16;     // the counter buffer's stripes (spreads the atomics); the host sums them
 // Each stripe holds kFlatMonoRefusalSlots class counters, then kFlatMonoWeaponReasons counters of the refused first-person pixels by reason.
 // After them one more, the only ACCEPTED pixels the census counts (class kFlatMonoClassSkinned): in the world route the skinned pixels that took their exact
-// motion from target 7, which is how a log shows the route read E; in the flat profile (it has no target 7) the near pixels that rode the ship's record.
+// motion from target 7, which is how a log shows the route read E; in the flat profile (it has no target 7) the near pixels that rode the vehicle frame (the cockpit rig's root pose).
 constexpr uint32_t kFlatMonoRefusalSkinned = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons;
 constexpr uint32_t kFlatMonoRefusalCounters = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons + 1;
 

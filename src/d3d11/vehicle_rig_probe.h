@@ -8,12 +8,30 @@
 #include <atomic>
 #include <cstdint>
 
+#include "vehicle_frame.h"
+
 namespace edvr {
 
 // Once at start-up, from the proxy's device creation, in both profiles. Reads advanced.vehicle_rig_probe once.
 void vehicleRigProbeInstall();
 // Once a second (device_hook's poll): the 5 s emit line, the 30 s summary, and a refresh of the rig table when no emit is refreshing it.
 void vehicleRigProbePoll(uint64_t nowMs);
+
+// The flat profile's vehicle frame (vehicle_frame.h): the cockpit rig root's pose at this frame's emit and last frame's, and its sphere in its own frame. `stamp` is the present-frame clock the emit
+// folds into its markers (engineVelocityPresentClock; the value the prep reads as EN[276].x). Anything but kOk leaves `out` alone and the resolve on the old path. Counts into the window below.
+struct VehicleFrameRead {
+    vframe::Frame frame;
+    float sphere[4] = {};   // centre xyz, radius, in the root's own frame
+};
+vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out);
+// The counts since the last call (they restart), for the flat runtime's 5 s line; the tracked rig's name and root sphere radius.
+struct VehicleFrameWindow {
+    uint64_t asked = 0, with = 0, missing = 0, notAdjacent = 0, changed = 0;
+    bool live = false, rigKnown = false;
+    float sphereRadius = 0;
+    char name[48] = {};
+};
+void vehicleRigFrameWindow(VehicleFrameWindow* out);
 
 // The flat pixel capture's tap (flat_pixel_capture.h calls it at "flat pixels: copied", on the render thread, with the capture's frame and camera row 5, the eye). An inline cell so the
 // capture header links to nothing; null until the probe is live.

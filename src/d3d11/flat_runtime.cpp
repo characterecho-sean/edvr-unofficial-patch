@@ -69,6 +69,8 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "vehicle_frame.h"
+#include "vehicle_rig_probe.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
@@ -848,6 +850,25 @@ bool flatRuntimeMapOpenFrame() {
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
+// The vehicle frame (vehicle_frame.h, the probe's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
+// journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
+// (known and not on foot); the last gate seen is what the 5 s line reports.
+static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
+static void fillVehicleFrame(FlatMonoResolveFrame& f) {
+    bool onFoot=false;
+    const bool known=journalFlatOnFoot(&onFoot);
+    g_vehicleGateSeen=vframe::gate(known,onFoot);
+    f.vehicleFrame=false;
+    if(g_vehicleGateSeen!=vframe::Gate::kOn)return;
+    VehicleFrameRead frame;
+    if(vehicleRigFrameTake(engineVelocityPresentClock(),&frame)!=vframe::Why::kOk)return;
+    if(!vframe::useFrame(known,onFoot,true))return;
+    for(int i=0;i<3;++i){std::memcpy(&f.vehiclePosition[0][i],&frame.frame.now.pos[i],4);std::memcpy(&f.vehiclePosition[1][i],&frame.frame.prev.pos[i],4);}
+    for(int i=0;i<2;++i){f.vehicleQuat[0][i]=frame.frame.now.quat[i];f.vehicleQuat[1][i]=frame.frame.prev.quat[i];}
+    std::memcpy(f.vehicleSphere,frame.sphere,sizeof(f.vehicleSphere));
+    f.vehicleFrame=true;
+}
+
 static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
     if (f.reset) return;
     State::CameraOriginWindow& o = s.origin;
@@ -4811,6 +4832,17 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
         {
+            // The vehicle frame (vehicle_frame.h; the probe's cockpit rig root): every window, zeros included, so a gate that never opens cannot hide.
+            // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
+            // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
+            VehicleFrameWindow vw;
+            vehicleRigFrameWindow(&vw);
+            Log::get().note("flat vehicle frame 5s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,
+                (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
+                !vw.live?" probe=off(advanced.vehicle_rig_probe is off, or this is not build 334925: no frame can exist)":"");
+        }
+        {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
             Log::get().note("flat steady detail 5s: steady-detail=on depth-check=%llu/%llu; a stale-slot pixel takes the camera term only where "
                             "last frame's depth confirms it (ran/skipped resolves this window)",
@@ -4832,7 +4864,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu ship-record=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu vehicle-frame=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
@@ -7255,7 +7287,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
     f.staleRecordTerm=true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
-    f.shipRecordTerm=journalOnFootKnown() && !journalOnFoot();   // in a ship: a near pixel with no motion of its own rides the ship's record
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -7701,7 +7733,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
     f.staleRecordTerm = true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
-    f.shipRecordTerm = journalOnFootKnown() && !journalOnFoot();   // in a ship: a near pixel with no motion of its own rides the ship's record
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {

@@ -3361,6 +3361,8 @@ void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept {
     flatOriginWitnessFrameBoundary(presentFrame,flatOriginCaptureEnabled() && runtimeFlatProfile(),g_emitLive.load(std::memory_order_acquire));
 }
 
+uint32_t engineVelocityPresentClock() noexcept { return g_frame.load(std::memory_order_acquire); }
+
 void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     // Runs while live, and once more after a stand-down that left EDVR state
     // bound: configure(false) may come from the config thread, which must not

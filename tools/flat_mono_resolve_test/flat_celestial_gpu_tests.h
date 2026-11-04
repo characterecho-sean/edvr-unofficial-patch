@@ -22,7 +22,7 @@ constexpr float kNear = .025f;         // the reversed-Z near plane the rows car
 constexpr double kDepth = 500.0;       // metres: every pixel of the depth texture is at this range (depth = near / z)
 constexpr float kSx = 1.2f, kSy = 2.1f;   // the rows' scales: the tangents are +/-1/kSx and +/-1/kSy
 
-// flat_mono_resolve.cpp's Constants: the 336 bytes the prep's b0 reads (that file's static_assert pins the size). Mirrored here, because the
+// flat_mono_resolve.cpp's Constants: the 400 bytes the prep's b0 reads (that file's static_assert pins the size). Mirrored here, because the
 // rig drives the prep directly.
 struct MonoConstants {
     float camera[6][4], previous[6][4];
@@ -31,8 +31,9 @@ struct MonoConstants {
     uint32_t route[4], debug[4];
     float foregroundDepth[4];
     float celestialTanNow[4], celestialTanPrev[4];
+    float vehiclePosNow[4], vehiclePosPrev[4]; uint32_t vehicleQuat[4]; float vehicleSphere[4];   // the vehicle frame (debug.w value 32), zero here
 };
-static_assert(sizeof(MonoConstants) == 336, "flat_mono_resolve.cpp's Constants (the prep's b0)");
+static_assert(sizeof(MonoConstants) == 400, "flat_mono_resolve.cpp's Constants (the prep's b0)");
 
 // The engine-motion core's CelestialRecord (flat_mono_shader_source.h reads it at t18): six float4s.
 struct Record {

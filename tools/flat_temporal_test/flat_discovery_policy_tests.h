@@ -66,6 +66,16 @@ template<class Check> void run(Check check) {
                hooks=read("src/d3d11/vscreen.cpp"),deviceHook=read("src/d3d11/device_hook.cpp"),
                compute=read("src/d3d11/flat_compute_capture.cpp");
     check(!temporal.empty()&&!runtime.empty()&&!hooks.empty()&&!deviceHook.empty()&&!compute.empty(),"discovery wiring: source inputs are readable");
+    // The vehicle frame's gate asks the FLAT journal reader. journalOnFootKnown() goes through journalWatchActive(), which is false in the flat profile, so a gate built on it was
+    // dead in every flight (the ship record's census read 0 in every window); journalFlatOnFoot is the reader that answers in flat.
+    {
+        const auto fill=body(runtime,"static void fillVehicleFrame(");
+        size_t sites=0;for(size_t at=runtime.find("fillVehicleFrame(f);");at!=std::string::npos;at=runtime.find("fillVehicleFrame(f);",at+1))++sites;
+        check(!fill.empty() && fill.find("journalFlatOnFoot(&onFoot)")!=std::string::npos && fill.find("vframe::gate(known,onFoot)")!=std::string::npos &&
+              fill.find("journalOnFootKnown")==std::string::npos && fill.find("journalOnFoot()")==std::string::npos && fill.find("vframe::useFrame(known,onFoot,true)")!=std::string::npos &&
+              sites==2 && runtime.find("journalOnFootKnown()")==std::string::npos && runtime.find("shipRecordTerm")==std::string::npos,
+              "vehicle frame gate: both treatment sites ask journalFlatOnFoot through fillVehicleFrame, never journalOnFootKnown (dead in flat)");
+    }
     const auto keyStart=deviceHook.find("if (g_state->censusKey.pressed()) {");
     const auto keyEnd=deviceHook.find("if (g_state->gpuPassKey.pressed())",keyStart);
     const auto key=(keyStart!=std::string::npos && keyEnd!=std::string::npos)?deviceHook.substr(keyStart,keyEnd-keyStart):std::string();

@@ -11,10 +11,6 @@ import math
 
 import numpy as np
 
-# The ship record's counters and threshold (flat_mono_shader_source.h kShipSlots, kShipMinSamples).
-SHIP_SLOTS = 16384
-SHIP_MIN_SAMPLES = 32
-
 
 def marker_hash(r):
     words = [r[1, 0], r[1, 1], r[1, 2], r[0, 2], r[0, 3],
@@ -219,6 +215,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
     before the flag existed); True or False forces it, so an old capture can be asked what
     the policy would have done, and a new one what it would have done without."""
     declared_static = bool(meta.get("static_scene", False))
+    vehicle_frame = bool(meta.get("vehicle_frame", False))   # the capture says whether the frame carried the vehicle frame
     static = declared_static if static_scene is None else bool(static_scene)
     rw, rh = meta["render_width"], meta["render_height"]
     capture = meta.get("capture_roi") if meta.get("route") == "hdr" else None
@@ -260,43 +257,11 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                                   ndc_now, first=270)
         scene_old = unjitter_rows(np.memmap(meta["buffers"]["scene_previous"][0], mode="r", dtype="<f4").reshape((-1, 4)),
                                   ndc_old, first=270)
-    # The ship record (debug.w value 32; flat, in a ship): replayed from the captured planes, since the capture does not say which slot the
-    # GPU picked. shipCount's sparse grid (every 16th render pixel, at +8), near joined pixels per pool slot; shipPick's slot with the most,
-    # none under 32. Made on first use. Inside a cropped (HDR) capture only the grid points the crop holds are seen: "complete" says so.
-    ship_cache = []
-
-    def ship_slot():
-        if ship_cache:
-            return ship_cache[0]
-        found = {"slot": None, "samples": 0, "grid_points": 0, "seen_points": 0, "complete": True, "replayed": True}
-        if complete and pool_stride == 336 and scene_now is not None and scene_now.shape[0] > 276:
-            token = np.float32(scene_now[276, 0]).view(np.uint32)
-            counts = {}
-            for gy in range(0, rh, 16):
-                for gx in range(0, rw, 16):
-                    qx, qy = min(gx + 8, rw - 1), min(gy + 8, rh - 1)
-                    found["grid_points"] += 1
-                    if not (cx <= qx < cx + cw and cy <= qy < cy + ch):
-                        found["complete"] = False
-                        continue
-                    found["seen_points"] += 1
-                    z = np.float32(depth[qy - cy, qx - cx])
-                    if not (np.isfinite(z) and 0 < z <= 1 and z * 10 >= now[3, 2]):
-                        continue
-                    code_f = slots[qy - cy, qx - cx, 0]
-                    if not (code_f >= 1) or code_f >= 4294967296 or not float(code_f).is_integer() or int(code_f) % 2 == 0:
-                        continue
-                    slot = int(code_f) >> 1
-                    if slot >= count or slot >= SHIP_SLOTS:
-                        continue
-                    if record_kind(pool[first + slot], token) == "joined":
-                        counts[slot] = counts.get(slot, 0) + 1
-            best = max(counts.items(), key=lambda kv: (kv[1], -kv[0]), default=None)
-            if best is not None and best[1] >= SHIP_MIN_SAMPLES:
-                found["slot"], found["samples"] = best[0], best[1]
-        ship_cache.append(found)
-        return found
-
+    # The vehicle frame (debug.w value 32; flat, in a vehicle) is NOT replayed. It is the game's cockpit rig root, its pose at this frame's emit and last frame's, and its
+    # sphere: none of that is in the capture's planes, and the capture JSON does not carry it (the pose lines are in the log, as vehicle_rig_pose, and the 5 s
+    # "flat vehicle frame" line says whether the term ran). A near pixel on the camera term whose captured outcome the camera term does not explain is labelled
+    # vehicle_frame_unreplayed (kept) or rejected_near_unreplayed (refused though the camera term could be formed), and is left out of the motion comparison. Only a capture
+    # that declares "vehicle_frame": true is read that way; an older one has no such pixels.
     def record_term(slot, raw_uv, z):
         """The motion and class `engine_before` gives the pixel through pool slot `slot` (a fresh joined rig record), or None."""
         if slot is None or slot >= count:
@@ -395,27 +360,25 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                             branch = "camera_stale_kept"
                     near = bool(z * 10 >= now[3, 2])
                     kind_zero = branch in ("camera_no_slot", "camera_unmarked_record", "camera_stale_stamp", "camera_static_reprojection_fallback")
-                    if near and (kind_zero or branch in ("camera_stale_kept", "rejected_stale_or_depth")):
-                        ship = ship_slot()
-                        camera_motion_ok = motion_from_before(camera_before(now, old, raw_uv, z), raw_uv, rw, rh) is not None
-                        if ship["slot"] is not None and kept:
-                            carried = record_term(ship["slot"], raw_uv, z)
-                            if matches(carried, raw_uv, observed) and not matches(camera_before(now, old, raw_uv, z), raw_uv, observed):
-                                branch, before = "ship_record", carried
-                        elif ship["slot"] is not None and kind_zero and not kept and camera_motion_ok:
-                            # A near pixel on the camera term that last frame's depth did not confirm. Said only where a ship record exists: the
-                            # capture does not say whether the ship record term was on, and without one the check cannot be told from any other refusal.
-                            branch = "rejected_near_camera_check"
+                    if vehicle_frame and near and (kind_zero or branch in ("camera_stale_kept", "rejected_stale_or_depth")):
+                        camera_ok = camera_before(now, old, raw_uv, z)
+                        if kept and not matches(camera_ok, raw_uv, observed):
+                            branch = "vehicle_frame_unreplayed"
+                        elif not kept and kind_zero and motion_from_before(camera_ok, raw_uv, rw, rh) is not None:
+                            branch = "rejected_near_unreplayed"
                 if branch.startswith("camera"):
                     before = camera_before(now, old, raw_uv, z)
                 motion = motion_from_before(before, raw_uv, rw, rh) if before is not None else None
-                if motion is None:
+                unreplayed = branch in ("vehicle_frame_unreplayed", "rejected_near_unreplayed")
+                if motion is None and not unreplayed:
                     if not branch.startswith("rejected"):
                         branch = "rejected_output"
                     motion = np.zeros(2, dtype=np.float32)
                 counts[branch] = counts.get(branch, 0) + 1
+                if unreplayed:
+                    continue
                 reject_mismatch += bool(branch.startswith("rejected")) != bool(rejection[iy, ix])
-                bucket = ("engine" if branch in ("engine_joined", "engine_stale_record", "ship_record")
+                bucket = ("engine" if branch in ("engine_joined", "engine_stale_record")
                           else "rejected" if branch.startswith("rejected") else "camera")
                 errors[bucket].append((float(np.linalg.norm(motion - observed)), float(np.linalg.norm(observed))))
         comparisons = {}
@@ -431,8 +394,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                        "sampled_pixels": sum(counts.values()), "branch_counts": counts,
                        "records_used": sorted(slots_used), "rejection_mismatch_pixels": reject_mismatch,
                        "motion_comparison": comparisons})
-    ship_note = {"ship_record": ship_cache[0]} if ship_cache else {}
-    return {**ship_note, "engine_complete": complete, "input_grid": "render pixels",
+    return {"engine_complete": complete, "input_grid": "render pixels",
             "static_scene": {"declared": declared_static, "replayed_as": static},
             "sampling": "exact when step=1; otherwise regular grid and sampled counts",
             "rows_jitter": {"source": rows_source, "ndc_now": [float(v) for v in ndc_now],
@@ -513,10 +475,10 @@ def self_test():
 
 
 def ship_replay_self_test():
-    """The stale record term and the ship record, replayed from planes: a 96 x 96 frame whose near pixels belong to one joined record that
-    rides the camera (the engine rows are still while the camera rows move), with a block that has no slot and rode it, a block that has no
-    slot and kept the camera vector (an older build's capture), a block that has no slot and was refused, and a stale block over the joined
-    record whose motion is the record's."""
+    """The stale record term, replayed from planes, and the near pixels the vehicle frame explains, labelled as unreplayed: a 96 x 96 frame of a joined record
+    that rides the camera (the engine rows are still while the camera rows move), with a block that has no slot and kept zero motion (the vehicle frame: not
+    replayable), a block that has no slot and kept the camera vector (the old path), a block that has no slot and was refused, and a stale block over the
+    joined record whose motion is the record's."""
     from pathlib import Path
     from tempfile import TemporaryDirectory
 
@@ -544,12 +506,11 @@ def ship_replay_self_test():
     slots[:, :, 1] = depth
     motion = np.zeros((rh, rw, 2), dtype="<f2")
     rejection = np.zeros((rh, rw), dtype=np.uint8)
-    camera_motion = camera_before(camera, previous, np.asarray([(10 + .5) / rw, (10 + .5) / rh], dtype=np.float32), np.float32(.01))
-    camera_vector = motion_from_before(camera_before(camera, previous, np.asarray([(26 + .5) / rw, (10 + .5) / rh], dtype=np.float32), np.float32(.01)),
-                                       np.asarray([(26 + .5) / rw, (10 + .5) / rh], dtype=np.float32), rw, rh)
-    assert camera_motion is not None and camera_vector is not None and np.linalg.norm(camera_vector) > 5
-    # block A (10,10): no slot, rode the ship (motion zero, kept); B (26,10): no slot, the camera vector kept; C (42,10): no slot, refused;
-    # D (58,10): a stale slot over the joined record, kept with the record's motion (zero)
+    uv = np.asarray([(26 + .5) / rw, (10 + .5) / rh], dtype=np.float32)
+    camera_vector = motion_from_before(camera_before(camera, previous, uv, np.float32(.01)), uv, rw, rh)
+    assert camera_vector is not None and np.linalg.norm(camera_vector) > 5
+    # block A (10,10): no slot, zero motion kept; B (26,10): no slot, the camera vector kept; C (42,10): no slot, refused; D (58,10): a stale slot over the
+    # joined record, kept with the record's motion (zero)
     for bx in (10, 26, 42):
         slots[10:14, bx:bx + 4, 0] = 0
     slots[10:14, 58:62, 1] = .5
@@ -570,21 +531,19 @@ def ship_replay_self_test():
             paths[name] = path
         meta = {"route": "sdr", "capture_roi": None, "render_width": rw, "render_height": rh, "camera": camera.tolist(),
                 "previous_camera": previous.tolist(), "jitter": [0, 0], "previous_jitter": [0, 0], "rows_jitter": [0, 0],
-                "previous_rows_jitter": [0, 0], "reset": False, "static_scene": False, "textures": paths, "buffers": buffers,
+                "previous_rows_jitter": [0, 0], "reset": False, "static_scene": False, "vehicle_frame": True, "textures": paths, "buffers": buffers,
                 "engine": {"complete": True}}
         report = analyze(meta, [("A", (10, 10, 4, 4)), ("B", (26, 10, 4, 4)), ("C", (42, 10, 4, 4)), ("D", (58, 10, 4, 4))])
         counts = {entry["name"]: entry["branch_counts"] for entry in report["rois"]}
-        assert report["ship_record"]["slot"] == 1 and report["ship_record"]["samples"] >= 32, report["ship_record"]
-        # A rode the ship; it also matches the camera term only if the camera did not move, which it did
-        assert counts["A"] == {"ship_record": 16}, counts["A"]
+        assert "ship_record" not in report, "the vote is gone: nothing recomputes a slot"
+        assert counts["A"] == {"vehicle_frame_unreplayed": 16}, counts["A"]
         assert counts["B"] == {"camera_no_slot": 16}, counts["B"]
-        assert counts["C"] == {"rejected_near_camera_check": 16}, counts["C"]
+        assert counts["C"] == {"rejected_near_unreplayed": 16}, counts["C"]
         assert counts["D"] == {"engine_stale_record": 16}, counts["D"]
-        # With fewer than 32 grid points on the record there is no ship record: A stays a camera pixel (and mismatches the capture)
-        slots[48:, :, 0] = 0
-        Path(paths["slots"]).write_bytes(slots.tobytes())
-        again = analyze(meta, [("A", (10, 10, 4, 4))])
-        assert again["ship_record"]["slot"] is None and again["rois"][0]["branch_counts"] == {"camera_no_slot": 16}, again
+        # The unreplayed pixels are left out of the motion comparison, and out of the rejection mismatch count
+        for entry in report["rois"]:
+            if entry["name"] in ("A", "C"):
+                assert entry["motion_comparison"] == {} and entry["rejection_mismatch_pixels"] == 0, entry
 
 
 def crop_replay_self_test():

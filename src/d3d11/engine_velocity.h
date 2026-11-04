@@ -234,6 +234,8 @@ inline void engineVelocityResourceUnknown(const ID3D11Resource* resource) {
 
 // The present-frame clock (device_hook, once per owned Present).
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept;
+// The present-frame clock the emit folds into its markers and the scene snapshots carry as EN[276].x (the value NotePresentFrame last set). Any thread.
+uint32_t engineVelocityPresentClock() noexcept;
 // The owner thread's frame boundary (vscreen): rotation, the periodic lines.
 void engineVelocityFrameBoundary(ID3D11DeviceContext*);
 // The flat runtime's per-draw restore before the lazy form below: substituted shaders/blend back, the draw cache reset,

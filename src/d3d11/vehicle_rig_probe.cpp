@@ -12,6 +12,11 @@
 //   vehicle_rig emits ship=N cockpit=N ...        every 5 s while the counts change
 //   vehicle_rig_pose_frame / vehicle_rig_pose     at "flat pixels: copied": each ship and cockpit record's pose bits, joinable to the pool by exact bits; capped
 //   vehicle_rig: ... (every 30 s)                 "no target seen", or the counts: targets, rigs ready, faults caught, vtable mismatches, rigs not ready; and whether the emit gate was open
+//   vehicle_rig record role=cockpit i=.. c=.. r=..  each cockpit-rig record's own sphere, once per rig (capped): whether a rig's loose sphere comes from one mesh
+//
+// THE VEHICLE FRAME (the flat profile's use of this probe, issue 186). The emit tap also records the pose of the CURRENT COCKPIT RIG's root record (index 0) at the emit, keyed by the
+// present-frame clock the emit folds into its markers, in a small lock-free ring (vehicle_frame.h). The flat resolve takes this frame's entry and last frame's (vehicleRigFrameTake);
+// the root's sphere is read when the rig is first seen. advanced.vehicle_rig_probe off, a build that is not 334925, or no cockpit rig mean no frame, and the resolve is the old path.
 #include "vehicle_rig_probe.h"
 
 #include <windows.h>
@@ -26,7 +31,9 @@
 #include "../common/game_build.h"
 #include "../common/log.h"
 #include "journal_watch.h"
+#include "engine_velocity.h"
 #include "kinematic_eval_hook.h"
+#include "vehicle_frame.h"
 #include "vehicle_rig_core.h"
 
 namespace edvr {
@@ -181,6 +188,29 @@ struct RigMemo {
 };
 RigMemo g_memo[vr::kMaxRigs];
 
+// ---- the vehicle frame: the current cockpit rig's root, its pose ring and sphere -----------------------------------------------------------------------------------------------
+vframe::Ring g_frameRing;
+std::atomic<uint64_t> g_cockpitRoot{0};          // the root record's address (the first element of the cockpit rig's array); 0: no cockpit rig is ready
+std::atomic<uint32_t> g_cockpitGen{0};           // bumped whenever the cockpit rig, its handle or its record array changes (a vehicle change, a rearranged array)
+std::atomic<uint32_t> g_sphereBits[4] = {};      // the root's sphere in its own frame: centre xyz, radius, as float bits
+std::atomic<uint64_t> g_rigNameWords[6] = {};    // the rig's name, 48 bytes
+uint64_t g_cockpitKey = 0;                       // refresh-owned
+std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
+constexpr uint32_t kRecordSphereLines = 48;       // the per-record sphere lines a cockpit rig writes
+
+void publishCockpit(uint64_t root, const float sphere[4], const char* name) noexcept {
+    g_cockpitGen.fetch_add(1, std::memory_order_release);
+    for (int i = 0; i < 4; ++i) {
+        uint32_t b = 0;
+        std::memcpy(&b, &sphere[i], 4);
+        g_sphereBits[i].store(b, std::memory_order_relaxed);
+    }
+    uint64_t w[6] = {};
+    if (name) std::memcpy(w, name, strnlen(name, 47));
+    for (int i = 0; i < 6; ++i) g_rigNameWords[i].store(w[i], std::memory_order_relaxed);
+    g_cockpitRoot.store(root, std::memory_order_release);
+}
+
 uint64_t mixKey(uint64_t h, uint64_t e, uint64_t i) noexcept { return (h * 0x9E3779B97F4A7C15ull) ^ (e * 0xC2B2AE3D27D4EB4Full) ^ (i * 0x165667B19E3779F9ull); }
 
 const char* slotRole(const Slot& s) noexcept { return vr::roleName(static_cast<uint32_t>(s.role)); }
@@ -214,6 +244,38 @@ void logReady(const Slot& s, const vr::RigRead& rr) noexcept {
     }
 }
 
+// A cockpit rig that is ready: when it is a different rig (or its array moved) read its root's sphere once, publish the root, and write each record's own sphere once.
+void trackCockpit(const Slot& slot, const vr::RigRead& rr, uint64_t key) noexcept {
+    const uint64_t ck = key ^ (rr.lo * 0x9E3779B97F4A7C15ull) ^ (rr.count * 0xC2B2AE3D27D4EB4Full);
+    if (ck == g_cockpitKey && g_cockpitRoot.load(std::memory_order_relaxed) == rr.lo) return;
+    g_cockpitKey = ck;
+    vr::RigInfo info;
+    vr::describeRig(g_mem, rr, &info);
+    if (!info.haveRoot || !std::isfinite(info.rootSphere[3]) || !(info.rootSphere[3] > 0) || !std::isfinite(info.rootSphere[0]) || !std::isfinite(info.rootSphere[1]) ||
+        !std::isfinite(info.rootSphere[2])) {
+        g_cockpitGen.fetch_add(1, std::memory_order_release);
+        g_cockpitRoot.store(0, std::memory_order_release);
+        Log::get().note("vehicle_rig frame: the cockpit rig's root sphere could not be read (or is not a sphere); no vehicle frame for this rig");
+        return;
+    }
+    publishCockpit(rr.lo, info.rootSphere, info.haveName ? info.name : slot.name);
+    Log::get().note("vehicle_rig frame: cockpit rig \"%s\" is the vehicle frame's rig: root %p, rootSphere=(%.4f,%.4f,%.4f,%.4f) in the root's own frame, records=%llu",
+                    info.haveName ? info.name : slot.name, reinterpret_cast<void*>(rr.lo), info.rootSphere[0], info.rootSphere[1], info.rootSphere[2], info.rootSphere[3],
+                    static_cast<unsigned long long>(rr.count));
+    // Each record's own sphere, once per rig: a loose root sphere (the Cobra's 30 m) may come from one hull mesh.
+    const uint64_t cap = rr.count < kRecordSphereLines ? rr.count : kRecordSphereLines;
+    for (uint64_t k = 0; k < cap; ++k) {
+        const uint64_t rec = rr.lo + k * vr::kRecordStride;
+        float c[3] = {}, r = 0;
+        vr::PoseRead p;
+        if (!g_mem.read(c, static_cast<uintptr_t>(rec + vr::kRecSphereCentre), 12) || !g_mem.read(&r, static_cast<uintptr_t>(rec + vr::kRecSphereRadius), 4) || !vr::readPose(g_mem, rec, &p)) continue;
+        const bool rigid = p.haveScale && std::fabs(p.xfScale - 1.0f) < 0.01f;
+        Log::get().note("vehicle_rig record role=cockpit i=%llu c=(%.4f,%.4f,%.4f) r=%.4f rigid=%d (rigid: the record's transform has scale 1)", static_cast<unsigned long long>(k), c[0], c[1], c[2], r,
+                        rigid ? 1 : 0);
+    }
+    if (rr.count > cap) Log::get().note("vehicle_rig record role=cockpit CAPPED: %llu of %llu records logged", static_cast<unsigned long long>(cap), static_cast<unsigned long long>(rr.count));
+}
+
 void refresh() noexcept {
     if (g_refreshBusy.exchange(true, std::memory_order_acquire)) return;
     const int64_t t0 = ticks();
@@ -222,6 +284,7 @@ void refresh() noexcept {
     if (readTracked(slots, &n)) {
         vr::RoleTable::Range ranges[vr::kMaxRigs];
         uint32_t m = 0, ready = 0, notReady = 0;
+        bool cockpitReady = false;
         for (uint32_t i = 0; i < n; ++i) {
             vr::RigRead rr;
             const vr::Status st = vr::readRig(g_mem, slots[i].h, slots[i].E, slots[i].I, g_rigVtable, &rr);
@@ -244,6 +307,10 @@ void refresh() noexcept {
             }
             if (st == vr::Status::kOk || st == vr::Status::kEmpty) {
                 ++ready;
+                if (st == vr::Status::kOk && slots[i].role == vr::kCockpit && !cockpitReady) {
+                    cockpitReady = true;
+                    trackCockpit(slots[i], rr, key);
+                }
                 if (st == vr::Status::kOk) {
                     ranges[m].lo = rr.lo;
                     ranges[m].hi = rr.hi;
@@ -266,6 +333,11 @@ void refresh() noexcept {
                 ++notReady;
             }
         }
+        if (!cockpitReady && g_cockpitRoot.load(std::memory_order_relaxed) != 0) {
+            g_cockpitKey = 0;
+            g_cockpitGen.fetch_add(1, std::memory_order_release);
+            g_cockpitRoot.store(0, std::memory_order_release);
+        }
         g_table.publish(ranges, m);
         g_rigsNow.store(n, std::memory_order_relaxed);
         g_readyNow.store(ready, std::memory_order_relaxed);
@@ -283,6 +355,13 @@ void emitTap(uintptr_t record) noexcept {
     const bool sample = (n & 255u) == 0;
     const int64_t t0 = sample ? ticks() : 0;
     g_tapCalls.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t root = g_cockpitRoot.load(std::memory_order_relaxed);
+    if (root && record == root) {
+        // The cockpit rig's root, right after the game's own emit: its pose is what the pool holds. Keyed by the clock the emit folds into its markers.
+        vframe::Pose pose;
+        if (g_mem.read(pose.pos, static_cast<uintptr_t>(record + vr::kRecPos), 12) && g_mem.read(pose.quat, static_cast<uintptr_t>(record + vr::kRecQuat), 8))
+            g_frameRing.record(engineVelocityPresentClock(), g_cockpitGen.load(std::memory_order_acquire), pose);
+    }
     g_emits.note(g_table.classify(record));
     if ((n & 15u) == 0) {
         // Once a frame, roughly: the first tap to find the last refresh older than 4 ms takes it.
@@ -585,6 +664,45 @@ void vehicleRigProbeInstall() {
     Log::get().note("vehicle_rig: installed: SetTarget (0x1096640, found by signature at 0x%llX) forwards first and returns the game's result unchanged; read-only (SEH-guarded reads, no writes into the "
                     "game). Emit counts ride the kinematic emit bracket and only count while the game's evaluator gate is already open for engine motion (temporal AA on); pose lines come at "
                     "\"flat pixels: copied\". advanced.vehicle_rig_probe is TEMPORARY.", static_cast<unsigned long long>(at));
+}
+
+vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out) {
+    g_frameAsked.fetch_add(1, std::memory_order_relaxed);
+    vframe::Why why = vframe::Why::kMissing;
+    if (g_live.load(std::memory_order_acquire) && g_cockpitRoot.load(std::memory_order_acquire)) {
+        const uint32_t gen = g_cockpitGen.load(std::memory_order_acquire);
+        why = vframe::select(g_frameRing, stamp, gen, &out->frame);
+        if (why == vframe::Why::kOk) {
+            for (int i = 0; i < 4; ++i) {
+                const uint32_t b = g_sphereBits[i].load(std::memory_order_relaxed);
+                std::memcpy(&out->sphere[i], &b, 4);
+            }
+            if (g_cockpitGen.load(std::memory_order_acquire) != gen || !g_cockpitRoot.load(std::memory_order_acquire)) why = vframe::Why::kChanged;
+        }
+    }
+    switch (why) {
+        case vframe::Why::kOk: g_frameWith.fetch_add(1, std::memory_order_relaxed); break;
+        case vframe::Why::kMissing: g_frameMissing.fetch_add(1, std::memory_order_relaxed); break;
+        case vframe::Why::kNotAdjacent: g_frameNotAdjacent.fetch_add(1, std::memory_order_relaxed); break;
+        default: g_frameChanged.fetch_add(1, std::memory_order_relaxed); break;
+    }
+    return why;
+}
+
+void vehicleRigFrameWindow(VehicleFrameWindow* out) {
+    out->asked = g_frameAsked.exchange(0, std::memory_order_relaxed);
+    out->with = g_frameWith.exchange(0, std::memory_order_relaxed);
+    out->missing = g_frameMissing.exchange(0, std::memory_order_relaxed);
+    out->notAdjacent = g_frameNotAdjacent.exchange(0, std::memory_order_relaxed);
+    out->changed = g_frameChanged.exchange(0, std::memory_order_relaxed);
+    out->live = g_live.load(std::memory_order_acquire);
+    uint64_t w[6];
+    for (int i = 0; i < 6; ++i) w[i] = g_rigNameWords[i].load(std::memory_order_relaxed);
+    std::memcpy(out->name, w, 48);
+    out->name[47] = 0;
+    uint32_t b = g_sphereBits[3].load(std::memory_order_relaxed);
+    std::memcpy(&out->sphereRadius, &b, 4);
+    out->rigKnown = g_cockpitRoot.load(std::memory_order_relaxed) != 0;
 }
 
 void vehicleRigProbePoll(uint64_t nowMs) {
