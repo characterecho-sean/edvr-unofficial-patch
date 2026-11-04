@@ -158,6 +158,7 @@ bool g_vsDropSaid = false, g_psDropSaid = false;
 struct FamilyState {
     bool derived = false, valid = false;
     bool derivedFlat = false;   // the profile the derivation and every patch below were made under; a switch derives again
+    bool derivedSkin = false;   // whether the second skin was armed (VR, g_skinWanted) when a skinned family was derived; arming it later derives that family again
     // F2: this family's vertex shader takes the second skin (VR, a skinned family, a vertex shader that passed the analysis); its
     // keyed pairs in kSkinPairs export E. False for good once a patch of it fails to create (skinWhy says why).
     bool skin = false;
@@ -218,6 +219,7 @@ std::atomic<bool> g_anyBound{false};   // EDVR state may still be bound (owner t
 // never a stale answer. Owner thread, under g_mutex.
 SkinJoinGpu g_skin;
 std::atomic<bool> g_skinWanted{false};   // VR profile with the feature live: the hook is armed and the chain dispatch feeds the join
+bool g_skinDeclinedFlat = false;         // armSkinLocked ran in the flat profile and declined: a later configure under VR owes the arm (g_mutex)
 uint32_t g_skinPoseFrame = ~0u;          // the present frame whose first pool snapshot owes a pose table (built at the frame boundary), and that snapshot's eye
 int g_skinPoseEye = -1;
 // The frame's list of the instance-stream entries its skinned draws read (skin_join.h, "the pose table's CPU reference"): every skinned family's substituted
@@ -774,14 +776,18 @@ thread_local bool t_creating = false;
 void deriveFamily(int f) {
     FamilyState& s = g_families[f];
     // A live VR/flat switch: what was derived and patched under the other profile (the second skin is VR's alone, and the
-    // pixel shaders were patched with or without its export) is derived again, from the remembered bytecode.
-    if (s.derived && s.derivedFlat != runtimeFlatProfile()) {
+    // pixel shaders were patched with or without its export) is derived again, from the remembered bytecode. So is a skinned
+    // family derived before the second skin was armed: a session that started flat arms it at its first switch to VR
+    // (armSkinForProfileLocked), and a family derived in VR just ahead of that must take it too.
+    const bool skinArmed = !runtimeFlatProfile() && g_skinWanted.load(std::memory_order_acquire);
+    if (s.derived && (s.derivedFlat != runtimeFlatProfile() || (kFamilies[f].skinned && s.derivedSkin != skinArmed))) {
         s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
         s.psExports.clear(); s.psZeroes.clear();
         s.derived = s.valid = false; s.skin = false; s.skinWhy.clear(); s.reason.clear(); s.inputs = EngineVelocityInputs{};
     }
     if (s.derived) return;
     s.derivedFlat = runtimeFlatProfile();
+    s.derivedSkin = skinArmed;
     for (auto& [ptr, info] : g_vs) {
         if (info.family != f) continue;
         s.derived = true;
@@ -790,8 +796,9 @@ void deriveFamily(int f) {
         s.valid = engineVelocityDeriveInputs(info.bytes.data(), info.bytes.size(), s.inputs, why);
         if (!s.valid) s.reason = "signature: " + why;
         // F2: a skinned family takes the second skin when its vertex shader's chain is the one the patch clones.
-        // g_skinWanted: a session that started flat never armed the second skin's hook (armSkinLocked), so a family derived
-        // after a switch to VR takes none rather than patching shaders whose target 7 nothing makes.
+        // g_skinWanted: a family takes the second skin only once the hook is armed (armSkinLocked), never patching shaders whose
+        // target 7 nothing makes. A session that started flat arms it at its first switch to VR (armSkinForProfileLocked); a
+        // family derived before that is derived again (derivedSkin above).
         if (s.valid && !runtimeFlatProfile() && kFamilies[f].skinned && g_skinWanted.load(std::memory_order_acquire)) {
             // A family whose pixel shaders already read the vertex shader's next free register names its own (kFamilies); it must still be free on
             // the vertex side, which the vertex patch checks.
@@ -2688,7 +2695,8 @@ void attachEmitLocked(bool quiet) {
 // F2: the second skin, VR with the feature live. The hook is armed once (its own line says what it did) and its gate opened; the
 // chain dispatch then feeds the join. A hook that stood down leaves the job table's prefix join, and the log says so.
 void armSkinLocked() {
-    if (runtimeFlatProfile()) return;
+    if (runtimeFlatProfile()) { g_skinDeclinedFlat = true; return; }
+    g_skinDeclinedFlat = false;
     char line[420] = {};
     const SkinHookState state = skinEntityHookArm(line, sizeof(line));
     skinEntityHookSetGate(true);
@@ -2700,12 +2708,22 @@ void armSkinLocked() {
                     "chain's own job table every frame. A character it cannot join has no history for that frame, never a guess.",
                     state == SkinHookState::Armed ? "game's entry list (read-only hook), the table's prefix as the fallback" : "job table's prefix");
 }
+
+// A session that started in the flat profile declined the second skin when engine motion went live (armSkinLocked). The profile
+// switch to VR reaches engineVelocityConfigure again with engine motion already live, which has nothing else to do, so this is
+// the ask: arm it once, now, before the first VR draw derives the skinned families. Only for the decline above: a VR session whose
+// emit hook came up late, or whose arm was never owed, is left as it was.
+void armSkinForProfileLocked() {
+    if (!g_skinDeclinedFlat || runtimeFlatProfile() || !g_emitLive.load(std::memory_order_acquire)) return;
+    Log::get().note("skin join: the session started in the flat profile and is now in VR: arming the second skin at the switch.");
+    armSkinLocked();
+}
 }  // namespace engine_velocity_detail
 
 void engineVelocityConfigure(bool on) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (on && live.load(std::memory_order_acquire) && !g_emitAttached) { attachEmitLocked(true); return; }
-    if (on == live.load(std::memory_order_acquire)) return;
+    if (on == live.load(std::memory_order_acquire)) { if (on) armSkinForProfileLocked(); return; }
     if (!on) { engineVelocityShutdown(); return; }
     // The emit bracket rides the shared eval hooks, held open by its own
     // want; the bracket itself needs the lookup verified.
@@ -2762,6 +2780,7 @@ void engineVelocityShutdown() {
     g_lookup.store(nullptr, std::memory_order_release);
     g_emitLive.store(false, std::memory_order_release);
     g_skinWanted.store(false, std::memory_order_release);
+    g_skinDeclinedFlat = false;
     skinEntityHookSetGate(false);   // the relay then forwards straight to the game's function
     clearLocked();
     if (was) Log::get().note("engine motion: engine-record velocity stood down, state cleared.");
@@ -2820,11 +2839,12 @@ size_t engineVelocityRememberedForRig(bool pixel) {
 }
 size_t engineVelocityRememberCapForRig() { return kRememberCap; }
 // profile_switch_tests.h: whether family f is derived, under which profile, and whether it took the second skin.
-bool engineVelocityFamilyStateForRig(int f, bool* derivedFlat, bool* skin) {
+bool engineVelocityFamilyStateForRig(int f, bool* derivedFlat, bool* skin, bool* derivedSkin) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (f < 0 || f >= kFamilyCount) return false;
     if (derivedFlat) *derivedFlat = g_families[f].derivedFlat;
     if (skin) *skin = g_families[f].skin;
+    if (derivedSkin) *derivedSkin = g_families[f].derivedSkin;
     return g_families[f].derived;
 }
 // pin_tests.h: the 32 bytes the rig's lookup check reads (null: no check), and the pin's size.

@@ -36,6 +36,7 @@ SOURCE = ROOT / "src" / "d3d11" / "engine_velocity.cpp"
 RIG = HERE / "engine_velocity_test.cpp"
 CASES = HERE / "remember_cap_tests.h"
 GUARD_CASES = HERE / "flat_lazy_tests.h"
+PROFILE_CASES = HERE / "profile_switch_tests.h"
 HEADER = ROOT / "src" / "d3d11" / "engine_velocity_primary_copy.h"
 CLAIM_CASES = HERE / "claim_check_tests.h"
 # Directories the rig includes by relative path; the claim-check mutations compile from a copy of these.
@@ -74,6 +75,16 @@ MUTATIONS = [
      ") {\n        ++g_draw.flatFlushBy", "guard G5"),
     ("lazy-guard-ends-eager", "    if (!g_flatLazy) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);",
      "    if (!g_flatLazy || g_bound.guardSrv3) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);", "guard G5"),
+    # A session that starts in flat arms the second skin at its first switch to VR (profile_switch_tests.h, case W4): the configure that
+    # finds engine motion already live asks, the decline is remembered, the ask is for that decline alone, a family derived before the arm
+    # is derived again.
+    ("switch-configure-never-asks", "if (on == live.load(std::memory_order_acquire)) { if (on) armSkinForProfileLocked(); return; }",
+     "if (on == live.load(std::memory_order_acquire)) return;", "profile switch W4"),
+    ("switch-decline-not-remembered", "if (runtimeFlatProfile()) { g_skinDeclinedFlat = true; return; }",
+     "if (runtimeFlatProfile()) return;", "profile switch W4"),
+    ("switch-asks-every-configure", "if (!g_skinDeclinedFlat || runtimeFlatProfile() || !g_emitLive.load(std::memory_order_acquire)) return;",
+     "if (runtimeFlatProfile() || !g_emitLive.load(std::memory_order_acquire)) return;", "profile switch W4"),
+    ("switch-family-derived-before-arm-kept", "(kFamilies[f].skinned && s.derivedSkin != skinArmed)", "false", "profile switch W4"),
 ]
 CLEAR_CHECK = "inline bool clearClaimCheck(uintptr_t dictionary) noexcept {\n    if(!g_claimPrecheck)return false;\n    ClaimViewState view;\n    "
 MERGE_CHECK = "inline bool mergeClaimCheck(uintptr_t destination,uintptr_t source) noexcept {\n    if(!g_claimPrecheck)return false;\n    ClaimViewState view;\n    "
@@ -144,7 +155,7 @@ def self_test():
     for name, anchor, replacement, case in MUTATIONS:
         assert source.count(anchor) == 1, name + ": anchor found " + str(source.count(anchor)) + " times, want 1"
         assert anchor != replacement, name + ": no edit"
-        assert case + ":" in cases + read(GUARD_CASES), name + ": the rig has no check '" + case + ":'"
+        assert case + ":" in cases + read(GUARD_CASES) + read(PROFILE_CASES), name + ": the rig has no check '" + case + ":'"
     for name, anchor, replacement, case in HEADER_MUTATIONS:
         assert header.count(anchor) == 1, name + ": anchor found " + str(header.count(anchor)) + " times in the header, want 1"
         assert anchor != replacement, name + ": no edit"
@@ -249,7 +260,7 @@ def run(only, jobs):
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             pending = [pool.submit(one_header, m) for m in selected_header]
             for name, case, result in pool.map(one, selected):
-                labels = re.findall(r"^FAIL: ((?:cap R|guard G|claim check C)\d+|flat lazy):", result.stderr, re.M)
+                labels = re.findall(r"^FAIL: ((?:cap R|guard G|claim check C|profile switch W)\d+|flat lazy):", result.stderr, re.M)
                 if result.returncode != 1 or case not in labels:
                     failures.append(name + ": survived or failed the wrong check (exit " + str(result.returncode) + ", wanted " + case
                                     + ")\n" + result.stdout + result.stderr)
