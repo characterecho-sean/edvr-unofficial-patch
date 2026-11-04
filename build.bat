@@ -697,7 +697,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" "src\d3d11\vehicle_rig_probe.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -2590,6 +2590,19 @@ if errorlevel 1 ( echo [edvr] ERROR: light grid cache test build failed & exit /
 "%BUILD%\light_grid_cache_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_vehicle_rig_test
+echo [edvr] === vehicle_rig_test.exe ===
+REM The vehicle rig probe's pure half (src\d3d11\vehicle_rig_core.h, advanced.vehicle_rig_probe, TEMPORARY, issue 186): the role table's range test at its boundaries, a rig with a zero
+REM count, a rig torn down between frames, a vtable mismatch, a fault in a guarded read, an absurd count, the seqlock publish under concurrent readers, the pose math against
+REM tools\flat_pixels_engine.py's, and the corrected reads (R = *(I+0x2F0), the module handle array at *(J+0x1D8)). No DLL and no game.
+if not exist "%OBJ%\vehiclerig" mkdir "%OBJ%\vehiclerig"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vehiclerig\\" ^
+    /Fe"%BUILD%\vehicle_rig_test.exe" "tools\vehicle_rig_test\vehicle_rig_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vehicle rig test build failed & exit /b 1 )
+"%BUILD%\vehicle_rig_test.exe" --self-test || exit /b 1
+exit /b 0
 :rig_pad_state_test
 echo [edvr] === pad_state_test.exe ===
 REM The pad-state probe's pure half (src\d3d11\pad_state_core.h): the identity and prologue decision, change detection, the exact line texts, the
