@@ -1077,7 +1077,7 @@ if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe fixture assembly bui
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
@@ -3236,7 +3236,7 @@ REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
 %CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_render_settings\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
     "tools\native_render_settings_test\native_render_settings_test.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )
