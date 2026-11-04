@@ -140,6 +140,13 @@ struct FlatMonoResolveFrame {
     // term as it was. Needs steadyDetail's depth check (no effect where that is unavailable, on a reset, or under staticScene). False (the
     // default) leaves every pixel and the prep's arithmetic exactly as before the field.
     bool staleRecordTerm = false;
+    // The ship record (the flat profile's treatment alone, in a ship and not on foot; the VR world route never sets it): the record that owns most of
+    // the frame's near joined pixels (within 10 m; a sparse grid, at least 32 samples) is picked on the GPU, and a near pixel that has no motion of
+    // its own (no slot, an unmarked or skinned record, or a stale pixel whose own record declined) rides it where last frame's depth confirms it. Its
+    // class is skinned (the census's accepted counter). A near pixel left on the camera term is checked against last frame's depth as well, and
+    // refused where that fails. Needs steadyDetail's depth check, the engine's views and a frame that is not a reset. False (the default) leaves every
+    // pixel, every resource and the prep's arithmetic exactly as before the field.
+    bool shipRecordTerm = false;
     // Planet patch motion (celestial_motion.h): the planet records (the SRV the flat runtime fetched for this frame, bound at t18 for the prep)
     // and the tangents (l, r, b, t) of this frame's and last frame's camera rows they were built for. The pixels inside a body take its own
     // motion in place of the camera term. Only the flat runtime fills them, from its own frames; the VR world route never does. Null leaves

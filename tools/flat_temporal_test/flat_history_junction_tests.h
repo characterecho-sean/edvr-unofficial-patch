@@ -172,8 +172,9 @@ inline std::string pinFailure(const std::string& source) {
             from = at;
         }
     }
-    // The current depth is read by the prep for the pixel (once) and by the junction test (the four texels, once), nowhere else.
-    if (countOf(source, "SceneDepth.Load(") != 2) return "SceneDepth is read somewhere else, or not by the junction test";
+    // The current depth is read by the prep for the pixel (once), by the junction test (the four texels, once) and by the ship record's counting
+    // kernel (its grid point, once), nowhere else.
+    if (countOf(source, "SceneDepth.Load(") != 3) return "SceneDepth is read somewhere else, or not by the junction test";
     return mirrorFailure(source);
 }
 

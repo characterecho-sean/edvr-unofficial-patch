@@ -349,6 +349,12 @@ struct State {
     uint32_t classWidth=0, classHeight=0;
     ComPtr<ID3D11Buffer> refusalCounts;
     ComPtr<ID3D11UnorderedAccessView> refusalCountsUav;
+    // The ship record (FlatMonoResolveFrame::shipRecordTerm), made on the first frame that asks: its two kernels, the per-slot counters (raw, UAV)
+    // and the one-uint result (raw, UAV for the picker, SRV for the prep). Nothing is read back.
+    ComPtr<ID3D11ComputeShader> shipCount, shipPick;
+    ComPtr<ID3D11Buffer> shipCounts, shipPicked;
+    ComPtr<ID3D11UnorderedAccessView> shipCountsUav, shipPickedUav;
+    ComPtr<ID3D11ShaderResourceView> shipPickedSrv;
     ComPtr<ID3D11Buffer> refusalStaging[4];
     bool refusalPending[4]={false,false,false,false};
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
@@ -397,6 +403,8 @@ bool firstPersonBoundLogged=false, firstPersonRefusedLogged=false;
 // loader lock.
 std::vector<unsigned char>& g_testPrepBytecode=*new std::vector<unsigned char>;
 std::vector<unsigned char>& g_testTaaBytecode=*new std::vector<unsigned char>;
+std::vector<unsigned char>& g_testShipCountBytecode=*new std::vector<unsigned char>;   // the ship record's counting kernel, likewise
+std::vector<unsigned char>& g_testShipPickBytecode=*new std::vector<unsigned char>;    // ... and its picker
 // What the next initialisation is asked for (flatMonoResolveSetIsolation, test rigs only; Auto in production): what the next initialisation is asked for; and the renderer's
 // initialisations that said which isolation they chose, in the log, at most kIsolationLogCap a session.
 FlatContextIsolation g_isolationRequest=FlatContextIsolation::Auto;
@@ -423,7 +431,9 @@ bool g_steadyFailureLogged=false;
 // refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither. debug.w bit 3 (8): the
 // planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise. debug.w bit 4
 // (16): a stale slot's pixel asks the record under it first (FlatMonoResolveFrame::staleRecordTerm; set only with the steady-detail depth check
-// available); the bits 1, 2, 4 and 8 are the untrusted-camera map, the foreground map, the skin target and the planet records, each tested alone.
+// available); debug.w bit 5 (32): the ship record is picked (shipCount, shipPick) and bound at t19, and a near pixel with no motion of its own rides it
+// (FlatMonoResolveFrame::shipRecordTerm; same condition). The bits 1, 2, 4, 8, 16 and 32 are the untrusted-camera map, the foreground map, the skin
+// target, the planet records, the stale record term and the ship record, each tested alone.
 // celestialTanNow/celestialTanPrev: the flat tangents (l, r, b, t) of this frame's and last frame's camera rows, read only with that bit.
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4];
     float celestialTanNow[4], celestialTanPrev[4]; };
@@ -755,6 +765,35 @@ bool ensureOutputDomains(uint32_t width,uint32_t height) {
     g.outputDomain[0]={};g.outputDomain[1]={};
     return image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[0],true,"output-domain0") &&
            image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[1],true,"output-domain1");
+}
+// The ship record's two kernels and their buffers (kFlatMonoShip*): 16,384 per-slot counters and the one-uint pick.
+constexpr UINT kShipSlots=16384;
+bool ensureShipRecord() {
+    if(g.shipCount && g.shipPick && g.shipCountsUav && g.shipPickedUav && g.shipPickedSrv)return true;
+    ID3D11Device* device=g.device.Get();
+    if(!device)return false;
+    if(!g.shipCount && FAILED(device->CreateComputeShader(kFlatMonoShipCountBytecode,sizeof(kFlatMonoShipCountBytecode),nullptr,g.shipCount.GetAddressOf())))
+        return false;
+    if(!g_testShipCountBytecode.empty() &&
+       FAILED(device->CreateComputeShader(g_testShipCountBytecode.data(),g_testShipCountBytecode.size(),nullptr,g.shipCount.ReleaseAndGetAddressOf())))
+        return false;
+    if(!g.shipPick && FAILED(device->CreateComputeShader(kFlatMonoShipPickBytecode,sizeof(kFlatMonoShipPickBytecode),nullptr,g.shipPick.GetAddressOf())))
+        return false;
+    if(!g_testShipPickBytecode.empty() &&
+       FAILED(device->CreateComputeShader(g_testShipPickBytecode.data(),g_testShipPickBytecode.size(),nullptr,g.shipPick.ReleaseAndGetAddressOf())))
+        return false;
+    auto raw=[&](UINT bytes,ComPtr<ID3D11Buffer>& buffer,ComPtr<ID3D11UnorderedAccessView>& uav) {
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;
+        bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        if(!buffer && FAILED(device->CreateBuffer(&bd,nullptr,buffer.GetAddressOf())))return false;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements=bytes/4u;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+        return SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(),&ud,uav.ReleaseAndGetAddressOf()));
+    };
+    if(!raw(kShipSlots*4u,g.shipCounts,g.shipCountsUav) || !raw(16u,g.shipPicked,g.shipPickedUav))return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R32_TYPELESS;sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
+    sd.BufferEx.NumElements=4;sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
+    return SUCCEEDED(device->CreateShaderResourceView(g.shipPicked.Get(),&sd,g.shipPickedSrv.ReleaseAndGetAddressOf()));
 }
 // The counting pass, its counter buffer (16 stripes of 24 counters, raw, UAV) and the four-slot staging ring the sums are read
 // back from.
@@ -1302,6 +1341,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Planet patch motion (celestial_motion.h): the planet records the flat runtime fetched for this frame, bound at t18 with their tangents.
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
+    // The ship record (FlatMonoResolveFrame::shipRecordTerm): the steady-detail depth check validates it, so it needs that; and the engine's views.
+    const bool shipNow=f.shipRecordTerm && depthCheck && engine && ensureShipRecord();
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     // Continued history always receives the actual previous origin. Ambiguous
     // inputs take the existing reset path, which seeds from the current rows.
@@ -1314,6 +1355,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.debug[2]=overlay?1u:0u;
     constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
     if(f.staleRecordTerm && depthCheck)constants.debug[3]|=16u;
+    if(shipNow)constants.debug[3]|=32u;
     if(celestialBound){constants.debug[3]|=8u;std::memcpy(constants.celestialTanNow,f.celestialTanNow,sizeof(f.celestialTanNow));std::memcpy(constants.celestialTanPrev,f.celestialTanPrev,sizeof(f.celestialTanPrev));}
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
@@ -1333,14 +1375,33 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     HdrCrumbSpan prepStep(g_crumbOn,"prep","groups=%ux%u",(f.renderWidth+7)/8,(f.renderHeight+7)/8);
     ID3D11Buffer* cb[]={g.constants.Get(),f.engine.sceneNow,f.engine.scenePrev};
     context->CSSetConstantBuffers(0,3,cb);
+    if(shipNow) {
+        // The ship record: count the near joined pixels of a sparse grid (every 16th render pixel) per pool slot, then pick the slot with the most.
+        // Two small dispatches, no read-back: the prep reads the pick as a buffer at t19.
+        const UINT zeros[4]={0,0,0,0};
+        context->ClearUnorderedAccessViewUint(g.shipCountsUav.Get(),zeros);
+        ID3D11ShaderResourceView* shipViews[]={nullptr,f.depth,f.engine.slots,f.engine.pool};
+        context->CSSetShaderResources(0,4,shipViews);
+        ID3D11UnorderedAccessView* shipUavs[]={g.shipCountsUav.Get(),g.shipPickedUav.Get()};
+        context->CSSetUnorderedAccessViews(6,1,shipUavs,nullptr);
+        context->CSSetShader(g.shipCount.Get(),nullptr,0);
+        context->Dispatch(((f.renderWidth+15)/16+7)/8,((f.renderHeight+15)/16+7)/8,1);
+        context->CSSetUnorderedAccessViews(6,2,shipUavs,nullptr);
+        context->CSSetShader(g.shipPick.Get(),nullptr,0);
+        context->Dispatch(1,1,1);
+        ID3D11UnorderedAccessView* noShipUavs[2]={};
+        context->CSSetUnorderedAccessViews(6,2,noShipUavs,nullptr);
+        ID3D11ShaderResourceView* noShipViews[4]={};
+        context->CSSetShaderResources(0,4,noShipViews);
+    }
     // t4..t7 are the later kernels' (motion, rejection, expected depth, history): null for prep. t8 is the later kernels' history depth
     // and the prep's too, but only on a frame whose steady-detail check runs (last frame's depth). t9 and t10 are the first-person map and
     // stencil, null unless the pair was accepted above.
     ID3D11ShaderResourceView* prepViews[]={g.color.srv.Get(),f.depth,f.engine.slots,f.engine.pool,
         nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil,
         nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr,
-        celestialBound?f.celestialRecords:nullptr};
-    const UINT prepViewCount=celestialBound?19:(skin?18:(foreground?16:14));
+        celestialBound?f.celestialRecords:nullptr,shipNow?g.shipPickedSrv.Get():nullptr};
+    const UINT prepViewCount=shipNow?20:(celestialBound?19:(skin?18:(foreground?16:14)));
     context->CSSetShaderResources(0,prepViewCount,prepViews);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
@@ -1348,7 +1409,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[19]={};
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[20]={};
     context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
@@ -1825,6 +1886,13 @@ bool flatMonoResolveLastSpatialWasSmaa() { return g.lastSpatialSmaa; }
 void flatMonoResolveTestPrepBytecode(const void* bytes,size_t size) {
     g_testPrepBytecode.clear();
     if(bytes && size)g_testPrepBytecode.assign(static_cast<const unsigned char*>(bytes),static_cast<const unsigned char*>(bytes)+size);
+}
+// Test-only, likewise, the same contract for the ship record's counting kernel (shipCount) or its picker (shipPick): tools\flat_mono_resolve_test runs its ship scenario
+// against a counting pass with one rule flipped. Takes effect when the ship record's resources are next made (call flatMonoResolveReset()).
+void flatMonoResolveTestShipBytecode(bool pick,const void* bytes,size_t size) {
+    auto& target=pick?g_testShipPickBytecode:g_testShipCountBytecode;
+    target.clear();
+    if(bytes && size)target.assign(static_cast<const unsigned char*>(bytes),static_cast<const unsigned char*>(bytes)+size);
 }
 // Test-only, likewise, the same contract for the TAA kernel: tools\flat_mono_resolve_test runs its TAA history-depth scenarios against a
 // taa() with one rule flipped (the old single-texel check among them) and proves they fail. Empty bytes mean the shipped bytecode; it

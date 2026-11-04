@@ -4832,12 +4832,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu ship-record=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
-                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],"off",
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],(unsigned long long)steady.skinned,"off",
                     used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
@@ -7255,6 +7255,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
     f.staleRecordTerm=true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    f.shipRecordTerm=journalOnFootKnown() && !journalOnFoot();   // in a ship: a near pixel with no motion of its own rides the ship's record
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -7700,6 +7701,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
     f.staleRecordTerm = true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    f.shipRecordTerm = journalOnFootKnown() && !journalOnFoot();   // in a ship: a near pixel with no motion of its own rides the ship's record
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {

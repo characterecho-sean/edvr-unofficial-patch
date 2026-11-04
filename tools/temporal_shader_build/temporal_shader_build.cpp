@@ -485,6 +485,9 @@ static int generateTemporal(const Options& o) {
         // The VR world route's refusal census (design doc section 82, stage 2 experiment build): one counting pass over the class
         // texture the prep writes on a frame that samples. Made on first use, so a profile that never asks never creates it.
         {"kFlatMonoCensusBytecode", "flat_mono_census_cs", "census", nullptr, {}, true},
+        // The flat profile's ship record: a counting pass over a sparse grid and a picker, made on the first frame that asks (flat_mono_resolve.cpp).
+        {"kFlatMonoShipCountBytecode", "flat_mono_ship_count_cs", "shipCount", nullptr, {}, true},
+        {"kFlatMonoShipPickBytecode", "flat_mono_ship_pick_cs", "shipPick", nullptr, {}, true},
         // The map temporal-off frames' upscale (2026-10-10): AMD's FSR1 EASU with the bounded HDR compression around it (map_easu_shader.h).
         // Two entries over one source (the vendored FSR text first); the map's constants come from map_easu.cpp (FsrEasuCon, CPU side).
         {"kFlatMapEasuCompressBytecode", "flat_map_easu_compress_cs", "mapCompress", nullptr, {}, false, mapEasu.c_str()},

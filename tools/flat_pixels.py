@@ -983,7 +983,9 @@ def self_test():
         branches = analyze(complete_meta, [("whole", (0, 0, rw, rh))])["engine_analysis"]["rois"][0]["branch_counts"]
         assert branches["engine_joined"] == 1 and branches["camera_unmarked_record"] == 1
         assert branches["rejected_masked_record"] == 1 and branches["rejected_corrupt_code"] == 1
-        assert branches["rejected_stale_or_depth"] == 1 and branches["camera_no_slot"] == 1
+        # The stale pixel's captured rejection byte says kept and the joined record under it (slot code 3) reproduces its zero motion, so the
+        # replay now calls it the stale record term (flat_pixels_engine: staleRecordBefore); with a rejected byte it stays rejected_stale_or_depth.
+        assert branches["engine_stale_record"] == 1 and "rejected_stale_or_depth" not in branches and branches["camera_no_slot"] == 1
         assert "camera_stale_static" not in branches and complete_meta["static_scene"] is False
         rgba = np.concatenate((slots, np.full((rh, rw, 2), [7, 19], dtype="<f4")), axis=2)
         rgba_manifest = json.loads(json.dumps(complete))
