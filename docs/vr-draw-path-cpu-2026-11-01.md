@@ -44,7 +44,8 @@
   2-3 removed. Argon agreed; Opus approved on re-review. Spec #191,
   `d5135e52`. Flown 2026-11-04: S2 cut eye-memo misses 45% (about 0.08 ms);
   S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
-  Next: the closing build (S1 and the temporary lines out), then the PR.
+  Closing build (#194, `a7941eb0`): S1 and the temporary lines out,
+  installed. Next: check flight, then the PR.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3348,3 +3349,15 @@ replaces it.
   NEVER APPLIED, composites 0, `ui depth totals:` within the arc's spread,
   own time per full-path draw not above build 6's 283 ns beyond noise (SE about
   3 ns).
+
+**Built and reviewed (2026-11-04, `a7941eb0`, spec #194).** Sonnet removed
+it; full gated build green on the committed tree. The sixteen S1-only modules
+are byte-identical to `85006708`. A fresh Opus review of the diff approved
+it: every former mask site equals build 5's test, order and short-circuits
+included; S2, the #184 fix and item 5 are unchanged from build 6. Two notes,
+not fixed (tests only, each would cost another build):
+- `ui_depth_test.cpp:272`, `:274`: with the miss counter gone, the S2 memo case
+  passes whether the call hits or misses; S2's key stays tested in
+  `scrim_metadata_test`.
+- `gate_test.cpp:1698`: the scan for removed S1 names skips subfolders of
+  `src` (`fsr`, `smaa`, `plugins`), which are clean today.
