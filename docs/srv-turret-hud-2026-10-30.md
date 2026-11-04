@@ -20,12 +20,12 @@
   offset (directed along u, or the fallback). The draw-time correction is gone,
   so the radar billboards are left to the game and the disc orbits, as the
   flight of fe0b2560 showed. Not flown since the strip.
-- **Keys** (`[experimental]`): fifteen. Baked from the 2026-11-02 Frontier flight, systems
+- **Keys** (`[experimental]`): thirteen. Baked from the 2026-11-02 Frontier flight, systems
   near and gunner up from 2026-11-03: camera back 80, HUD forward 0, radar forward 0,
   panels back 0, systems near 80, weapon panel up 10, gunner up 35, cards up 0, screen
   limit game, radar anchor off, depth game. TEMPORARY, to bake and remove once Sean
-  settles them: `srv_turret_target_card_shift` 7 mm and `srv_turret_systems_card_shift`
-  5 mm (was 9, 6, 7) and `srv_turret_systems_card_up` 5 mm (whole mm, 0 to 30, live). The sheet draws the card contents and not the border.
+  settles them. The sheet's card positions are baked (2026-11-03, flight of affd9edb): planet card
+  7 mm along its U, SYSTEMS side 3 mm along its U and 5 mm up; those three keys are gone.
 - **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
   anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
   `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
@@ -38,7 +38,7 @@
   1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
      setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
      Dead modes; camera ships.
-  2. The fifteen `experimental.srv_turret_*` keys: ship the values as the behaviour
+  2. The thirteen `experimental.srv_turret_*` keys: ship the values as the behaviour
      and remove the keys when the arc closes (AGENTS.md "Scope control").
   3. The `srv_turret_hud_depth` values `game` and `real`, and the
      `srv_turret_hud_scissor` value `game`: candidates once the keys go.
@@ -58,7 +58,7 @@
   (`kBracketCutM`). Sean tuned that dial in flight ("3 mm works"); baked, key `srv_turret_bracket_cut` removed with his approval. Not flown as baked.
 - **Entry fade (2026-11-03, branch `claude/srv-turret-entry-fade`):** both eyes held at black from the turret-view-on edge until the runtime reports the camera move applied plus 150 ms, then in over 200 ms, whole run capped at 1 s, with a luma trace in the log that shows the game's own fade against the edge; built, NOT FLOWN (journal entry below).
 - **Early edge and sheet polish (2026-11-03, branch `claude/srv-turret-polish`, built, NOT FLOWN):** the view is also on when the Scorpion is known and the gunner sheet drew in an eye pass within 1 s while Status.json says off (`srv_turret_sheet_latch.h`); Status takes over with no edge; the luma lead is 1000 ms. Sheet: the 0.79 bound only above y -0.33, top plane -0.3125. Journal "the early edge" below. **The press (branch `claude/srv-turret-press`, built, NOT FLOWN):** the draw gate opens only from a counted press of ToggleBuggyTurretButton for 2000 ms (the always-open gate stays only as a fallback for a key that cannot be watched); the press ramps to black in 100 ms; the SYSTEMS card and its label row shift together. Journal "the press" below. The flight of d660ed64 read the wrong preset (Custom instead of the SRV line's ConsoleX360 in ControlSchemes): fixed, plus the SYSTEMS lower-edge planes; built, NOT FLOWN.
-- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet drawn by vs A888D510, signature K, flown OK; card content shifts are keys now and the two corner notches are fixed, built, NOT FLOWN).
+- **Open:** the flight of the stripped build and of the baked clip; the two height keys; the proposals above; #179 (Disable GUI effects off: the weapon panels flown fixed 2026-11-03; the gunner sheet drawn by vs A888D510, signature K, flown OK; card positions baked and flown OK 2026-11-03, see the entry at the end; the SRV turret exit's lag is unmeasured). The other thirteen keys await Sean's decision.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -2064,3 +2064,11 @@ Log `edvr_gfx_20261103_162959.log`, eye dumps 163235010001 (trimmed card, moved)
 - The SYSTEMS card's lower edge. Projecting the decoded sheet mesh through the draw's cb0[4..7] and cb1[275] (dump 125154858001, eye 0, frame 38367, draw ordinal 1044) onto FinalCrisp_LOverview.bmp: the tile corner v11 landed on the left L bracket's corner and the seam lines on the text within 3 px. Measured in mesh metres by back-projecting pixels: left L, bar x 0.4932..0.4966 (leaning), foot y -0.4895..-0.4915 reaching x 0.5003; right L, bar x 0.7416..0.7495, foot y -0.4895..-0.4915, x 0.7361..0.7418; the brown art ends at y -0.4865 (a tint step along x 0.62 to 0.72), the dark fill at -0.4810; the aperture icon's top is y -0.5014. The planes, in `srv_turret_hud_shader.h`: LEFT, for lower-row triangles with a centroid left of x 0.56, a slanted plane along the tile edge v11 to v16 (0.2 mm right of it: x = 0.5069 + 0.2157 (y + 0.4783)) replaces the cut at x 0.53, so the brown strip beside the L returns and triangle (11,16,17) stays gone (the foot is 3.8 mm and the bar 10 mm left of the plane); RIGHT, triangle (302,10,9) (centroid x above 0.72) is cut above y -0.4925 through `clip.y` (6 mm under the brown's edge, 1 mm under the foot, 8.9 mm over the icon): no wedge, nothing bright.
 - New TEMPORARY live key `experimental.srv_turret_systems_card_up`, whole mm, 0..30, default 5: the SYSTEMS side (the card and the row under it) moves up along the fill's left edge, unit (0.1652, 0.9502, 0.2642) from the dump's fill vertices, through the constant block's `s3.z`. The brown's bottom is 5.5 mm under the fill's and the dark shows 5.5 mm above the header (Sean's dump 163235010001 showed about 12 px and 15 px at 0.37 mm a pixel). The settings log line gains `, systems card up N mm`; `edvr_log.py` parses it.
 - `experimental.srv_turret_systems_card_shift` default 7 to 5 at Sean's word (2 mm left); the target stays 7. Both and the raise stay TEMPORARY.
+
+### 2026-11-03: the flight of affd9edb: the press read from the SRV preset; the card positions baked, three keys removed (#179)
+
+Log `edvr_gfx_20261103_173350.log`. Flown OK.
+
+- The press: read from `ControlSchemes\ConsoleX360.binds` `GamePad_LThumb`, so line 3 of `StartPreset.4.start` is the SRV's (confirmed; it was the maintainer's expectation until this log). Three entries, press to sheet 422 to 672 ms and press to Status.json 437 to 1063 ms, no fallback and no latch expiry.
+- Sean tuned the cards live and approved the result ("Let's bake these values, looks great"). Baked in the shared I/K body of `srv_turret_hud_shader.h` as `kTargetCardShiftM` 7 mm, `kSystemsCardShiftM` 3 mm (the code's default was 5; he flew 3) and `kSystemsCardUpM` 5 mm. The keys `experimental.srv_turret_target_card_shift`, `experimental.srv_turret_systems_card_shift` and `experimental.srv_turret_systems_card_up` are removed, with the constant block's fourth register (`TurretParams` is 128 bytes again, eight registers), the settings log line's three fields, `edvr_log.py`'s parse and the menu rows. The rig asserts the baked amounts: a planet card triangle moves 7 mm along its U with no raise; a SYSTEMS, label-row or seam triangle moves 3 mm along its U plus 5 mm up; mutants cover the wrong amount, sign, direction and region.
+- Open: the turret exit's lag is unmeasured; the other `srv_turret_*` keys still await a decision.

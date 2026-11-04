@@ -50,7 +50,7 @@ namespace {
 static_assert(st::kBackDefaultCm == 80 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kRadarForwardMaxCm == 150 &&
                   st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 &&
                   st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 &&
-                  st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 && st::kTargetCardShiftDefaultMm == 7 && st::kSystemsCardShiftDefaultMm == 5 && st::kSystemsCardUpDefaultMm == 5 && st::kCardShiftMaxMm == 30 &&
+                  st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
               "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
@@ -58,7 +58,7 @@ constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   /
 // ---- the frame thread's state ----------------------------------------------------------------------------------------------------------------------------------
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
-std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0}, g_systemsNearCm{0}, g_hudUpCm{0}, g_gunnerUpCm{0}, g_cardsUpCm{0}, g_targetCardShiftMm{0}, g_systemsCardShiftMm{0}, g_systemsCardUpMm{0};   // experimental keys, as last read (the HUD keys are read by the draw path too)
+std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0}, g_systemsNearCm{0}, g_hudUpCm{0}, g_gunnerUpCm{0}, g_cardsUpCm{0};   // experimental keys, as last read (the HUD keys are read by the draw path too)
 static_assert(st::kDepthDefault == st::DepthMode::kGame, "the literal default of experimental.srv_turret_hud_depth in readKeys is game, which the ini ships");
 std::atomic<int> g_depthMode{static_cast<int>(st::kDepthDefault)};   // experimental.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
 std::atomic<bool> g_scissorOpen{false};      // experimental.srv_turret_hud_scissor: game (the default) or open
@@ -218,9 +218,6 @@ void readKeys() {
     const int hudUp = cfg.getIntInRange("experimental.srv_turret_hud_up", 10, 0, 100);
     const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 35, 0, 100);
     const int cardsUp = cfg.getIntInRange("experimental.srv_turret_cards_up", 0, 0, 100);
-    const int targetCardShift = cfg.getIntInRange("experimental.srv_turret_target_card_shift", 7, 0, 30);
-    const int systemsCardShift = cfg.getIntInRange("experimental.srv_turret_systems_card_shift", 5, 0, 30);
-    const int systemsCardUp = cfg.getIntInRange("experimental.srv_turret_systems_card_up", 5, 0, 30);
     const std::string depthText = cfg.getString("experimental.srv_turret_hud_depth", "game");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());
     const bool scissorOpen = cfg.getString("experimental.srv_turret_hud_scissor", "game") != "game";
@@ -230,8 +227,7 @@ void readKeys() {
                          radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) ||
                          gap != g_gapCm.load(std::memory_order_relaxed) || systemsNear != g_systemsNearCm.load(std::memory_order_relaxed) ||
                          hudUp != g_hudUpCm.load(std::memory_order_relaxed) || gunnerUp != g_gunnerUpCm.load(std::memory_order_relaxed) ||
-                         cardsUp != g_cardsUpCm.load(std::memory_order_relaxed) || targetCardShift != g_targetCardShiftMm.load(std::memory_order_relaxed) ||
-                         systemsCardShift != g_systemsCardShiftMm.load(std::memory_order_relaxed) || systemsCardUp != g_systemsCardUpMm.load(std::memory_order_relaxed) ||
+                         cardsUp != g_cardsUpCm.load(std::memory_order_relaxed) ||
                          static_cast<int>(depth) != g_depthMode.load(std::memory_order_relaxed) ||
                          scissorOpen != g_scissorOpen.load(std::memory_order_relaxed) || static_cast<int>(anchorMode) != g_anchorMode.load(std::memory_order_relaxed);
     g_keysRead = true;
@@ -246,18 +242,15 @@ void readKeys() {
     g_hudUpCm.store(hudUp, std::memory_order_relaxed);
     g_gunnerUpCm.store(gunnerUp, std::memory_order_relaxed);
     g_cardsUpCm.store(cardsUp, std::memory_order_relaxed);
-    g_targetCardShiftMm.store(targetCardShift, std::memory_order_relaxed);
-    g_systemsCardShiftMm.store(systemsCardShift, std::memory_order_relaxed);
-    g_systemsCardUpMm.store(systemsCardUp, std::memory_order_relaxed);
     g_depthMode.store(static_cast<int>(depth), std::memory_order_relaxed);
     g_scissorOpen.store(scissorOpen, std::memory_order_relaxed);
     g_anchorMode.store(static_cast<int>(anchorMode), std::memory_order_relaxed);
     if (changed)
-        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm, target card shift %d mm, systems card shift %d mm, systems card up %d mm (live; "
+        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s, systems near %d cm, hud up %d cm, gunner up %d cm, cards up %d cm (live; "
                         "experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back, experimental.srv_turret_hud_gap, "
-                        "experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor, experimental.srv_turret_radar_anchor, experimental.srv_turret_systems_near, experimental.srv_turret_hud_up, experimental.srv_turret_gunner_up, experimental.srv_turret_cards_up, experimental.srv_turret_target_card_shift, experimental.srv_turret_systems_card_shift and experimental.srv_turret_systems_card_up, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key "
+                        "experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor, experimental.srv_turret_radar_anchor, experimental.srv_turret_systems_near, experimental.srv_turret_hud_up, experimental.srv_turret_gunner_up and experimental.srv_turret_cards_up, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key "
                         "open or game, the radar anchor key on, reversed, off or camera)",
-                        back, forward, radarForward, panels, radar, gap, st::depthModeName(depth), scissorOpen ? "open" : "game", st::radarAnchorModeName(anchorMode), systemsNear, hudUp, gunnerUp, cardsUp, targetCardShift, systemsCardShift, systemsCardUp);
+                        back, forward, radarForward, panels, radar, gap, st::depthModeName(depth), scissorOpen ? "open" : "game", st::radarAnchorModeName(anchorMode), systemsNear, hudUp, gunnerUp, cardsUp);
 }
 
 // The constants a group's draws run with at the keys in force, on this eye frame: the group's push-back when above 0, else the pull when the gap is above 0, else the translation alone
@@ -1224,7 +1217,7 @@ bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint
         return false;
     }
     st::TurretParams params;
-    if (!st::gunnerParamsFor(frame, params, cards, g_targetCardShiftMm.load(std::memory_order_relaxed), g_systemsCardShiftMm.load(std::memory_order_relaxed), g_systemsCardUpMm.load(std::memory_order_relaxed))) return false;
+    if (!st::gunnerParamsFor(frame, params, cards)) return false;
     ID3D11Buffer* constants = g_constants[eye].get(ctx, params);
     if (!constants) {
         refuse(st::Refuse::kNotReady);

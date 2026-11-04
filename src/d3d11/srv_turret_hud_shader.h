@@ -74,7 +74,6 @@ namespace edvr {
     "    float4 s0;   // row 0 of seat-from-math-eye. Identity except on the gunner sheet, where it keeps the border test still as the head turns\n" \
     "    float4 s1;\n" \
     "    float4 s2;\n" \
-    "    float4 s3;   // x: the target card content shift, metres; y: the SYSTEMS card content shift, metres, along the card; z: the SYSTEMS side raise, metres, up the fill's left edge (the gunner sheet only). w: padding, stays 0\n" \
     "};\n" \
     "float4 turretMove(float4 c, out float3 dq) {\n" \
     "    dq = float3(0.0, 0.0, 0.0);\n" \
@@ -250,8 +249,12 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "static const float kLowerRightStartX = 0.72;\n" \
     "static const float kLowerRightCutY = -0.4925;\n" \
     "// The cards show their content off-centre in their dark fills. Epic dump 125141609001, vertices decoded with the sheet vertex shader: the target card (left) fill top edge runs along U = (0.7451, 0, 0.6670) in mesh metres, the SYSTEMS card (right) fill top edge along U = (0.74314, 0, -0.66913), the sheet curving the other way on that side.\n" \
-    "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That makes 6.9 mm and 9.0 mm rightwards in all; the keys default to 7 and 9 (SYSTEMS since moved to 7, see experimental.srv_turret_systems_card_shift).\n" \
-    "// Only the triangles a card region keeps whole move, each along its own U, by s3.x (target) and s3.y (SYSTEMS), metres. On the SYSTEMS side the card and the label row below it move together as one rigid piece: the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider, triangles above it are inSystems and triangles in the row y -0.4783..-0.5534 have vertices in the label region, and shifting only the first left the letters' bottoms one shift to the left of their tops (the cut-off look) and a notch in the divider (Epic dump 125141609001). So every drawn triangle on that side, inSystems or label (the dash, the SRV SCORPION text and the GUNNER CAMERA label all lie in that row), takes the SYSTEMS shift. The target card's test comes first and the label starts at x 0.12, so the target card never takes it. The raise s3.z goes with it, for every drawn triangle on that side. Everything else stays. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
+    "// Sean screenshots of 2026-11-03, black fill against brown art, row by row: the target card, with 5.3 mm of shift already applied, 16 px on the left and 23 to 24 px on the right of about 820 px (about 0.40 mm a pixel); the SYSTEMS card, unshifted, 24 px on the left and 82 to 85 px on the right of about 1090 px (about 0.305 mm a pixel). That made 6.9 mm and 9.0 mm rightwards in all; Sean then tuned both live and flew 7 mm for the target card and 3 mm (and 5 mm up) for SYSTEMS (flight of 2026-11-03, log edvr_gfx_20261103_173350.log), the values below.\n" \
+    "// Only the triangles a card region keeps whole move, each along its own U, by kTargetCardShiftM (target) and kSystemsCardShiftM (SYSTEMS), metres. On the SYSTEMS side the card and the label row below it move together as one rigid piece: the sheet's tile seam at y -0.4783 runs through the SRV SCORPION text and the panel divider, triangles above it are inSystems and triangles in the row y -0.4783..-0.5534 have vertices in the label region, and shifting only the first left the letters' bottoms one shift to the left of their tops (the cut-off look) and a notch in the divider (Epic dump 125141609001). So every drawn triangle on that side, inSystems or label (the dash, the SRV SCORPION text and the GUNNER CAMERA label all lie in that row), takes the SYSTEMS shift. The target card's test comes first and the label starts at x 0.12, so the target card never takes it. The raise kSystemsCardUpM goes with it, for every drawn triangle on that side. Everything else stays. The region tests and the clip planes read the position as the game made it, so the bracket cut travels with the content. The shift is applied in mesh metres, as a clip-space delta through the draw clip rows, before the gunner move.\n" \
+    "// Baked from Sean's live tuning, approved in his flight of 2026-11-03 (log edvr_gfx_20261103_173350.log, #179), metres. kTargetCardShiftM: 7 mm along the target card's U centres the planet card's content in its dark fill. kSystemsCardShiftM: 3 mm along the SYSTEMS U centres the SYSTEMS card, the label row and the seam as one piece. kSystemsCardUpM: 5 mm up the SYSTEMS fill's left edge, so the art's bottom edge meets the fill's and the dark shows no more above the header.\n" \
+    "static const float kTargetCardShiftM = 0.007;\n" \
+    "static const float kSystemsCardShiftM = 0.003;\n" \
+    "static const float kSystemsCardUpM = 0.005;\n" \
     "static const float3 kTargetCardAcross = float3(0.7451, 0.0, 0.6670);\n" \
     "static const float3 kSystemsCardAcross = float3(0.74314, 0.0, -0.66913);\n" \
     "// Up the SYSTEMS fill's left edge (Epic dump 125154858001: (0.4934,-0.4810,0.7916) to (0.5229,-0.3114,0.8388) in mesh metres, unit (0.1652, 0.9502, 0.2642)). The art's bottom edge is 5.5 mm below the fill's and the dark shows 5.5 mm above its header.\n" \
@@ -330,8 +333,8 @@ constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    float4 shiftClip = float4(0.0, 0.0, 0.0, 0.0);\n" \
     "    if (live && draw) {\n" \
     "        float3 sd = float3(0.0, 0.0, 0.0);\n" \
-    "        if (inTarget(p0) && inTarget(p1) && inTarget(p2)) sd = kTargetCardAcross * s3.x;\n" \
-    "        else if (onSystemsSide(p0) && onSystemsSide(p1) && onSystemsSide(p2)) sd = kSystemsCardAcross * s3.y + kSystemsCardUp * s3.z;\n" \
+    "        if (inTarget(p0) && inTarget(p1) && inTarget(p2)) sd = kTargetCardAcross * kTargetCardShiftM;\n" \
+    "        else if (onSystemsSide(p0) && onSystemsSide(p1) && onSystemsSide(p2)) sd = kSystemsCardAcross * kSystemsCardShiftM + kSystemsCardUp * kSystemsCardUpM;\n" \
     "        shiftClip = float4(dot(clipRows[4].xyz, sd), dot(clipRows[5].xyz, sd), dot(clipRows[6].xyz, sd), dot(clipRows[7].xyz, sd));\n" \
     "    }\n" \
     "    const bool locked = an.w > 0.5;\n" \
