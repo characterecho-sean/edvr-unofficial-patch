@@ -3401,8 +3401,10 @@ cycle 35.8; most of that wider gap is not attributed to this arc, because the ga
 
 `origin/main` `859cde44` merged for PR #166: 248 commits since `e1606a23`,
 conflicts in six files. Full build green on the merged tree; not flown. A fresh
-Opus read of the merge for silent collisions found none beyond these three,
-which would have compiled and passed:
+Opus read of the merge for silent collisions found none beyond these three.
+The depth writer's merged cleanly and no rig covers it; the SRV rig pins the
+gate term and `sharp_weapons_test` scans the may-want list, so the other two
+probably would have failed a rig:
 - **Depth writer probe:** `pixelProbeLive` required `rtv0Eye`, but the probe's
   depth-only draws have no eye colour, so it also tests
   `depthWriterWantsDraws()`.
