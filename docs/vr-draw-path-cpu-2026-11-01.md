@@ -5,12 +5,9 @@
 - **Question:** how much of a CPU-bound VR frame is EDVR's draw path
   (GLOSSARY: Draw path), and how much can go without changing what reaches
   the screen? Earlier investigation: `docs\stereo-cpu-sharing-2026-10-16.md`.
-- **Build 1 (flown 2026-11-02, `53c965cd`):** failed the total criterion;
-  cleanup approved the same day (branch `build1/cleanup`, draft PR #166).
-  Shipped: item 1 as the behaviour (scene depth without AA: eye rows, marker
-  fix, reticle depth), item 3, the re-issue counter. Removed: items 2 and 4.
-  All three temporary keys are gone ("The temporary keys"). Review of its
-  flight: the render thread is CPU-bound; build 1's DLAA items were worth
+- **Build 1 (flown 2026-11-02, `53c965cd`, draft PR #166):** failed the
+  total criterion. Shipped items 1 and 3 and the re-issue counter; removed
+  items 2 and 4 and all three temporary keys. Its DLAA items were worth
   0.2-0.4 ms against a 0.8 ms noise floor.
 - **Build 2 (#168, branch `build2/may-want-byte`; flown 2026-11-03):** the VS
   "may-want" byte and pair test before `GetType`, the stash deleted,
