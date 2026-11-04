@@ -176,6 +176,12 @@ uint64_t g_cockpitKey = 0;                       // refresh-owned
 uint64_t g_cockpitUnreadKey = 0;                 // refresh-owned: the rig whose root sphere last failed to read, and when
 int64_t g_cockpitUnreadAt = 0;
 std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
+// TEMPORARY (issue 186): which path the cockpit rig takes (VehicleFrameWindow).
+std::atomic<uint64_t> g_cockpitBytes{0};         // the size of the rig's record array
+std::atomic<uint64_t> g_lastRigRoot{0};          // the root of the rig tracked before this one
+uint64_t g_publishedRoot = 0;                    // refresh-owned
+uint32_t g_lastPoseWords[5] = {};                // refresh-owned
+std::atomic<uint64_t> g_rootDirect{0}, g_rootPrimary{0}, g_rigDirect{0}, g_rigPrimary{0}, g_lastRigRootEmits{0}, g_poseReads{0}, g_poseMoved{0};
 
 // The old root goes before the generation moves, and the tap reads the generation before the root: a tap holding the new generation can only see no root or the new one, so one
 // generation's poses all come from one rig. The new root goes last, so a reader that sees it sees the whole sphere.
@@ -184,7 +190,7 @@ void retireCockpit() noexcept {
     g_cockpitGen.fetch_add(1, std::memory_order_acq_rel);
 }
 
-void publishCockpit(uint64_t root, const float sphere[4], const char* name) noexcept {
+void publishCockpit(uint64_t root, uint64_t bytes, const float sphere[4], const char* name) noexcept {
     retireCockpit();
     for (int i = 0; i < 4; ++i) {
         uint32_t b = 0;
@@ -194,6 +200,9 @@ void publishCockpit(uint64_t root, const float sphere[4], const char* name) noex
     uint64_t w[6] = {};
     if (name) std::memcpy(w, name, strnlen(name, 47));
     for (int i = 0; i < 6; ++i) g_rigNameWords[i].store(w[i], std::memory_order_relaxed);
+    if (g_publishedRoot && g_publishedRoot != root) g_lastRigRoot.store(g_publishedRoot, std::memory_order_relaxed);
+    g_publishedRoot = root;
+    g_cockpitBytes.store(bytes, std::memory_order_relaxed);
     g_cockpitRoot.store(root, std::memory_order_release);
 }
 
@@ -238,7 +247,7 @@ void trackCockpit(const vr::RigRead& rr, uint64_t key) noexcept {
         return;
     }
     g_cockpitUnreadKey = 0;
-    publishCockpit(rr.lo, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
+    publishCockpit(rr.lo, rr.count * vr::kRecordStride, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
 }
 
 bool wrongRead(vr::Status st) noexcept {
@@ -286,6 +295,16 @@ void refresh() noexcept {
             g_cockpitKey = 0;
             retireCockpit();
         }
+        // TEMPORARY (issue 186): is the root's pose changing in memory, whatever path emits it?
+        const uint64_t root = g_cockpitRoot.load(std::memory_order_relaxed);
+        uint32_t words[5] = {};
+        if (root && g_mem.read(words, static_cast<uintptr_t>(root + vr::kRecPos), 12) && g_mem.read(words + 3, static_cast<uintptr_t>(root + vr::kRecQuat), 8)) {
+            g_poseReads.fetch_add(1, std::memory_order_relaxed);
+            if (std::memcmp(words, g_lastPoseWords, sizeof(words)) != 0) {
+                g_poseMoved.fetch_add(1, std::memory_order_relaxed);
+                std::memcpy(g_lastPoseWords, words, sizeof(words));
+            }
+        }
     }
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
     g_refreshTicks.fetch_add(static_cast<uint64_t>(ticks() - t0), std::memory_order_relaxed);
@@ -293,15 +312,25 @@ void refresh() noexcept {
 }
 
 // ---- the emit tap (job threads, only while the game's evaluator gate is open for engine motion) -----------------------------------------------------------------------
-void emitTap(uintptr_t record) noexcept {
+// The record's own canonical pose either producer reads, stamped when it is the cockpit rig's root; TEMPORARY (issue 186): the counts of which path took the rig.
+void takeRecord(uintptr_t record, std::atomic<uint64_t>& rootCount, std::atomic<uint64_t>& rigCount) noexcept {
     const uint32_t gen = g_cockpitGen.load(std::memory_order_acquire);   // before the root: retireCockpit
     const uint64_t root = g_cockpitRoot.load(std::memory_order_acquire);
     if (root && record == root) {
         // The cockpit rig's root, right after the game's own emit: its pose is what the pool holds. Keyed by the clock the emit folds into its markers.
+        rootCount.fetch_add(1, std::memory_order_relaxed);
         vframe::Pose pose;
         if (g_mem.read(pose.pos, static_cast<uintptr_t>(record + vr::kRecPos), 12) && g_mem.read(pose.quat, static_cast<uintptr_t>(record + vr::kRecQuat), 8))
             g_frameRing.record(engineVelocityPresentClock(), gen, pose);
     }
+    if (root && record >= root && record - root < g_cockpitBytes.load(std::memory_order_relaxed)) rigCount.fetch_add(1, std::memory_order_relaxed);
+    if (record == g_lastRigRoot.load(std::memory_order_relaxed)) g_lastRigRootEmits.fetch_add(1, std::memory_order_relaxed);
+}
+
+void primaryTap(uintptr_t record) noexcept { takeRecord(record, g_rootPrimary, g_rigPrimary); }
+
+void emitTap(uintptr_t record) noexcept {
+    takeRecord(record, g_rootDirect, g_rigDirect);
     thread_local uint32_t t_calls = 0;
     if ((++t_calls & 15u) == 0) {
         // Once a frame, roughly: the first tap to find the last refresh older than 4 ms takes it.
@@ -536,6 +565,7 @@ void vehicleRigInstall() {
     }
     g_live.store(true, std::memory_order_release);
     kinematicEvalSetVehicleRigTap(&emitTap);
+    kinematicEvalSetVehicleRigPrimaryTap(&primaryTap);
     g_vehicleRigCaptureTap.store(&captureTap, std::memory_order_release);
     g_gate.store(1, std::memory_order_release);
     Log::get().note("vehicle_rig: installed: SetTarget (0x1096640, found by signature at 0x%llX) forwards first and returns the game's result unchanged; reads only (SEH-guarded reads, no writes into the "
@@ -573,6 +603,13 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out) {
     out->missing = g_frameMissing.exchange(0, std::memory_order_relaxed);
     out->notAdjacent = g_frameNotAdjacent.exchange(0, std::memory_order_relaxed);
     out->changed = g_frameChanged.exchange(0, std::memory_order_relaxed);
+    out->rootDirect = g_rootDirect.exchange(0, std::memory_order_relaxed);
+    out->rootPrimary = g_rootPrimary.exchange(0, std::memory_order_relaxed);
+    out->rigDirect = g_rigDirect.exchange(0, std::memory_order_relaxed);
+    out->rigPrimary = g_rigPrimary.exchange(0, std::memory_order_relaxed);
+    out->lastRigRoot = g_lastRigRootEmits.exchange(0, std::memory_order_relaxed);
+    out->poseReads = g_poseReads.exchange(0, std::memory_order_relaxed);
+    out->poseMoved = g_poseMoved.exchange(0, std::memory_order_relaxed);
     out->live = g_live.load(std::memory_order_acquire);
     uint64_t w[6];
     for (int i = 0; i < 6; ++i) w[i] = g_rigNameWords[i].load(std::memory_order_relaxed);

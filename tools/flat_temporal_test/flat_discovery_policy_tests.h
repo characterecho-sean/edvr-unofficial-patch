@@ -77,6 +77,12 @@ template<class Check> void run(Check check) {
               sites==2 && runtime.find("journalOnFootKnown()")==std::string::npos && runtime.find("shipRecordTerm")==std::string::npos,
               "vehicle frame gate: both treatment sites ask journalFlatOnFoot through fillVehicleFrame, never journalOnFootKnown (dead in flat)");
     }
+    // The F10 audit's identity check knows EDVR's own canopy swap (issue 193): without it the audit held the route in observation for the whole arm, in any cockpit with
+    // visual.cockpit_glass = legacy, and the capture it armed had no treated frame to copy.
+    {
+        const auto qualify=body(runtime,"const FlatProjectionBindingPlan* qualifyProjection(");
+        check(qualify.find("cockpitGlassReplacedHash(actualPs.Get())==ps")!=std::string::npos,"F10 audit: the canopy swap is not an actual-shader mismatch");
+    }
     // The vehicle frame has no key: advanced.vehicle_rig_probe (never in a release) is gone from every source file, the allow-list included.
     {
         size_t files=0,hits=0;

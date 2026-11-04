@@ -14,7 +14,7 @@ namespace edvr {
 
 // Once at start-up, from the proxy's device creation, in both profiles.
 void vehicleRigInstall();
-// Once a second (device_hook's poll): the 30 s health line, and a refresh of the rigs when no emit is refreshing them.
+// From device_hook's poll: the 30 s health line, and a refresh of the rigs when no emit is refreshing them.
 void vehicleRigPoll(uint64_t nowMs);
 
 // The flat profile's vehicle frame (vehicle_frame.h): the cockpit rig root's pose at this frame's emit and last frame's, and its sphere in its own frame. `stamp` is the present-frame clock the emit
@@ -24,9 +24,13 @@ struct VehicleFrameRead {
     float sphere[4] = {};   // centre xyz, radius, in the root's own frame
 };
 vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out);
-// The counts since the last call (they restart), for the flat runtime's 30 s line; the tracked rig's name and root sphere radius.
+// The counts since the last call (they restart), for the flat runtime's 5 s line; the tracked rig's name and root sphere radius.
+// TEMPORARY (issue 186): which path the cockpit rig took. rootDirect, rootPrimary: its root through FUN_144315A20 and through 42B6D50, the two that fill the ring. rigDirect, rigPrimary: any
+// record of its array through each (the root included). lastRigRoot: the root of the rig tracked before this one, still emitting. poseReads, poseMoved: the root's pose read from
+// memory at each refresh, and how many reads differed from the one before, so an evaluated rig that no path emits shows.
 struct VehicleFrameWindow {
     uint64_t asked = 0, with = 0, missing = 0, notAdjacent = 0, changed = 0;
+    uint64_t rootDirect = 0, rootPrimary = 0, rigDirect = 0, rigPrimary = 0, lastRigRoot = 0, poseReads = 0, poseMoved = 0;
     bool live = false, rigKnown = false;
     float sphereRadius = 0;
     char name[48] = {};

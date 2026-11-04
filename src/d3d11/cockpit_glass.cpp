@@ -315,6 +315,8 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
     return replacement;
 }
 
+uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual) { return actual && actual == g_ps ? kReplacedPsHash : 0; }
+
 bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx) {
     const Overlay which = overlayFor(bindingShaderHash(BindSlot::Ps));   // the game's own pixel shader: the shadow records it, never the replacement
     if (which == Overlay::None) return false;
