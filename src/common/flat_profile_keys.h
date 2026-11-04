@@ -35,6 +35,10 @@ inline bool flatProfileReadsKey(const char* key) {
         // The star glow (visual.star_glow, star_glow.h): a percentage of the halo the game's own bloom draws around a star, in both profiles.
         // The Visual tab's row. Unlisted, getString answers "off" here, which the reader takes for the stock 100.
         std::strcmp(key, "visual.star_glow") == 0 ||
+        // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
+        // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
+        // running stock", so the row could never turn the fix on.
+        std::strcmp(key, "fix.particle_billboard") == 0 ||
         // The AA comparison key (aa_compare.cpp): turns EDVR's temporal AA off for a side-by-side look and back, runtime only. Unlisted, a hotkey
         // key reads empty in flat, which is unbound.
         std::strcmp(key, "hotkey.compare_aa") == 0 ||

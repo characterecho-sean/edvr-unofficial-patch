@@ -49,6 +49,10 @@ inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlat
 //   star_glow    Star glow    100 to 400 percent of the halo the game's own bloom draws around a star. Its `menu visual` token (2026-10-27) is the page
 //                             VR's menu builds too: the headset reads the key since the VR port, so the row is on both Visual pages. A row only this tab
 //                             should show would be `menu flat_visual`, a page VR builds none of, as `menu flat_performance` is for the Performance tab.
+//   particle_billboard  Billboards  steady, or the game's own (2026-11-03). The VR fix ported to the flat draw thunks (vscreen.cpp FlatParticleScope):
+//                             plumes stay upright and face the viewer instead of swimming when the mouse turns, and the explosions' billboards lose their roll.
+//                             It is a [fix] key with a plain `menu` token, so its row is on VR's Fix page and, listed here, on this tab too; the edvr.ini order
+//                             puts it ahead of the two [visual] rows.
 // The other `menu visual` rows (World scale, Intro background picture, Screen curve) are VR's: the flat gate (flat_profile_keys.h) refuses their keys, so a
 // flat row for them would show a value that does nothing. They are not listed here.
 // Order is the tab's: menu.cpp walks the generated schema (edvr.ini order) and keeps the rows named here, whatever page their token names.
@@ -56,6 +60,7 @@ inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlat
 inline constexpr FlatPageRow kFlatVisualRows[] = {
     {"visual", "intro_video", FlatRowRead::Allowlist},
     {"visual", "star_glow",   FlatRowRead::Allowlist},
+    {"fix", "particle_billboard", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatVisualRowCount = sizeof(kFlatVisualRows) / sizeof(kFlatVisualRows[0]);
 

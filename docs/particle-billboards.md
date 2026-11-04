@@ -23,6 +23,10 @@
   `tools\billboard_facing_test`; 11 shaders stay roll-free. `9AEC` stays gated by `fix.witchspace_stars`. Flown (builds of 2026-10-16, eye runs 100331,
   100415, 100454): every billboard draw went through a facing transcription (100 percent swapped), no untranscribed billboard drew, explosions are drawn by
   the five transcriptions only. Not on main with it: the shield producer probe and the parked join (`claude/producer-434d120-probe`).
+- **Flat port (2026-11-03, `claude/particle-billboard-flat-port-827e00`, NOT FLOWN):** flat read the key as "stock" and its four draw thunks never
+  reached the VR ladder's `particleOnDraw`. Now the key is allow-listed and a Visual tab row, `particleConfigure` reads it in both profiles,
+  and each flat thunk wraps the game's issue in `FlatParticleScope` (vscreen.cpp). Default `steady`. Flight check: `watching the scene
+  constants at slot 1`, then `steady -- N draw(s)`, and `billboard roll-free` swapped > 0. Open: flat TAA ghosting on a plume (position vs motion record).
 - **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
 - **Ruled out:** nothing yet.
 - **Next flight:** Frontier VR, `steady`: fly an explosion with the head pitched and rolled. The `billboard roll-free` line now

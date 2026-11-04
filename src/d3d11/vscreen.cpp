@@ -5212,6 +5212,37 @@ private:
     bool masked_ = false;
 };
 
+// fix.particle_billboard in the flat profile (particle_fix.h, docs\particle-billboards.md): the substitution the VR ladder makes in
+// beginPanelOverride / forwardWithVerdict, around the game's own issue of ONE draw. The plume and the flare are claimed (particleOnDraw says
+// so; particleBegin swaps the vertex shader and the viewer feed at b3), the explosion transcriptions and the roll-free families arm the
+// pending rebind that particleRollFreeBegin makes. Built AFTER the FlatRuntimeDrawScope and its beginActualDraw, so the flat classification
+// of the draw (it keys on the game's vertex shader) sees the game's bindings, and destroyed straight after the real call, so nothing of
+// the swap is bound when endActualDraw or uiReissue runs. Owner context only; one load of the mode while the fix is stock.
+struct FlatParticleScope {
+    FlatParticleScope(ID3D11DeviceContext* ctx, char kind, UINT count, UINT instances) : ctx_(ctx) {
+        if (!particleSteady() || ctx != g_state->ownerCtx) return;
+        detail::g_rollFreePending = false;   // a pending rebind belongs to ONE draw (what particleRollFreeClear does; billboard_rollfree_test pins that name to the VR ladder)
+        if (!particleOnDrawMayMatch(kind, count, instances,
+                                    bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0)) return;
+        if (particleOnDraw(ctx, kind, count, instances)) {
+            particleBegin(ctx);
+            claimed_ = true;
+        } else if (detail::g_rollFreePending) {
+            particleRollFreeBegin(ctx);
+        }
+    }
+    ~FlatParticleScope() {
+        if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx_);   // also puts back a facing transcription's swap
+        if (claimed_) particleEnd(ctx_);
+    }
+    FlatParticleScope(const FlatParticleScope&) = delete;
+    FlatParticleScope& operator=(const FlatParticleScope&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+    bool claimed_ = false;
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
@@ -5230,7 +5261,10 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);   // built 2026-10-21: only a skipped sun draw is changed (no real call, or a masked one)
-        if (sun.issues()) g_state->realDraw(self, count, start);
+        {
+            FlatParticleScope particle(self, 'D', count, 1);
+            if (sun.issues()) g_state->realDraw(self, count, start);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
@@ -5313,7 +5347,10 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        {
+            FlatParticleScope particle(self, 'I', count, 1);
+            if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
@@ -5394,7 +5431,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        {
+            FlatParticleScope particle(self, 'N', perInstance, instances);
+            if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
@@ -5471,9 +5511,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         FlatStationSunGate sun(self, flatDraw, stationSkip);
-        if (sun.issues())
-            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                              baseVertex, startInstance);
+        {
+            FlatParticleScope particle(self, 'X', perInstance, instances);
+            if (sun.issues())
+                g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                                  baseVertex, startInstance);
+        }
         sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });

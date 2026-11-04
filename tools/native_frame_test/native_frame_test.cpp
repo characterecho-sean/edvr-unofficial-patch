@@ -6299,6 +6299,30 @@ int wmain(int argc, wchar_t** argv) {
         edvr::clearGlitchFrame();
     }
 
+    // ---- fix.turbo_mode: the deferred wait in a ship too, whatever weapon stability says; native on foot keeps the runtime's pacing ----------------------------------------
+    {
+        uint64_t seq = 150;
+        auto pacing = [&]() {
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_8};
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            return table.beginFrame(table.context, &f, &o) == S_OK ? static_cast<int>(o.deferredPacing) : -1;
+        };
+        g_journalActive = g_onFootKnown = true;
+        g_onFoot = false;   // in a ship
+        edvr::Config::get().set("fix.weapon_stability", "1");
+        check(pacing() == 0, "turbo mode off (the default): a ship stays on the runtime's pacing");
+        edvr::Config::get().set("fix.turbo_mode", "on");
+        check(pacing() == 1, "fix.turbo_mode = on defers pacing in a ship");
+        edvr::Config::get().set("fix.weapon_stability", "0");
+        check(pacing() == 1, "fix.turbo_mode does not depend on fix.weapon_stability");
+        edvr::g_nativeOnFootActive.store(true);
+        check(pacing() == 0, "fix.turbo_mode steps aside while native on foot is active");
+        edvr::g_nativeOnFootActive.store(false);
+        edvr::Config::get().set("fix.turbo_mode", "off");
+        edvr::Config::get().set("fix.weapon_stability", "1");
+        g_journalActive = g_onFootKnown = g_onFoot = false;
+    }
+
     // ---- F101: mixed DLL versions against this provider: a released (v0.21.1) runtime's shapes, F31 to F100's version 1 words, this runtime's ladder -----
     {
         uint64_t seq = 200;

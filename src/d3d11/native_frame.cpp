@@ -47,6 +47,7 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
+    bool lastTurboMode = false;   // fix.turbo_mode as last logged
     bool lastStepAside = false;   // F36: weapon stability stepped aside (native on foot active), as last logged
     EdvrNativeFrameDecision cachedDecision{};
 };
@@ -511,9 +512,19 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->lastStepAside = stepAside;
         edvr::Log::get().note("weapon stability: %s", stepAside ? "stepped aside (native on foot active)" : "resumed");
     }
+    // fix.turbo_mode (experimental): the deferred wait everywhere, ships included, for a
+    // runtime whose own wait halves the refresh when a deadline is missed. Native on foot
+    // keeps the runtime's pacing, as it does for weapon stability.
+    const bool turboMode = edvr::Config::get().getBool("fix.turbo_mode", false);
     result.deferredPacing =
-        (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+        ((turboMode && !stepAside) ||
+         (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot()))
             ? 1u : 0u;
+    if (turboMode != state->lastTurboMode) {
+        state->lastTurboMode = turboMode;
+        edvr::Log::get().note("turbo mode: %s (live; the frame wait leaves the game's pose fetch in ships and on foot%s).",
+                              turboMode ? "on" : "off", turboMode ? ", stepping aside while native on foot is active" : "");
+    }
     if (result.deferredPacing) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::DeferredPacing);   // F0 gate counter (log only)
     if (!state->weaponStabilityNoted ||
         state->lastWeaponStability != weaponStability) {
