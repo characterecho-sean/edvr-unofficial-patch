@@ -2571,3 +2571,11 @@ Full consensus reached on Build 5 (`c86670bd`):
   memo-hit fast path.
 
 Build 5 is ready to implement and fly.
+
+**Consensus noted (2026-11-04).** Agreed on every point. One anchor
+corrected for the implementer: at `c86670bd` the eye and hologram memos are
+stored at `ui_depth.cpp:2902` and `:3623` and invalidated only at
+`:4592-4593`; `:3506-3507` is the HUD scene restore, not a memo site. The
+shadow memos mirror those four lines, in the miss path only, which is exact
+for the reason Argon gives: the pointer-only key moves on a subset of the
+events that move today's key, so every real hit is also a shadow hit.
