@@ -9,10 +9,8 @@
   criterion. Shipped items 1 and 3 and the re-issue counter; removed the rest
   and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
 - **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair test
-  before `GetType`, `drawPathFast` in the instanced hook, `--perf-windows`.
-  Its targets fell about 0.6 ms a frame.
-- **Post-build-2 review (2026-11-03):** ruled out the tee trap (0.08 ms), the
-  EDHM bypass.
+  before `GetType`, `drawPathFast` in the instanced hook. Its targets fell about
+  0.6 ms a frame. Ruled out after it: the tee trap (0.08 ms), the EDHM bypass.
 - **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
   marker windows copied once per Unmap. Passed: coverage held, R5
   `streamUnmapCopy` 0.697 to 0.506 ms. B1: 607 of 676 non-eye draws are
@@ -46,6 +44,7 @@
   2-3 removed. Argon agreed; Opus approved on re-review. Spec #191,
   `d5135e52`. Flown 2026-11-04: S2 cut eye-memo misses 45% (about 0.08 ms);
   S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
+  Next: the closing build (S1 and the temporary lines out), then the PR.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3319,3 +3318,33 @@ call into the driver, and they move when the code around them moves.
 - ruled out: reading a per-line own-time peak just after a forwarded D3D call
   as that line's cost; it moves with layout (build 5 `:4751`, build 6
   `:4694`).
+
+## Closing build: S1 and the temporary lines removed (2026-11-04)
+
+The arc branch is cumulative: builds 1-6 are all on it. This build makes it
+fit to submit, removing what was there only to measure or what did not pay.
+It adds nothing, so it skips the design review; a fresh review of the diff
+replaces it.
+
+- **Removed:**
+  - S1 (ruled out in "Flight 2026-11-04 (build 6)"): `draw_interest.h`,
+    `DrawHot::interest`, `g_drawInterestPtr`, every module's `...InterestBits()`
+    and `...RecomputeInterest()`, the install store, and the drift check in
+    `bindingAudit`. Every ladder site goes back to its build 5 flag test.
+  - The TEMPORARY `build 6 counts:` line, its counters and its `edvr_log.py`
+    parser.
+- **Kept:** S2, the #184 fix (`DrawCallFlags` with the pending flags, N7's
+  clear), item 5's revert, `draw mask:` (a standing line), and builds 1-5's
+  cuts.
+- **Mechanics:** sixteen modules changed in build 6 only for S1, so they return
+  byte for byte to `85006708`: `blend_probe`, `celestial_motion`,
+  `depth_probe`, `desktop_window`, `draw_census`, `fss_panel`,
+  `native_on_foot`, `object_probe`, `optimized_station`, `panel_curve`,
+  `particle_fix`, `quad_probe`, `remlok_fix`, `scrim_fix`, `sunglare_fix`,
+  `flat_temporal` (each `.cpp` and `.h`; checked: their other build 6 lines
+  exist only to call the recompute). `vscreen`, `ui_depth`, `ui_layer`,
+  `perf_monitor` and the rigs are edited by hand.
+- **Check flight:** the L2 spot, one 100 s capture. Pass: `--health` with no
+  NEVER APPLIED, composites 0, `ui depth totals:` within the arc's spread,
+  own time per full-path draw not above build 6's 283 ns beyond noise (SE about
+  3 ns).
