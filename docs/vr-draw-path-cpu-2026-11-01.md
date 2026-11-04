@@ -42,8 +42,8 @@
   `uiDepthOnEyeDraw`'s memo hit inline, a `viewIsSurface` front cache, one
   engine-velocity generation; temporary counts for #184 (all three flags) and
   S2 (would-hit and would-disagree); the cross-profile probe's count without
-  a locked add. Expected 0.25-0.39 ms. Reviews and agreement follow the design. Next:
-  implementation and flight.
+  a locked add. Expected 0.25-0.39 ms. Argon agreed; the Opus review asked
+  for four rig and counter fixes, taken. Next: Opus re-review, then build.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2357,7 +2357,8 @@ The L2 spot, standing still, DLAA, HUD bloom on and star glow off as now, one
 - **Each item, in the profile, per full-path draw:** `starGlowAfterDraw` and
   `vrStarGlowAfterDraw` gone; `uiDepthOnEyeDraw` own down by at least half;
   `viewIsSurface` own down; the `engine_velocity.h:175` line down;
-  `hookedPSSetConstantBuffers` own down by at least half (item 7). Judged per
+  `hookedPSSetConstantBuffers` own down (item 7); items 1-3 judged as caller
+  plus callee and item 4 on the thunks (Opus review, finding 8). Judged per
   item, because the expected total (0.25-0.39 ms a frame at 17,148 draws, about
   0.20-0.31 at build 3's count) is within two standard errors of the difference
   between two flights (about 0.09 ms).
@@ -2586,3 +2587,28 @@ stored at `ui_depth.cpp:2902` and `:3623` and invalidated only at
 shadow memos mirror those four lines, in the miss path only, which is exact
 for the reason Argon gives: the pointer-only key moves on a subset of the
 events that move today's key, so every real hit is also a shadow hit.
+
+### Review of the build 5 design (Opus, 2026-11-04), and dispositions
+
+**Changes required** (fresh context, against `c86670bd`; notes outside the
+repo: `b5-opus-review.md`). The production changes in items 1-4, 6 and 7
+hold up as exact on every path traced, except one wrap-around gap in item 4.
+Four test seams could not run as written, and the #184 counters could not
+tell "never ran" from "never happened". Each finding was checked against
+the code; all are taken. Where this table and the item text above differ,
+the table wins.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | BLOCKING. Item 2's rig check moved "to a miss" still aborts: a miss runs `classifyEyeDraw`, whose first read is `bindingGet(Dsv0)` (`ui_depth.cpp:2647`), and `ui_depth_test.cpp:51-58` stubs it and its neighbours with `std::abort()` (checked). | Taken. Those stubs return rig values while a test flag is set and abort otherwise, as `hologram_depth_test.cpp:76` already does for `bindingGet`. The `g_holoDraw` copy is asserted on the miss (`ui_depth_test.cpp:219` moves). |
+| 2 | BLOCKING. Item 3's fill and evict cases need a `g_viewMemo` miss, which calls the `bindingResolve` abort stub (`:55`); and `putSeq` must be read after the miss's own put (`ui_depth.cpp:869`), or a front entry filled on a miss never hits. | Taken, both: the same flagged fakes; the entry stores `g_viewMemoPuts` as it stands after the put. |
+| 3 | BLOCKING. `engine_velocity_test` builds with `EDVR_BINDING_SHADOW_EXTERNAL` and its own fake slots (`lifecycle_tests.h:102-111`, checked), so it never runs the real bump; its tests bump `.gen` directly and expect the slow path (`skin_lifecycle_tests.h:673-689`). | Taken. In that rig the aggregate is the sum of the five fake generations, so every direct bump moves it. The real bump sites are tested in `scrim_metadata_test`, which links `binding_shadow.cpp`. |
+| 4 | BLOCKING. The fence behind `vscreen.cpp:4308` rises only on a failed hologram restore (`ui_layer.cpp:1867`), so zeros prove nothing. The sequence stamp must be `thread_local` and bumped at `beginPanelOverride`'s entry, before the returns at `:2096`, `:2111`, `:2116`, `:2118`. `t_holoDepthThisDraw` is never cleared at `:2143`, so it can reach any later draw. | Taken. The line prints the totals beside the counts: blocked returns and `UiDepthScope` constructions. Zero blocked returns reads "undetermined", not "never". The stamp is `thread_local`, bumped first thing in `beginPanelOverride`. The consumed-stale count covers any later draw, foreign or owner. |
+| 5 | Item 1's behavioural test cannot live in `ui_quality_test`, which does not link `vr_star_glow.cpp`; its text pins (`ui_vr_star_glow_test.h:526-542`, `584-615`, `711-724`; `ui_vr_hud_glow_test.h:308`) match today's call sites and will break. Export `g_t0.active` itself, not a mirror. | Taken: the pins are updated to the gated call, and the inline test reads `detail::g_t0` (its `active` field) and `detail::g_mode` directly; no new writer. |
+| 6 | The S2 shadow's pointer-only bump lives in `bindingSet`, which `ui_depth_test` does not link; `bindingInvalidate` must always bump; both rigs that include `ui_depth.cpp` need the new reader defined. | Taken: tested in `scrim_metadata_test`; `bindingInvalidate`, `bindingSetShader`, forget-all and the frame boundary always bump it; both rigs define the reader. |
+| 7 | Item 4 after a 32-bit wrap: an aggregate of 0 matches a reset cache. Keep `cache.vs/ps/rtv/dsv`, which are read elsewhere (`engine_velocity.cpp:1874`, `1961-1966`, `2114-2115`). Nine `DrawCache{}` resets, not seven (checked: nine). | Taken: the increment skips 0. The five per-slot fields stay in `DrawCache` and are still stored; only the compare changes. |
+| 8 | Moving a cost inline makes "callee own down" pass by construction. | Taken: items 1-3 are judged as caller plus callee, and item 4 on the four thunks' own time, per full-path draw. |
+| 9 | Item 7: the call count is already logged (`cross_profile_cost.h:51`, `psConstantBuffers=<calls>/<us>`); dropping the lock prefix keeps the store and the call, so "down by half" is optimistic. Needs a never-ran signature and a source pin. | Taken: "down"; never ran = the hook's own time unchanged; a source pin on the site's begin. |
+| 10 | Never-ran signatures missing for item 4; item 3 and item 6 should print what they measure against. | Taken: the item 6 line also prints engine velocity's slow-half entries, `viewIsSurface` calls, and shadow lookups (which must equal the real misses). |
+| 11 | Zero disagreements in one 100 s standing flight cannot settle the recycled-address case. | Taken: build 6 words it "none observed in N lookups", and S2's case rests on that plus the frame bound, stated as such. |
+| 12 | The total's lower bound leans on items 3 and 7, the least supported. | Agreed: the 0.25-0.39 ms total is a guide; the per-item criteria decide. |
