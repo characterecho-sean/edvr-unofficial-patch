@@ -297,12 +297,19 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int tileH = u * 50 / 10;
     const int tileGap = cap / 4;
     const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
-    const int hintHUsed = c.hint[0] ? hintH : 0;
+    // The hint box is ALWAYS hintH tall, whatever the hint holds: the row
+    // hints are row-dependent (the dimmed rows' and a few others' set one,
+    // the rest set none), so sizing the box to the hint's presence would
+    // make the whole panel grow and shrink by hintH as the highlight, and
+    // with it the scroll, moved over the rows that do and do not carry one
+    // -- the card changed size and shape while the page was scrolled. The
+    // box keeps its height and is simply empty without a hint, the footer's
+    // own rule for the same reason (kFooterLines below).
     // A locked FPS readout sits above the tabs so it stays visible while
     // the menu is scrolled or a tooltip is up.
     const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
     const int H = pad + overlayH + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) +
-                  graphH + hintHUsed + footH + pad;
+                  graphH + hintH + footH + pad;
     *outH = H;
 
     // Background.
@@ -598,7 +605,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             h.rgb = kHint;
             ops.push_back(h);
         }
-        y += hintHUsed;
+        y += hintH;
         if (c.footer[0]) {
             // One single-line op per '\n'-separated line, each in its own
             // slot of the two-line box, so the single-line draw path
@@ -1606,6 +1613,17 @@ void menuPanelSubmit(const MenuContent& c) {
 bool menuPanelWorkerReadyForTest() {
     std::lock_guard<std::mutex> lock(g_w.m);
     return g_w.hasReady && !g_w.hasPending;
+}
+// The bitmap height layout() produces for `c`, so the test can assert the
+// panel's shape does not depend on which rows carry a hint. The raster's
+// aspect is a pure function of this height, so a constant height here is a
+// constant on-screen card size (halfH = halfW * aspect).
+int menuPanelLayoutHeightForTest(const MenuContent& c) {
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int h = 0;
+    layout(c, ops, lines, &h, 0, nullptr);
+    return h;
 }
 #endif
 

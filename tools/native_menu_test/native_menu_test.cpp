@@ -112,6 +112,46 @@ int wmain(int argc, wchar_t** argv) {
     if (!std::wcscmp(argv[1], L"--dry-run")) {
         std::puts("native_menu_test: dry-run (no WARP device)"); return 0;
     }
+    if (!std::wcscmp(argv[1], L"--layout")) {
+        // The panel's bitmap height is the on-screen card's shape: the
+        // raster stores its aspect and halfH = halfW * aspect, so a height
+        // that changes between pages changes the card's size. The hint
+        // box must therefore keep its height whatever the highlighted
+        // row's hint holds, or scrolling over a row that does (and one
+        // that does not) carry a hint makes the card grow and shrink.
+        // capPx 34 is the VR path's floor (menu.cpp's sizeContent); the
+        // flat path's ~34x256 card is the rig's own 256-wide test.
+        unsigned checks = 0, fails = 0;
+        auto check = [&](bool ok, const char* name) {
+            ++checks; if (!ok) { ++fails; std::printf("FAIL: %s\n", name); }
+        };
+        edvr::MenuContent page{};
+        page.widthPx = page.cardPx = 256;
+        page.capPx = 34;
+        page.tabCount = 3;
+        for (int i = 0; i < 3; ++i) std::snprintf(page.tabs[i], sizeof(page.tabs[i]), "Tab %d", i);
+        page.activeTab = 1;
+        page.lineCount = 5;
+        for (int i = 0; i < 5; ++i) std::snprintf(page.lines[i].left, sizeof(page.lines[i].left), "Row %d", i);
+        std::strcpy(page.footer, "keys");
+        const int plain = edvr::menuPanelLayoutHeightForTest(page);
+        check(plain > 0, "a plain page has a layout height");
+        const int hintH = page.capPx * 34 / 10;
+        check(hintH > 0, "the hint box has a height at this cap");
+        const char* hints[] = {
+            "Choose DLSS to change its model preset.",
+            "No runtime width on record yet; the panel stays at the game's own 1920x1080 until a session with VR running has completed once.",
+            "Turn anti-aliasing on to sharpen.",
+            "Currently resolves to 3840x2160.",
+        };
+        for (const char* hint : hints) {
+            std::strcpy(page.hint, hint);
+            check(edvr::menuPanelLayoutHeightForTest(page) == plain,
+                  "a hinted page is the same height as an unhinted one");
+        }
+        std::printf("native_menu_test: layout %u checks, %u failures\n", checks, fails);
+        return fails ? 1 : 0;
+    }
     if (std::wcscmp(argv[1], L"--self-test")) return 2;
     unsigned checks = 0, fails = 0;
     auto check = [&](bool ok, const char* name) {

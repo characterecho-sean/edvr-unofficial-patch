@@ -208,6 +208,7 @@ struct MenuGeometry {
 void menuPanelSubmit(const MenuContent& c);
 #ifdef EDVR_MENU_TEST
 bool menuPanelWorkerReadyForTest();
+int  menuPanelLayoutHeightForTest(const MenuContent& c);
 #endif
 
 // Once per frame: upload a finished raster, create the texture as needed.
