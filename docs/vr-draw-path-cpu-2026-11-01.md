@@ -41,8 +41,13 @@
   forwards"):** the arc's per-function "self" included the D3D calls each
   hook forwards. EDVR's own R1 time is 4.72 ms: the draw path 3.29, `Unmap`
   0.39, `Map` 0.26, the bind hooks about 0.3. Ruled out: the bind hooks as a
-  large target. A3 (map/unmap) is worth at most 0.65 ms. Next: build 4's
-  scope (A3 alone, or with the draw path), then name the 512x512 pass.
+  large target. A3 (map/unmap) is worth at most 0.65 ms.
+- **Build 4 (designed 2026-11-03, "Build 4: the draw path's own cost"):** A3
+  and the draw path in one build, all keyless: inlined first tests, a hot
+  `State` block, owner-only per-draw flags, the map bounce gated on its own
+  `open_` test (not `!runtimeVrProfile()`), counters for build 5, own time
+  in the analyzer. Expected 0.35-0.55 ms. Next: its review; the 512x512
+  pass later.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is
   held as not scene depth, the tee never goes fast and F113 reports `none`
   100%. Key on: fast path 36-46%, F113 scene meshes 94%.
@@ -1644,3 +1649,163 @@ Own time, ms a frame (own | below EDVR):
 - Builds 2 and 3 are unaffected: the byte's targets and the marker copy are
   EDVR's own code (the copy is `streamCopyGuarded`'s reads of write-combined
   memory, all own).
+
+## Build 4: the draw path's own cost, and the map/unmap cuts (designed 2026-11-03)
+
+Scope decided 2026-11-03: A3 together with the draw path, one build. The
+candidates come from a code read against build 3's per-line own time (Opus,
+fresh context; notes outside the repo, `b4-candidates.md`), checked here
+where marked. Environment: VR profile, the native OpenXR runtime, PSVR2 at
+2632x2684, DLAA, EDHM chained, game build 334925, about 13,600 full-path
+draws a frame in the concourse. No change reads a headset size or a runtime.
+
+**Where the time goes (inferred, not measured with cache counters).** The
+ladder's own samples land on the instruction after a load of a module flag
+(`g_drawCensusPending`, `g_holoSteady`, `g_footprintWanted`,
+`g_vrStarGlowWanted`), a `State` field 50 KB in (`censusSkipCount` at
++0xC930, `introCurveThisDraw` at +0xCB0D), or a thread-local slot, not on
+arithmetic. Those lines sum to about 0.63 ms a frame, about 2 ns each a draw:
+the shape of one cache miss per flag, because the game's draw between two
+hooks evicts them and each lives on its own line. So the lever is the number
+of distinct cache lines the ladder touches and the out-of-line calls it
+makes, not the tests themselves.
+
+### Changes (all keyless: each is the same test or the same data, moved)
+
+1. **Inline each callee's first test at the call site.** Out-of-line calls
+   made for every draw that return on their first line. The codebase does
+   this already ("the callee's own first test, inline",
+   `vscreen.cpp:2185-2188`).
+
+   | call | site (`vscreen.cpp`) | first test | own ms |
+   |---|---|---|---|
+   | `pixelProbeBefore`, `pixelProbeAfterEye` | 5498, 5604 and the other thunks | `pixelProbeWantsDraws()` (`:1900`, `:1915`, checked) | 0.036 + 0.052 |
+   | `temporalPassWantsRigidDraw` | 5544-5552 | `g_temporalPassWantedFssChrome`, eye, seen (`temporal_pass.cpp:6086-6089`) | 0.036 |
+   | `gpuFrameCommandIfLive` | 5460 | inline in `gpu_frame_timing.h:62`, not inlined | 0.028 |
+   | `flatTemporalCapturing` | 2109, 3524, 3668 | one relaxed load (`flat_temporal.h:24-25`) | 0.024 |
+   | `uiLayerTargetKind` | 4361 | generation compare (`ui_layer.cpp:3808-3810`) | 0.025 |
+   | `objectProbeCandidateDrawIssued` | 4342-4345 | `g_objectProbeLedgerOn && ctx` (`object_probe.cpp:1497`) | 0.023 |
+   | `optimizedStationSkipsDraw` | 2087 | `g_sunOff` (`optimized_station.cpp:2422`) | 0.021 |
+   | `blendProbeWantsDraws` | 4265 | one relaxed load (`blend_probe.cpp:724-726`) | 0.019 |
+
+   Bound 0.29 ms; expected 0.12-0.2, since the flag load stays. Each inlined
+   test must be exactly the callee's first test; the callee keeps it.
+2. **The per-draw `State` fields in one 64-byte-aligned block at the head of
+   `State`:** `ownerCtx`, `rtv0Eye`, `rtv0EyeGen`, `rtv0Cand`, `glareClamp`,
+   `curveThisDraw`, `introCurveThisDraw`, `eyeDrawsThisFrame`,
+   `bindAuditSeq`, the `censusSkip*` counts, `censusAutoW`, `quadSkipArmed`,
+   `distanceEnabled`, `fssBodyFrame`, `frameNo`, and item 3's flags. Their
+   lines cost about 0.13 ms; expected 0.05-0.1. Layout only. A
+   `static_assert` pins the block's size.
+3. **The three thread-local per-draw flags become owner-only `State`
+   members.** `t_uiDepthThisDraw`, `t_holoDepthThisDraw`,
+   `t_compositeThisDraw` (`vscreen.cpp:1598-1610`) are thread-local so a
+   deferred-context draw on another thread cannot take the render thread's
+   flag. Every write is already after the foreign-context return
+   (`:2074-2084` before `:2114-2115`, `:2507-2513`), and only `UiDepthScope`
+   (`:4279-4284`) reads and clears them. As members, read and cleared only
+   when the draw is the owner's (computed at `:4261`), a foreign draw reads
+   false, as it does today. Lines 2114, 2115, 4293: bound 0.09, expected
+   0.05-0.08.
+4. **The flat map bounce, gated on its own "anything open" test.** In VR
+   nothing is ever installed (`flat_map_bounce.h:139`, `setMode` only at
+   `flat_runtime.cpp:4341` after the flat-only return at `:4214`), so
+   `open_` stays 0 and `preMap`/`beginUnmap` return at their first test
+   (`flat_map_bounce.h:128`, `:164`, checked). Argon's proposed gate,
+   `!runtimeVrProfile()`, is not exact: the profile switches live at a
+   frame boundary (`mode_watch.cpp:451`), and a bounce still open across a
+   flat-to-VR switch would never be flushed (one Unmap's write lost, the
+   slot and its reference leaked); `hookedUnmap`'s comment requires the
+   flush "independently of the current mode" (`vscreen.cpp:3636`). Instead:
+   expose `open_ != 0` inline, skip `PreMap` and `BeginUnmap` when it is 0,
+   move `flatcpu::Scope` in `flatRuntimeMapBounceBeginUnmap`
+   (`flat_runtime.cpp:5462`) below that test, and gate `Install`
+   (`vscreen.cpp:3512`) on `flatRuntimeActive()`, an exact term of its own
+   refusal (`flat_runtime.cpp:5441`). Exact in every profile and across a
+   switch. About 0.05 ms.
+5. **`uiDepthOnEyeDraw`'s per-draw outputs in one struct**, reset as a
+   block. 0.112 of its 0.132 ms sits right after twelve resets to globals
+   on separate lines (`ui_depth.cpp:2896-2908`). Same resets, same values;
+   expected about 0.05. Skipping the resets is not in this build.
+6. **Shape before flag in the eye branch:** `holoWantsDraws() &&
+   holoPatternShape` (`vscreen.cpp:2678`) and `backdropWantsDraws() &&
+   backdropCompositeShape` (`:2708`) become shape first; both shapes are
+   (X, 6, 1) (`holo_fix.h:58-60`, `backdrop_fix.h:126-128`) and count and
+   instances are in registers. Pure reads. Expected 0.03-0.05.
+7. **Two counters, for build 5's decisions, on one new 10 s line.** They
+   cost one compare and increment per call, outside the per-draw ladder:
+   - `mapMemo` lookups and misses (`vscreen.cpp:3582-3587`). A miss pays
+     `mapBufferDesc` (0.028 own plus two COM calls).
+   - Same-pointer re-sets in `bindingSet`, for RTV0, DSV0 and PS SRV 0-3:
+     calls, and calls whose pointer equals the one bound. Every set bumps
+     the generation today (`binding_shadow.cpp:107-112`, checked), which is
+     why every per-binding cache in the ladder misses (this arc's item 4).
+8. **The analyzer reports own time.** `tools\cpu_profile`'s EDVR export
+   gains, per innermost address, whether the sample's top frame was in
+   EDVR (own) or below it. This replaces the disassembly script used above
+   and makes own time the figure every later table ranks by.
+
+Expected total: 0.35-0.55 ms a frame of EDVR's own time, nearly all in the
+draw path.
+
+### Left for build 5, each needing evidence first
+
+- **S1, a per-frame snapshot of the feature flags** (extending
+  `drawGateWanted`, `vscreen.cpp:2144-2164`), packed in item 2's block so
+  the ladder reads one cache line. Each bit a "may want" superset. Bound
+  about 0.5, expected 0.15-0.3; needs a one-flight A/B that counts
+  stale-false snapshots.
+- **S2, a content generation** that moves only when the bound pointer
+  changes, for the per-binding caches; engine velocity keeps the set
+  generation (`vscreen.cpp:5489-5493`). Bound about 0.29; decided by item
+  7's re-set counts.
+- `viewIsSurface`'s per-slot front cache (0.117); `mapMemo` resizing (by
+  item 7's miss count); skipping `uiDepthOnEyeDraw`'s resets.
+- Not candidates: the marker tee and probes (already ruled out), star glow's
+  per-draw classify (it keeps per-target run state that any other draw
+  ends, `vr_star_glow.cpp:362-374`), `depthProbeNoteDraw`'s counters.
+
+### Test seams
+
+- Item 1: each predicate is a header read; a rig check per inlined test that
+  it equals the callee's first test over its inputs where the callee's
+  state is reachable (`temporalPassWantsRigidDraw`'s state moves to
+  `temporal_pass.h`).
+- Item 3: a rig case where a foreign-context draw runs between an owner
+  draw's set and its `UiDepthScope`: the foreign draw reads false and the
+  owner's flag survives.
+- Item 4: `flat_map_bounce_test` gains "`open()==0`: `preMap` and
+  `beginUnmap` touch nothing" and a flat-to-VR switch with one bounce open:
+  the next Unmap still flushes it.
+- Item 7: `edvr_log.py` parses the new line (fixture, self-test, health
+  pattern).
+- Item 8: the analyzer's parser tests gain an own/below case.
+
+### What the log shows if the new code never ran
+
+- Item 7: no new counter line.
+- Items 1-6: nothing in the log; the profile shows it. With item 8, the
+  per-line own time of the changed lines (2087, 2109, 2114, 2115, 2591,
+  2678, 2708, 4293, 4342-4345, 4361, 5460, 5498, 5544-5552, 5599, 5604,
+  `ui_depth.cpp:2896-2908`) falls, and the out-of-line callees of item 1
+  drop out of the own list.
+
+### Flight
+
+The L2 spot, standing still, DLAA, `EDVR_PROFILE_SYMBOLS=1`, one 100 s
+capture. No census.
+
+### Pass criteria
+
+- **The cut:** the draw subtree's own time per full-path draw (own ms over
+  the `draw mask:` line's full-path draws a frame) falls by at least 0.2 ms
+  a frame's worth at build 3's draw count, against build 3's 3.29 ms at
+  about 13,600 draws. Per draw, because the scene and draw count move
+  between flights.
+- **Nothing changed on screen:** every feature these items touch logs the
+  same as in build 3 within flight-to-flight spread: the `ui depth` 20 s
+  line and `ui scene composites` (item 3), the temporal pass's rigid-draw
+  count, the footprint line, the pixel and blend probes (off: zero both
+  times), `--health` with no new NEVER APPLIED.
+- **Nothing else rose:** no EDVR function's own time up more than 0.1 ms.
+- **Build 5 is decided:** item 7's miss and re-set counts are in the log.
