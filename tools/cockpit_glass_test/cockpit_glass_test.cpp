@@ -421,7 +421,7 @@ static void fft1(std::vector<std::complex<double>>& v, bool) {
 }
 
 struct StreakStats {
-    double std = 0, p5 = 0, p50 = 0, p95 = 0;
+    double std = 0, p5 = 0, p50 = 0, p90 = 0, p95 = 0, p99 = 0, meanOverMax = 0;
     double band[4] = {0, 0, 0, 0};   // spectral energy by cycles per tile: 0-4, 4-16, 16-64, 64 and up
     double local = 0, global = 0;    // fibre coherence: local, and how well the regions' directions agree
     double elongation[4] = {0, 0, 0, 0};   // per band (cycles per tile 1-4, 4-16, 16-64, 64 and up): the spectrum's second-moment eigenvalue ratio, 1 for isotropic noise
@@ -445,6 +445,9 @@ static StreakStats streakStats(const std::vector<uint8_t>& bytes, int n) {
     st.p5 = sorted[sorted.size() * 5 / 100];
     st.p50 = sorted[sorted.size() / 2];
     st.p95 = sorted[sorted.size() * 95 / 100];
+    st.p90 = sorted[sorted.size() * 90 / 100];
+    st.p99 = sorted[sorted.size() * 99 / 100];
+    st.meanOverMax = mean;
     // Band energy.
     std::vector<std::complex<double>> grid(a.size());
     for (size_t i = 0; i < a.size(); ++i) grid[i] = a[i] - mean;
@@ -580,7 +583,14 @@ static void testStreaks(const char* dumpPath) {
                 "coherence local %.3f global %.3f; elongation %.1f %.1f %.1f %.1f, stroke angle %.1f %.1f %.1f %.1f; bristle ratio %.2f; neighbour difference %.4f, seam difference %.4f\n",
                 n, n, ms, mean, st.std, st.p5, st.p50, st.p95, st.band[0], st.band[1], st.band[2], st.band[3], st.local, st.global, st.elongation[0], st.elongation[1], st.elongation[2], st.elongation[3], st.angle[0], st.angle[1], st.angle[2], st.angle[3], st.bristle, interior, seam);
     check(std::fabs(st.std - 0.093) < 0.02, "the contrast is the legacy texture's (std about 0.093 of the max)");
-    check(std::fabs(st.p5 - 0.158) < 0.03 && std::fabs(st.p50 - 0.245) < 0.025 && std::fabs(st.p95 - 0.442) < 0.06, "the percentiles are the legacy texture's (p5 0.158, p50 0.245, p95 0.442): a floor, no black holes");
+    // The distribution relative to the mean (section 13): the legacy texture's percentile ratios p5 0.571, p50 0.884, p90 1.430, p95 1.591, p99 2.135, each within 8%, so the
+    // bright parts are as bright, relative to the mean, as legacy's and no more.
+    const double ratios[5] = {st.p5 / st.meanOverMax, st.p50 / st.meanOverMax, st.p90 / st.meanOverMax, st.p95 / st.meanOverMax, st.p99 / st.meanOverMax};
+    const double legacyRatios[5] = {0.571, 0.884, 1.430, 1.591, 2.135};
+    bool ratiosOk = true;
+    for (int i = 0; i < 5; ++i) ratiosOk = ratiosOk && std::fabs(ratios[i] - legacyRatios[i]) < 0.08 * legacyRatios[i];
+    std::printf("percentile ratios to the mean: p5 %.3f p50 %.3f p90 %.3f p95 %.3f p99 %.3f (legacy 0.571 0.884 1.430 1.591 2.135)\n", ratios[0], ratios[1], ratios[2], ratios[3], ratios[4]);
+    check(ratiosOk, "the percentiles over the mean are the legacy texture's (p5, p50, p90, p95, p99) within 8%: a floor, no black holes, no bright sweeps");
     // The spectrum figures are secondary sanity checks: a painted texture honestly gives other band energies and a more elongated, more coherent fine structure than the legacy
     // texture's (section 13), so the band energies are held to within 0.2 of legacy's (0.418, 0.236, 0.161, 0.185), every band must be elongated (at least 2) and run the legacy
     // texture's diagonal (within 15 degrees of 44.5, 53.4, 52.2, 55.0).
@@ -625,7 +635,7 @@ static void testShader() {
     const float kDirtMask = 0.025f, kDirtColour = 0.97f, kBaseAlpha = 0.02f, kStreakMax = 0.09f;
     const float vertexB = 0.72f;
     const float liveMask = std::fmin(std::fmax((vertexB - 0.2f) * 0.5f, 0.0f), 1.0f) * 0.5f;   // what live's vertex shader passes for B = 0.72 (CB2[6] = (.., .., 0.5, -0.2), CB2[0].x = 0.5)
-    const float kDirtStrength = 8.0f;   // chosen, not measured
+    const float kDirtStrength = 4.0f;   // chosen, not measured
     const float dirtWeight = liveMask / 0.25f;   // live's mask over CB2[6].z * CB2[0].x: B - 0.2 = 0.52, no offset added back
     const float albedo = kStreakMax * (kDirtMask * dirtWeight) * kDirtColour * kDirtStrength;
     const float sun = 1000.0f;

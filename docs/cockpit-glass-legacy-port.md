@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges) and kDirtStrength is 8 (section 13). Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges), kDirtStrength is 4 and the streak texture's brightness distribution is legacy's by quantile mapping (section 13). Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -666,6 +666,23 @@ under the sun for B = 0.72 is 0.5645 (wanted 0.5645) at alpha 0.02; hangar 0.113
 condensation overlays 0.01128 (0.01129); and a new continuity case: a mask of exactly 0 gives 0 and 1e-4 gives 0.000434
 (wanted 0.000434), in proportion to the 0.13 mask's, with no step. `hotkey_capture_test` still passes with the merge's
 four-row Visual tab (no change needed), and the full build on the merged tip passed.
+
+**Calmer highlights, strength 4 (2026-11-03, after the flight of 711d02eb).** The polygon edges were gone; Sean: "probably still too
+intense", with too much brightness in the dirt texture compared with legacy. Two changes. `kDirtStrength` 8 to 4 (still chosen).
+And the streak texture's remap: with the stored mean fixed at 0.2667 of the max, the exponential remap left the bright values
+at p90 / p95 / p99 of 1.54 / 1.85 / 2.49 times the mean against legacy's 1.43 / 1.59 / 2.14, in broad connected sweeps.
+The remap is now a quantile mapping onto legacy's summary distribution: each texel keeps its rank in the painting and takes
+its value, as a ratio to the mean, from legacy's percentile ratios (p5 0.571, p50 0.884, p90 1.43, p95 1.59, p99 2.14,
+p99.9 2.55, max 3.75, a floor of 0.3 at the bottom; only those summary figures are used), so the painting's strokes are kept and
+the distribution of brightness is legacy's. The painting's per-stroke value range is also cut (0.07, 0.05, 0.05) so the broad
+sweeps carry less of the contrast, and the narrowest class is a little fainter. Measured over the mean, ours / legacy: p5 0.569 /
+0.571, p50 0.876 / 0.884, p90 1.416 / 1.430, p95 1.576 / 1.591, p99 2.116 / 2.135 (all within 1.5%); std 0.095 (0.093);
+band energies 0.434 / 0.311 / 0.195 / 0.060; stroke angle 46.4 / 51.5 / 50.8 / 49.5; local coherence 0.899. `kStreakMax` is
+unchanged at 0.09: the stored max is still 255 and the stored mean is 0.2687 of it (the table's mean over its top), so the linear
+mean is 0.0242 (legacy 0.024) and the peak 0.09. By eye: an even, dim, brushed wipe in which no broad area stands out brighter; the strokes still
+read as streaks, with a few thin bright streaks left. The rig now holds the percentile ratios (p5, p50, p90, p95, p99 within 8% of
+legacy's) instead of percentiles over the max. Rig shader values with strength 4: dirt under the sun 0.2822 (wanted 0.2822), hangar
+0.05673 (0.05675), ice overlay 0.005642 (0.005645).
 
 ## Ruled out
 

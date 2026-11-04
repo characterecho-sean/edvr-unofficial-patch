@@ -183,10 +183,10 @@ static const float kCrackSpec = 0.02;          // crack glare strength (cb0[38].
 static const float kCrackGloss = 450.0;        // and its exponent (cb0[38].z)
 // The streak texture is stored normalised (its brightest texel 1, its mean 0.267); times this, the max is the legacy dirt texture's 0.09 and the mean its 0.024.
 static const float kStreakMax = 0.09;
-// CHOSEN, not measured: the dirt albedo is multiplied by this. Sean found 16 too much for a clean windshield; with the mask's offset gone (below) the mask is also about 0.7 times
-// what it was, so 8 is near the 4 to 6 times that section 12 of the doc measures as matching legacy on the display. Dirt albedo only: the smudge and crack glare and the crack colour
-// are not scaled.
-static const float kDirtStrength = 8.0;
+// CHOSEN, not measured: the dirt albedo is multiplied by this. Sean found 16 too much for a clean windshield, and then 8 "probably still too intense", with too much brightness in
+// the dirt texture compared to legacy; section 12 of the doc measures about 4 to 6 times as matching legacy on the display. Dirt albedo only: the smudge and crack glare and the
+// crack colour are not scaled.
+static const float kDirtStrength = 4.0;
 // Fixed choices.
 static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)

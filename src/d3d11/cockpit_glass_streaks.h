@@ -16,7 +16,7 @@
 //   ends      opacity ramps up at the start and frays out at the end, per bristle: each bristle starts and stops at its own distance, so the ends are ragged;
 //   edges     fairly soft but definite across the width;
 //   value     its own, in a narrow range around the base, so the contrast stays low.
-// The painting is remapped, with a floor so nothing is black and an exponential found by bisection, so the stored mean is the target with the maximum at 1.
+// The painting is remapped by quantile onto legacy's summary distribution (percentile ratios to the mean), so the stored mean is the target and the maximum about 1.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -40,9 +40,9 @@ constexpr float kTargetMean = kLegacyMean / kLegacyMax;
 struct StrokeClass { int count; float lenLo, lenHi, widthLo, widthHi, opacityLo, opacityHi, valueRange, bristleContrast; };
 constexpr int kClassCount = 3;
 constexpr StrokeClass kClasses[kClassCount] = {
-    {40, 0.90f, 1.40f, 120.0f, 200.0f, 0.30f, 0.60f, 0.15f, 0.12f},   // broad smears
-    {70, 0.50f, 1.10f, 60.0f, 130.0f, 0.25f, 0.50f, 0.15f, 0.13f},    // narrower smears
-    {110, 0.30f, 0.70f, 40.0f, 70.0f, 0.25f, 0.50f, 0.13f, 0.14f},    // the narrowest: still broad, and soft-edged
+    {40, 0.90f, 1.40f, 120.0f, 200.0f, 0.30f, 0.60f, 0.07f, 0.12f},   // broad smears
+    {70, 0.50f, 1.10f, 60.0f, 130.0f, 0.25f, 0.50f, 0.05f, 0.13f},    // narrower smears
+    {110, 0.30f, 0.70f, 40.0f, 70.0f, 0.20f, 0.40f, 0.05f, 0.14f},    // the narrowest: still broad, and soft-edged
 };
 
 namespace detail {
@@ -157,27 +157,31 @@ inline void generate(uint8_t* out, int size = kSize) {
             for (uint32_t at : touched) field[at] += (markValue[at] - field[at]) * markAlpha[at];
         }
     }
-    // The remap: the painting is standardised, then floor + (1 - floor) * exp(s (z - max)), s by bisection so the stored mean is the target (the mean falls as s rises).
-    // The exponential gives the soft long upper tail legacy's values have; the floor keeps the dirt from ever reaching black; the brightest texel is 1.
-    double mean = 0, var = 0;
-    for (float f : field) mean += f;
-    mean /= static_cast<double>(n);
-    for (float f : field) var += (f - mean) * (f - mean);
-    const float sd = static_cast<float>(std::sqrt(var / static_cast<double>(n))) + 1e-9f;
-    std::vector<float> z(n);
-    float top = -1e9f;
-    for (size_t i = 0; i < n; ++i) { z[i] = std::min(3.0f, (field[i] - static_cast<float>(mean)) / sd); top = std::max(top, z[i]); }
-    constexpr float kFloor = 0.16f;
-    float lo = 0.01f, hi = 8.0f;
-    for (int it = 0; it < 40; ++it) {
-        const float k = 0.5f * (lo + hi);
-        double m = 0;
-        for (float v : z) m += kFloor + (1.0f - kFloor) * std::exp(k * (v - top));
-        m /= static_cast<double>(n);
-        if (m > kTargetMean) lo = k; else hi = k;
+    // The remap is a quantile mapping onto the legacy texture's summary distribution (section 13): each texel keeps its RANK in the painting, and its value, as a ratio to the
+    // mean, is read off the legacy texture's percentile ratios (p5 0.571, p50 0.884, p90 1.43, p95 1.59, p99 2.14, p99.9 2.55, a floor so nothing is black). Only those summary
+    // figures are used. Spatial structure (the strokes) is the painting's; the distribution of values, and so how bright the bright parts are, is legacy's.
+    static const float kQuantile[][2] = {{0.0f, 0.30f}, {1.0f, 0.52f}, {5.0f, 0.571f}, {10.0f, 0.62f}, {25.0f, 0.78f}, {50.0f, 0.884f}, {75.0f, 1.231f},
+                                         {90.0f, 1.43f}, {95.0f, 1.591f}, {99.0f, 2.135f}, {99.9f, 2.551f}, {100.0f, 3.75f}};
+    constexpr int kQuantiles = sizeof(kQuantile) / sizeof(kQuantile[0]);
+    std::vector<uint32_t> order(n);
+    for (size_t i = 0; i < n; ++i) order[i] = static_cast<uint32_t>(i);
+    std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return field[x] < field[y] || (field[x] == field[y] && x < y); });
+    std::vector<float> ratio(n);
+    double mean = 0;
+    for (size_t rank = 0; rank < n; ++rank) {
+        const float q = 100.0f * (static_cast<float>(rank) + 0.5f) / static_cast<float>(n);
+        int k = 1;
+        while (k < kQuantiles - 1 && kQuantile[k][0] < q) ++k;
+        const float t = (q - kQuantile[k - 1][0]) / (kQuantile[k][0] - kQuantile[k - 1][0]);
+        ratio[order[rank]] = kQuantile[k - 1][1] + (kQuantile[k][1] - kQuantile[k - 1][1]) * t;
+        mean += ratio[order[rank]];
     }
-    const float k = 0.5f * (lo + hi);
-    for (size_t i = 0; i < n; ++i) out[i] = static_cast<uint8_t>(std::lround(255.0f * (kFloor + (1.0f - kFloor) * std::exp(k * (z[i] - top)))));
+    mean /= static_cast<double>(n);
+    // The stored value is the ratio over the table's top: the maximum is 1 and the mean about the target.
+    float top = 0;
+    for (float r : ratio) top = std::max(top, r);
+    const float norm = 1.0f / top;   // the brightest texel is 1; the mean is then (the table's mean ratio) / (its top ratio), within 1% of the target
+    for (size_t i = 0; i < n; ++i) out[i] = static_cast<uint8_t>(std::lround(255.0f * ratio[i] * norm));
 }
 
 // The mip chain of a wrapping texture, box filtered (a wrap is a no-op for a power-of-two box). `levels` receives kMips arrays, base first.
