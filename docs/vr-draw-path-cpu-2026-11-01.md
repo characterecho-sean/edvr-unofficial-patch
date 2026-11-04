@@ -42,11 +42,10 @@
   count saved; ruled out: items 2 and 3 as cuts (each moved a cold load, which
   was the cost). S2 cleared: 40% of eye-memo misses, 0 disagreements in 8.1M.
   #184 undetermined (no blocked return), as expected.
-- **Build 6 (draft 2026-11-04, "Build 6: one interest mask"):** S1 as a
-  write-through mask, S2, #184 with the pending flags (yes, 2026-11-04), build
-  5's items 2-3 removed, the temporary lines retired. Antigravity and Opus
-  agreed on R1-R4 ("Consensus on the build 6 plan (2026-11-04, Antigravity)");
-  ready for a fresh Opus review and implementation.
+- **Build 6 ("Build 6: one interest mask"):** S1 as a write-through mask; S2
+  and #184 with the pending flags (both approved 2026-11-04); build 5's items
+  2-3 removed. Argon agreed; Opus asked for 13 changes, all taken. Next: Opus
+  re-review, spec, implementation.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
