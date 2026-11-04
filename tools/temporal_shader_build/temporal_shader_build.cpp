@@ -1285,7 +1285,7 @@ static void selfTest() {
             {"kCockpitGlassCondensationOverlayPsBytecode", "cockpit_glass_condensation_overlay_ps", condensationMacros, true, 7, 11},
         };
         for (size_t v = 0; v < 3; ++v) {
-            auto& shader = coreFixed[coreLegacy.size() + 41 + v];
+            auto& shader = coreFixed[coreLegacy.size() + 43 + v];
             const GlassContract& want = contracts[v];
             check(!std::strcmp(shader.symbol, want.symbol) && !std::strcmp(shader.sourceName, want.sourceName) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "ps_5_0") && shader.alternate == edvr::kCockpitGlassLegacyPsHlsl &&
