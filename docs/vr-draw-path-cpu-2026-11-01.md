@@ -13,11 +13,8 @@
   before `GetType`, `drawPathFast` in the instanced hook, instruments read with
   `edvr_log.py --perf-windows`. Its targets fell about 0.6 ms a frame, nothing
   rose more than 0.2 ms.
-- **Post-build-2 review (2026-11-03, "Review of build 2's flight and next
-  targets" and the replies after it):** kept the marker copy, the bind and map
-  hooks, the post-R1 split, the layer-A fade gate. Ruled out or deferred: the
-  tee trap under DLAA (0.08 ms), the sub-pixel floor, the EDHM bypass,
-  offscreen/concourse culling until a census says what those draws are.
+- **Post-build-2 review (2026-11-03):** kept the marker copy, the bind and map
+  hooks; ruled out the tee trap under DLAA (0.08 ms), the EDHM bypass.
 - **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
   marker windows copied once per Unmap. Passed: coverage held, R5
   `streamUnmapCopy` 0.697 to 0.506 ms. B1: 607 of 676 non-eye draws are
@@ -43,7 +40,11 @@
   engine-velocity generation; temporary counts for #184 (all three flags) and
   S2 (would-hit and would-disagree); the cross-profile probe's count without
   a locked add. Expected 0.22-0.36 ms. Argon agreed; Opus asked for four
-  rig and counter fixes, taken, and approved on re-review. Next: spec, build.
+  rig and counter fixes, taken, and approved on re-review. Spec #187;
+  `85006708` installed. Next: flight.
+- **Build 6 (draft 2026-11-04, "Build 6: one interest mask"):** S1 as a
+  write-through mask, S2 if build 5's counts allow, #184 (asked), the
+  temporary lines retired.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2638,3 +2639,161 @@ Item 7 re-sized from build 4's own log: `psConstantBuffers=2598726/78.97`
 over 805 frames, about 3,230 PS constant-buffer binds a frame, so the 0.096
 ms is about 30 ns a call, of which the locked add is part. Expected
 0.03-0.06 ms; the build's total 0.22-0.36.
+
+## Build 6: one interest mask, S2 by its counts, #184, and the arc's temporary lines retired (designed 2026-11-04, draft)
+
+The arc's last planned build. Its items wait on build 5's flight where
+marked; the design is written now so the review can run in parallel. A code
+survey (Opus, read-only, notes outside the repo: `b6-survey.md`) supplied
+the anchors, at `c86670bd`; build 5 moves some of them, so the spec re-anchors.
+
+**Evidence.** An unclaimed eye draw under DLAA reads 34 module-scope flag
+sites across about 22 cache lines (one or two per module), plus about 7
+fixed lines (`g_state`, `DrawHot`, the binding shadow, the TLS block); build
+4's own-time lines in `beginPanelOverride` and `forwardWithVerdict` sit on
+those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
+
+### Changes
+
+1. **S1: a write-through interest mask** (exact; keyless). A `uint64_t
+   interest` at bytes 56-63 of `DrawHot` (`vscreen.cpp:415-432` uses 53 of
+   64). One bit per stored flag the ladder reads, about 31: the survey's
+   sites 3-6, 8-11, 12 (the flag, not its per-draw tail), 13-23, 25-27 and
+   29-33, each bit equal to the flag's whole expression (for example
+   `g_uiDepthOn && !g_uiDepthStoodDown`). Each ladder load becomes a bit test
+   in place; no rung moves.
+   - **Writers:** an out-of-line `drawInterestSet(bit, bool)` in
+     `vscreen.cpp`, null-safe for `g_state` (null before install and in
+     transport-only mode, `:6230`). Install recomputes every bit from the
+     real accessors after `new State` (`:7331`) and the configure sweep
+     (`:7344-7367`).
+   - **The rule that makes it exact:** each module recomputes its bits from
+     its real expressions at the end of every function that writes one of
+     its flags. That covers the writes through aliases and reference
+     parameters (`particle_fix.cpp:115`, `:883`; `depth_probe.cpp:100`;
+     `native_on_foot.cpp:305`). The mid-draw writers recompute right after
+     the write: `ui_depth.cpp:3488`, `panel_curve.cpp:277`, `:462`, `:492`,
+     `quad_probe.cpp:469`, `ui_layer.cpp:1867`, `:2411`, `:5376`, `:5383`,
+     `draw_census.cpp:775`.
+   - **Why plain fields suffice:** every writer of a mirrored flag runs on
+     the render thread (Present, the `tk*` ticks, the config refresh, menu
+     actions, mid-draw; `device_hook.cpp:1571-1660`, `:1707`, `:2024`), and
+     the ladder reads on the render thread, so program order gives `bit ==
+     expression` at every read. The review should test this claim writer by
+     writer; a writer found off the render thread stays unmirrored.
+   - **Not mirrored:** `drawGateWanted` (its contract allows arming from any
+     thread, `draw_gate.h:44-46`; one load, on the line it shares with
+     `g_aaOffDraw`); `introPanelWants`, `introCurveWants` and
+     `sunglareWantsDraws` (computed, not stored, and behind shape tests); the
+     depth probe's per-draw tail; the per-draw outputs of `g_uiDepthDraw`.
+   - **Gated by an invariant:** `g_rollFreePending` is set only behind
+     `particleSteady()` (`particle_fix.cpp:672`, `:681`, reached from
+     `vscreen.cpp:2218`) and cleared on leaving steady (`:950`);
+     `g_rollFreeEngaged` is set only when pending (`:697`, `:724`). So the
+     clear at `vscreen.cpp:2004` and the tests at `:4346`, `:4348` are
+     skipped when the steady bit is clear.
+   - **Drift check, TEMPORARY:** in `bindingAudit`'s 1-in-1024 slot
+     (`:2196`), recompute the mask and log once on a mismatch, naming the
+     bit. Zero mismatches over a flight is part of the pass.
+   - Expected: about 29 lines touched per unclaimed eye draw down to about
+     7. Ms: 0.05-0.15 (S1's earlier bound was 0.5; the flight decides).
+2. **S2, if build 5's counts allow it** (exact only on the flight's
+   evidence). In `bindingSet` (`binding_shadow.cpp:112-118`), call
+   `noteEyeKeySlot` for PsSrv0-3 only when `s.ptr != ptr`; per-slot `gen`
+   still moves on every set, so `srv0IsPanelSized` (`vscreen.cpp:1450`), the
+   scrim cache (`scrim_fix.h:108`, `scrim_fix.cpp:114`) and engine velocity's
+   PsSrv3 compare are unchanged. The key's readers are the eye memo
+   (`ui_depth.cpp:2898`) and the hologram memo (`:3619`); the hologram
+   classifier reads no PS SRV (`:3579-3612`), so S2 cannot change its
+   answers. The eye classifier's plain decline loses one input on a
+   same-pointer re-set: `viewIsSurface` of the re-set view. The exposure is
+   a view freed after a silent D3D unbind and re-created at the same address
+   over an already-learned surface, with its view-memo entry evicted earlier
+   in the same frame; the per-frame bumps of the key
+   (`binding_shadow.cpp:157`) and the classifier epoch (`ui_depth.cpp:4363`)
+   end it at the frame. **Gate:** `ptr_would_disagree` is 0 in build 5's
+   flight, and `ptr_would_hit` is large enough to matter (each hit saves
+   one classifier run, up to four `viewIsSurface` calls). Otherwise S2 is
+   ruled out. Rig: `scrim_metadata_test.cpp:121-123` asserts that a
+   same-pointer re-set moves the key for all eight slots; it splits, PsSrv0-3
+   asserting the key stays and the per-slot `gen` moves.
+3. **#184: the three per-draw flags become the draw's own** (a BEHAVIOUR
+   CHANGE, needing the maintainer's yes). Today: an owner draw blocked at
+   `vscreen.cpp:4308` leaves its flags in TLS. The fence that blocks it is
+   raised only on a failed hologram-binding restore (`ui_layer.cpp:1865-1867`)
+   and holds to the frame boundary (`:6792`), so every owner draw for the
+   rest of that frame does the same. The next draws then consume them:
+   (1) a foreign-context draw on the render thread passes `:4308` and runs
+   the UI-depth and hologram re-issue Begins on the foreign context, reading
+   the mode the blocked draw left (`:4675`, `:4692`; the hazard the comment
+   at `:4662-4667` says the TLS exists to prevent); (2) the first
+   non-eye owner draw after the fence clears re-issues into the hologram
+   scratch targets, gated only on `g_holoEye >= 0` (`ui_depth.cpp:3638`,
+   `:3755`); (3) a kSkip from `:2096-2135` (the F157 coat-pack skip at `:2135` among them) offers stale flags to the blend
+   probe. The fix: `struct DrawCallFlags { bool uiDepth, holoDepth,
+   composite; }` filled by `beginPanelOverride` (all false on every early
+   return by construction; `:2536-2550` write it; `:2143-2144` go) and passed
+   to `forwardWithVerdict` at the four thunks' call pairs (`:5277/5291`,
+   `:5360/5373`, `:5440/5462`, `:5526/5554`, the only callers); the scope
+   builds from it and the TLS goes. Plus `if (flags.uiDepth)
+   uiDepthEnd(self);` on the `:4308` return, so the mode does not outlive
+   it. This also removes build 5's deferred item 5 cost (about 11 TLS
+   accesses a draw, 0.02-0.04 ms). Build 5's counter will most likely read
+   0 (the fence is a fault path); the case rests on the code, which is why
+   it is put to the maintainer rather than gated on the count.
+   - **Asked, not proposed:** `planetPending` and `worldScreenPending`
+     (`ui_depth.cpp:2675`, `:2688`) leak past the same returns (consumed
+     only at `vscreen.cpp:4703`, `:4709`, reset by the next eye draw). The
+     same struct could carry them; that is another behaviour change.
+4. **The arc's temporary lines retired.**
+   - Build 4's `binding re-sets:` line, marked TEMPORARY: `bind_set_line.h`
+     and its includes (`binding_shadow.h:45`, `vscreen.h:24`,
+     `perf_monitor.cpp:5`), `binding_shadow.cpp:107-110`, `:114`,
+     `binding_shadow.h:167-168`, `vscreen.cpp:126-127`, `:3626`, `:3628`,
+     `:6205-6210`, `vscreen.h:129-130`, `perf_monitor.cpp:1278-1291`, and
+     its parser in `edvr_log.py`. (Build 5 already drops its `bindSetNote`
+     call.)
+   - Build 5's item 6 line (the #184 and S2 counts) and item 1's drift check
+     above, after build 6's flight.
+   - **Asked:** `draw mask:` (`draw_mask_line.h`, which calls itself a
+     standing line, so it is not removed without a yes). It costs a load and
+     a store on `g_maskDraws` every draw (`vscreen.cpp:4301`) plus the skip
+     counts. Keep it, or retire it with the arc.
+
+### Left out
+
+- Star glow's decline with star glow on; B1 (the 512x512 pass); the
+  `mapMemo` size (17% misses, its cost not measured).
+- The blend probe, `gpu_pass_profile` and the F44/F45/F47/F18 instruments:
+  TEMPORARY, but other arcs'.
+
+### Test seams
+
+- Item 1: a pure header holding the bit layout and an `interestFrom(...)`
+  function, tested in `tools\aa_off_test` against each accessor; a
+  source-text check in the `gate_test.cpp:803` style that every mirrored
+  flag's writer function calls its module's recompute; the drift check in
+  flight.
+- Item 2: the split `scrim_metadata_test` cases; `ui_depth_test`: a
+  same-pointer re-set keeps the eye memo valid, a pointer change does not.
+- Item 3: the struct and a pure "which re-issues for these flags and this
+  verdict" function in a header (the `draw_fast_path.h` pattern), tested in
+  `tools\aa_off_test`; a source-text check that no `thread_local bool
+  t_*ThisDraw` remains and all four call pairs pass the flags;
+  `hologram_depth_test`: Begin declines after `uiDepthHologramSkippedDraw()`;
+  `ui_depth_test`: after `uiDepthEnd`, `uiDepthWantsReissue()` is false.
+- Item 4: `edvr_log.py --self-test` without the retired lines; the build's
+  gates.
+
+### Flight and pass criteria
+
+The L2 spot, standing still, DLAA, one 100 s capture.
+- `beginPanelOverride` and `forwardWithVerdict` own time per full-path draw
+  down; the drift check logs no mismatch.
+- With S2: eye-memo misses per eye draw down by about build 5's
+  `ptr_would_hit` share; `ui depth totals:` and the composites line within
+  build 5's range.
+- Nothing else up more than 0.1 ms; `--health` with no new NEVER APPLIED.
+- If the code never ran: no drift line ever and no change in the two
+  functions' own time (item 1); eye-memo misses unchanged (item 2); a
+  `thread_local` flag still in the binary's symbols (item 3).
