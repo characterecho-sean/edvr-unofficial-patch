@@ -6,11 +6,13 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <mutex>
 
 namespace edvr {
 namespace {
@@ -187,6 +189,33 @@ uint64_t pendingStages(const EyeState& es) {
 // number polled on a readback call.
 PeriodicWork g_workRound{"luma_round", "stages"};
 
+// The staging texture of a slot: sixteen rows of the source's width and format, made again when the source's size or format changed. False when the device could not be had or the
+// texture could not be made (the slot is then unusable this time).
+bool prepareStaging(ID3D11DeviceContext* ctx, const D3D11_TEXTURE2D_DESC& td, StageSlot& slot) {
+    if (slot.staging && slot.width == td.Width && slot.height == td.Height && slot.format == td.Format) return true;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = td.Width;
+    sd.Height = kGrid;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Format = td.Format;
+    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Quality = 0;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.BindFlags = 0;
+    sd.MiscFlags = 0;
+    slot.staging.Reset();
+    if (FAILED(dev->CreateTexture2D(&sd, nullptr, &slot.staging)) || !slot.staging) return false;
+    slot.width = td.Width;
+    slot.height = td.Height;
+    slot.format = td.Format;
+    return true;
+}
+
 void noteArmedOnce() {
     if (g_armedLogged) return;
     g_armedLogged = true;
@@ -232,6 +261,94 @@ void decodeSlot(StageSlot& slot, const D3D11_MAPPED_SUBRESOURCE& mapped) {
     slot.mean = static_cast<float>(sum / static_cast<double>(kGrid * kGrid));
     slot.maxLuma = maxLuma;
     slot.blackPct = static_cast<float>(blackCount) * 100.0f / static_cast<float>(kGrid * kGrid);
+}
+
+// ---- the frame-by-frame mode (lumaProbeBurst) --------------------------------------------------------------------------------------------------------------------------
+// Stage 0 only, every pass of both eyes, a few staging slots an eye so a reading that is not back yet does not stop the next frame's sample. The finished readings wait in a ring for
+// lumaProbeTakeBurst. Sampling and polling are on the render thread (lumaProbeSample / lumaProbeEnd, with the rounds above); the ring is shared with the taker under a mutex.
+constexpr int kBurstSlots = 4;
+constexpr size_t kBurstKeep = 512;   // finished readings kept for the taker: about 2.8 s of both eyes at 90 Hz
+struct BurstSlot {
+    StageSlot stage;
+    uint32_t seq = 0;
+    double tMs = 0.0;
+    bool busy = false;
+};
+BurstSlot g_burstSlots[2][kBurstSlots];
+std::atomic<bool> g_burstOn{false};
+uint32_t g_burstSeq = 0;   // render thread: the left eye's passes counted while the mode is on
+std::mutex g_burstMu;
+LumaBurstReading g_burstRing[kBurstKeep];
+size_t g_burstHead = 0, g_burstCount = 0;   // under g_burstMu: the oldest reading and how many are kept
+
+void burstPush(const LumaBurstReading& r) {
+    std::lock_guard<std::mutex> lock(g_burstMu);
+    if (g_burstCount == kBurstKeep) {   // full: the oldest goes
+        g_burstHead = (g_burstHead + 1) % kBurstKeep;
+        --g_burstCount;
+    }
+    g_burstRing[(g_burstHead + g_burstCount) % kBurstKeep] = r;
+    ++g_burstCount;
+}
+
+void burstSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
+    if (eye == 0) ++g_burstSeq;
+    if (!ctx || !tex) return;
+    BurstSlot* slot = nullptr;
+    for (auto& s : g_burstSlots[eye]) {
+        if (!s.busy) { slot = &s; break; }
+    }
+    if (!slot) return;   // every slot is waiting on the GPU: this frame goes unsampled
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (td.SampleDesc.Count > 1 || classifyFormat(td.Format) == FormatKind::Unsupported) return;
+    if (!prepareStaging(ctx, td, slot->stage)) return;
+    for (int j = 0; j < kGrid; ++j) {
+        const UINT y = static_cast<UINT>(gridCoordinate(j, td.Height));
+        const D3D11_BOX row{0, y, 0, td.Width, y + 1, 1};
+        ctx->CopySubresourceRegion(slot->stage.staging.Get(), 0, 0, static_cast<UINT>(j), 0, tex, 0, &row);
+    }
+    slot->stage.status = SlotStatus::Pending;
+    slot->stage.waitFrames = 0;
+    slot->seq = g_burstSeq;
+    slot->tMs = lumaProbeClockMs();
+    slot->busy = true;
+}
+
+// Reads the eye's finished slots without waiting, oldest first. A slot still drawing after 30 passes is dropped (the staging texture with it: the next sample makes a fresh one).
+void burstPoll(ID3D11DeviceContext* ctx, int eye) {
+    bool tried[kBurstSlots] = {};
+    for (int n = 0; n < kBurstSlots; ++n) {
+        int pick = -1;
+        for (int i = 0; i < kBurstSlots; ++i) {
+            const BurstSlot& s = g_burstSlots[eye][i];
+            if (!s.busy || tried[i]) continue;
+            if (pick < 0 || s.seq < g_burstSlots[eye][pick].seq) pick = i;
+        }
+        if (pick < 0) return;
+        tried[pick] = true;
+        BurstSlot& slot = g_burstSlots[eye][pick];
+        ++slot.stage.waitFrames;
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT hr = ctx->Map(slot.stage.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (SUCCEEDED(hr) && mapped.pData) {
+            decodeSlot(slot.stage, mapped);
+            ctx->Unmap(slot.stage.staging.Get(), 0);
+            if (slot.stage.status == SlotStatus::Pending) {
+                burstPush(LumaBurstReading{slot.seq, eye, slot.tMs, slot.stage.mean});
+            }
+            slot.busy = false;
+        } else if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (slot.stage.waitFrames > 30) {
+                slot.stage.staging.Reset();
+                slot.busy = false;
+            }
+            return;   // later slots of this eye were sampled after this one: they are not back either
+        } else {
+            slot.stage.staging.Reset();
+            slot.busy = false;
+        }
+    }
 }
 
 void formatStage(const StageSlot& slot, char* out, size_t outSize) {
@@ -328,6 +445,7 @@ void lumaProbeBegin(int eye) {
 void lumaProbeSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, int stage) {
     noteArmedOnce();
     if (eye < 0 || eye > 1 || stage < 0 || stage >= kStages) return;
+    if (stage == 0 && g_burstOn.load(std::memory_order_relaxed)) burstSample(ctx, tex, eye);
     EyeState& es = g_eyes[eye];
     if (!es.armed) return;
     StageSlot& slot = es.stages[stage];
@@ -350,33 +468,9 @@ void lumaProbeSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, in
     // From here the call does the work: the device lookup, a staging texture
     // when the size changed, sixteen row copies. Timed however it is left.
     PeriodicWorkScope timing(g_workRound);
-    if (!slot.staging || slot.width != td.Width || slot.height != td.Height || slot.format != td.Format) {
-        Ptr<ID3D11Device> dev;
-        ctx->GetDevice(&dev);
-        if (!dev) {
-            slot.status = SlotStatus::Absent;
-            return;
-        }
-        D3D11_TEXTURE2D_DESC sd{};
-        sd.Width = td.Width;
-        sd.Height = kGrid;
-        sd.MipLevels = 1;
-        sd.ArraySize = 1;
-        sd.Format = td.Format;
-        sd.SampleDesc.Count = 1;
-        sd.SampleDesc.Quality = 0;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.BindFlags = 0;
-        sd.MiscFlags = 0;
-        slot.staging.Reset();
-        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &slot.staging)) || !slot.staging) {
-            slot.status = SlotStatus::Absent;
-            return;
-        }
-        slot.width = td.Width;
-        slot.height = td.Height;
-        slot.format = td.Format;
+    if (!prepareStaging(ctx, td, slot)) {
+        slot.status = SlotStatus::Absent;
+        return;
     }
     // Exact source rows, unchanged bytes and format (including sRGB and
     // typeless): no SRV, shader conversion or context bindings required.
@@ -398,6 +492,7 @@ void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye) {
     if (eye < 0 || eye > 1) return;
     EyeState& es = g_eyes[eye];
     if (!ctx) return;   // try again once a frame hands us a context
+    burstPoll(ctx, eye);
     if (es.armed) {
         // One run: the nonblocking polls, the decode and the report line.
         PeriodicWorkScope timing(g_workRound, pendingStages(es));
@@ -441,6 +536,31 @@ void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye) {
         for (auto& slot : es.stages) slot.status = SlotStatus::Empty;
     }
     armIfDue(es);
+}
+
+void lumaProbeBurst(bool on) { g_burstOn.store(on, std::memory_order_relaxed); }
+
+size_t lumaProbeTakeBurst(LumaBurstReading* out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    std::lock_guard<std::mutex> lock(g_burstMu);
+    size_t n = 0;
+    while (n < cap && g_burstCount > 0) {
+        out[n++] = g_burstRing[g_burstHead];
+        g_burstHead = (g_burstHead + 1) % kBurstKeep;
+        --g_burstCount;
+    }
+    return n;
+}
+
+double lumaProbeClockMs() {
+    static const double perMs = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart > 0 ? static_cast<double>(f.QuadPart) / 1000.0 : 1.0;
+    }();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart) / perMs;
 }
 
 }  // namespace edvr

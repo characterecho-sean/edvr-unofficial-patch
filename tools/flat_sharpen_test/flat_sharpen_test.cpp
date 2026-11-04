@@ -502,8 +502,8 @@ void panelTable(const std::string& root, const std::string& gen) {
               std::strcmp(kFlatVisualRows[3].section, "fix") == 0 && std::strcmp(kFlatVisualRows[3].key, "particle_billboard") == 0 &&
               flatVisualHasRow("visual", "star_glow") && flatVisualHasRow("visual", "cockpit_glass") && flatVisualHasRow("fix", "particle_billboard") &&
               !flatVisualHasRow("fix", "temporal_aa") && flatProfileReadsKey("fix.particle_billboard"),
-          "the Visual tab has the Intro movie, the Star glow, the Cockpit glass and the Smoke and steam plumes (the table's order; the tab's is edvr.ini's)");
-    check(!flatPageHasRow("fix", "particle_billboard") && !flatDebugHasRow("fix", "particle_billboard"), "the Smoke and steam plumes row is on the Visual tab only");
+          "the Visual tab has the Intro movie, the Star glow, the Cockpit glass and the Billboards (the table's order; the tab's is edvr.ini's)");
+    check(!flatPageHasRow("fix", "particle_billboard") && !flatDebugHasRow("fix", "particle_billboard"), "the Billboards row is on the Visual tab only");
     check(!flatPageHasRow("visual", "star_glow") && !flatDebugHasRow("visual", "star_glow") && !flatVisualHasRow("advanced", "flat_cpu_timing"),
           "no key is on two tabs");
     check(sourceBuildsFlatVisualFromTable(menuCpp), "menu.cpp builds the Visual tab, between Performance and Debug, from kFlatVisualRows");

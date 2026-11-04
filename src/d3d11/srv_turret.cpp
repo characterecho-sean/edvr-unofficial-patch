@@ -5,7 +5,10 @@
 
 #include "srv_radar_anchor.h"
 #include "srv_turret_hud_binding.h"
+#include "srv_turret_entry_fade.h"
+#include "srv_turret_press.h"
 #include "srv_turret_math.h"
+#include "srv_turret_sheet_latch.h"
 
 #include "draw_gate.h"
 #include "journal_watch.h"
@@ -36,6 +39,8 @@ std::atomic<bool> g_srvTurretHudWanted{false};
 std::atomic<bool> g_srvTurretHudCounting{false};
 std::atomic<bool> g_srvTurretCameraRowsWanted{false};
 std::atomic<bool> g_srvTurretRadarWritersOn{false};
+std::atomic<bool> g_srvTurretWatchOnly{false};
+std::atomic<uint64_t> g_srvTurretSheetSeenMs{0};
 }  // namespace detail
 
 namespace st = srv_turret;
@@ -43,8 +48,8 @@ namespace st = srv_turret;
 namespace {
 
 static_assert(st::kBackDefaultCm == 80 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 0 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 0 && st::kRadarForwardMaxCm == 150 &&
-                  st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 70 && st::kSystemsNearMaxCm == 200 &&
-                  st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 0 && st::kGunnerUpMaxCm == 100 &&
+                  st::kPanelsDefaultCm == 0 && st::kRadarDefaultCm == 0 && st::kSystemsNearDefaultCm == 80 && st::kSystemsNearMaxCm == 200 &&
+                  st::kHudUpDefaultCm == 10 && st::kHudUpMaxCm == 100 && st::kGunnerUpDefaultCm == 35 && st::kGunnerUpMaxCm == 100 &&
                   st::kCardsUpDefaultCm == 0 && st::kCardsUpMaxCm == 100 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
               "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
@@ -60,6 +65,8 @@ std::atomic<bool> g_scissorOpen{false};      // experimental.srv_turret_hud_scis
 static_assert(st::kRadarAnchorDefault == st::RadarAnchorMode::kOff, "the literal default of experimental.srv_turret_radar_anchor in readKeys is off, which the ini ships");
 std::atomic<int> g_anchorMode{static_cast<int>(st::kRadarAnchorDefault)};   // experimental.srv_turret_radar_anchor as a st::RadarAnchorMode (0 on, 1 reversed, 2 off, 3 camera)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
+st::sheetlatch::EntryGate g_sheetLatch;       // the early edge: the gunner sheet drew and Status.json has not said so yet (srv_turret_sheet_latch.h)
+bool g_latchRaisedEdge = false;             // the current on edge was raised by the latch (the agreed line is said only for such an edge)
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
 double g_loggedBackM = 0.0;                 // what the log last said was published
@@ -141,7 +148,8 @@ const SigShader kShader[kSigN] = {
     EDVR_SRV_TURRET_SHADER(A, "1989E6D3"), EDVR_SRV_TURRET_SHADER(B, "2CECEC30"), EDVR_SRV_TURRET_SHADER(C, "DF3503CD"),
     EDVR_SRV_TURRET_SHADER(D, "44DDCDEB"), EDVR_SRV_TURRET_SHADER(E, "9B34C331"), EDVR_SRV_TURRET_SHADER(F, "9611A454"),
     EDVR_SRV_TURRET_SHADER(G, "B932058F"), EDVR_SRV_TURRET_SHADER(H, "5559BD94"),
-    EDVR_SRV_TURRET_SHADER(I, "5DAD41AA"),
+    EDVR_SRV_TURRET_SHADER(I, "5DAD41AA"), EDVR_SRV_TURRET_SHADER(J, "81216C77"),
+    EDVR_SRV_TURRET_SHADER(K, "A888D510"),
 };
 #undef EDVR_SRV_TURRET_SHADER
 ID3D11GeometryShader* g_gs[kSigN] = {};
@@ -206,9 +214,9 @@ void readKeys() {
     const int panels = cfg.getIntInRange("experimental.srv_turret_panels_back", 0, 0, 200);
     const int radar = cfg.getIntInRange("experimental.srv_turret_radar_back", 0, 0, 200);
     const int gap = cfg.getIntInRange("experimental.srv_turret_hud_gap", 0, 0, 200);
-    const int systemsNear = cfg.getIntInRange("experimental.srv_turret_systems_near", 70, 0, 200);
+    const int systemsNear = cfg.getIntInRange("experimental.srv_turret_systems_near", 80, 0, 200);
     const int hudUp = cfg.getIntInRange("experimental.srv_turret_hud_up", 10, 0, 100);
-    const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 0, 0, 100);
+    const int gunnerUp = cfg.getIntInRange("experimental.srv_turret_gunner_up", 35, 0, 100);
     const int cardsUp = cfg.getIntInRange("experimental.srv_turret_cards_up", 0, 0, 100);
     const std::string depthText = cfg.getString("experimental.srv_turret_hud_depth", "game");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());
@@ -953,6 +961,8 @@ void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {
 void srvTurretFrameTick(uint32_t frameNo) {
     if (!runtimeVrProfile()) {   // flat (or not yet decided): every state stays at its zero, alignTick adds an exact 0
         anchorTick(false, frameNo, 0);   // a radar anchor armed in VR gets a zero offset (a live switch to flat puts the game's own place back)
+        if (detail::g_srvTurretWatchOnly.exchange(false, std::memory_order_relaxed)) detail::g_srvTurretHudWanted.store(false, std::memory_order_relaxed);
+        g_sheetLatch.reset();
         return;
     }
     readKeys();
@@ -960,13 +970,66 @@ void srvTurretFrameTick(uint32_t frameNo) {
               panelsCm = g_panelsCm.load(std::memory_order_relaxed), radarCm = g_radarCm.load(std::memory_order_relaxed), gapCm = g_gapCm.load(std::memory_order_relaxed),
               systemsNearCm = g_systemsNearCm.load(std::memory_order_relaxed), hudUpCm = g_hudUpCm.load(std::memory_order_relaxed), gunnerUpCm = g_gunnerUpCm.load(std::memory_order_relaxed), cardsUpCm = g_cardsUpCm.load(std::memory_order_relaxed);
     // The Scorpion only: the turret view bit is the Scarab's too, and the journal says which SRV this is (journalSrvScorpion; unknown is "not the Scorpion"). `on` is what both parts act on.
+    // The early edge: Status.json lags the game (the game's fade has ended before the bit lands), so `on` is also true when the Scorpion is known and the gunner sheet drew in an eye pass
+    // within the last second while Status.json still says off (srv_turret_sheet_latch.h). Status.json reporting the turret takes over with no edge; turning off stays Status-driven.
     const bool turret = journalSrvTurretView();
-    const bool on = turret && journalSrvScorpion();
+    const bool scorpion = journalSrvScorpion();
+    const uint64_t tickMs = GetTickCount64();
+    // The press (srv_turret_press.h): the player's turret key, watched and never consumed. GuiFocus comes from Status.json through journalGuiFocus, known once the field has been seen in the file;
+    // an unknown GuiFocus counts as 0 (Status.json leaves it out when no panel is open, as on foot), a known one above 0 is a panel open (the galaxy map, station services ...).
+    const SrvTurretPressState press = srvTurretPressPoll();
+    uint32_t guiFocus = 0;
+    if (!journalGuiFocus(&guiFocus)) guiFocus = 0;
+    st::sheetlatch::GateIn gateIn;
+    gateIn.nowMs = tickMs;
+    gateIn.pressEdge = press.pressed;
+    gateIn.observable = press.observable;
+    gateIn.epoch = press.epoch;
+    gateIn.scorpion = scorpion;
+    gateIn.srvSeat = (journalSeatKind() & 4u) != 0;
+    gateIn.guiFocusZero = guiFocus == 0;
+    gateIn.statusOn = turret;
+    gateIn.sheetSeenMs = detail::g_srvTurretSheetSeenMs.load(std::memory_order_relaxed);
+    const st::sheetlatch::GateOut gate = g_sheetLatch.step(gateIn);
+    const st::sheetlatch::Result& latch = gate.latch;
+    const bool on = gate.on;
+    if (gate.event == st::sheetlatch::GateEvent::kFellBack) {
+        Log::get().note("srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): %s",
+                        gate.fallback == st::sheetlatch::FallbackWhy::kUnobservable ? press.why : "the view went on with no press seen in the preceding 2000 ms, so the watcher is blind (a device it does not see)");
+    } else if (gate.event == st::sheetlatch::GateEvent::kFallbackOff) {
+        Log::get().note("srv turret press: the bindings changed; the press is trusted again");
+    }
+    {   // the press gate's words for the entry fade, which runs later in this frame
+        SrvTurretPressWords w;
+        w.ageMs = static_cast<double>(gate.pressAgeMs);
+        w.waiting = gate.waiting;
+        w.sheetEdge = gate.sheetEdge;
+        w.noPress = gate.noPress;
+        w.fallback = static_cast<uint8_t>(gate.fallback);
+        w.sheetLagMs = static_cast<double>(gate.sheetLagMs);
+        w.statusLagMs = static_cast<double>(gate.statusLagMs);
+        srvTurretEntryFadeNotePress(w);
+    }
     if (on != g_on) {
         g_on = on;
-        Log::get().note("srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)", on ? "on" : "off", frameNo, static_cast<unsigned>(journalStatusFlags()),
-                        static_cast<unsigned>(journalSeatKind()));
+        if (on) g_latchRaisedEdge = latch.event == st::sheetlatch::Event::kRaised;
+        Log::get().note("srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)%s", on ? "on" : "off", frameNo, static_cast<unsigned>(journalStatusFlags()),
+                        static_cast<unsigned>(journalSeatKind()), g_latchRaisedEdge ? " (the gunner sheet drew; Status.json not yet)" : "");
     }
+    if (latch.event == st::sheetlatch::Event::kStatusAgreed && g_latchRaisedEdge) {
+        g_latchRaisedEdge = false;
+        Log::get().note("srv turret view: Status.json agreed %llu ms after the sheet", static_cast<unsigned long long>(latch.lagMs));
+    } else if (latch.event == st::sheetlatch::Event::kExpired || latch.event == st::sheetlatch::Event::kDropped) {
+        g_latchRaisedEdge = false;
+        if (latch.event == st::sheetlatch::Event::kExpired)
+            Log::get().note("srv turret view: the gunner sheet latch expired after %llu ms: no sheet draw for 1000 ms and Status.json still off", static_cast<unsigned long long>(latch.lagMs));
+        else
+            Log::get().note("srv turret view: the gunner sheet latch dropped after %llu ms: the journal no longer calls the Scorpion", static_cast<unsigned long long>(latch.lagMs));
+    }
+    // Watching: the Scorpion in its SRV seat with the view off. The draw gate is open and the gunner sheet's draws are noted (srvTurretGunnerBegin), nothing is moved (srvTurretHudBeginDraw).
+    // The press gate decides when (srv_turret_sheet_latch.h EntryGate): from a counted press for 2000 ms, or the whole time in the Scorpion with the view off while the press cannot be relied on.
+    const bool watching = gate.gateOpen && !on;
+    if (watching != detail::g_srvTurretWatchOnly.load(std::memory_order_relaxed)) detail::g_srvTurretWatchOnly.store(watching, std::memory_order_relaxed);
     if (turret && !on && !g_ignored) {
         g_ignored = true;
         Log::get().note("srv turret view: not the Scorpion at frame %u (Status.json Flags 0x%08X, seat kind 0x%X): the turret view is on in an SRV the journal does not call the Scorpion, so the "
@@ -977,15 +1040,16 @@ void srvTurretFrameTick(uint32_t frameNo) {
     g_backSeatedZ = st::backSeatedZ(on, backCm);
     anchorTick(on, frameNo, radarForwardCm);   // the radar moved in the game (experimental.srv_turret_radar_anchor): nothing unless `on`
     const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0 || systemsNearCm > 0 || hudUpCm > 0 || gunnerUpCm > 0 || cardsUpCm > 0);   // any HUD key, including the gunner frame and the card height; a group whose own keys are 0 is left alone per draw
+    const bool drawGate = wanted || watching || (on && gate.gateOpen);   // the draw gate: the HUD move, the watch for the gunner sheet, or the sheet still being noted while a raised view waits for Status.json
     if (wanted) {
         cacheGeometry(on, backCm, forwardCm, radarForwardCm);
     } else {
         g_anchor.reset();   // the next stay (or the next key) takes the anchor afresh
         g_anchorOk.store(false, std::memory_order_release);
     }
-    if (wanted != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
-        detail::g_srvTurretHudWanted.store(wanted, std::memory_order_relaxed);
-        if (wanted) drawGateArm();   // the gate re-samples at the frame boundary after this tick; this makes the very next draw see it too
+    if (drawGate != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
+        detail::g_srvTurretHudWanted.store(drawGate, std::memory_order_relaxed);
+        if (drawGate) drawGateArm();  // the gate re-samples at the frame boundary after this tick; this makes the very next draw see it too
     }
     // The 10 s line: only for a window in which the turret view was on at some point.
     const uint64_t now = GetTickCount64();
@@ -1004,11 +1068,13 @@ void srvTurretFrameTick(uint32_t frameNo) {
 }
 
 double srvTurretBackSeatedZ() { return g_backSeatedZ; }
+bool srvTurretViewOn() { return g_on; }
 
 void srvTurretNotePublished(double seatedZ, uint32_t serial) {
     const double back = -seatedZ;   // metres the camera is behind the game's own
     if (std::fabs(back - g_loggedBackM) < 5.0e-4) return;
     g_loggedBackM = back;
+    if (back > 0.0) srvTurretEntryFadeNoteMove(serial);   // the entry fade waits for the runtime to report this serial applied
     if (back > 0.0)
         Log::get().note("srv turret camera: back %.2f m published (serial %u)", back, static_cast<unsigned>(serial));
     else
@@ -1119,9 +1185,12 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     return true;
 }
 
-// The gunner camera's curved panel: the 2016-index sheet (vs 5DAD41AA) and the 288-index cards (vs C4B4B334). Every other index count of those shaders, including the Escape menu's 360, is left to the game. The move is the turret-forward translation in tNear, at the game's own depth. The cards-up key is added only on the 288-index draws.
+// The gunner camera's curved panel: the 2016-index sheet (vs 5DAD41AA, or vs A888D510 with Disable GUI effects off) and the 288-index cards (vs C4B4B334). Every other index count of those shaders, including the Escape menu's 360, is left to the game. The move is the turret-forward translation in tNear, at the game's own depth. The cards-up key is added only on the 288-index draws.
 bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint32_t indexCount, int eye) {
     const int sig = st::gunnerSignature(vs, kind, indexCount);
+    // The early edge's signal (srv_turret_sheet_latch.h): the sheet drew in an eye pass. One atomic store, whether or not the view is on.
+    if (st::isGunnerSheetSignature(sig) && (eye == 0 || eye == 1)) detail::g_srvTurretSheetSeenMs.store(GetTickCount64(), std::memory_order_relaxed);
+    if (detail::g_srvTurretWatchOnly.load(std::memory_order_relaxed)) return false;   // watching only: the view is not on, nothing moves
     const bool cards = sig == st::kGunnerCardsSignature;
     if (!ctx || sig < 0 || (g_systemsNearCm.load(std::memory_order_relaxed) <= 0 && g_gunnerUpCm.load(std::memory_order_relaxed) <= 0 && !(cards && g_cardsUpCm.load(std::memory_order_relaxed) > 0))) return false;
     if (eye != 0 && eye != 1) {
@@ -1157,7 +1226,7 @@ bool srvTurretGunnerBegin(ID3D11DeviceContext* ctx, uint64_t vs, char kind, uint
     // The sheet's own view: VS b0 rows 4..7 are the clip matrix and VS b1 row 275 is the world-rebase origin.
     // Bound into the geometry shader, they recover the mesh's local metres. A draw whose view cannot be read is still moved; its faint frame stays.
     st::ExtraCb clip, cam;
-    const bool sheet = sig == st::kGunnerSheetSignature;
+    const bool sheet = st::isGunnerSheetSignature(sig);
     const bool view = sheet && st::readGameCb(ctx, 0, clip, false) && st::readGameCb(ctx, 1, cam, false) && st::cbShowsRegister(clip, 7) && st::cbShowsRegister(cam, 275);
     if (sheet && !view && !g_sheetViewNoted) {
         g_sheetViewNoted = true;
@@ -1214,6 +1283,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
 
 void srvTurretShutdown() {
     detail::g_srvTurretHudWanted.store(false, std::memory_order_relaxed);
+    detail::g_srvTurretWatchOnly.store(false, std::memory_order_relaxed);
     detail::g_srvTurretHudCounting.store(false, std::memory_order_relaxed);
     noteEnd();
     srvRadarAnchorShutdown();   // the hook's gate shuts: the relay forwards straight to the game's function

@@ -100,7 +100,12 @@ extern std::atomic<bool> g_srvTurretHudCounting;
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
 // Camera mode's match of the radar's own picture billboard: true while the view is on in camera mode (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarWritersOn;
+// The early edge (srv_turret_sheet_latch.h): true while the Scorpion is in its SRV seat and the turret view is off. The draw gate is open for it, the gunner sheet's draws are timed
+// (g_srvTurretSheetSeenMs, GetTickCount64) and every other draw is the game's.
+extern std::atomic<bool> g_srvTurretWatchOnly;
+extern std::atomic<uint64_t> g_srvTurretSheetSeenMs;
 }  // namespace detail
+inline bool srvTurretWatchOnly() { return detail::g_srvTurretWatchOnly.load(std::memory_order_relaxed); }
 
 // The radar's picture writers, for camera mode's match of the radar's own picture billboard (srv_turret.cpp billboardKind). vscreen.cpp forwardWithVerdict, every owner-context draw while camera mode is on (one
 // relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the frame, which a radar billboard's t4 is
@@ -130,6 +135,8 @@ inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(
 void srvTurretFrameTick(uint32_t frameNo);
 // The seated z alignTick adds to its eye alignment: -D metres while the camera is moved back, else exactly 0. Frame thread.
 double srvTurretBackSeatedZ();
+// True while the Scorpion's turret view is on (the tick's `on`: Status.json's bit, the journal's Scorpion, VR). Frame thread. The entry fade (srv_turret_entry_fade.h) starts its hold on this edge.
+bool srvTurretViewOn();
 // alignTick, right after it published an alignment: the z it added and the serial it published under. Said in the log when it changed. Frame thread.
 void srvTurretNotePublished(double seatedZ, uint32_t serial);
 

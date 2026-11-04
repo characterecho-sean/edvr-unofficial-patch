@@ -148,24 +148,9 @@ struct Cand {
 // Returns false when there is no preset file or the directory cannot be
 // enumerated; true with an empty `out` is a preset naming files that are
 // not there.
-bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
+// The same walk for an explicit list of preset names (the SRV lookup below passes the one name of its context); an empty list admits every .binds.
+bool collectBindsFilesFor(const std::wstring& dir, const std::vector<std::string>& names, std::vector<Cand>* out) {
     out->clear();
-    std::string presets;
-    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
-        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
-        return false;
-    }
-    std::vector<std::string> names;
-    {
-        size_t start = 0;
-        while (start < presets.size()) {
-            size_t end = presets.find_first_of("\r\n", start);
-            if (end == std::string::npos) end = presets.size();
-            if (end > start) names.push_back(presets.substr(start, end - start));
-            start = presets.find_first_not_of("\r\n", end);
-            if (start == std::string::npos) break;
-        }
-    }
     WIN32_FIND_DATAW fd{};
     HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) return false;
@@ -192,6 +177,27 @@ bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
         return CompareFileTime(&a.wt, &b.wt) > 0;
     });
     return true;
+}
+
+bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
+    out->clear();
+    std::string presets;
+    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
+        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
+        return false;
+    }
+    std::vector<std::string> names;
+    {
+        size_t start = 0;
+        while (start < presets.size()) {
+            size_t end = presets.find_first_of("\r\n", start);
+            if (end == std::string::npos) end = presets.size();
+            if (end > start) names.push_back(presets.substr(start, end - start));
+            start = presets.find_first_not_of("\r\n", end);
+            if (start == std::string::npos) break;
+        }
+    }
+    return collectBindsFilesFor(dir, names, out);
 }
 
 // Every slot in one file's text, with the element it belongs to. A small tag walker rather than a search per element: the
@@ -324,17 +330,18 @@ int scanAllUsesIn(const std::string& text, EliteBindUse* out, int max) {
 
 }  // namespace
 
-bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
+bool eliteBindsActionIn(const char* elementName, const char* text, size_t len, EliteResetBind* out) {
     if (!out) return false;
     out->present = false;
     out->count = 0;
     memset(out->slot, 0, sizeof(out->slot));
-    if (!text) return false;
+    if (!text || !elementName || !elementName[0]) return false;
     const std::string body(text, len);
-    out->present = body.find("<HMDReset>") != std::string::npos;
+    const std::string want(elementName);
+    out->present = body.find("<" + want + ">") != std::string::npos;
     if (!out->present) return false;
     walkSlots(body, [&](const std::string& element, const std::string& device, const std::string& key, const std::string& prefix) {
-        if (element != "HMDReset" || out->count >= 2) return;
+        if (element != want || out->count >= 2) return;
         EliteResetSlot& s = out->slot[out->count++];
         snprintf(s.label, sizeof(s.label), "%s:%s%s", device.c_str(), prefix.c_str(), key.c_str());
         s.observable = false;
@@ -373,7 +380,11 @@ bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
     return true;
 }
 
-bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) {
+bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
+    return eliteBindsActionIn("HMDReset", text, len, out);
+}
+
+bool eliteBindsActionDir(const char* elementName, const wchar_t* dirC, EliteResetBind* out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     if (!dirC || !dirC[0]) return false;
@@ -385,12 +396,81 @@ bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) {
         if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
         ++out->filesSeen;
         // The first file that CONTAINS the element answers alone (the camera lookup's rule).
-        if (eliteBindsHmdResetIn(text.data(), text.size(), out)) {
+        if (eliteBindsActionIn(elementName, text.data(), text.size(), out)) {
             snprintf(out->file, sizeof(out->file), "%s", c.utf8);
             return true;
         }
     }
     return false;
+}
+
+bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) { return eliteBindsActionDir("HMDReset", dirC, out); }
+
+bool eliteBindsActionSrvDir(const char* elementName, const wchar_t* dirC, const wchar_t* gameDirC, EliteResetBind* out) {
+    if (!out) return false;
+    std::string presets;
+    std::wstring dir = dirC ? dirC : L"";
+    // Today's behaviour for the old one-line StartPreset.start, no file, or a short file.
+    if (dir.empty() || !readWholeFile(dir + L"\\StartPreset.4.start", &presets)) return eliteBindsActionDir(elementName, dirC, out);
+    std::vector<std::string> lines;   // one preset per bind context, blank lines kept so the index stays the context's: general, ship, SRV, on foot
+    {
+        size_t start = 0;
+        while (start <= presets.size()) {
+            size_t end = presets.find('\n', start);
+            if (end == std::string::npos) end = presets.size();
+            std::string l = presets.substr(start, end - start);
+            while (!l.empty() && (l.back() == '\r' || l.back() == ' ' || l.back() == '\t')) l.pop_back();
+            lines.push_back(l);
+            start = end + 1;
+        }
+    }
+    if (lines.size() < 4 || lines[2].empty()) return eliteBindsActionDir(elementName, dirC, out);
+    const std::string& preset = lines[2];
+    memset(out, 0, sizeof(*out));
+    // 1) Options\Bindings: the newest maintained file of that preset name, by the usual rule (the first file that contains the element answers).
+    std::vector<Cand> cands;
+    std::vector<std::string> names(1, preset);
+    if (collectBindsFilesFor(dir, names, &cands)) {
+        for (const Cand& c : cands) {
+            std::string text;
+            if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+            ++out->filesSeen;
+            if (eliteBindsActionIn(elementName, text.data(), text.size(), out)) {
+                snprintf(out->file, sizeof(out->file), "%s", c.utf8);
+                return true;
+            }
+        }
+    }
+    // 2) the game directory's ControlSchemes\<preset>.binds: a stock preset (ConsoleX360 ...) is not copied to Options\Bindings until it is edited.
+    if (gameDirC && gameDirC[0] && preset.find_first_of("\\/:") == std::string::npos) {
+        wchar_t wname[MAX_PATH] = {};
+        MultiByteToWideChar(CP_UTF8, 0, preset.c_str(), -1, wname, MAX_PATH);
+        std::string text;
+        if (readWholeFile(std::wstring(gameDirC) + L"\\ControlSchemes\\" + wname + L".binds", &text)) {
+            ++out->filesSeen;
+            if (eliteBindsActionIn(elementName, text.data(), text.size(), out)) {
+                snprintf(out->file, sizeof(out->file), "ControlSchemes\\%s.binds", preset.c_str());
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool eliteBindsActionSrv(const char* elementName, EliteResetBind* out) {
+    wchar_t exe[MAX_PATH] = {};
+    std::wstring gameDir;
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);   // the game's exe: EDVR's d3d11.dll sits beside it
+    if (n > 0 && n < MAX_PATH) {
+        gameDir = exe;
+        const size_t slash = gameDir.find_last_of(L"\\/");
+        gameDir = slash == std::wstring::npos ? std::wstring() : gameDir.substr(0, slash);
+    }
+    return eliteBindsActionSrvDir(elementName, bindingsDir().c_str(), gameDir.c_str(), out);
+}
+
+bool eliteBindsAction(const char* elementName, EliteResetBind* out) {
+    return eliteBindsActionDir(elementName, bindingsDir().c_str(), out);
 }
 
 bool eliteBindsHmdReset(EliteResetBind* out) {

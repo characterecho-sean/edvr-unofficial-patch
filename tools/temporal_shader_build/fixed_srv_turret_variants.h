@@ -1,5 +1,5 @@
 #pragma once
-// Build-only registry: the SRV turret HUD's nine pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap), one for each distinct
+// Build-only registry: the SRV turret HUD's eleven pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap), one for each distinct
 // vertex-shader output signature (src/d3d11/srv_turret_math.h kSignatures). New, so held to their own contract (symbol, source name, entry, profile, the text each compiles, and the stage, signature and constant buffer its
 // DXBC reflects) in temporal_shader_build's self-test; tools/srv_turret_hud_test runs the compiled bytes on WARP.
 #include "../../src/d3d11/srv_turret_hud_shader.h"
@@ -13,4 +13,6 @@ static std::vector<Variant> srvTurretHudVariants() { return {
     {"kSrvTurretHudGsGBytecode","srv turret hud pass-through G","main",nullptr,{},false,edvr::kSrvTurretHudGsG,"gs_5_0"},
     {"kSrvTurretHudGsHBytecode","srv turret hud pass-through H","main",nullptr,{},false,edvr::kSrvTurretHudGsH,"gs_5_0"},
     {"kSrvTurretHudGsIBytecode","srv turret hud pass-through I","main",nullptr,{},false,edvr::kSrvTurretHudGsI,"gs_5_0"},
+    {"kSrvTurretHudGsJBytecode","srv turret hud pass-through J","main",nullptr,{},false,edvr::kSrvTurretHudGsJ,"gs_5_0"},
+    {"kSrvTurretHudGsKBytecode","srv turret hud pass-through K","main",nullptr,{},false,edvr::kSrvTurretHudGsK,"gs_5_0"},
 }; }

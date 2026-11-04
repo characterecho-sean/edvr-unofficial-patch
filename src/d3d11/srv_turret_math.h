@@ -53,7 +53,7 @@
 //                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
-//   experimental.srv_turret_systems_near centimetres, 0..200, default 0: meant for the vehicle power and systems panel. What it writes now is a second radial window on the two hologram
+//   experimental.srv_turret_systems_near centimetres, 0..200, default 80: meant for the vehicle power and systems panel. What it writes now is a second radial window on the two hologram
 //                               families, vertices further than 1 m from the anchor and no further than 4 m, this much nearer along the ray. A flight at 40 cm did not move the panel. The Escape menu
 //                               is a different mesh and is not bound: translating it locked the headset view. The weapon panels inside 1 m stay on panels_back. The reticle, past 4 m, stays. A pull
 //                               reaches a vertex only when it is further than the pull plus 10 cm (and further than 1 m). 0 leaves the game's own depth.
@@ -69,8 +69,10 @@
 // the same draw's vertex constants are the camera's RIGHT, UP and FORWARD unit vectors in world axes (they match the projection rows), so the shader adds the eye-space displacement of the
 // move (right * dX + up * dY + forward * dZ) to the interpolant. The module binds the draw's own VS constant buffer at slot 1 to GS slot 1 for that signature (srv_turret_hud_binding.h).
 //
-// KNOWN GAP. With Elite's "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6 (ps A2965EC2931A39C8), a different output signature (SV_Position at o5).
-// There is no bytecode for it in the dumps, so it is not covered yet.
+// THE HOLO PANELS WITH "DISABLE GUI EFFECTS" OFF are vs 81216C77F90DEDD6 with ps A2965EC2931A39C8 or B4786E0A0B199285 instead of vs 1989E6D3 (issue 179). The dumped bytecode
+// (vs_81216C77F90DEDD6.dxbc) writes TEXCOORD0 xyzw, TEXCOORD4 xyz, TEXCOORD6 xyz, TEXCOORD7 xyz, TEXCOORD8 xy and SV_POSITION at o5 from the same inputs, constant buffers and clip rows as
+// vs 1989E6D3, and neither pixel shader reads SV_POSITION. They are signature 9 and the two families 81216C77.A2965EC2 and 81216C77.B4786E0A, in the panels group and moved as 1989E6D3 is
+// (TEXCOORD6 is not touched).
 //
 // IN THIS FILE, in order: the keys and their limits; Part 1 (the Scorpion-only gate and the camera's seated z); Part 2 (the families, their output signatures and groups); the radar's anchor
 // moved in the game (the setter's offset, the placement rule, the direction along the turret) and the radar's own camera (the slot rule, the camera move); THE MOVE (the shader's constants
@@ -91,9 +93,9 @@ inline constexpr int kForwardDefaultCm = 0, kForwardMaxCm = 150;   // experiment
 inline constexpr int kRadarForwardDefaultCm = 0, kRadarForwardMaxCm = 150;   // experimental.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
 inline constexpr int kPanelsDefaultCm = 0, kRadarDefaultCm = 0, kPushMaxCm = 200;   // experimental.srv_turret_panels_back and experimental.srv_turret_radar_back
-inline constexpr int kSystemsNearDefaultCm = 70, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 70 is the distance kept on 2026-11-02.
+inline constexpr int kSystemsNearDefaultCm = 80, kSystemsNearMaxCm = 200;   // experimental.srv_turret_systems_near: centimetres toward the camera for the gunner sheet (2016 indices) and the two cards (288), at game depth. 80 is the distance kept on 2026-11-03.
 inline constexpr int kHudUpDefaultCm = 10, kHudUpMaxCm = 100;   // experimental.srv_turret_hud_up: centimetres up, along the seat, for the weapon panel (arcs, names, ammo, INFO). 10 is the raise kept on 2026-11-02.
-inline constexpr int kGunnerUpDefaultCm = 0, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards
+inline constexpr int kGunnerUpDefaultCm = 35, kGunnerUpMaxCm = 100;   // experimental.srv_turret_gunner_up: centimetres up, along the seat, for the gunner sheet and its two cards. 35 is the raise kept on 2026-11-03.
 inline constexpr int kCardsUpDefaultCm = 0, kCardsUpMaxCm = 100;   // experimental.srv_turret_cards_up: centimetres up, along the seat, for the target card and SYSTEMS only
 
 // How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
@@ -171,7 +173,7 @@ struct Signature {
     SigElement el[kMaxSigElements];
     bool psReadsPosition;        // the family's pixel shader also reads SV_POSITION.xy
 };
-inline constexpr uint32_t kSignatureCount = 9;
+inline constexpr uint32_t kSignatureCount = 11;
 inline constexpr Signature kSignatures[kSignatureCount] = {
     {"1989E6D3", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 6, 3}, {"SV_Position", 0, 4}}, false},
     {"2CECEC30", 3, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 7, 2}, {"SV_Position", 0, 4}}, true},
@@ -182,6 +184,8 @@ inline constexpr Signature kSignatures[kSignatureCount] = {
     {"B932058F", 2, {{"__USER_RADAR_LOCALKEY_COLOUR", 0, 3}, {"SV_Position", 0, 4}}, false},
     {"5559BD94", 3, {{"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3}, {"__USER_VERTEX_M_TEXCOORD", 0, 2}, {"SV_Position", 0, 4}}, true},
     {"5DAD41AA", 2, {{"TEXCOORD", 0, 4}, {"SV_Position", 0, 4}}, false},
+    {"81216C77", 6, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 4, 3}, {"TEXCOORD", 6, 3}, {"TEXCOORD", 7, 3}, {"TEXCOORD", 8, 2}, {"SV_Position", 0, 4}}, false},
+    {"A888D510", 6, {{"TEXCOORD", 0, 4}, {"TEXCOORD", 2, 3}, {"TEXCOORD", 4, 3}, {"TEXCOORD", 5, 3}, {"TEXCOORD", 6, 2}, {"SV_Position", 0, 4}}, false},
 };
 // The floats of one vertex as the vertex shader writes it (the signature), and where the clip position, the last element, starts in it. The geometry shader writes the signature and then one
 // more element, `pre` (kPreSemantic, 4 floats): the clip position as the game made it, before the move. The pixel shaders do not read it and nothing in the module reads it back.
@@ -212,7 +216,7 @@ struct Family {
 constexpr Family makeFamily(uint64_t vs, uint64_t ps, const char* name, uint32_t sig, Group group) {
     return Family{vs, ps, name, sig, (sigFloats(sig) + kPreFloats) * 4, sigPosFloat(sig), sigFloats(sig), group};
 }
-inline constexpr uint32_t kFamilyCount = 9;
+inline constexpr uint32_t kFamilyCount = 11;
 inline constexpr Family kFamilies[kFamilyCount] = {
     makeFamily(0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull, "1989E6D3", 0, Group::kPanels),
     makeFamily(0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "2CECEC30", 1, Group::kPanels),
@@ -223,6 +227,8 @@ inline constexpr Family kFamilies[kFamilyCount] = {
     makeFamily(0xB932058F26B76691ull, 0x65861AC394D51526ull, "B932058F", 6, Group::kRadar),
     makeFamily(0x5559BD94B6852E83ull, 0xEA02FAC2BD6C643Cull, "5559BD94.EA02FAC2", 7, Group::kRadar),
     makeFamily(0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7, Group::kRadar),
+    makeFamily(0x81216C77F90DEDD6ull, 0xA2965EC2931A39C8ull, "81216C77.A2965EC2", 9, Group::kPanels),
+    makeFamily(0x81216C77F90DEDD6ull, 0xB4786E0A0B199285ull, "81216C77.B4786E0A", 9, Group::kPanels),
 };
 // The geometry stage's limits the signatures must stay inside: 32 input registers, and 1024 scalars of output a draw (maxvertexcount 3 times a vertex's floats).
 constexpr bool signaturesFit() {
@@ -239,8 +245,11 @@ static_assert(signaturesFit(), "every signature ends in a 4-component SV_Positio
 static_assert(kFamilies[0].strideBytes == 60 && kFamilies[0].posFloat == 7 && kFamilies[0].preFloat == 11 && kFamilies[1].strideBytes == 56 && kFamilies[1].posFloat == 6 &&
                   kFamilies[1].preFloat == 10 && kFamilies[8].strideBytes == 52 && kFamilies[8].posFloat == 5 && kFamilies[8].preFloat == 9,
               "the geometry shader's output records: (4 + 3 + 4 + 4), (4 + 2 + 4 + 4) and the target hologram sphere's (3 + 2 + 4 + 4) floats");
-static_assert(kFamilies[0].group == Group::kPanels && kFamilies[1].group == Group::kPanels && kFamilies[2].group == Group::kRadar && kFamilies[8].group == Group::kRadar,
-              "the two hologram families are the panels, every other family is the radar");
+static_assert(kFamilies[9].strideBytes == 92 && kFamilies[9].posFloat == 15 && kFamilies[9].preFloat == 19 && kFamilies[10].strideBytes == 92 && kFamilies[10].posFloat == 15 && kFamilies[10].preFloat == 19,
+              "the Disable-GUI-effects-off panels' output record: (4 + 3 + 3 + 3 + 2 + 4 + 4) floats");
+static_assert(kFamilies[0].group == Group::kPanels && kFamilies[1].group == Group::kPanels && kFamilies[2].group == Group::kRadar && kFamilies[8].group == Group::kRadar &&
+                  kFamilies[9].group == Group::kPanels && kFamilies[10].group == Group::kPanels,
+              "the hologram families (1989E6D3, 2CECEC30 and the two 81216C77 pairs) are the panels, every other family is the radar");
 // The family of a draw's shader pair, or -1: both halves of the pair must match.
 inline int familyOf(uint64_t vs, uint64_t ps) {
     for (uint32_t i = 0; i < kFamilyCount; ++i)
@@ -581,10 +590,9 @@ struct TurretParams {
     float s0x = 1.0f, s0y = 0.0f, s0z = 0.0f, s0w = 0.0f;   // row 0 of seat-from-math-eye. The gunner sheet uses it to tell the outer border from the card brackets.
     float s1x = 0.0f, s1y = 1.0f, s1z = 0.0f, s1w = 0.0f;
     float s2x = 0.0f, s2y = 0.0f, s2z = 1.0f, s2w = 0.0f;
-    float s3x = 0.0f, s3y = 0.0f, s3z = 0.0f, s3w = 0.0f;   // unused padding: stays 0 (the gunner sheet's bracket cut is a constant in its shader)
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
-static_assert(sizeof(TurretParams) == 144, "the turret shader's cbuffer is nine 16-byte registers");
+static_assert(sizeof(TurretParams) == 128, "the turret shader's cbuffer is eight 16-byte registers");
 
 // One eye's side of the constants for a frame: its tangents (jitter included), the anchor and the HUD-forward translation, both in the eye's space (X right, Y up, Z forward).
 struct EyeFrame {
@@ -663,18 +671,27 @@ inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm
 // The Escape menu is the 360-index draws of those shaders and is not this. The centre reticle is vs E5086486 and is not this. Positive centimetres move the whole panel toward the camera
 // along the turret, the same axis as the HUD-forward key. The sheet is then unwrapped off its left-right curve onto one plane just in front of the launcher, so a
 // horizontal line on that curve stays the game's. The curved sheet is not reshaped. experimental.srv_turret_cards_up raises only the two cards.
+// With Elite's "Disable GUI effects" OFF the same 2016-index sheet is drawn by vs A888D51024D9798E (ps 9107E72CB016CC02), the menu panel's vertex shader (issue 179). The dumps (vs_A888D51024D9798E.dxbc
+// and vs_5DAD41AA66757CE3.dxbc) show the same unpack of the packed vertex, the same instance record and the same clip rows (cb0[4..7] against the position minus cb1[275]), so the sheet's
+// geometry shader inverts them alike; the 2016-index count and the turret gates are what tell it from the menu panel's other draws (6 indices in the dump).
 inline constexpr uint64_t kGunnerSheetVs = 0x5DAD41AA66757CE3ull;
+inline constexpr uint64_t kGunnerSheetAltVs = 0xA888D51024D9798Eull;
 inline constexpr uint64_t kGunnerCardsVs = 0xC4B4B334B26E81A9ull;
 inline constexpr uint32_t kGunnerSheetIndices = 2016;
 inline constexpr uint32_t kGunnerCardsIndices = 288;
 inline constexpr int kGunnerCardsSignature = 1;
 inline constexpr int kGunnerSheetSignature = 8;
-static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature + 1 == kSignatureCount && kSignatures[kGunnerCardsSignature].el[1].index == 7 && kSignatures[kGunnerSheetSignature].count == 2,
-              "the gunner cards use the hologram signature B, and the sheet is the last signature");
+inline constexpr int kGunnerSheetAltSignature = 10;   // the sheet with Disable GUI effects off (K): the same geometry shader body as signature 8 (I)
+static_assert(kGunnerCardsSignature == 1 && kGunnerSheetSignature == 8 && kGunnerSheetAltSignature + 1 == static_cast<int>(kSignatureCount) && kSignatures[kGunnerCardsSignature].el[1].index == 7 &&
+                  kSignatures[kGunnerSheetSignature].count == 2 && kSignatures[kGunnerSheetAltSignature].count == 6,
+              "the gunner cards use the hologram signature B, and the sheet is signature 8 (I) or, with Disable GUI effects off, the last (K)");
+constexpr bool isGunnerSheetSignature(int sig) { return sig == kGunnerSheetSignature || sig == kGunnerSheetAltSignature; }
 inline int gunnerSignature(uint64_t vs, char kind, uint32_t indexCount) {
     if (kind != 'I' && kind != 'X') return -1;
+    if (indexCount != kGunnerSheetIndices && indexCount != kGunnerCardsIndices) return -1;   // the index count first: nearly every draw ends here
     if (vs == kGunnerCardsVs && indexCount == kGunnerCardsIndices) return kGunnerCardsSignature;
     if (vs == kGunnerSheetVs && indexCount == kGunnerSheetIndices) return kGunnerSheetSignature;
+    if (vs == kGunnerSheetAltVs && indexCount == kGunnerSheetIndices) return kGunnerSheetAltSignature;
     return -1;
 }
 inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g == Group::kPanels ? hudForwardCm : radarForwardCm; }
@@ -686,7 +703,7 @@ inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPa
 // does something (a gap, a translation, or the systems pull).
 inline bool paramsUsable(const TurretParams& p) {
     const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc, p.gap2, p.dMin2, p.dMax2, p.pad2,
-                         p.s0x, p.s0y, p.s0z, p.s0w, p.s1x, p.s1y, p.s1z, p.s1w, p.s2x, p.s2y, p.s2z, p.s2w, p.s3x, p.s3y, p.s3z, p.s3w};
+                         p.s0x, p.s0y, p.s0z, p.s0w, p.s1x, p.s1y, p.s1z, p.s1w, p.s2x, p.s2y, p.s2z, p.s2w};
     for (float f : all)
         if (!std::isfinite(f)) return false;
     if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;

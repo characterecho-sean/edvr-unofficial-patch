@@ -123,6 +123,34 @@ void absentAndNeighbours() {
     check(!eliteBindsHmdResetIn("x", 1, nullptr), "no output: false");
 }
 
+// The SRV turret view's key (Elite's ToggleBuggyTurretButton, issue 179) goes through the same parser by element name (eliteBindsActionIn); HMDReset above is the same parser with its name fixed.
+bool parseTurret(const std::string& body, EliteResetBind* out) {
+    const std::string text = binds(body);
+    return eliteBindsActionIn("ToggleBuggyTurretButton", text.data(), text.size(), out);
+}
+void turretKey() {
+    EliteResetBind b;
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_FaceUp\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.present && b.count == 1 && b.slot[0].observable && b.slot[0].needsProof && b.slot[0].binding.kind == HotkeyKind::Pad && b.slot[0].binding.padButtons != 0 &&
+              std::strcmp(b.slot[0].label, "GamePad:GamePad_FaceUp") == 0,
+          "Sean's turret key (GamePad_FaceUp) is a pad button: found, observable, trusted after a first press");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_T\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && b.slot[0].observable && !b.slot[0].needsProof && b.slot[0].binding.kind == HotkeyKind::Key && b.slot[0].binding.vk == 'T',
+          "a keyboard turret key is observable and needs no proof");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"231D0200\" Key=\"Joy_12\" />\n\t\t<Secondary Device=\"Keyboard\" Key=\"Key_F9\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 2 && b.slot[0].observable && b.slot[0].binding.kind == HotkeyKind::Joy && b.slot[0].binding.joyDevice == 0x231D0200u && b.slot[0].binding.joyInput == 11 &&
+              b.slot[1].observable && b.slot[1].binding.vk == VK_F9,
+          "a joystick button with a keyboard secondary: both slots observable");
+    check(parseTurret("\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"Mouse\" Key=\"Mouse_7\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && !b.slot[0].observable,
+          "a mouse button past the fifth is bound and cannot be seen (the press falls back)");
+    check(!parseTurret("\t<HMDReset>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_F12\" />\n\t</HMDReset>\n", &b) && !b.present && b.count == 0,
+          "a file with HMDReset and no turret element: not present, and the HMD key is not read as the turret key");
+    check(parseTurret("\t<HMDReset>\n\t\t<Primary Device=\"Keyboard\" Key=\"Key_F12\" />\n\t</HMDReset>\n\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_FaceUp\" />\n\t</ToggleBuggyTurretButton>\n", &b) &&
+              b.count == 1 && b.slot[0].binding.kind == HotkeyKind::Pad, "with both elements the turret key is the turret element's, not HMDReset's");
+    check(!eliteBindsActionIn(nullptr, "x", 1, &b) && !eliteBindsActionIn("", "x", 1, &b) && !eliteBindsActionIn("ToggleBuggyTurretButton", "x", 1, nullptr), "no element name, or no output: false");
+}
+
 std::wstring scratchDir() {
     wchar_t tmp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, tmp);
@@ -170,6 +198,54 @@ void folder() {
     RemoveDirectoryW(dir.c_str());
     check(GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES, "the scratch folder is gone");
 }
+
+// The SRV's bind context (issue 179): Sean's real StartPreset.4.start is "Custom | Custom | ConsoleX360 | Custom", one preset per context, the third the SRV's. Custom.4.2.binds holds a stale
+// FaceUp for the turret; the stock ConsoleX360 preset, in the game directory's ControlSchemes folder, binds LThumb.
+void srvContext() {
+    const std::wstring root = scratchDir() + L"_srv";
+    const std::wstring opt = root + L"\\Options", game = root + L"\\Game", schemes = game + L"\\ControlSchemes";
+    CreateDirectoryW(root.c_str(), nullptr);
+    CreateDirectoryW(opt.c_str(), nullptr);
+    CreateDirectoryW(game.c_str(), nullptr);
+    CreateDirectoryW(schemes.c_str(), nullptr);
+    const std::string face = "\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_FaceUp\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n";
+    const std::string lthumb = "\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_LThumb\" />\n\t\t<Secondary Device=\"{NoDevice}\" Key=\"\" />\n\t</ToggleBuggyTurretButton>\n";
+    const std::string back = "\t<ToggleBuggyTurretButton>\n\t\t<Primary Device=\"GamePad\" Key=\"GamePad_Back\" />\n\t</ToggleBuggyTurretButton>\n";
+    EliteResetBind b;
+    writeFile(opt + L"\\Custom.4.2.binds", binds(face));
+    // the old one-line file: today's answer (the Custom file)
+    writeFile(opt + L"\\StartPreset.start", "Custom\r\n");
+    check(eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b) && std::strcmp(b.file, "Custom.4.2.binds") == 0 && b.slot[0].binding.padButtons == 0x8000,
+          "with only the old StartPreset.start the answer is the active preset's file, as before");
+    writeFile(opt + L"\\StartPreset.4.start", "Custom\r\nCustom\r\n");
+    check(eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b) && std::strcmp(b.file, "Custom.4.2.binds") == 0, "a StartPreset.4.start of fewer than four lines: today's answer");
+    // Sean's file
+    writeFile(opt + L"\\StartPreset.4.start", "Custom\r\nCustom\r\nConsoleX360\r\nCustom\r\n");
+    check(!eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b), "the SRV line names ConsoleX360, which is nowhere yet: not found (the stale Custom file is not used)");
+    writeFile(schemes + L"\\ConsoleX360.binds", binds(lthumb));
+    check(eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b) && b.count == 1 && b.slot[0].observable && b.slot[0].binding.kind == HotkeyKind::Pad &&
+              b.slot[0].binding.padButtons == 0x0040 && std::strcmp(b.file, "ControlSchemes\\ConsoleX360.binds") == 0 && std::strcmp(b.slot[0].label, "GamePad:GamePad_LThumb") == 0,
+          "Custom with FaceUp beside ConsoleX360 with LThumb in ControlSchemes: the SRV line gives LThumb, and the file name is ControlSchemes\\ConsoleX360.binds");
+    check(eliteBindsActionDir("ToggleBuggyTurretButton", opt.c_str(), &b) && b.slot[0].binding.padButtons == 0x8000, "...while the ordinary lookup (HMDReset's and the FSS's way) still answers FaceUp from the Custom file");
+    // a maintained copy in Options\Bindings wins over the stock one
+    Sleep(30);
+    writeFile(opt + L"\\ConsoleX360.4.2.binds", binds(back));
+    check(eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b) && std::strcmp(b.file, "ConsoleX360.4.2.binds") == 0 && b.slot[0].binding.padButtons == 0x0020,
+          "a maintained ConsoleX360 file in Options\\Bindings is looked up first");
+    writeFile(opt + L"\\ConsoleX360.4.2.binds", binds(""));
+    check(eliteBindsActionSrvDir("ToggleBuggyTurretButton", opt.c_str(), game.c_str(), &b) && std::strcmp(b.file, "ControlSchemes\\ConsoleX360.binds") == 0,
+          "...and one without the element is passed over for the stock file");
+    DeleteFileW((opt + L"\\StartPreset.start").c_str());
+    DeleteFileW((opt + L"\\StartPreset.4.start").c_str());
+    DeleteFileW((opt + L"\\Custom.4.2.binds").c_str());
+    DeleteFileW((opt + L"\\ConsoleX360.4.2.binds").c_str());
+    DeleteFileW((schemes + L"\\ConsoleX360.binds").c_str());
+    RemoveDirectoryW(schemes.c_str());
+    RemoveDirectoryW(game.c_str());
+    RemoveDirectoryW(opt.c_str());
+    RemoveDirectoryW(root.c_str());
+    check(GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES, "the SRV scratch folder is gone");
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -186,7 +262,9 @@ int wmain(int argc, wchar_t** argv) {
     unobservable();
     mouse();
     absentAndNeighbours();
+    turretKey();
     folder();
+    srvContext();
     std::printf("seat_press_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

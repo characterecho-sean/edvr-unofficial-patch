@@ -638,8 +638,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 91 && coreLegacy.size() + 44 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's nine geometry shaders and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 93 && coreLegacy.size() + 46 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1169,12 +1169,12 @@ static void selfTest() {
         }
     }
 
-    // The SRV turret HUD's nine pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to their own contract -- the symbol, source name, entry,
+    // The SRV turret HUD's eleven pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to their own contract -- the symbol, source name, entry,
     // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
     // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
-    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 144-byte constant buffer, Turret at b0 (srv_turret_math.h's
-    // TurretParams: nine registers; signature H also GameVS at b1; signature I also SheetClip at b1 and SheetCam at b2, and ends its output with SV_ClipDistance0, two components,
+    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 128-byte constant buffer, Turret at b0 (srv_turret_math.h's
+    // TurretParams: eight registers; signature H also GameVS at b1; signatures I and K (the gunner sheet, and that sheet with Disable GUI effects off) also SheetClip at b1 and SheetCam at b2, and ends its output with SV_ClipDistance0, two components,
     // after TURRETPRE). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
@@ -1189,6 +1189,8 @@ static void selfTest() {
             {"kSrvTurretHudGsGBytecode", "srv turret hud pass-through G", edvr::kSrvTurretHudGsG},
             {"kSrvTurretHudGsHBytecode", "srv turret hud pass-through H", edvr::kSrvTurretHudGsH},
             {"kSrvTurretHudGsIBytecode", "srv turret hud pass-through I", edvr::kSrvTurretHudGsI},
+            {"kSrvTurretHudGsJBytecode", "srv turret hud pass-through J", edvr::kSrvTurretHudGsJ},
+            {"kSrvTurretHudGsKBytecode", "srv turret hud pass-through K", edvr::kSrvTurretHudGsK},
         };
         for (size_t i = 0; i < stm::kSignatureCount; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 32 + i];
@@ -1208,7 +1210,7 @@ static void selfTest() {
                       D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
                       "the turret HUD shaders reflect as Shader Model 5 geometry shaders");
                 // The gunner sheet (signature I) writes a second element after TURRETPRE, SV_ClipDistance0 (two distances), which clips its leftover card brackets.
-                const bool sheet = i == stm::kGunnerSheetSignature;
+                const bool sheet = stm::isGunnerSheetSignature(static_cast<int>(i));
                 check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
                       desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 &&
                       desc.InputParameters == sig.count && desc.OutputParameters == sig.count + (sheet ? 2u : 1u),
@@ -1239,7 +1241,7 @@ static void selfTest() {
                 // Signature I reads the draw's VS b0 at GS b1 (SheetClip) and VS b1 at GS b2 (SheetCam) and keeps only the card interior.
                 const bool scene = i == stm::kSceneSignature;
                 const bool turret = SUCCEEDED(reflection ? reflection->GetResourceBindingDescByName("Turret", &bind) : E_FAIL) && bind.Type == D3D_SIT_CBUFFER &&
-                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 144;
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 128;
                 if (sheet) {
                     D3D11_SHADER_INPUT_BIND_DESC clipBind{};
                     D3D11_SHADER_BUFFER_DESC clipDesc{};
@@ -1252,7 +1254,7 @@ static void selfTest() {
                           "...the gunner sheet reads Turret, SheetClip at b1 and SheetCam at b2");
                 } else {
                     check(reflection && turret && desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
-                          "...reading one 144-byte constant buffer, Turret at b0, and nothing else (signature H also GameVS at b1)");
+                          "...reading one 128-byte constant buffer, Turret at b0, and nothing else (signature H also GameVS at b1)");
                 }
                 if (scene) {
                     D3D11_SHADER_INPUT_BIND_DESC sceneBind{};
