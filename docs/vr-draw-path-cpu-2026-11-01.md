@@ -44,8 +44,8 @@
   #184 undetermined (no blocked return), as expected.
 - **Build 6 ("Build 6: one interest mask"):** S1 as a write-through mask; S2
   and #184 with the pending flags (both approved 2026-11-04); build 5's items
-  2-3 removed. Argon agreed; Opus asked for 13 changes, all taken. Next: Opus
-  re-review, spec, implementation.
+  2-3 removed. Argon agreed; Opus asked for 13 changes, all taken, and approved on
+  re-review. Next: spec, implementation.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3236,3 +3236,11 @@ repo: `b6-rereview.md`. It supersedes N7's disposition and adds to N1 and N9:
   the spec says which.
 - The spec is written from the table, as amended here, not from the item text
   above it.
+
+**Second re-review (Opus, 2026-11-04): approved.** N7 as amended is exact;
+N1 resolved. On N9 it corrects the rig list: `particle_capture_test` compiles
+pure headers only (`build.bat:3795-3804`) and `ui_quality_test` scans
+`ui_layer.cpp` as text (`:3645-3652`); the rigs that link `ui_layer.cpp` whole
+are `ui_layer_world_test` (`:3706`) and `ui_layer_device_test` (`:3717`), so
+the fence case goes there or falls back to the source-text check. The spec
+carries the corrected list.
