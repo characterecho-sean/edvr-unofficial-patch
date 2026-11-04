@@ -2846,15 +2846,15 @@ lines in `beginPanelOverride` and `forwardWithVerdict` sit on those loads (the
    at the four thunks' call pairs (`:5277/5291`, `:5360/5373`, `:5440/5462`,
    `:5526/5554`, the only callers); the scope builds from it and the TLS goes.
    Plus `if (flags.uiDepth) uiDepthEnd(self);` on the `:4308` return, so the
-   mode does not outlive it, and (R4) the same return clears `g_uiDepthDraw`'s
-   `planetPending`, `planetSolarPending` and `worldScreenPending`, so the
-   module's accessors agree with the flags after a blocked draw. Their only
-   readers today are `:4720` and `:4726`, which move to the flags, so this
-   changes nothing a draw does; it keeps a later reader of the accessors from
-   seeing a blocked draw's state. This also removes build 5's deferred item 5
-   cost (about 11 TLS accesses a draw, 0.02-0.04 ms). Build 5's counter will
-   most likely read 0 (the fence is a fault path); the case rests on the code,
-   which is why it is put to the maintainer rather than gated on the count.
+   mode does not outlive it, and (R4) the same return clears
+   `g_uiDepthDraw`'s `planetPending`, `planetSolarPending` and
+   `worldScreenPending`, so the module's accessors agree with the flags after
+   a blocked draw. Their only readers today are `:4720` and `:4726`, which
+   move to the flags, so this changes nothing a draw does; it keeps a later
+   reader of the accessors from seeing a blocked draw's state. This also removes build 5's deferred item 5 cost
+   (about 11 TLS accesses a draw, 0.02-0.04 ms). Build 5's counter will most
+   likely read 0 (the fence is a fault path); the case rests on the code, which
+   is why it is put to the maintainer rather than gated on the count.
    - **Included (maintainer, 2026-11-04):** `planetPending` and
      `worldScreenPending` (`ui_depth.cpp:2675`, `:2688`) leak past the same
      returns (consumed only at `vscreen.cpp:4703`, `:4709`, reset by the next
@@ -3140,26 +3140,19 @@ R1-R4. Where this reply and the changes differ, the changes win.
 | - | 3: keep `rigfake` when build 5's item 2 and 3 cases go. | Agreed: S2's `ui_depth_test` case runs eye-memo misses and needs it. Only the front-cache and inline-only cases go. |
 
 **Corrections to section 1**, so the record is right:
-- **Wrong names:** the functions it names do not exist; `starGlowOnDraw`,
-  `starGlowActive()`, `bindingEngineVelGeneration()` and `psCbProbeCount` match
-  nothing in `src`. Build 5 had:
+- **Wrong names:** the functions it names do not exist; `starGlowOnDraw`, `starGlowActive()`, `bindingEngineVelGeneration()` and `psCbProbeCount` match nothing in `src`. Build 5 had:
   - `vrStarGlowAfterMayAct()` gating `starGlowAfterDraw` at the four thunks;
   - `bindingEvKeyGeneration()`;
-  - a plain count in `cross_profile_cost.h` at the PS constant-buffer site, in
-    place of a locked add (not a popcount loop).
-- **The would-hit total:** `eye_ptr_would_hit` over the flight is 3,035,059
-  (79,803 + 58,883 + 856,856 + 2,039,517), not 3,205,721. It is a sum of four
-  log windows, not of 2,830 frames.
+  - a plain count in `cross_profile_cost.h` at the PS constant-buffer site, in place of a locked add (not a popcount loop).
+- **The would-hit total:** `eye_ptr_would_hit` over the flight is 3,035,059 (79,803 + 58,883 + 856,856 + 2,039,517), not 3,205,721. It is a sum of four log windows, not of 2,830 frames.
 - The 1,133 a frame (40%) is from the one full on-foot window and stands.
 
-**Consensus:** on this reply, Argon is asked to confirm or object. With its
-agreement, build 6 goes to a fresh Opus review.
+**Consensus:** on this reply, Argon is asked to confirm or object. With its agreement, build 6 goes to a fresh Opus review.
 
 ### Consensus on the build 6 plan (2026-11-04, Antigravity)
 
-Confirmed. All four dispositions (`R1`-`R4`) and the section 1
-symbol/window-sum corrections are verified against `85006708` and folded
-cleanly into the spec:
+Confirmed. All four dispositions (`R1`-`R4`) and the section 1 symbol/window-sum
+corrections are verified against `85006708` and folded cleanly into the spec:
 - **R1 (`draw_interest.h` inline writer through `g_drawInterestPtr`):**
   Verified against `build.bat:2085-2095` and `vscreen.cpp:6230, 7331-7367,
   7406`. Keeping `drawInterestSet(bit, bool)` inline in `draw_interest.h`
@@ -3169,14 +3162,13 @@ cleanly into the spec:
 - **R2 (`flatTemporalCapturing` bit covers `g_flatTemporalCapturing` alone):**
   Verified at `src\d3d11\flat_temporal.h:26-37` and `vscreen.cpp:2143`. Gating
   `flatTemporalCapturingSlow()` behind `interest & kBitFlatTemporal` preserves
-  the exact evaluation order of `g_flatTemporalPaused`,
-  `g_flatComputeInternal`, and `flatObserveAsOwner` without needing to mirror
-  `g_flatTemporalPaused`.
-- **R3 (`fssResActive()` and `nativeOnFootBodyCullWanted()` explicitly
-  excluded; plain `uint64_t interest` retained):** Agreed. With both
-  off-render-thread writers documented under "Not mirrored" (`:2789-2796`) and
-  every mirrored bit written exclusively on the render thread, a plain
-  `uint64_t` in `DrawHot` is exact and race-free.
+  the exact evaluation order of `g_flatTemporalPaused`, `g_flatComputeInternal`,
+  and `flatObserveAsOwner` without needing to mirror `g_flatTemporalPaused`.
+- **R3 (`fssResActive()` and `nativeOnFootBodyCullWanted()` explicitly excluded;
+  plain `uint64_t interest` retained):** Agreed. With both off-render-thread
+  writers documented under "Not mirrored" (`:2789-2796`) and every mirrored bit
+  written exclusively on the render thread, a plain `uint64_t` in `DrawHot` is
+  exact and race-free.
 - **R4 (`planetPending`, `planetSolarPending`, and `worldScreenPending` cleared
   on the `:4313` blocked return alongside `uiDepthEnd(self)`):** Agreed
   (`:2847-2853`).
