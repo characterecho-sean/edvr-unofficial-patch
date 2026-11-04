@@ -13,8 +13,9 @@
 // THE POINTER. vscreen.cpp points g_drawInterestPtr at State::interest after `new State` and clears it before State is deleted (both deletes). Null means a write does
 // nothing: before install, in transport-only mode, and in every rig that compiles a module without vscreen.cpp. A rig that tests a module's recompute points it at a local.
 //
-// THREADS. Every writer that is mirrored runs on the render thread (Present, the tk ticks, the config refresh, menu actions, mid-draw), and the ladder reads on it, so the
-// mask is a plain field. Flags with a writer on another thread are not mirrored: drawGateWanted, fssResActive(), nativeOnFootBodyCullWanted(); nor are computed wants
+// THREADS. Every writer that is mirrored runs on the render thread (Present, the tk ticks, the config refresh, menu actions, mid-draw), and the ladder reads on it, except
+// the shutdown recomputes, which may run on another thread under the loader lock: so the mask is an atomic, read with relaxed loads and written by compare-exchange
+// (drawInterestStore). Flags with a writer on another thread are not mirrored: drawGateWanted, fssResActive(), nativeOnFootBodyCullWanted(); nor are computed wants
 // (introPanelWants, introCurveWants, sunglareWantsDraws).
 #include <atomic>
 #include <cstdint>
