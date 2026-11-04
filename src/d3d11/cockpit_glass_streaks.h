@@ -32,6 +32,10 @@ constexpr float kLegacyMean = 0.024f;   // the legacy dirt texture's linear mean
 constexpr float kLegacyMax = 0.09f;     // and its max
 // The shader multiplies the stored value by this, so the stored 1.0 is the legacy max.
 constexpr float kStreakMax = kLegacyMax;
+// The patch multiplier the shader takes from a high mip of this texture (cockpit_glass_shader.h: kPatchMip, kPatchContrast, kStreakStoredMean): 1 + contrast x (stored - mean) / mean.
+constexpr int kPatchMip = 5;
+constexpr float kPatchContrast = 0.7f;
+constexpr float kStreakStoredMean = 0.2687f;
 // The stored mean that, times kStreakMax, is the legacy mean.
 constexpr float kTargetMean = kLegacyMean / kLegacyMax;
 

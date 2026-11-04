@@ -187,6 +187,17 @@ static const float kStreakMax = 0.09;
 // the dirt texture compared to legacy; section 12 of the doc measures about 4 to 6 times as matching legacy on the display. Dirt albedo only: the smudge and crack glare and the
 // crack colour are not scaled.
 static const float kDirtStrength = 4.0;
+// CHOSEN placement, not measured (Sean approved it, 2026-11-03): where the dirt sits. Legacy's dirt mask covered most of the pane, and the game's vertex mask reads as frost at the
+// frame (a bright frame against the struts, faceted by the triangles, 37% of the visible pane at exactly 0 on the Vulture). So the grime never ends: a film everywhere on the pane,
+// a small softened gather toward the frame from the vertex mask (no kink where it reaches 0), and patches from the streak texture itself, unrelated to the mesh. In the units of
+// dirtWeight (live's mask over CB2[6].z * CB2[0].x, 0 to 0.8 on the ships measured).
+static const float kGrimeFilm = 0.16;           // everywhere, the main term
+static const float kGrimeEdge = 0.2;            // the vertex mask's gather toward the frame, at most
+static const float kEdgeFull = 0.8;             // dirtWeight at which the gather is full
+static const float kPatchScale = 0.19;          // the patch sample's uv scale: not a simple ratio, so it does not line up with the main repeat
+static const float kPatchMip = 5.0;             // of 10: 16 x 16 texels, stored 0.149 to 0.491
+static const float kStreakStoredMean = 0.2687;  // the streak texture's stored mean (cockpit_glass_streaks.h)
+static const float kPatchContrast = 0.7;        // the multiplier is 1 + this x (stored - mean) / mean: 0.69 to 1.58 over mip 5, mean 1; clamped to 0.4 .. 1.6
 // Fixed choices.
 static const float kInvPi = 0.318310;          // live's own factor on the direct light: its t1 light colour is in units where diffuse = albedo * ndl / pi * colour
 static const float kAmbientMip = 7.0;          // the roughest mip the live shader samples (its sqrt(roughness) * 8, capped at 7)
@@ -269,7 +280,13 @@ float4 main(PsIn i) : SV_Target {
     float liveDirt = i.masks[EDVR_MASK_DIRT];
     float denom = cb2[6].z * cb2[0].x;
     float dirtWeight = denom > 0.000001 ? max(liveDirt / denom, 0.0) : 0.0;
-    float dirtMask = kLegacyDirtMask * dirtWeight;
+    // Placement (CHOSEN, see kGrimeFilm): the film everywhere, a softened gather from the vertex mask, and patches from the streak texture at an unrelated scale and a high mip.
+    // With no streak texture bound (t12 not ready) the dirt is off, as the streak factor in the albedo says.
+    float edge = smoothstep(0.0, 1.0, saturate(dirtWeight / kEdgeFull));
+    float grime = kGrimeFilm + kGrimeEdge * edge;
+    float patchStored = Streaks.SampleLevel(QualitySampler, i.texcoord * kPatchScale, kPatchMip);
+    float patch = clamp(1.0 + kPatchContrast * (patchStored - kStreakStoredMean) / kStreakStoredMean, 0.4, 1.6);
+    float dirtMask = kLegacyDirtMask * grime * patch;
     // The smudge mask: live's imperfection mask times the blemish map's y channel. The legacy client's was a vertex alpha channel (1.2 A - 0.2), which the
     // live vertex shader does not pass, so live's own is kept.
     float imp = saturate(blemish.y * i.masks[EDVR_MASK_IMP]);

@@ -41,7 +41,7 @@ than the port's guesses. BUILT (section 11, not flown): the shader takes those v
 streak texture (256 x 256, worker thread, at t12) stands in for legacy's; the quality-3 ice and condensation draws
 get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and condensation untouched. Open: the
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
-Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges), kDirtStrength is 4 and the streak texture's brightness distribution is legacy's by quantile mapping (section 13). Replay and display measurements: section 12.
+Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges), kDirtStrength is 4 and the streak texture's brightness distribution is legacy's by quantile mapping (section 13); the dirt is placed as a film plus a soft edge gather plus patches, not by the vertex mask alone (section 13). Replay and display measurements: section 12.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
@@ -699,6 +699,25 @@ different meshes (legacy 2720 vertices, Odyssey 1208). One capture of Odyssey in
   Vulture capture to compare with.
 - **Light:** sun colour 806 here, N.L 0.62 on the glass, against 350 and 0.47 on the Asp frame the ×16 replay
   pictures came from, so about 3 times the sunlight on the dirt. This is one frame each, and sun colour varies by star.
+
+**Grime placement: film, soft edge, patches (2026-11-03, after the flight of bcb4e91f).** Sean: x4 is "nicely subtle", but the grime "clings to
+the edges of the panel with a hard edge, feels artificial". The vertex mask is the cause: on the Vulture it is a bright frame against the struts,
+faceted by the triangles, with 37% of the visible pane at exactly 0. Sean approved a new placement. The dirt mask is now
+`kLegacyDirtMask x grime x patch` in every variant. `grime = kGrimeFilm (0.16) + kGrimeEdge (0.2) x smoothstep(saturate(dirtWeight / 0.8))`,
+in the units of dirtWeight (0 to 0.8 on the ships measured): a film everywhere on the pane (the main term), and a small gather toward the
+frame from the vertex mask with no kink where it reaches 0, at most 0.36 against 0.8 before (the Vulture's visible mean dirtWeight was
+about 0.22, so the overall level stays about where Sean likes it). `patch` samples the streak texture a second time, unrelated to the mesh:
+SampleLevel at `texcoord x 0.19` (not a simple ratio, so it does not line up with the main repeat) at mip 5 of 10, normalised around the
+stored mean 0.2687 as `clamp(1 + 0.7 x (stored - mean) / mean, 0.4, 1.6)`. Measured on the generator's mip 5 (16 x 16 texels): stored
+0.149 to 0.494, so the multiplier runs 0.688 to 1.587 with mean 1.006. With t12 unbound the streak factor in the albedo is 0 and the dirt is off,
+as before. Film, edge and patches are CHOSEN placement, not measured: legacy's dirt mask covered most of the pane, and the game's
+vertex mask reads as frost at the frame. The albedo line, x4, the streak sample, glare, crack, alpha and the ambient are unchanged.
+Frame time: dirtMask is now never 0, so in the overlay variants the early-out (crack + dirt + smudge below 1/1024) never fires, and the
+intact variant already shaded every pane pixel (the 0.02 alpha base): every covered pixel now shades fully, which is the frame-time question
+for the flight. Rig (WARP): dirt under the sun (B 0.72) 0.2637 (wanted 0.2637); film: mask 0 gives 0.1389 (wanted 0.1389), mask 1e-4 gives
+0.1389 (no step), edge at its maximum 0.3125 = 2.250 times the film (the bound (0.16 + 0.2) / 0.16); hangar 0.05301 (0.05302); dirt with a
+probe 0.3167 (0.3167); ice and condensation overlays 0.005272 (0.005274), alpha 0; and a CPU check that the patch multiplier stays
+within 0.4 to 1.6 over mip 5 and averages 1.006, with the shader's constants pinned to the header's.
 
 ## Ruled out
 

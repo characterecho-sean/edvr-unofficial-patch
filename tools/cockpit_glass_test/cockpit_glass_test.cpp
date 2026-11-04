@@ -9,6 +9,7 @@
 //   - the ice and condensation overlays: the same dirt light, premultiplied, alpha written 0, from their own vertex shaders' mask orders and texture slots.
 // Run with --dump <file> to write the generated streak texture as raw bytes (512 x 512). Output under obj\ and System32's d3d11.
 #include "../../src/d3d11/cockpit_glass_core.h"
+#include "../../src/d3d11/cockpit_glass_shader.h"
 #include "../../src/d3d11/cockpit_glass_streaks.h"
 #include "temporal_shader_bytecode.h"
 
@@ -608,6 +609,24 @@ static void testStreaks(const char* dumpPath) {
     std::vector<std::vector<uint8_t>> mips;
     gs::buildMips(a.data(), n, mips);
     check(static_cast<int>(mips.size()) == gs::kMips && mips.back().size() == 1, "the chain has 10 levels, 512 down to 1");
+    // The patch multiplier the shader takes from mip kPatchMip (placement, section 13): 1 + contrast x (stored - mean) / mean, clamped to 0.4 .. 1.6. Over that mip's texels it
+    // stays in range and averages about 1; and the shader's constants are the header's.
+    {
+        const std::vector<uint8_t>& m = mips[gs::kPatchMip];
+        double lo = 1e9, hi = -1e9, sum = 0, mult_lo = 1e9, mult_hi = -1e9, mult_sum = 0;
+        for (uint8_t v : m) {
+            const double sv = v / 255.0, mult = std::min(1.6, std::max(0.4, 1.0 + gs::kPatchContrast * (sv - gs::kStreakStoredMean) / gs::kStreakStoredMean));
+            lo = std::min(lo, sv); hi = std::max(hi, sv); sum += sv;
+            mult_lo = std::min(mult_lo, mult); mult_hi = std::max(mult_hi, mult); mult_sum += mult;
+        }
+        std::printf("patch mip %d: %zu texels, stored %.3f to %.3f (mean %.4f); multiplier %.3f to %.3f, mean %.3f\n", gs::kPatchMip, m.size(), lo, hi, sum / m.size(), mult_lo, mult_hi,
+                    mult_sum / m.size());
+        check(mult_lo >= 0.4 && mult_hi <= 1.6 && std::fabs(mult_sum / m.size() - 1.0) < 0.03, "the patch multiplier stays within 0.4 to 1.6 over the mip and averages about 1");
+        check(std::fabs(sum / m.size() - gs::kStreakStoredMean) < 0.003, "the texture's stored mean is the one the patch multiplier is normalised around");
+        check(std::strstr(edvr::kCockpitGlassLegacyPsHlsl, "kPatchContrast = 0.7") && std::strstr(edvr::kCockpitGlassLegacyPsHlsl, "kPatchMip = 5.0") &&
+                  std::strstr(edvr::kCockpitGlassLegacyPsHlsl, "kStreakStoredMean = 0.2687") && std::strstr(edvr::kCockpitGlassLegacyPsHlsl, "kPatchScale = 0.19"),
+              "the shader's patch constants are the header's");
+    }
     bool means = true;
     for (const auto& m : mips) {
         double mm = 0;
@@ -637,7 +656,12 @@ static void testShader() {
     const float liveMask = std::fmin(std::fmax((vertexB - 0.2f) * 0.5f, 0.0f), 1.0f) * 0.5f;   // what live's vertex shader passes for B = 0.72 (CB2[6] = (.., .., 0.5, -0.2), CB2[0].x = 0.5)
     const float kDirtStrength = 4.0f;   // chosen, not measured
     const float dirtWeight = liveMask / 0.25f;   // live's mask over CB2[6].z * CB2[0].x: B - 0.2 = 0.52, no offset added back
-    const float albedo = kStreakMax * (kDirtMask * dirtWeight) * kDirtColour * kDirtStrength;
+    // Placement: grime = film + edge x smoothstep(dirtWeight / 0.8); the test's 1 x 1 streak texel is 1, so the patch multiplier is clamped to 1.6.
+    auto grimeOf = [](float w) {
+        const float t = std::fmin(std::fmax(w / 0.8f, 0.0f), 1.0f);
+        return 0.16f + 0.2f * (t * t * (3.0f - 2.0f * t));
+    };
+    const float albedo = kStreakMax * (kDirtMask * grimeOf(dirtWeight) * 1.6f) * kDirtColour * kDirtStrength;
     const float sun = 1000.0f;
 
     Case none;   // no mask at all
@@ -657,15 +681,19 @@ static void testShader() {
     check(closeTo(d.a, kBaseAlpha, 0.01f), "the dirt does not occlude: alpha stays the legacy base");
     check(closeTo(d.r, dirtWant, 0.02f) && closeTo(d.g, dirtWant, 0.02f) && closeTo(d.b, dirtWant, 0.02f),
           "dirt under the sun is grey: streak x (0.025 x vertex B) x 0.97, Lambert on the legacy normal over pi, divided by the alpha, scaled by the HDR write scale");
-    // Continuity: a dirt mask just above 0 gives dirt just above 0 (no step at the boundary of a zero region), and exactly 0 gives none.
+    // Placement (CHOSEN, section 13): the film is everywhere, so a pixel with mask exactly 0 still gets dirt, mask 0 and mask 1e-4 give nearly the same (no step), and the edge
+    // gather at its maximum is at most (0.16 + 0.2) / 0.16 times the film.
     {
-        Case tiny = dirt, zeroMask = dirt;
-        tiny.masks[1] = 1e-4f;
+        Case zeroMask = dirt, tiny = dirt, edgeMax = dirt;
         zeroMask.masks[1] = 0.0f;
-        const Pixel t = canopy.draw(tiny), z0 = canopy.draw(zeroMask);
-        const float wantTiny = d.r * (1e-4f / liveMask);
-        std::printf("continuity: mask 0 gives %g, mask 1e-4 gives %g (wanted %g, the 0.13 mask's %g scaled)\n", z0.r, t.r, wantTiny, d.r);
-        check(z0.r == 0 && t.r > 0 && closeTo(t.r, wantTiny, 0.1f), "the dirt runs smoothly to 0: a mask just above 0 gives dirt just above 0, in proportion, with no step");
+        tiny.masks[1] = 1e-4f;
+        edgeMax.masks[1] = 0.2f;   // dirtWeight 0.8: the gather is full
+        const Pixel z0 = canopy.draw(zeroMask), t = canopy.draw(tiny), em = canopy.draw(edgeMax);
+        const float filmWant = ndl * sun * kInvPi * (kStreakMax * (kDirtMask * grimeOf(0.0f) * 1.6f) * kDirtColour * kDirtStrength) / kBaseAlpha / 256.0f;
+        std::printf("film: mask 0 gives %g (wanted %g), mask 1e-4 gives %g, edge at its maximum gives %g (%.3f times the film)\n", z0.r, filmWant, t.r, em.r, em.r / z0.r);
+        check(z0.r > 0 && closeTo(z0.r, filmWant, 0.02f), "a pixel with mask exactly 0 still gets the film");
+        check(closeTo(t.r, z0.r, 0.01f), "mask 0 and mask 1e-4 give nearly the same result: no step, no kink");
+        check(em.r > z0.r && em.r <= z0.r * (0.16f + 0.2f) / 0.16f * 1.01f && closeTo(em.r, z0.r * 2.25f, 0.02f), "the edge gather at its maximum is no more than (0.16 + 0.2) / 0.16 times the film");
     }
     Case bare = dirt;
     bare.streaks = false;
@@ -764,7 +792,8 @@ static void testShader() {
     Case iceBare = ice;
     iceBare.masks[2] = 0.0f;
     const Pixel ib = canopy.draw(iceBare);
-    check(ib.r == 0 && ib.g == 0 && ib.b == 0 && ib.a == 0, "an overlay pixel with no dirt, smudge or crack adds nothing");
+    const float ibWant = ndl * sun * kInvPi * (kStreakMax * (kDirtMask * grimeOf(0.0f) * 1.6f) * kDirtColour * kDirtStrength) / 256.0f;
+    check(ib.a == 0 && closeTo(ib.r, ibWant, 0.03f), "an overlay pixel with no vertex mask still gets the film, and writes no alpha");
     Case iceNoStreaks = ice;
     iceNoStreaks.streaks = false;
     const Pixel ins = canopy.draw(iceNoStreaks);
