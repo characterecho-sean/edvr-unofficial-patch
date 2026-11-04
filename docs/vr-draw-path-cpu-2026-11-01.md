@@ -41,8 +41,8 @@
   once"; consensus reached 2026-11-04):** star glow's call gated inline,
   `uiDepthOnEyeDraw`'s memo hit inline, a `viewIsSurface` front cache, one
   engine-velocity generation; temporary counts for #184 (all three flags) and
-  S2 (would-hit and would-disagree). Expected 0.19-0.30 ms. Asked: the
-  cross-profile probe. Reviews and agreement follow the design. Next:
+  S2 (would-hit and would-disagree); the cross-profile probe's count without
+  a locked add. Expected 0.25-0.39 ms. Reviews and agreement follow the design. Next:
   implementation and flight.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
@@ -2275,18 +2275,24 @@ S2) would save. A code survey (Opus, read-only, notes outside the repo:
    `edvr_log.py`: a regex, a fixture and a self-test; `--perf-windows` prints
    the line.
 
-### Asked of the maintainer, not in the build without a yes
+### Item 7: the cross-profile probe's count without a locked add (maintainer's choice, 2026-11-04)
 
-- **The cross-profile probe on every PS constant-buffer bind**
-  (`vscreen.cpp:3223`, 0.096 ms a frame own). In VR every PS CB bind runs
-  `cross_profile::enterSite(Site::FlatPsConstantBuffers, true).stop()`: a `lock
-  xadd` on one counter (`cross_profile_cost.h:83`) and, one call in 64, two
-  `QueryPerformanceCounter` calls. `stop()` follows `begin()` directly, so the
-  timed stretch is empty and the ticks measure QPC itself. No feature reads it;
-  it is the instrument of `docs\design-unified-install-2026-10-12.md` section
-  3.3. Options: (a) remove the site; (b) a plain load-and-store count (exact on
-  the render thread, can lose counts from deferred-context threads); (c) keep
-  it. Expected 0.06-0.09 for (a) or (b).
+In VR every PS constant-buffer bind runs
+`cross_profile::enterSite(Site::FlatPsConstantBuffers, true).stop()`
+(`vscreen.cpp:3223`, 0.096 ms a frame own): a `lock xadd` on one counter
+(`cross_profile_cost.h:83`) and, one call in 64, two
+`QueryPerformanceCounter` calls around an empty stretch. No feature reads it;
+it is the instrument of `docs\design-unified-install-2026-10-12.md` section
+3.3. Of the three options (remove the site, a plain count, keep it), the
+maintainer took the recommendation, the plain count: this one site gets a
+`Probe` begin that does a relaxed load and store of `calls` in place of the
+`fetch_add` (`cross_profile_cost.h:83`). The sampling test, the timing and
+the report are unchanged, and every other site keeps the `fetch_add`.
+Exact for everything a feature decides (nothing reads it). The count is
+exact on one thread; a PS constant-buffer bind from a deferred context on
+another thread at the same moment can lose one count, which the report
+tolerates. Expected 0.06-0.09. Test seam: `tools\cross_profile_test`, the
+site's count over a run of calls on one thread equals the calls.
 
 ### Left for build 6, each needing build 5's counts or a design
 
