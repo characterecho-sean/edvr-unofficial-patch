@@ -126,6 +126,13 @@ bool anyKeyedPs(uint64_t hash) {
         if ((!kFamilies[i].flatOnly || runtimeFlatProfile()) && keyedPs(i, hash, runtimeFlatProfile())) return true;
     return false;
 }
+// The remember gate: a shader the game creates once is kept when any profile's family keys it, because a live
+// VR/flat switch does not re-create it. Which family runs in which profile is decided at the draw, not here.
+bool keyedPsInEitherProfile(uint64_t hash) {
+    for (int i = 0; i < kFamilyCount; ++i)
+        if (keyedPs(i, hash, true) || keyedPs(i, hash, false)) return true;
+    return false;
+}
 
 std::recursive_mutex g_mutex;   // shader memory, patches, eyes, the draw path's slow half
 
@@ -150,6 +157,7 @@ bool g_vsDropSaid = false, g_psDropSaid = false;
 
 struct FamilyState {
     bool derived = false, valid = false;
+    bool derivedFlat = false;   // the profile the derivation and every patch below were made under; a switch derives again
     // F2: this family's vertex shader takes the second skin (VR, a skinned family, a vertex shader that passed the analysis); its
     // keyed pairs in kSkinPairs export E. False for good once a patch of it fails to create (skinWhy says why).
     bool skin = false;
@@ -765,7 +773,15 @@ thread_local bool t_creating = false;
 
 void deriveFamily(int f) {
     FamilyState& s = g_families[f];
+    // A live VR/flat switch: what was derived and patched under the other profile (the second skin is VR's alone, and the
+    // pixel shaders were patched with or without its export) is derived again, from the remembered bytecode.
+    if (s.derived && s.derivedFlat != runtimeFlatProfile()) {
+        s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
+        s.psExports.clear(); s.psZeroes.clear();
+        s.derived = s.valid = false; s.skin = false; s.skinWhy.clear(); s.reason.clear(); s.inputs = EngineVelocityInputs{};
+    }
     if (s.derived) return;
+    s.derivedFlat = runtimeFlatProfile();
     for (auto& [ptr, info] : g_vs) {
         if (info.family != f) continue;
         s.derived = true;
@@ -774,7 +790,9 @@ void deriveFamily(int f) {
         s.valid = engineVelocityDeriveInputs(info.bytes.data(), info.bytes.size(), s.inputs, why);
         if (!s.valid) s.reason = "signature: " + why;
         // F2: a skinned family takes the second skin when its vertex shader's chain is the one the patch clones.
-        if (s.valid && !runtimeFlatProfile() && kFamilies[f].skinned) {
+        // g_skinWanted: a session that started flat never armed the second skin's hook (armSkinLocked), so a family derived
+        // after a switch to VR takes none rather than patching shaders whose target 7 nothing makes.
+        if (s.valid && !runtimeFlatProfile() && kFamilies[f].skinned && g_skinWanted.load(std::memory_order_acquire)) {
             // A family whose pixel shaders already read the vertex shader's next free register names its own (kFamilies); it must still be free on
             // the vertex side, which the vertex patch checks.
             if (s.inputs.skinRegister < 32 && kFamilies[f].skinRegister) s.inputs.skinRegister = kFamilies[f].skinRegister;
@@ -2751,7 +2769,7 @@ void engineVelocityShutdown() {
 
 void engineVelocityRememberVs(ID3D11VertexShader* shader, uint64_t hash, const void* bytecode, size_t bytes, bool linked) {
     if (t_creating || !shader || !bytecode || !bytes || bytes > 1024u * 1024u) return;
-    const int f = familyForProfile(hash, runtimeFlatProfile());
+    const int f = engine_velocity_family::familyOfVs(hash);   // either profile's family: the profile can switch live
     if (f < 0) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     // One entry per shader OBJECT: the game may create a keyed hash many times.
@@ -2774,7 +2792,7 @@ void engineVelocityRememberVs(ID3D11VertexShader* shader, uint64_t hash, const v
 }
 
 void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const void* bytecode, size_t bytes, bool linked) {
-    if (t_creating || !shader || !bytecode || !bytes || bytes > 1024u * 1024u || !anyKeyedPs(hash)) return;
+    if (t_creating || !shader || !bytecode || !bytes || bytes > 1024u * 1024u || !keyedPsInEitherProfile(hash)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_ps.count(shader)) return;
     if (g_ps.size() >= kRememberCap) {
@@ -2801,6 +2819,14 @@ size_t engineVelocityRememberedForRig(bool pixel) {
     return pixel ? g_ps.size() : g_vs.size();
 }
 size_t engineVelocityRememberCapForRig() { return kRememberCap; }
+// profile_switch_tests.h: whether family f is derived, under which profile, and whether it took the second skin.
+bool engineVelocityFamilyStateForRig(int f, bool* derivedFlat, bool* skin) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (f < 0 || f >= kFamilyCount) return false;
+    if (derivedFlat) *derivedFlat = g_families[f].derivedFlat;
+    if (skin) *skin = g_families[f].skin;
+    return g_families[f].derived;
+}
 // pin_tests.h: the 32 bytes the rig's lookup check reads (null: no check), and the pin's size.
 void engineVelocityLookupFixtureForRig(const uint8_t* bytes) { g_rigLookupFixture = bytes; }
 const uint8_t* engineVelocityLookupPinForRig(size_t* n) { if (n) *n = sizeof(kLookupPrologue); return kLookupPrologue; }
