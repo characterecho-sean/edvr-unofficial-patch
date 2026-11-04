@@ -1349,7 +1349,7 @@ void tickHotkeys() {
         if (route == FlatDrawCaptureRoute::Passive) {
             flatTemporalArmPassive(g_state->device);
         } else if (route == FlatDrawCaptureRoute::General || route == FlatDrawCaptureRoute::Full) {
-            flatTemporalArm(route == FlatDrawCaptureRoute::Full);
+            flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);
             // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
             drawCensusFlatRequest();
         } else if (route == FlatDrawCaptureRoute::Vr) {

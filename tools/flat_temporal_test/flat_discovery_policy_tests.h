@@ -81,7 +81,7 @@ template<class Check> void run(Check check) {
     check(passive!=std::string::npos && ordinary!=std::string::npos && vr!=std::string::npos && passive<ordinary && ordinary<vr &&
           key.substr(passive,ordinary-passive).find("flatTemporalArmPassive(g_state->device);")!=std::string::npos &&
           key.substr(passive,ordinary-passive).find("drawCensusFlatRequest(")==std::string::npos &&
-          key.substr(ordinary,vr-ordinary).find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos &&
+          key.substr(ordinary,vr-ordinary).find("flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);")!=std::string::npos &&
           key.substr(ordinary,vr-ordinary).find("drawCensusFlatRequest();")!=std::string::npos &&
           key.substr(vr).find("drawCensusRequest();")!=std::string::npos &&
           key.substr(vr).find("quadProbeRequest();")!=std::string::npos,
@@ -157,6 +157,20 @@ template<class Check> void run(Check check) {
     check(!before(removed,"flatRuntimeSubstitution(ctx, FlatSubstEvent::kOtherDraw)","flatComputeProbeDraw("),
           "discovery wiring control: losing restore is detected");
     const auto arm=body(temporal,"void flatTemporalArm(");
+    // Issue 189: a session that began in VR has no g.device, so the arm must take
+    // the caller's device, and each early return must say why it did not arm.
+    check(arm.find("ID3D11Device* callerDevice")!=std::string::npos &&
+          arm.find("g.device ? g.device : callerDevice")!=std::string::npos &&
+          before(arm,"g.device ? g.device : callerDevice","flatTemporalStart(device);") &&
+          arm.find("if (!g.device)")==std::string::npos,
+          "issue 189: the arm starts from the caller's device when no window exists");
+    size_t returns=0,notes=0;
+    for(size_t at=arm.find("return;");at!=std::string::npos;at=arm.find("return;",at+1)){
+        ++returns;
+        const auto lineStart=arm.rfind('\n',arm.rfind('\n',at)-1);
+        if(arm.find("the capture key did not arm a capture",lineStart)<at)++notes;
+    }
+    check(returns==3 && notes==3,"issue 189: every early return of the arm logs that the press did not arm a capture");
     check(before(arm,"flatTemporalStart(device);","g_flatTemporalManual.store(true")&&
           arm.find("g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);")!=std::string::npos&&
           arm.find("g.projectionManual = full;")!=std::string::npos,

@@ -44,7 +44,7 @@ inline bool flatTemporalNeedsOriginalState() {
 }
 
 void flatTemporalStart(ID3D11Device* device);
-void flatTemporalArm(bool full = false);  // Shift + dump_draws requests the large full capture
+void flatTemporalArm(ID3D11Device* device, bool full = false);  // starts the window when none exists (a session that began in VR); Shift + dump_draws requests the large full capture
 void flatTemporalArmPassive(ID3D11Device* device);  // Ctrl + keyboard dump_draws restarts automatic discovery
 void flatTemporalStop();
 // Stand-down: the observers see no draw or call while paused (flatTemporalCapturing).
