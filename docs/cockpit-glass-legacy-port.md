@@ -2,7 +2,7 @@
 
 ## Status
 
-State 2026-11-03: **FLOWN THREE TIMES (swap works), REBUILT TO MEASURED VALUES, NOT FLOWN AGAIN.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
+State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
 quality-3 canopy shader `4E4FF61E8A08FC7E`, at bind time. What was built, the constants chosen and what the
@@ -43,10 +43,10 @@ get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and 
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
 Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges), kDirtStrength is 4 and the streak texture's brightness distribution is legacy's by quantile mapping (section 13); the dirt is placed as a film plus a soft edge gather plus patches, not by the vertex mask alone (section 13). Replay and display measurements: section 12.
 
-15619672 flown: too faint, no visible difference from `odyssey`; film 0.4 and edge 0.3 built, not flown (end of section 13). A dashed bright line under the top strut turned out not to be the glass, it shows with `odyssey` too (section 15). Whether the film and patches read naturally is still Sean's call.
+15619672 flown: too faint, no visible difference from `odyssey`; film 0.4 and edge 0.3 flown 25cb4723, "looks better" (end of section 13). CB2[17].w behaves like per-ship wear driving Odyssey's dirt; Horizons' glass shader has no such term, and Sean decided on 2026-11-04 that EDVR's grime stays fixed (section 16). A dashed bright line under the top strut turned out not to be the glass, it shows with `odyssey` too (section 15). Whether the film and patches read naturally is still Sean's call.
 
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
-`:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
+`:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Default off, kept on main while users try `legacy` (Sean, 2026-11-04), so a report can turn it on. Remove all of it once that feedback is in.
 
 Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt` (312425) and `..._live.txt` (334925),
 filed 2026-11-03: permutation tables, the cb0 layout, the legacy PS written out. `..._live_mapping.txt` holds
@@ -750,6 +750,49 @@ Replay of frame 8848 (no DLSS, no streak texture, another camera position), done
 
 So the line is not this arc's. The hairline at the gap is this film's own and still stands, faint, and has not been
 seen on the glass.
+
+## 16. CB2[17].w behaves like per-ship wear (2026-11-03)
+
+The shader's string table names it `pLayerMaskCutoff`. Live scales its dirt and smudge coverage by
+`1 - saturate(w / 0.95)`, so at 0.95 they are fully off. Read from the probe lines in every Steam log of 2026-11-03:
+
+- The Explorer_NX flights, 09:08 to 12:33 local: 0.87869 falling to 0.874599, about 0.000023 per 30 s (0.0028 an hour)
+  in the windows where it moves, stalling in others, and carried across game restarts. So it is stored, not per session.
+- Flights from 16:36 local: 0.95 throughout (one sample 0.949999). Sean flies a Vulture there; those journals hold no
+  ship event, so that is from Sean. The Asp and Vulture RenderDoc captures also read 0.95.
+- It is not hull or canopy health: the journal has hull 1.0 and ShipCockpit health 1.0 at 0.87. A RepairAll at 09:47
+  local did not raise it.
+
+INFERRED: a wear value that makes Odyssey's dirt grow as a ship is used. Not established: what resets it (a repaint was
+not seen), whether the fall is linear, and why the 0.95 ships hold still. At that rate, 0.95 to 0 is about 340 hours of
+flight, an extrapolation. EDVR's dirt does not read this value. It does honour `gCockpitGlassCrackAmount` (CB1[55].y)
+through the vertex mask, which was 0 in every sample.
+
+Corrections: the Vulture is a training-scenario ship (Sean), which fits its silent journals and its steady 0.95, so the
+"0.95 ships hold still" question falls away for it. The Asp captures also read 0.95 and are unexplained.
+
+**What the code says (Ghidra, read-only, builds 312425 and 334925; addresses are RVAs).** The value is written at runtime
+from one float f in both builds: `pLayerMaskCutoff = 0.95 - 0.9 f` and `pDirtLevelScale = 1.2 f + 0.3` (312425
+FUN_141BCCCA0, 334925 FUN_142DE6090; 312425 also sets `pFadeLevelScale = f`). So 0.95 is f = 0, 0.8787 is f = 0.079, and
+Odyssey's glass dirt is shown at 1 - w / 0.95, about 0.947 f. **What f is was not resolved**: it comes from a polymorphic
+object in both builds, so calling it wear is still an inference from how it behaves.
+
+**Horizons:**
+
+- The glass does not use it. The intact PS has no such term (dirt = texture x mask x AlphaMultiplier), and no path from
+  wear to the glass was found. So legacy's dirt on the glass does not grow with use, as far as this reaches.
+- Which materials legacy applied the block to is not determined.
+- Crack, tint, alpha multiplier, ice and condensation come from cockpit-effect state machines (312425 FUN_142094690 holds
+  them, FUN_1420951F0 pushes them). The crack's driving float was not found, and only part of the exe was read for crack writers.
+- The dirt multiplier 0.025 was not located, and three captures of one ship cannot show it is constant.
+- `maxWear` and `wear` are server JSON keys for repair costs and menu state (312425 FUN_1410EDCB0, 334925 FUN_141E489C0).
+  `WearComponent` is a registered entity component with no reader or accumulator found.
+- The station repair screen had a "repair tear and wear" option (312425 FUN_1411B2440), and its strings are gone from
+  334925. What buying it did was not resolved, so whether it reset f is not known.
+
+**Decided (Sean, 2026-11-04): the legacy grime stays fixed.** It does not read CB2[17].w, so it looks the same on every
+ship, new or worn, matching Horizons as far as the code reaches. With `odyssey`, the game's own wear-driven dirt is
+unchanged. The unresolved items above no longer block anything here; f matters again only if this is reopened.
 
 ## Ruled out
 
