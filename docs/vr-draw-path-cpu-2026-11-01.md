@@ -39,16 +39,13 @@
   EDVR's own R1 time is 4.72 ms: the draw path 3.29, `Unmap` 0.39, `Map` 0.26,
   the bind hooks about 0.3. Ruled out: the bind hooks as a large target. A3
   (map/unmap) is worth at most 0.65 ms.
-- **Build 4 (designed 2026-11-03, "Build 4: the draw path's own cost", reviewed
-  in "Review of the build 4 plan"):** A3 and the draw path in one build, all
-  keyless: inlined first tests, a hot `State` block, owner-only per-draw flags,
-  the map bounce gated on its own `open_` test (not `!runtimeVrProfile()`),
-  counters for build 5, own time in the analyzer. Expected 0.35-0.55 ms. Review
-  agrees on all 8 items and adds four mechanical checks (why
-  `gpuFrameCommandIfLive` and `flatTemporalCapturing` did not inline, two more
-  shape-before-flag sites, `uiDepthHologramOnEyeDraw` / `viewIsSurface`
-  empty-table fast-reject, and `census_skip_offscreen` DSV fallback for the
-  512x512 depth pass).
+- **Build 4 (designed 2026-11-03, "Build 4: the draw path's own cost";
+  reviewed by Antigravity and Opus, dispositions in "Review of the build 4
+  design (Opus)"):** A3 and the draw path, all keyless: inlined first tests,
+  a hot `State` block, the map bounce gated on its own `open_` test, shape
+  and hash before flag, the hologram pass by VS bit, counters for build 5,
+  own time in the analyzer. Expected 0.33-0.53 ms. Item 3 dropped (#184).
+  Next: re-review.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -1676,22 +1673,42 @@ themselves.
    | `blendProbeWantsDraws` | 4265 | one relaxed load (`blend_probe.cpp:724-726`) | 0.019 |
 
    Bound 0.29 ms; expected 0.12-0.2, since the flag load stays. Each inlined
-   test must be exactly the callee's first test; the callee keeps it.
+   test must be exactly the callee's first test; the callee keeps it. The
+   Opus review checked every row: each first test is a pure read with
+   nothing before it. Three need more than a copy of the test:
+   - `optimizedStationSkipsDraw` (`:2087`) evaluates two pure hash loads as
+     its arguments, so the inline `g_sunOff` test goes before them;
+     `g_sunOff` needs a header accessor.
+   - `gpuFrameCommandIfLive` makes two independent tests: the cut is a
+     forced inline, not its first test.
+   - `uiLayerTargetKind`'s test reads `g_tc`, file-local to `ui_layer.cpp`;
+     it needs an inline accessor in the header.
+   - Antigravity's review (checked): `gpuFrameCommandMightAct`
+     (`gpu_frame_timing.h:44-46`) tests the thread-local
+     `g_gpuFrameInternal` before the relaxed `g_gpuFrameCommandLive` load;
+     swapping them is exact (both pure reads) and keeps the thread-local
+     off the path while `app_gpu_timing` is off. `flatTemporalCapturing`
+     (`flat_temporal.h:24-32`): force-inline its first load and move the
+     rest to an out-of-line slow path.
 2. **The per-draw `State` fields in one 64-byte-aligned block at the head of
-   `State`:** `ownerCtx`, `rtv0Eye`, `rtv0EyeGen`, `rtv0Cand`, `glareClamp`,
+   `State`:** `ownerCtx`, `rtv0Eye`, `rtv0EyeGen`, `rtv0Cand`,
    `curveThisDraw`, `introCurveThisDraw`, `eyeDrawsThisFrame`, `bindAuditSeq`,
    the `censusSkip*` counts, `censusAutoW`, `quadSkipArmed`, `distanceEnabled`,
-   `fssBodyFrame`, `frameNo`, and item 3's flags. Their lines cost about 0.13
-   ms; expected 0.05-0.1. Layout only. A `static_assert` pins the block's size.
-3. **The three thread-local per-draw flags become owner-only `State` members.**
-   `t_uiDepthThisDraw`, `t_holoDepthThisDraw`, `t_compositeThisDraw`
-   (`vscreen.cpp:1598-1610`) are thread-local so a deferred-context draw on
-   another thread cannot take the render thread's flag. Every write is already
-   after the foreign-context return (`:2074-2084` before `:2114-2115`,
-   `:2507-2513`), and only `UiDepthScope` (`:4279-4284`) reads and clears them.
-   As members, read and cleared only when the draw is the owner's (computed at
-   `:4261`), a foreign draw reads false, as it does today. Lines 2114, 2115,
-   4293: bound 0.09, expected 0.05-0.08.
+   `fssBodyFrame`, `frameNo`. Not `glareClamp`: foreign threads write it
+   (`vscreen.cpp:2073`), so in the block it would share the owner's busiest
+   cache line. Their lines cost about 0.13 ms; expected 0.05-0.1. Layout
+   only: `State` lives only in `vscreen.cpp`'s anonymous namespace, nothing
+   takes `offsetof` or copies it, and `new` honours a 64-byte alignment under
+   C++17 (Opus review). A `static_assert` pins the block's size.
+3. *(Dropped after review.)* The three thread-local per-draw flags as
+   owner-only `State` members (0.05-0.08 ms). Not exact: an owner draw
+   blocked at `vscreen.cpp:4262` returns before `UiDepthScope` clears the
+   flags, and `t_holoDepthThisDraw` is not cleared with the other two at
+   `:2114-2115` (checked), so today a foreign-context draw on the render
+   thread can consume a flag a blocked owner draw left, which gates the
+   reissues at `:4629` and `:4646`. Owner-only members would change that.
+   The lingering flag is its own issue (#184); item 3 can return once that
+   is settled.
 4. **The flat map bounce, gated on its own "anything open" test.** In VR
    nothing is ever installed (`flat_map_bounce.h:139`, `setMode` only at
    `flat_runtime.cpp:4341` after the flat-only return at `:4214`), so `open_`
@@ -1706,31 +1723,78 @@ themselves.
    in `flatRuntimeMapBounceBeginUnmap` (`flat_runtime.cpp:5462`) below that
    test, and gate `Install` (`vscreen.cpp:3512`) on `flatRuntimeActive()`, an
    exact term of its own refusal (`flat_runtime.cpp:5441`). Exact in every
-   profile and across a switch. About 0.05 ms.
-5. **`uiDepthOnEyeDraw`'s per-draw outputs in one struct**, reset as a block.
-   0.112 of its 0.132 ms sits right after twelve resets to globals on separate
-   lines (`ui_depth.cpp:2896-2908`). Same resets, same values; expected about
-   0.05. Skipping the resets is not in this build.
-6. **Shape before flag in the eye branch:** `holoWantsDraws() &&
-   holoPatternShape` (`vscreen.cpp:2678`) and `backdropWantsDraws() &&
-   backdropCompositeShape` (`:2708`) become shape first; both shapes are (X, 6,
-   1) (`holo_fix.h:58-60`, `backdrop_fix.h:126-128`) and count and instances
-   are in registers. Pure reads. Expected 0.03-0.05.
-7. **Two counters, for build 5's decisions, on one new 10 s line.** They cost
-   one compare and increment per call, outside the per-draw ladder:
+   profile and across a switch (both reviews). About 0.05 ms. Mechanism:
+   `open_` is private and the bounce sits behind a function-local static, so
+   `FlatMapBounce` gains an inline `anyOpen()` (the same acquire load as its
+   first tests) and `flat_runtime.cpp` publishes a global pointer to it at
+   construction; a null pointer reads as nothing open. Moving the
+   `flatcpu::Scope` changes what the flat profile's own CPU report counts for
+   `BeginUnmap`: it no longer times the early return.
+5. **`uiDepthOnEyeDraw`'s per-draw outputs in one struct**, reset as a
+   block. 0.112 of its 0.132 ms sits right after its per-draw stores to
+   globals on separate lines (`ui_depth.cpp:2896-2908`: twelve resets plus
+   the `g_holoDraw` copy of the input, 14 stores). Same stores, same values:
+   the struct's defaults reproduce the resets (-1 for both eye fields), and
+   every access moves with it, including the inline accessors in
+   `ui_depth.h`. Expected about 0.05. Skipping the resets is not in this
+   build.
+6. **Shape before flag, and hash before guard, in the eye branch.** Pure
+   reads, reordered:
+   - `holoWantsDraws() && holoPatternShape` (`vscreen.cpp:2678`) and
+     `backdropWantsDraws() && backdropCompositeShape` (`:2708`): both shapes
+     are (X, 6, 1) (`holo_fix.h:58-60`, `backdrop_fix.h:126-128`).
+   - `targetSharpWantsDraws() && targetSharpOnEyeDraw` (`:2685`): the callee
+     tests the same (X, 6, 1) shape right after its flag
+     (`target_sharp.cpp:317-318`); an inline `targetSharpShape` goes first
+     (Antigravity).
+   - `vscreen.cpp:1994-2000`: the two-hash VS test moves before
+     `guardedBudget` (Antigravity). `bindingShaderHash` is a shadow read, and
+     a spent budget skips the lambda either way (`guard.h:133-138`).
+   - Not scrim: Antigravity's review gives its shape as (X, 6, 1), but
+     `scrimWashShape` is `X, instances 1, count >= 100`
+     (`scrim_fix.h:123-125`), which most meshes pass.
+   Expected 0.04-0.06.
+7. **Two counters, for build 5's decisions, on one new line (TEMPORARY).**
+   One compare and increment per call, outside the per-draw ladder. Every
+   `bindingSet` caller is owner-only (Opus review), so plain counters do.
    - `mapMemo` lookups and misses (`vscreen.cpp:3582-3587`). A miss pays
      `mapBufferDesc` (0.028 own plus two COM calls).
-   - Same-pointer re-sets in `bindingSet`, for RTV0, DSV0 and PS SRV 0-3:
-     calls, and calls whose pointer equals the one bound. Every set bumps
-     the generation today (`binding_shadow.cpp:107-112`, checked), which is
-     why every per-binding cache in the ladder misses (this arc's item 4).
-8. **The analyzer reports own time.** `tools\cpu_profile`'s EDVR export gains,
-   per innermost address, whether the sample's top frame was in EDVR (own) or
-   below it. This replaces the disassembly script used above and makes own time
-   the figure every later table ranks by.
+   - `bindingSet` calls for RTV0, DSV0 and PS SRV 0-3, the calls whose
+     pointer equals the one bound (compared before it is overwritten), and
+     null-to-null re-sets counted apart. Every set bumps the generation
+     today (`binding_shadow.cpp:107-112`, checked), which is why every
+     per-binding cache in the ladder misses (this arc's item 4). Pointer
+     equality is an upper bound for S2, not its saving.
+   - The line goes beside `draw mask:` in `perf_monitor.cpp`, on its
+     1800-frame window, formatted by a header function (about 300
+     characters). `edvr_log.py` gets a parse fixture and a self-test, and
+     `--perf-windows` prints it; `--health` works by feature tag, so no
+     health rule.
+8. **The analyzer reports own time.** In `tools\cpu_profile`'s EDVR export
+   (`Report.cs:626-630`), a sample is own when `stack.TopModuleId ==
+   edvrModule`, the test behind `callerSamplesTopFrameInEdvr` (`:724-736`).
+   Outputs: own and below counts per innermost address and per chain, and an
+   own total, which must equal `callerSamplesTopFrameInEdvr` (the
+   self-test). This replaces the disassembly script used above and makes own
+   time the figure every later table ranks by.
+9. **The hologram pass skipped by the VS byte** (Antigravity, checked).
+   `classifyHologramDraw`'s two first declines read only the vertex
+   shader's hash, the exclusion list and the family lists
+   (`ui_depth.cpp:3598-3607`). A `kVsMayHoloDepth` bit in `vs_may_want.h`,
+   set when the hash is in `kHoloWorldMarkers` or `g_holoFamilies` and not
+   excluded, lets `vscreen.cpp:2513` skip the call. The skip must keep the
+   callee's one unconditional store, `g_holoEye = -1` (`:3628`), which
+   `uiDepthHologramContributionBegin` reads (`:3651`), and set
+   `t_holoDepthThisDraw` false as the call would. The bit must be a
+   superset: if `g_holoFamilies` or the exclusions can change after a VS's
+   byte is computed, the byte is recomputed then, or the bit is set for
+   every VS while they are unsettled. A skipped call stores nothing in
+   `g_holoMemo`; its key moves with the VS binding, so no later draw can hit
+   a stale entry (the memo's comment, `:3586-3589`). Own 0.06 ms
+   (`uiDepthHologramOnEyeDraw`); expected 0.03-0.05.
 
-Expected total: 0.35-0.55 ms a frame of EDVR's own time, nearly all in the draw
-path.
+Expected total: 0.33-0.53 ms a frame of EDVR's own time (items 1, 2, 4, 5,
+6 and 9), nearly all in the draw path.
 
 ### Left for build 5, each needing evidence first
 
@@ -1743,7 +1807,14 @@ path.
   (`vscreen.cpp:5489-5493`). Bound about 0.29; decided by item 7's re-set
   counts.
 - `viewIsSurface`'s per-slot front cache (0.117); `mapMemo` resizing (by item
-  7's miss count); skipping `uiDepthOnEyeDraw`'s resets.
+  7's miss count); skipping `uiDepthOnEyeDraw`'s resets. Antigravity's gate
+  on `g_surfaceCount != 0` (`ui_depth.cpp:330`) is exact but saves nothing
+  where surfaces are learned, as in the concourse; it goes with the front
+  cache.
+- B1 (Antigravity's note, for later): neither `census_skip_offscreen` nor
+  `census_skip` can target the 512x512 pass today, the first because it
+  resolves RTV0, null on depth-only draws (`vscreen.cpp:2397-2411`), the
+  second because it sits inside `if (s->rtv0Eye)` (`:2488`).
 - Not candidates: the marker tee and probes (already ruled out), star glow's
   per-draw classify (it keeps per-target run state that any other draw ends,
   `vr_star_glow.cpp:362-374`), `depthProbeNoteDraw`'s counters.
@@ -1753,24 +1824,29 @@ path.
 - Item 1: each predicate is a header read; a rig check per inlined test that it
   equals the callee's first test over its inputs where the callee's state is
   reachable (`temporalPassWantsRigidDraw`'s state moves to `temporal_pass.h`).
-- Item 3: a rig case where a foreign-context draw runs between an owner draw's
-  set and its `UiDepthScope`: the foreign draw reads false and the owner's flag
-  survives.
-- Item 4: `flat_map_bounce_test` gains "`open()==0`: `preMap` and `beginUnmap`
-  touch nothing" and a flat-to-VR switch with one bounce open: the next Unmap
-  still flushes it.
-- Item 7: `edvr_log.py` parses the new line (fixture, self-test, health
-  pattern).
-- Item 8: the analyzer's parser tests gain an own/below case.
+- Items 1, 5, 6 and 9 cover the pixel and blend probes, the temporal pass's
+  rigid draws, the holo, backdrop and target-sharp shapes and the hologram
+  pass by equivalence in the rig, not by the flight: the probes are off in
+  the flight, and no periodic line carries the rigid-draw count.
+- Item 4: `flat_map_bounce_test` gains "`anyOpen()` false: `preMap` and
+  `beginUnmap` touch nothing" and a flat-to-VR switch with one bounce open:
+  the next Unmap still flushes it.
+- Item 7: `edvr_log.py` parses the new line (fixture, self-test).
+- Item 8: the analyzer's tests gain an own/below case, and its own total
+  equals `callerSamplesTopFrameInEdvr`.
+- Item 9: for every VS hash in either list, excluded or not, the bit agrees
+  with `classifyHologramDraw`'s first two declines; a skipped draw leaves
+  `g_holoEye` at -1.
 
 ### What the log shows if the new code never ran
 
 - Item 7: no new counter line.
-- Items 1-6: nothing in the log; the profile shows it. With item 8, the
-  per-line own time of the changed lines (2087, 2109, 2114, 2115, 2591, 2678,
-  2708, 4293, 4342-4345, 4361, 5460, 5498, 5544-5552, 5599, 5604,
-  `ui_depth.cpp:2896-2908`) falls, and the out-of-line callees of item 1 drop
-  out of the own list.
+- Items 1, 2, 4, 5, 6, 9: nothing in the log; the profile shows it. With
+  item 8, the per-line own time of the changed lines falls, and the
+  out-of-line callees of items 1 and 9 drop out of the own list. Today's
+  lines are 1994, 2087, 2109, 2513, 2591, 2678, 2685, 2708, 4342-4345, 4361,
+  5460, 5498, 5544-5552, 5599, 5604 and `ui_depth.cpp:2896-2908`; the edits
+  move them, so the implementation records the new numbers in the commit.
 
 ### Flight
 
@@ -1779,17 +1855,25 @@ No census.
 
 ### Pass criteria
 
-- **The cut:** the draw subtree's own time per full-path draw (own ms over the
-  `draw mask:` line's full-path draws a frame) falls by at least 0.2 ms a
-  frame's worth at build 3's draw count, against build 3's 3.29 ms at about
-  13,600 draws. Per draw, because the scene and draw count move between
-  flights.
-- **Nothing changed on screen:** every feature these items touch logs the same
-  as in build 3 within flight-to-flight spread: the `ui depth` 20 s line and
-  `ui scene composites` (item 3), the temporal pass's rigid-draw count, the
-  footprint line, the pixel and blend probes (off: zero both times), `--health`
-  with no new NEVER APPLIED.
-- **Nothing else rose:** no EDVR function's own time up more than 0.1 ms.
+- **The cut:** total EDVR own time in R1, per full-path draw, falls by at
+  least 0.2 ms a frame's worth at build 3's draw count. Build 3: 4.70 ms own
+  (the analyzer's uncapped leaf, windows 3-20) over the full-path draws a
+  frame of the `draw mask:` windows that overlap the capture. Total, not the
+  draw subtree: the analyzer caps each chain at 6 frames (`Report.cs:627`),
+  and 0.25 ms a frame of build 3's chains hit the cap without reaching a
+  hook, so a subtree figure loses them (Opus review). Per draw, because the
+  scene and draw count move between flights; `draw mask:` counts all four
+  draw thunks, which is fine for a ratio between builds. Build 3's
+  per-window spread gives a standard error of about 0.07 ms, so 0.2 ms is
+  about three of them.
+- **Nothing changed on screen:** within flight-to-flight spread against
+  build 3, `ui depth totals:` (`ui_depth.cpp:4507`), `ui quality:
+  composites left in the scene:` (`ui_scene_composites.h:137`) and `vscreen
+  footprint:`; `--health` with no new NEVER APPLIED. The rest is the rig's
+  (test seams).
+- **Nothing else rose:** no EDVR function's own time up more than 0.1 ms,
+  comparing each item-1 and item-9 caller together with its former callees,
+  since their tests move into the caller by design.
 - **Build 5 is decided:** item 7's miss and re-set counts are in the log.
 
 ### Review of the build 4 plan (2026-11-03, Antigravity)
@@ -1905,3 +1989,36 @@ Checked against `src\d3d11\` and build 3's own-time split (`cfa5e806`).
      is a 2-line fix to the instrument that makes `advanced.census_skip_offscreen
      = 512x512` work on depth-only passes whenever we want to visually name the
      512x512 target.
+
+### Review of the build 4 design (Opus, 2026-11-03), and dispositions
+
+A fresh-context review on Opus, against the code at `f5b20467`. Verdict:
+changes required, three blocking findings, all fixed in the design text
+above. Notes outside the repo: `b4-review.md`. The Antigravity review above
+was checked claim by claim against the code; its dispositions are in the
+second table.
+
+| # | Opus finding | Disposition |
+|---|---|---|
+| 1 | BLOCKING: item 3 is not exact; a blocked owner draw leaves a flag a foreign render-thread draw consumes | Checked (`vscreen.cpp:4262`, `:2114-2115`). Item 3 dropped; the lingering flag is #184 |
+| 2 | BLOCKING: "nothing changed" lines misnamed; no rigid-draw line; probes off | Real line names used; the rest left to the rig, said so |
+| 3 | Item 1 exact; three rows need more than a copy | Added under item 1 |
+| 4 | Item 2 safe; leave `glareClamp` out (foreign writes) | Taken |
+| 5 | Item 4 exact; needs a mechanism; the `Scope` move changes the flat CPU report | Taken (`anyOpen()`, global pointer) |
+| 6 | Items 5 and 6 exact; 14 stores; accessors in `ui_depth.h`; defaults -1 | Taken |
+| 7 | BLOCKING: the subtree criterion loses 0.25 ms of capped chains; numerator and window mismatch | Criterion is now total own per full-path draw, standard error 0.07 ms stated |
+| 8 | Item 8 implementable at `Report.cs:626-630` | Outputs named, self-test against `callerSamplesTopFrameInEdvr` |
+| 9 | Item 7: owner-only callers; compare before overwrite; null-to-null apart; where and how it prints | Taken |
+| 10 | Estimates labelled; "no function up 0.1 ms" trips on the intended moves; line numbers shift | Callers compared with former callees; new line numbers recorded at commit |
+
+| Antigravity | Disposition |
+|---|---|
+| `gpuFrameCommandMightAct` reads the thread-local first | Checked (`gpu_frame_timing.h:44-46`); swap taken, item 1 |
+| `flatTemporalCapturing` too big to inline | Checked (`flat_temporal.h:24-32`); force-inlined first load, item 1 |
+| Hash before `guardedBudget` at `vscreen.cpp:1994` | Checked (`guard.h:133-138`); taken, item 6 |
+| Scrim shape first | Not taken: `scrimWashShape` is `count >= 100`, not 6 (`scrim_fix.h:123-125`) |
+| Target-sharp shape first | Checked (`target_sharp.cpp:317-318`); taken, item 6 |
+| Hologram pass by VS bit | Checked (`ui_depth.cpp:3592-3638`); taken as item 9, keeping the callee's `g_holoEye = -1` |
+| `g_surfaceCount != 0` gate | Exact, no saving in the concourse; with build 5's front cache |
+| Item 3 agreed | Superseded by Opus finding 1 |
+| B1: `census_skip*` cannot target the 512x512 pass | Recorded for B1 |
