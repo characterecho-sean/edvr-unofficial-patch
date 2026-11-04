@@ -188,20 +188,25 @@ void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 
 // The VR Galaxy Map's two more second issues (galaxy_map_ui.h, docs/galaxy-map-vr-2026-11-03.md Fix 3), each closed by uiLayerEnd and each only for a draw the layer took
 // while the map is open and its pointer hooks are armed:
-// a panel draw (vertex shader C4B4B334B26E81A9, B10B032BDFD46700 or 5DAD41AA66757CE3) re-issued into the eye's panel mask, an A8_UNORM texture at the layer's size that
+// a panel draw (vertex shader C4B4B334B26E81A9 or 5DAD41AA66757CE3) re-issued into the eye's panel mask, an A8_UNORM texture at the layer's size that
 // accumulates the draw's alpha (made at the first such draw, cleared once an eye-frame, let go at the frame boundary once the map is shut);
 // and the arrow's draw (4EF6DDB075A927FA), in the layer's bracket with the layer's own target, viewports and scissor, a blend that writes nothing and no depth or stencil:
 // the caller issues its one point there. Both fill in the draw's vertex shader, the eye, the layer's frame sequence and the mask's view. kNoMask: the draw is one of these but
 // the mask could not be made, for the caller to say (the layer does not link galaxy_map_ui.cpp in the rigs that link it whole).
-enum class UiMapBegin { kNotMine, kBound, kNoMask };
+enum class UiMapBegin { kNotMine, kBound, kNoMask, kNoDepth };
 struct UiMapIssue {
     ID3D11ShaderResourceView* mask = nullptr;
     uint64_t vs = 0;
+    uint64_t ps = 0;   // uiLayerMapDepthBegin: the game's pixel shader of the sprite
     int eye = -1;
     uint64_t seq = 0;
 };
 UiMapBegin uiLayerMapMaskBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 UiMapBegin uiLayerMapProbeBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
+// And the sprites' depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH), for a Galaxy Map sprite or canvas draw (pixel shader 964221955A9E77E7 or 855C469156AB997F) the layer took into the HDR
+// layer while the map is open in VR: the layer's bracket with no render target, the eye's D16 depth bound with its test and write on, the biased rasterizer, the layer's viewports and
+// scissor (closed by uiLayerEnd); the caller issues the draw with the pixel shader swapped (mapui::depthIssue). kNoDepth: the draw is one of these but the depth could not be made.
+UiMapBegin uiLayerMapDepthBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 
 // the crisp-HUD half of fix.ui_quality (Phases 1-3 of docs/cockpit-hud-layer-design-2026-09-27.md): the
 // cockpit's HDR HUD families (the holo panels, the flight HUD, the target

@@ -3079,15 +3079,38 @@ void testSupercruiseLines() {
                   ui.find("vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &srv0);") != std::string::npos && ui.find("D3D11_ASYNC_GETDATA_DONOTFLUSH") != std::string::npos &&
                   ui.find("noteUnavailable(\"the occlusion query\")") != std::string::npos && ui.find("GetData(", ui.find("GetData(") + 1) == std::string::npos,
               "GP19: the swap is through the raw setter, a failed creation leaves the game's shader, the probe puts topology, shaders and t0 back after a fault and never waits on its query");
-        check(edvr::mapui::isPanelVs(0xC4B4B334B26E81A9ull) && edvr::mapui::isPanelVs(0xB10B032BDFD46700ull) && edvr::mapui::isPanelVs(0x5DAD41AA66757CE3ull) && !edvr::mapui::isPanelVs(edvr::mapui::kVsArrow) &&
-                  edvr::mapui::panelIndex(0x5DAD41AA66757CE3ull) == 2 && edvr::mapui::panelIndex(edvr::mapui::kVsArrow) == -1,
-              "GP20: the three panel shaders are the mask's, the arrow's is not");
+        check(edvr::mapui::isPanelVs(0xC4B4B334B26E81A9ull) && !edvr::mapui::isPanelVs(0xB10B032BDFD46700ull) && edvr::mapui::isPanelVs(0x5DAD41AA66757CE3ull) && !edvr::mapui::isPanelVs(edvr::mapui::kVsArrow) &&
+                  edvr::mapui::panelIndex(0x5DAD41AA66757CE3ull) == 1 && edvr::mapui::panelIndex(0xB10B032BDFD46700ull) == -1 && edvr::mapui::panelIndex(edvr::mapui::kVsArrow) == -1,
+              "GP20: the shell meshes (C4B4B3) and the movie (5DAD41) are the mask's; the hover halo's shader (B10B03) and the arrow's are not");
         const D3D11_BLEND_DESC maskBlend = edvr::mapui::maskBlendDesc(), probeBlend = edvr::mapui::probeBlendDesc();
         const D3D11_RENDER_TARGET_BLEND_DESC& mb = maskBlend.RenderTarget[0];
         check(mb.BlendEnable && mb.SrcBlend == D3D11_BLEND_ONE && mb.DestBlend == D3D11_BLEND_ZERO && mb.BlendOp == D3D11_BLEND_OP_ADD && mb.SrcBlendAlpha == D3D11_BLEND_ONE &&
                   mb.DestBlendAlpha == D3D11_BLEND_INV_SRC_ALPHA && mb.BlendOpAlpha == D3D11_BLEND_OP_ADD && mb.RenderTargetWriteMask == D3D11_COLOR_WRITE_ENABLE_ALPHA &&
                   !probeBlend.RenderTarget[0].BlendEnable && probeBlend.RenderTarget[0].RenderTargetWriteMask == 0,
               "GP21: the mask accumulates the panels' alpha (source alpha ONE, destination alpha INV_SRC_ALPHA, add, colour ONE/ZERO, write mask ALPHA) and the probe writes nothing (write mask 0)");
+        // The sprites' depth (galaxy_map_ui.h, THE SPRITES' DEPTH): the states, the format, the layer's bracket and the second issue's place after the mask and probe.
+        const D3D11_DEPTH_STENCIL_DESC dTest = edvr::mapui::depthStateDesc(false), dWrite = edvr::mapui::depthStateDesc(true);
+        D3D11_RASTERIZER_DESC gameRs{};
+        gameRs.CullMode = D3D11_CULL_BACK;
+        gameRs.ScissorEnable = TRUE;
+        const D3D11_RASTERIZER_DESC biasRs = edvr::mapui::depthRasterDesc(gameRs);
+        check(dTest.DepthEnable && dTest.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL && dTest.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO && !dTest.StencilEnable &&
+                  dWrite.DepthEnable && dWrite.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL && dWrite.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL && !dWrite.StencilEnable &&
+                  edvr::mapui::kDepthFormat == DXGI_FORMAT_D16_UNORM && edvr::mapui::kDepthBias == -4 && biasRs.DepthBias == -4 && biasRs.SlopeScaledDepthBias == 0.0f && biasRs.ScissorEnable && biasRs.CullMode == D3D11_CULL_BACK &&
+                  edvr::mapui::kPsSprite == 0x964221955A9E77E7ull && edvr::mapui::kPsCanvas == 0x855C469156AB997Full,
+              "GP22: the sprites' depth tests GREATER_EQUAL (the game's depth is reversed), writes only in the depth issue, has no stencil, is D16_UNORM, and the depth issue's rasterizer is the game's with a bias of -4");
+        check(layer.find("const bool mapDepthColour = which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && mapDepthTests(g_draw.family) && mapui::vrOpen();") != std::string::npos &&
+                  layer.find("if (mapDsv) layerDsv = mapDsv;") != std::string::npos && layer.find("const bool needsDs = !mapIssue && !mapDsv &&") != std::string::npos &&
+                  layer.find("vScreenOMSetDepthStencilStateRaw(ctx, g_draw.dsState, g_draw.dsRef);") != std::string::npos && layer.find("if (g_draw.rsStateSaved) ctx->RSSetState(g_draw.rsState);") != std::string::npos &&
+                  layer.find("if (g_draw.dsState) g_draw.dsState->Release();") != std::string::npos && layer.find("UiMapBegin uiLayerMapDepthBegin(") != std::string::npos &&
+                  layer.find("if (!mapui::vrOpen() && (g_eye[0].mapDepthTex || g_eye[1].mapDepthTex)) {") != std::string::npos && layer.find("e.mapDepthTex.Reset();") != std::string::npos &&
+                  layer.find("mapDepthWrites(g_draw.family)") != std::string::npos,
+              "GP23: the layer binds the sprite depth in the colour issue's depth place for the three map families, takes the game's depth-stencil and rasterizer states and puts them back at restore, lets the depth go once the map is shut, and writes it for the sprite and the canvas only");
+        const size_t depthCall = screen.find("if (mapui::vrOpen()) mapDepthSecondIssue(self, kind, count, instances, args, census);", second);
+        check(depthCall != std::string::npos && depthCall > mapCall && depthCall < screen.find("// Issue 140", second) && screen.find("uiLayerMapDepthBegin(self, &issue)") != std::string::npos &&
+                  ui.find("guarded(\"galaxy map depth issue restore\"") != std::string::npos && ui.find("vScreenPSSetShaderRaw(ctx, ps0, nullptr, 0);", ui.find("galaxy map depth issue restore")) != std::string::npos &&
+                  pointer.find("depth issues made") != std::string::npos && pointer.find("the depth never ran") != std::string::npos && pointer.find("textures made") != std::string::npos,
+              "GP24: the depth issue is the last second issue (after the write-back, the mask and the probe), swaps the pixel shader through the raw setter and puts the game's back after a fault; the 30 s line says the depth made, tested, issued and not made, and when it never ran");
     }
 
     UiDsState normalDs;  // depth tested, no write; no stencil

@@ -50,6 +50,8 @@ struct State {
     ComPtr<ID3D11VertexShader> probeVs;
     ComPtr<ID3D11PixelShader> probePs;
     bool probeTried = false;
+    ComPtr<ID3D11PixelShader> depthPs[2];   // the depth issue's stand-ins for kPsSprite and kPsCanvas
+    bool depthPsTried = false;
     ComPtr<ID3D11VertexShader> savedVs;
     bool bound = false;
     EyeRing eye[2];
@@ -88,6 +90,8 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     s.probeVs.Reset();
     s.probePs.Reset();
     s.probeTried = false;
+    for (auto& p : s.depthPs) p.Reset();
+    s.depthPsTried = false;
     s.savedVs.Reset();
     s.bound = false;
     s.camBuf.Reset();
@@ -278,6 +282,39 @@ void swapEnd(ID3D11DeviceContext* ctx) {
         vScreenVSSetShaderRaw(ctx, s.savedVs.Get(), nullptr, 0);
     }
     s.savedVs.Reset();
+}
+
+bool depthIssue(ID3D11DeviceContext* ctx, uint64_t ps, const DepthDraw& dd) {
+    if (!ctx || !dd.draw || (ps != kPsSprite && ps != kPsCanvas)) return false;
+    State& s = st();
+    FlatComputeInternalScope internal;
+    bindDevice(s, ctx);
+    if (!s.depthPsTried) {
+        s.depthPsTried = true;
+        s.depthPs[0].Attach(shaderSwapCreatePs(ctx, kMapDepthSpritePsBytecode, sizeof(kMapDepthSpritePsBytecode), "map_depth_sprite_ps", "galaxy map"));
+        s.depthPs[1].Attach(shaderSwapCreatePs(ctx, kMapDepthCanvasPsBytecode, sizeof(kMapDepthCanvasPsBytecode), "map_depth_canvas_ps", "galaxy map"));
+        if (!s.depthPs[0] || !s.depthPs[1]) {
+            g_depth.unavailable.fetch_add(1, std::memory_order_relaxed);
+            Log::get().note("galaxy map: the sprites' depth pixel shaders could not be made: the depth is not written, the sprites are drawn in the game's order");
+        }
+    }
+    ID3D11PixelShader* ours = s.depthPs[ps == kPsSprite ? 0 : 1].Get();
+    if (!ours) return false;
+    ID3D11PixelShader* ps0 = nullptr;
+    ctx->PSGetShader(&ps0, nullptr, nullptr);
+    const bool ran = guarded("galaxy map depth issue", [&] {
+        vScreenPSSetShaderRaw(ctx, ours, nullptr, 0);
+        dd.draw(dd.user);
+    });
+    // Whatever happened, the game's pixel shader goes back.
+    guarded("galaxy map depth issue restore", [&] { vScreenPSSetShaderRaw(ctx, ps0, nullptr, 0); });
+    if (ps0) ps0->Release();
+    if (!ran) {
+        g_depth.faults.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    g_depth.issued.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 void noteMaskIssue(uint64_t vs, int eye, uint64_t seq) {

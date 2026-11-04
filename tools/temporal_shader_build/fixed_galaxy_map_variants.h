@@ -10,4 +10,6 @@ static std::vector<Variant> galaxyMapVariants() { return {
     {"kMapProbeVsBytecode","map_probe_vs","main",nullptr,{},false,edvr::kMapProbeVS,"vs_5_0"},
     {"kMapProbePsBytecode","map_probe_ps","main",nullptr,{},false,edvr::kMapProbePS,"ps_5_0"},
     {"kMapRingVsBytecode","map_ring_vs","main",nullptr,{},false,edvr::kMapRingVS,"vs_5_0"},
+    {"kMapDepthSpritePsBytecode","map_depth_sprite_ps","main",nullptr,{},false,edvr::kMapDepthSpritePS,"ps_5_0"},
+    {"kMapDepthCanvasPsBytecode","map_depth_canvas_ps","main",nullptr,{},false,edvr::kMapDepthCanvasPS,"ps_5_0"},
 }; }

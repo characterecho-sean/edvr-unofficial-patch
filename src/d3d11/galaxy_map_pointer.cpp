@@ -214,15 +214,18 @@ void closeGate(State& s) noexcept {
 
 void thirtySecondLine(State& s, uint64_t now) {
     using namespace mapui;
-    uint64_t swapped[kSwapCount], swappedTotal = 0, maskIssued[3], maskTotal = 0;
+    uint64_t swapped[kSwapCount], swappedTotal = 0, maskIssued[2], maskTotal = 0;
     for (uint32_t i = 0; i < kSwapCount; ++i) { swapped[i] = g_counters.swapped[i].exchange(0, std::memory_order_relaxed); swappedTotal += swapped[i]; }
-    for (int i = 0; i < 3; ++i) { maskIssued[i] = g_counters.maskIssued[i].exchange(0, std::memory_order_relaxed); maskTotal += maskIssued[i]; }
+    for (int i = 0; i < 2; ++i) { maskIssued[i] = g_counters.maskIssued[i].exchange(0, std::memory_order_relaxed); maskTotal += maskIssued[i]; }
     const uint64_t noPose = g_counters.noPose.exchange(0, std::memory_order_relaxed), camWrites = g_counters.camWrites.exchange(0, std::memory_order_relaxed);
     const uint64_t arrowKept = g_counters.arrowKept.exchange(0, std::memory_order_relaxed), maskLate = g_counters.maskLate.exchange(0, std::memory_order_relaxed);
     const uint64_t probes = g_counters.probes.exchange(0, std::memory_order_relaxed), answered = g_counters.answered.exchange(0, std::memory_order_relaxed);
     const uint64_t framesOver = g_counters.framesOver.exchange(0, std::memory_order_relaxed), framesClear = g_counters.framesClear.exchange(0, std::memory_order_relaxed);
     const uint64_t ringFull = g_counters.ringFull.exchange(0, std::memory_order_relaxed), perFrameFull = g_counters.perFrameFull.exchange(0, std::memory_order_relaxed);
     const uint64_t probeFaults = g_counters.probeFaults.exchange(0, std::memory_order_relaxed), unavailable = g_counters.maskUnavailable.exchange(0, std::memory_order_relaxed);
+    const uint64_t depthMade = g_depth.made.exchange(0, std::memory_order_relaxed), depthUnavailable = g_depth.unavailable.exchange(0, std::memory_order_relaxed);
+    const uint64_t depthTested = g_depth.tested.exchange(0, std::memory_order_relaxed), depthIssued = g_depth.issued.exchange(0, std::memory_order_relaxed);
+    const uint64_t depthFaults = g_depth.faults.exchange(0, std::memory_order_relaxed);
     const uint64_t calls = s.pointerCalls.exchange(0, std::memory_order_relaxed);
     const uint64_t replaced = s.replaced.exchange(0, std::memory_order_relaxed);
     uint64_t passed[kPassCount], passedTotal = 0;
@@ -231,25 +234,29 @@ void thirtySecondLine(State& s, uint64_t now) {
     s.openedInWindow = s.open;
     s.lastLineMs = now;
     const uint64_t declinesTotal = ringFull + perFrameFull + probeFaults + unavailable + maskLate;
-    if (!wasOpen && !calls && !swappedTotal && !maskTotal && !probes && !answered && !declinesTotal) return;
+    if (!wasOpen && !calls && !swappedTotal && !maskTotal && !probes && !answered && !declinesTotal && !depthMade && !depthUnavailable && !depthTested && !depthIssued && !depthFaults) return;
     char reasons[256] = "";
     size_t n = 0;
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: Galaxy Map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
                     "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu (icons, labels and rings left the game's for want of the map camera's pose: %llu; its up written %llu times); "
-                    "panel draws issued into the mask: C4B4B3 %llu, B10B03 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
-                    "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu)",
+                    "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
+                    "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
+                    "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
                     s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
                     static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(noPose), static_cast<unsigned long long>(camWrites),
-                    static_cast<unsigned long long>(maskIssued[0]), static_cast<unsigned long long>(maskIssued[1]), static_cast<unsigned long long>(maskIssued[2]),
+                    static_cast<unsigned long long>(maskIssued[0]), static_cast<unsigned long long>(maskIssued[1]),
                     static_cast<unsigned long long>(probes), static_cast<unsigned long long>(answered), static_cast<unsigned long long>(framesOver),
                     static_cast<unsigned long long>(framesClear), over() ? "yes" : "no", static_cast<unsigned long long>(declinesTotal), static_cast<unsigned long long>(ringFull),
                     static_cast<unsigned long long>(perFrameFull), static_cast<unsigned long long>(probeFaults), static_cast<unsigned long long>(unavailable),
-                    static_cast<unsigned long long>(maskLate));
+                    static_cast<unsigned long long>(maskLate), static_cast<unsigned long long>(depthMade), static_cast<unsigned long long>(depthTested), static_cast<unsigned long long>(depthIssued),
+                    static_cast<unsigned long long>(depthFaults), static_cast<unsigned long long>(depthUnavailable),
+                    s.open && !depthTested && !depthIssued ? " (NO sprite was tested or written in this window: the depth never ran)"
+                    : depthTested && !depthIssued ? " (sprites were tested against a depth nothing wrote: the depth issues never ran)" : "");
 }
 
 } // namespace

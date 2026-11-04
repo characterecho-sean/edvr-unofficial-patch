@@ -4226,6 +4226,28 @@ void mapSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT inst
     }
 }
 
+// The VR Galaxy Map's sprite depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH): a sprite or canvas draw the layer took into the HDR layer, once more after the write-back, into the eye's
+// D16 depth only, with the pixel shader that clips its see-through parts (mapui::depthIssue). A no-op for any other draw; the depth that could not be made is counted and said where it failed.
+struct MapDepthDraw {
+    ID3D11DeviceContext* self;
+    char                 kind;
+    UINT                 count;
+    UINT                 instances;
+    const DrawArgs*      args;
+};
+void mapDepthDraw(void* user) {
+    const MapDepthDraw& d = *static_cast<const MapDepthDraw*>(user);
+    pureDrawReissue(d.self, d.kind, d.count, d.instances, *d.args);
+}
+void mapDepthSecondIssue(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args, GpuCensusScope& census) {
+    UiMapIssue issue;
+    if (uiLayerMapDepthBegin(self, &issue) != UiMapBegin::kBound) return;
+    census.markIssued();
+    MapDepthDraw draw{self, kind, count, instances, &args};
+    mapui::depthIssue(self, issue.ps, mapui::DepthDraw{&mapDepthDraw, &draw});
+    uiLayerEnd(self);
+}
+
 // A layered draw's second issues (ui_layer.h), each the game's draw exactly
 // as it was issued, while the verdict's own state is still bound: a multiply
 // once more into the layer's per-channel transmittance, and a depth or
@@ -4246,6 +4268,7 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
         uiLayerWriteBackEnd(self);
     }
     if (mapui::pointerOpen()) mapSecondIssues(self, kind, count, instances, args, census);
+    if (mapui::vrOpen()) mapDepthSecondIssue(self, kind, count, instances, args, census);
 }
 
 // Issue 140 (experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by eleven shader

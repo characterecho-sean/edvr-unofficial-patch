@@ -7,6 +7,10 @@
 //      game's own maths for the icon, the b span and the ring; negated rows keep the game's on-screen orientation; a ray within a degree of mapUp uses the eye's right and writes no NaN
 //   G4 the ring's transcription against its formula, random instances
 //   G5 the arrow's transcription: the game's maths for a positive scale, the eye origin taken out for a negative one
+//   G7 the icons point down at the grid: at the map camera's forward the icon's corners are the label's; away from it the icon's up in the image runs along the projected grid
+//      vertical (a stem's direction) and the label's does not; a ray within 16 degrees of the vertical takes the camera's up; no NaN at the vertical
+//   G8 the sprites' depth with the real states and pixel shaders: reversed depth (a nearer clip position is larger), a far quad drawn after a near one is rejected where the near one's
+//      alpha is at or over kMapDepthAlpha and shows where it is under, near over far in either order, a second quad in the same plane draws whole at D16, the bias is four steps farther
 //   G6 the probe on the GPU: a point at the arrow's tip is counted by an occlusion query where the mask is set, or set on both sides of it along an axis within reach, and not
 //      where it is clear or set on one side only, a record with a positive scale rasterizes nothing, and the layer's pixels do not change (write mask 0)
 // The same shaders against the GAME's bytecode (the vs_*.dxbc of the shader dump) are compared by hand, with a one-off program that includes this file (GALAXY_MAP_VS_TEST_NO_MAIN):
@@ -343,6 +347,13 @@ inline void refAxes(V3 ray, V3 up, V3 Fe, V3 Re, V3& F, V3& R, V3& U) {
     R = cl > 0.02 ? c * (1.0 / cl) : normalize(Re - F * dot(Re, F));
     U = cross(F, R);
 }
+// galaxy_map_vs.h mapIconUp, in double: the grid's vertical below 35 degrees from it, the camera's above 16, a smoothstep between
+inline V3 refIconUp(V3 ray, V3 gridUp, V3 cameraUp) {
+    const double a = dot(ray, ray) > 1e-12 ? std::fabs(dot(normalize(ray), gridUp)) : 0.0;
+    double t = std::fmin(1.0, std::fmax(0.0, (a - 0.82) / (0.96 - 0.82)));
+    t = t * t * (3.0 - 2.0 * t);
+    return normalize(gridUp * (1.0 - t) + cameraUp * t);
+}
 // mode 0: the icon (C31238), 1: the icon with b2 (12382D), 2: the arrow (4EF6DD, replaced)
 inline Ref reference(int mode, const Scene& sc, size_t i) {
     const Vert& vert = sc.verts[i];
@@ -383,7 +394,8 @@ inline Ref reference(int mode, const Scene& sc, size_t i) {
         const V3 Re = normalize(Rx - Fe * dot(Rx, Fe)), Ue = normalize(Ry - Fe * dot(Ry, Fe));
         const V3 mu{c.cb10[0][0], c.cb10[0][1], c.cb10[0][2]};
         const V3 up{dp3(c.cb0[9], mu), dp3(c.cb0[10], mu), dp3(c.cb0[11], mu)};
-        refAxes(pcf, up, Fe, Re, F, R, U);
+        const V3 gridUp{c.cb0[9][1], c.cb0[10][1], c.cb0[11][1]};   // dot(float4(0, 1, 0, 0), cb0[9..11])
+        refAxes(pcf, mode == 0 ? refIconUp(pcf, gridUp, up) : up, Fe, Re, F, R, U);   // the label (mode 1) keeps the camera's up
         sx = dot(r277, Re) < 0 ? -1.0 : 1.0;
         sy = dot(r278, Ue) < 0 ? -1.0 : 1.0;
     }
@@ -710,7 +722,6 @@ inline void runWorldStability(Rig& rig, const WorldProgs& w) {
     const Frame c{a.R, rodrigues(a.U, a.R, 0.2), rodrigues(a.F, a.R, 0.2)};
     const Frame eyes[3] = {a, b, c};
     const char* names[3] = {"the eye as it was", "yawed 0.5 rad", "pitched 0.2 rad"};
-    const V3 center{7, -20, 15};
     struct Kind { const char* name; bool ring; bool label; Q q; std::vector<Corner> corners; std::vector<std::array<double, 2>> bs; };
     const Q mq = mapCameraQ(), idq{0, 0, 0, 1};
     std::vector<Corner> quad, tri;
@@ -725,6 +736,8 @@ inline void runWorldStability(Rig& rig, const WorldProgs& w) {
         {"an identity-quaternion triangle spanned by b", false, false, idq, tri, {}},
         {"a ring", true, false, idq, {}, {{-2, -2}, {2, -2}, {-2, 2}, {2, 2}}},
     };
+    // two centres: 37 degrees from the vertical (the grid's up, fully) and 26 (inside the hand-over from the grid's up to the camera's)
+    for (const V3 center : {V3{7, -20, 15}, V3{10, -25, 6}})
     for (const Kind& k : kinds) {
         std::vector<V3> pos[3];
         double clipDelta = 0;
@@ -757,7 +770,7 @@ inline void runWorldStability(Rig& rig, const WorldProgs& w) {
             for (size_t i = 0; i < pos[0].size(); ++i) worst = std::fmax(worst, std::sqrt(dot(pos[e][i] - pos[0][i], pos[e][i] - pos[0][i])));
         // the ring's position is absolute (the eye at kCam), the icons' relative to the eye: the undo above is each shader's own frame, and both are fixed under the eye's turn
         char label[200];
-        std::snprintf(label, sizeof label, "G2.%s: world position moved by at most %.2e under %s and %s (the clip x moved by %.3f)", k.name, worst, names[1], names[2], clipDelta);
+        std::snprintf(label, sizeof label, "G2.%s, centre (%g, %g, %g): world position moved by at most %.2e under %s and %s (the clip x moved by %.3f)", k.name, center.x, center.y, center.z, worst, names[1], names[2], clipDelta);
         std::printf("%s\n", label);
         check(worst < 2e-4 && clipDelta > 1e-2, label);
     }
@@ -792,13 +805,22 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         std::snprintf(label, sizeof label, "G3.icon square-on: corners within %.2e of the game's maths (quaternion quantisation), top edge level to %.2e in NDC", worst, top);
         std::printf("%s\n", label);
         check(worst < 2e-3 && top < 1e-4, label);
+        // at the map camera's own forward the grid's up and the camera's give the same axes: the icon's corners are the label's
+        const std::vector<float> lab = run(rig, *w.label, w.ilLabel, sc);
+        double same = 0;
+        for (size_t i = 0; i < quad.size(); ++i)
+            for (int k = 0; k < 4; ++k) same = std::fmax(same, std::fabs(out[i * w.icon->outFloats + w.icon->posAt + k] - lab[i * w.label->outFloats + w.label->posAt + k]));
+        std::snprintf(label, sizeof label, "G7.forward: at the map camera's forward the icon's corners equal the label's to %.2e", same);
+        std::printf("%s\n", label);
+        check(same < 1e-4, label);
     }
     // (b) a general ray: the facing icon's top edge is level when the eye looks along the ray with its up in the plane of mapUp and the ray
     const V3 mapUp = normalize({0.1, 0.9, 0.2});
-    const V3 ray{7, -20, 15};
-    const Frame fr = frameAlong(ray, mapUp);
+    const V3 gridUp{0, 1, 0};
+    const V3 ray{7, -20, 15};   // 37 degrees from the vertical: the icons and rings are spanned on the grid's up here, the labels on the map camera's
+    const Frame fr = frameAlong(ray, mapUp), frg = frameAlong(ray, gridUp);
     {
-        const Consts cc = cleanEye(fr, kCam, mapUp, 0.02, 0.02);
+        const Consts cc = cleanEye(frg, kCam, mapUp, 0.02, 0.02);
         std::vector<Corner> quad;
         for (int sx = -1; sx <= 1; sx += 2)
             for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.0, 0.0});
@@ -807,14 +829,28 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         const double top = std::fabs(ndcY(&out[1 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[3 * w.icon->outFloats + w.icon->posAt]));
         const double bottom = std::fabs(ndcY(&out[0 * w.icon->outFloats + w.icon->posAt]) - ndcY(&out[2 * w.icon->outFloats + w.icon->posAt]));
         char label[200];
-        std::snprintf(label, sizeof label, "G3.icon level on a general ray: top edge %.2e and bottom edge %.2e in NDC", top, bottom);
+        std::snprintf(label, sizeof label, "G3.icon level on a general ray (eye up in the plane of the grid's up and the ray): top edge %.2e and bottom edge %.2e in NDC", top, bottom);
+        std::printf("%s\n", label);
+        check(top < 1e-4 && bottom < 1e-4, label);
+    }
+    {
+        const Consts cc = cleanEye(fr, kCam, mapUp, 0.02, 0.02);
+        std::vector<Corner> quad;
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.0, 0.0});
+        const Scene sc = iconScene(cc, mapCameraQ(), ray, 1.7f, quad);
+        const std::vector<float> out = run(rig, *w.label, w.ilLabel, sc);
+        const double top = std::fabs(ndcY(&out[1 * w.label->outFloats + w.label->posAt]) - ndcY(&out[3 * w.label->outFloats + w.label->posAt]));
+        const double bottom = std::fabs(ndcY(&out[0 * w.label->outFloats + w.label->posAt]) - ndcY(&out[2 * w.label->outFloats + w.label->posAt]));
+        char label[200];
+        std::snprintf(label, sizeof label, "G3.label level on a general ray (eye up in the plane of the map camera's up and the ray): top edge %.2e and bottom edge %.2e in NDC", top, bottom);
         std::printf("%s\n", label);
         check(top < 1e-4 && bottom < 1e-4, label);
     }
     // (c) the b span of an identity-quaternion triangle and (d) the ring: level, and the game's maths with rows 277 and 278 equal to the eye's axes; (e) the same with both rows negated
     for (int neg = 0; neg < 2; ++neg) {
         const double lx = neg ? -0.5 : 0.5, ly = neg ? -0.7 : 0.7;
-        const Consts cc = cleanEye(fr, kCam, mapUp, lx, ly);
+        const Consts cc = cleanEye(frg, kCam, mapUp, lx, ly);
         std::vector<Corner> tri;
         for (int sx = -1; sx <= 1; sx += 2)
             for (int sy = -1; sy <= 1; sy += 2) tri.push_back({{0, 0, 0}, 3.0 * sx, 3.0 * sy});
@@ -832,7 +868,7 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         std::printf("%s\n", label);
         check(worst < 2e-3 && top < 1e-4, label);
 
-        const Consts ccr = cleanEye(fr, kRingEye, mapUp, lx, ly);
+        const Consts ccr = cleanEye(frg, kRingEye, mapUp, lx, ly);
         const RingScene rs = ringScene(ccr, kRingEye + ray, {{-3, -3}, {-3, 3}, {3, -3}, {3, 3}}, 1.0f);
         const std::vector<float> ro = runRing(rig, *w.ring, w.ilRing, rs);
         double rworst = 0;
@@ -919,11 +955,12 @@ inline void runRingTests(Rig& rig, const WorldProgs& w) {
             const V3 Re = normalize(Rx - Fe * dot(Rx, Fe)), Ue = normalize(Ry - Fe * dot(Ry, Fe));
             V3 F, R, U;
             const V3 ray = v1 - E;
-            refAxes(ray, mapUp, Fe, Re, F, R, U);
+            const V3 ringUp = refIconUp(ray, {0, 1, 0}, mapUp);
+            refAxes(ray, ringUp, Fe, Re, F, R, U);
             const V3 r277{cc.cb1[277][0], cc.cb1[277][1], cc.cb1[277][2]}, r278{cc.cb1[278][0], cc.cb1[278][1], cc.cb1[278][2]};
             const double sx = dot(r277, Re) < 0 ? -1.0 : 1.0, sy = dot(r278, Ue) < 0 ? -1.0 : 1.0;
             const double bx = static_cast<double>(r.v0[2]) * r.v3[2], by = static_cast<double>(r.v0[3]) * r.v3[2];
-            if (std::sqrt(dot(cross(mapUp, normalize(ray)), cross(mapUp, normalize(ray)))) <= 0.02) ++fallbacks;
+            if (std::sqrt(dot(cross(ringUp, normalize(ray)), cross(ringUp, normalize(ray)))) <= 0.02) ++fallbacks;
             const V3 pos = v1 + R * (bx * sx * std::sqrt(dot(r277, r277))) + U * (by * sy * std::sqrt(dot(r278, r278)));
             double ref[20];
             ref[0] = r.v1[0]; ref[1] = r.v1[1]; ref[2] = r.v1[2]; ref[3] = r.v3[2];
@@ -1207,10 +1244,341 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
     }
 }
 
+
+// ---- G7: the icons point down at the grid -------------------------------------------------------------------------------------
+// The NDC of a point (relative to the eye) under the icons' projection, b1 [270..273].
+inline void projectNdc(const Consts& c, V3 p, double out[2]) {
+    double clip[4];
+    for (int r = 0; r < 4; ++r) clip[r] = p.x * c.cb1[270][r] + p.y * c.cb1[271][r] + p.z * c.cb1[272][r] + c.cb1[273][r];
+    out[0] = clip[0] / clip[3];
+    out[1] = clip[1] / clip[3];
+}
+// The angle between two image directions, in radians.
+inline double imageAngle(const double a[2], const double b[2]) {
+    const double c = (a[0] * b[0] + a[1] * b[1]) / (std::sqrt(a[0] * a[0] + a[1] * a[1]) * std::sqrt(b[0] * b[0] + b[1] * b[1]));
+    return std::acos(std::fmin(1.0, std::fmax(-1.0, c)));
+}
+inline void runIconUpTests(Rig& rig, const WorldProgs& w) {
+    const V3 mapUp = normalize({0, 0.70710678, 0.70710678});   // the map camera's up
+    const V3 grid{0, 1, 0};
+    // (a) away from the map camera's forward: the quad's up edge (the corners (0, 1, 0) and (0, -1, 0) of the record) runs along the grid vertical's image through its centre,
+    // which is a stem's direction; the label's up edge, on the camera's up, does not. The eye looks off to one side (a general eye, the record well off its axis).
+    const Frame eye = frameAlong({0.35, -0.4, 0.85}, {0.04, 1.0, 0.05});
+    const Consts cc = cleanEye(eye, kCam, mapUp, 0.02, 0.02);
+    for (const V3 center : {V3{-9, -20, 12}, V3{14, -28, 20}, V3{-20, -12, 25}}) {
+        const double cosV = std::fabs(center.y) / std::sqrt(dot(center, center));   // |cos| of the ray with the vertical: all three are under cos 35 degrees
+        const std::vector<Corner> edge = {{{0, 1, 0}, 0, 0}, {{0, -1, 0}, 0, 0}};
+        const Scene sc = iconScene(cc, mapCameraQ(), center, 1.0f, edge);
+        const std::vector<float> icon = run(rig, *w.icon, w.ilIcon, sc), label = run(rig, *w.label, w.ilLabel, sc);
+        auto edgeDir = [&](const std::vector<float>& out, const Prog& prog, double d[2]) {
+            const float* a = &out[0 * prog.outFloats + prog.posAt];
+            const float* b = &out[1 * prog.outFloats + prog.posAt];
+            d[0] = a[0] / a[3] - b[0] / b[3];
+            d[1] = a[1] / a[3] - b[1] / b[3];
+        };
+        double di[2], dl[2], ds[2], p0[2], p1[2];
+        edgeDir(icon, *w.icon, di);
+        edgeDir(label, *w.label, dl);
+        const V3 cen{sc.recs[0].p[0] - kCam.x, sc.recs[0].p[1] - kCam.y, sc.recs[0].p[2] - kCam.z};
+        projectNdc(cc, cen, p0);
+        projectNdc(cc, cen + grid * 0.5, p1);
+        ds[0] = p1[0] - p0[0];
+        ds[1] = p1[1] - p0[1];
+        const double aIcon = imageAngle(di, ds), aLabel = imageAngle(dl, ds);
+        char text[240];
+        std::snprintf(text, sizeof text, "G7.stem: ray (%g, %g, %g), |cos| with the vertical %.2f: the icon's up edge is %.2e rad from the grid vertical's image, the label's %.3f rad", center.x, center.y, center.z, cosV, aIcon, aLabel);
+        std::printf("%s\n", text);
+        check(cosV < 0.82 && aIcon < 1e-3 && aLabel > 0.02, text);
+    }
+    // (b) a ray within 16 degrees of the vertical (|cos| >= 0.96) takes the camera's up: the icon's corners are the label's; in between they hand over without a jump
+    for (const double deg : {0.0, 5.0, 10.0, 15.9}) {
+        const double r = deg * 3.14159265358979 / 180.0;
+        const V3 center{30.0 * std::sin(r) * 0.6, -30.0 * std::cos(r), 30.0 * std::sin(r) * 0.8};
+        const std::vector<Corner> quad = {{{1, 1, 0}, 0, 0}, {{1, -1, 0}, 0, 0}, {{-1, 1, 0}, 0, 0}, {{-1, -1, 0}, 0, 0}};
+        const Scene sc = iconScene(cc, mapCameraQ(), center, 1.5f, quad);
+        const std::vector<float> icon = run(rig, *w.icon, w.ilIcon, sc), label = run(rig, *w.label, w.ilLabel, sc);
+        double worst = 0;
+        for (size_t i = 0; i < quad.size(); ++i)
+            for (int k = 0; k < 4; ++k) worst = std::fmax(worst, std::fabs(icon[i * w.icon->outFloats + w.icon->posAt + k] - label[i * w.label->outFloats + w.label->posAt + k]));
+        char text[200];
+        std::snprintf(text, sizeof text, "G7.nadir: a ray %.1f degrees from the vertical uses the camera's up: icon corners equal the label's to %.2e, finite %d", deg, worst, allFinite(icon) ? 1 : 0);
+        std::printf("%s\n", text);
+        check(worst < 5e-3 && allFinite(icon), text);   // 5e-3: the smoothstep reaches 1 only at 16 degrees; 15.9 is a hair short of it
+    }
+    {
+        // the hand-over is continuous: the corner moves little between rays a quarter of a degree apart through the zone
+        double prev[4] = {0, 0, 0, 0}, jump = 0;
+        bool first = true;
+        for (double deg = 16.0; deg <= 36.0; deg += 0.25) {
+            const double r = deg * 3.14159265358979 / 180.0;
+            const V3 center{30.0 * std::sin(r) * 0.6, -30.0 * std::cos(r), 30.0 * std::sin(r) * 0.8};
+            const Scene sc = iconScene(cc, mapCameraQ(), center, 1.5f, {{{1, 1, 0}, 0, 0}});
+            const std::vector<float> o = run(rig, *w.icon, w.ilIcon, sc);
+            const float* q = &o[w.icon->posAt];
+            double cur[4];
+            for (int k = 0; k < 4; ++k) cur[k] = q[k] / q[3];
+            if (!first) jump = std::fmax(jump, std::fmax(std::fabs(cur[0] - prev[0]), std::fabs(cur[1] - prev[1])));
+            for (int k = 0; k < 4; ++k) prev[k] = cur[k];
+            first = false;
+        }
+        char text[200];
+        std::snprintf(text, sizeof text, "G7.handover: from 16 to 36 degrees, the largest NDC step of a corner between rays 0.25 degrees apart is %.2e", jump);
+        std::printf("%s\n", text);
+        check(jump < 0.02, text);
+    }
+}
+
+// ---- G8: the sprites' depth ---------------------------------------------------------------------------------------------------
+// The real states (mapui::depthStateDesc, depthRasterDesc), the real pixel shaders (kMapDepthSpritePS) and a D16 depth at 16x16, through WARP with the debug layer. The quads are the
+// game's clip positions: clip.z = 0.1 and clip.w the distance (a constant-distance quad), or a tilted plane for the same-plane case. A quad's colour issue tests the depth and writes
+// none (a colour pixel shader of the test's); its depth issue is the sprite's real depth pixel shader, no render target, depth write on, the biased rasterizer.
+inline void runDepthTests(Rig& rig) {
+    const UINT N = 16;
+    const char* vsText = R"HLSL(
+cbuffer Q : register(b0) { float4 rect; float4 zw; float4 col; };
+void main(uint id : SV_VERTEXID, out float2 uv : TEXCOORD0, out float4 pos : SV_POSITION)
+{
+    float2 c = float2(id & 1, id >> 1);
+    float2 xy = lerp(rect.xy, rect.zw, c);
+    float w = 1.0 / (zw.y + zw.z * xy.x + zw.w * xy.y);   // zw.y the constant 1/distance, zw.zw its tilt over the screen (a plane)
+    pos = float4(xy * w, zw.x, w);                          // clip.z = zw.x (0.1), clip.w the distance
+    uv = float2((xy.x + 1.0) * 0.5, 0.5);
+}
+)HLSL";
+    const char* colourPs = R"HLSL(
+cbuffer Q : register(b0) { float4 rect; float4 zw; float4 col; };
+float4 main(float2 uv : TEXCOORD0) : SV_TARGET { return col; }
+)HLSL";
+    const std::vector<uint8_t> vsCode = compile(vsText, "vs_5_0"), colourCode = compile(colourPs, "ps_5_0");
+    const std::vector<uint8_t> spriteCode = compile(edvr::kMapDepthSpritePS, "ps_5_0"), canvasCode = compile(edvr::kMapDepthCanvasPS, "ps_5_0");
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> colourPsO, spritePs, canvasPs;
+    hr(rig.dev->CreateVertexShader(vsCode.data(), vsCode.size(), nullptr, &vs), "depth test vs");
+    hr(rig.dev->CreatePixelShader(colourCode.data(), colourCode.size(), nullptr, &colourPsO), "depth test colour ps");
+    hr(rig.dev->CreatePixelShader(spriteCode.data(), spriteCode.size(), nullptr, &spritePs), "sprite depth ps");
+    hr(rig.dev->CreatePixelShader(canvasCode.data(), canvasCode.size(), nullptr, &canvasPs), "canvas depth ps");
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = N;
+    td.MipLevels = td.ArraySize = 1;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> colour, depth;
+    hr(rig.dev->CreateTexture2D(&td, nullptr, &colour), "depth test colour");
+    td.Format = DXGI_FORMAT_R16_TYPELESS;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    hr(rig.dev->CreateTexture2D(&td, nullptr, &depth), "depth test depth");
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    hr(rig.dev->CreateRenderTargetView(colour.Get(), nullptr, &rtv), "depth test rtv");
+    D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+    dvd.Format = edvr::mapui::kDepthFormat;
+    dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    hr(rig.dev->CreateDepthStencilView(depth.Get(), &dvd, &dsv), "depth test dsv");
+
+    ComPtr<ID3D11DepthStencilState> testOnly, testWrite;
+    const D3D11_DEPTH_STENCIL_DESC d0 = edvr::mapui::depthStateDesc(false), d1 = edvr::mapui::depthStateDesc(true);
+    hr(rig.dev->CreateDepthStencilState(&d0, &testOnly), "ds test");
+    hr(rig.dev->CreateDepthStencilState(&d1, &testWrite), "ds write");
+    D3D11_RASTERIZER_DESC game{};   // the game's: solid, no cull, depth clip
+    game.FillMode = D3D11_FILL_SOLID;
+    game.CullMode = D3D11_CULL_NONE;
+    game.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rsGame, rsBias;
+    const D3D11_RASTERIZER_DESC biased = edvr::mapui::depthRasterDesc(game);
+    hr(rig.dev->CreateRasterizerState(&game, &rsGame), "rs game");
+    hr(rig.dev->CreateRasterizerState(&biased, &rsBias), "rs bias");
+    D3D11_SAMPLER_DESC sd{};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    ComPtr<ID3D11SamplerState> samp;
+    hr(rig.dev->CreateSamplerState(&sd, &samp), "sampler");
+    const D3D11_BLEND_DESC noColour = edvr::mapui::probeBlendDesc();
+    ComPtr<ID3D11BlendState> bsNone;
+    D3D11_BLEND_DESC opaque{};
+    opaque.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ComPtr<ID3D11BlendState> bsOpaque;
+    hr(rig.dev->CreateBlendState(&noColour, &bsNone), "bs none");
+    hr(rig.dev->CreateBlendState(&opaque, &bsOpaque), "bs opaque");
+
+    struct Quad { float x0, y0, x1, y1; float invD, tx, ty; float col[3]; uint8_t a0, a1; bool canvas; };
+    auto alphaTex = [&](uint8_t a0, uint8_t a1) {
+        const uint8_t px[8] = {255, 255, 255, a0, 255, 255, 255, a1};   // a 2x1 texture: the alpha of the left and right half
+        D3D11_TEXTURE2D_DESC t{};
+        t.Width = 2; t.Height = 1; t.MipLevels = t.ArraySize = 1; t.SampleDesc.Count = 1; t.Usage = D3D11_USAGE_DEFAULT; t.Format = DXGI_FORMAT_R8G8B8A8_UNORM; t.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init{px, 8, 0};
+        ComPtr<ID3D11Texture2D> tex;
+        hr(rig.dev->CreateTexture2D(&t, &init, &tex), "alpha tex");
+        ComPtr<ID3D11ShaderResourceView> srv;
+        hr(rig.dev->CreateShaderResourceView(tex.Get(), nullptr, &srv), "alpha srv");
+        return srv;
+    };
+    float cb2Data[8] = {1, 1, 1, 1, 1, 1, 1, 1};   // cb2[1].w = 1: the sprite's own alpha multiplier
+    ComPtr<ID3D11Buffer> cb2 = makeBuf(rig, cb2Data, sizeof cb2Data, D3D11_BIND_CONSTANT_BUFFER);
+    const D3D11_VIEWPORT vp{0, 0, static_cast<float>(N), static_cast<float>(N), 0, 1};
+    // one quad: the colour issue (test, no write), then the depth issue (the sprite's depth shader, write, biased); `withBias` false uses the game's rasterizer for the depth issue
+    auto drawQuad = [&](const Quad& q, bool depthIssue, bool withBias) {
+        const float cbv[12] = {q.x0, q.y0, q.x1, q.y1, 0.1f, q.invD, q.tx, q.ty, q.col[0], q.col[1], q.col[2], 1.0f};
+        ComPtr<ID3D11Buffer> cb0 = makeBuf(rig, cbv, sizeof cbv, D3D11_BIND_CONSTANT_BUFFER);
+        ComPtr<ID3D11ShaderResourceView> tex = alphaTex(q.a0, q.a1);
+        rig.ctx->IASetInputLayout(nullptr);
+        rig.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        rig.ctx->RSSetViewports(1, &vp);
+        rig.ctx->VSSetShader(vs.Get(), nullptr, 0);
+        rig.ctx->VSSetConstantBuffers(0, 1, cb0.GetAddressOf());
+        ID3D11Buffer* pcb[3] = {cb0.Get(), nullptr, cb2.Get()};
+        rig.ctx->PSSetConstantBuffers(0, 3, pcb);
+        rig.ctx->PSSetShaderResources(0, 1, tex.GetAddressOf());
+        rig.ctx->PSSetSamplers(0, 1, samp.GetAddressOf());
+        if (!depthIssue) {
+            ID3D11RenderTargetView* rt[1] = {rtv.Get()};
+            rig.ctx->OMSetRenderTargets(1, rt, dsv.Get());
+            rig.ctx->OMSetDepthStencilState(testOnly.Get(), 0);
+            rig.ctx->RSSetState(rsGame.Get());
+            rig.ctx->OMSetBlendState(bsOpaque.Get(), nullptr, 0xFFFFFFFFu);
+            rig.ctx->PSSetShader(colourPsO.Get(), nullptr, 0);
+        } else {
+            rig.ctx->OMSetRenderTargets(0, nullptr, dsv.Get());
+            rig.ctx->OMSetDepthStencilState(testWrite.Get(), 0);
+            rig.ctx->RSSetState(withBias ? rsBias.Get() : rsGame.Get());
+            rig.ctx->OMSetBlendState(bsNone.Get(), nullptr, 0xFFFFFFFFu);
+            rig.ctx->PSSetShader(q.canvas ? canvasPs.Get() : spritePs.Get(), nullptr, 0);
+        }
+        rig.ctx->Draw(4, 0);
+        ID3D11ShaderResourceView* none[1] = {nullptr};
+        rig.ctx->PSSetShaderResources(0, 1, none);
+        rig.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    };
+    auto clearAll = [&] {
+        const float zero[4] = {0, 0, 0, 0};
+        rig.ctx->ClearRenderTargetView(rtv.Get(), zero);
+        rig.ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+    };
+    auto readColour = [&](std::vector<uint8_t>& out) {
+        D3D11_TEXTURE2D_DESC st{};
+        colour->GetDesc(&st);
+        st.Usage = D3D11_USAGE_STAGING; st.BindFlags = 0; st.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> stage;
+        hr(rig.dev->CreateTexture2D(&st, nullptr, &stage), "colour staging");
+        rig.ctx->CopyResource(stage.Get(), colour.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        hr(rig.ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "map colour");
+        out.assign(N * N * 4, 0);
+        for (UINT y = 0; y < N; ++y) std::memcpy(&out[y * N * 4], static_cast<const uint8_t*>(m.pData) + y * m.RowPitch, N * 4);
+        rig.ctx->Unmap(stage.Get(), 0);
+    };
+    auto readDepth = [&](std::vector<uint16_t>& out) {
+        D3D11_TEXTURE2D_DESC st{};
+        depth->GetDesc(&st);
+        st.Usage = D3D11_USAGE_STAGING; st.BindFlags = 0; st.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> stage;
+        hr(rig.dev->CreateTexture2D(&st, nullptr, &stage), "depth staging");
+        rig.ctx->CopyResource(stage.Get(), depth.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        hr(rig.ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "map depth");
+        out.assign(N * N, 0);
+        for (UINT y = 0; y < N; ++y) std::memcpy(&out[y * N], static_cast<const uint8_t*>(m.pData) + y * m.RowPitch, N * 2);
+        rig.ctx->Unmap(stage.Get(), 0);
+    };
+    // colour ids: the pixel's red channel is the quad's id
+    const float NEAR_ID[3] = {1.0f, 0, 0}, FAR_ID[3] = {0, 1.0f, 0}, A_ID[3] = {1.0f, 0, 0}, B_ID[3] = {0, 0, 1.0f};
+    auto id = [&](const std::vector<uint8_t>& c, UINT x, UINT y) -> char {
+        const uint8_t* p = &c[(y * N + x) * 4];
+        if (p[0] > 200 && p[1] < 50 && p[2] < 50) return 'N';   // red
+        if (p[1] > 200 && p[0] < 50 && p[2] < 50) return 'F';   // green
+        if (p[2] > 200 && p[0] < 50 && p[1] < 50) return 'B';   // blue
+        return p[3] == 0 ? '.' : '?';
+    };
+    auto pair = [&](const Quad& first, const Quad& second, std::vector<uint8_t>& c) {
+        clearAll();
+        drawQuad(first, false, true);
+        drawQuad(first, true, true);
+        drawQuad(second, false, true);
+        drawQuad(second, true, true);
+        readColour(c);
+    };
+    // distances 5 and 10: invD 0.2 and 0.1
+    Quad nearQ{-1, -1, 1, 1, 0.2f, 0, 0, {NEAR_ID[0], NEAR_ID[1], NEAR_ID[2]}, 255, 255, false};
+    Quad farQ{-1, -1, 1, 1, 0.1f, 0, 0, {FAR_ID[0], FAR_ID[1], FAR_ID[2]}, 255, 255, false};
+    std::vector<uint8_t> c;
+    auto count = [&](char ch, UINT x0, UINT x1) { unsigned n = 0; for (UINT y = 0; y < N; ++y) for (UINT x = x0; x < x1; ++x) n += id(c, x, y) == ch; return n; };
+    char text[240];
+
+    // reversed depth: a nearer clip position (clip.w 5 against 10, clip.z 0.1) has the larger depth
+    {
+        std::vector<uint16_t> d5, d10;
+        clearAll(); drawQuad(nearQ, true, false); readDepth(d5);
+        clearAll(); drawQuad(farQ, true, false); readDepth(d10);
+        std::snprintf(text, sizeof text, "G8.reversed: clip.z 0.1 over clip.w 5 stores %u and over 10 stores %u of 65535 (0.1 / w: %.1f and %.1f): the nearer is the larger", d5[N * 8 + 8], d10[N * 8 + 8], 0.02 * 65535.0, 0.01 * 65535.0);
+        std::printf("%s\n", text);
+        check(d5[N * 8 + 8] > d10[N * 8 + 8] && std::abs(static_cast<int>(d5[N * 8 + 8]) - static_cast<int>(std::lround(0.02 * 65535.0))) <= 1 &&
+                  std::abs(static_cast<int>(d10[N * 8 + 8]) - static_cast<int>(std::lround(0.01 * 65535.0))) <= 1, text);
+        // the bias: the same quad written with the biased rasterizer is kDepthBias steps farther
+        std::vector<uint16_t> db;
+        clearAll(); drawQuad(nearQ, true, true); readDepth(db);
+        const int steps = static_cast<int>(d5[N * 8 + 8]) - static_cast<int>(db[N * 8 + 8]);
+        std::snprintf(text, sizeof text, "G8.bias: the biased rasterizer writes %d steps farther than the game's (kDepthBias %d)", steps, edvr::mapui::kDepthBias);
+        std::printf("%s\n", text);
+        check(steps == -edvr::mapui::kDepthBias, text);
+    }
+    // near first, then far: the far quad is rejected everywhere the near one is solid
+    pair(nearQ, farQ, c);
+    std::snprintf(text, sizeof text, "G8.near-then-far: near %u far %u of 256", count('N', 0, N), count('F', 0, N));
+    std::printf("%s\n", text);
+    check(count('N', 0, N) == N * N && count('F', 0, N) == 0, text);
+    // far first, then near: near over far
+    pair(farQ, nearQ, c);
+    std::snprintf(text, sizeof text, "G8.far-then-near: near %u far %u of 256", count('N', 0, N), count('F', 0, N));
+    std::printf("%s\n", text);
+    check(count('N', 0, N) == N * N && count('F', 0, N) == 0, text);
+    // the near quad half see-through (alpha 0.8 left, 0.1 right): the far quad shows on the right half only
+    {
+        Quad nearHalf = nearQ; nearHalf.a0 = 204; nearHalf.a1 = 26;
+        pair(nearHalf, farQ, c);
+        std::snprintf(text, sizeof text, "G8.alpha-split: left half near %u far %u, right half near %u far %u (of 128 each)", count('N', 0, N / 2), count('F', 0, N / 2), count('N', N / 2, N), count('F', N / 2, N));
+        std::printf("%s\n", text);
+        check(count('N', 0, N / 2) == N * N / 2 && count('F', 0, N / 2) == 0 && count('F', N / 2, N) == N * N / 2, text);
+        // at and under the threshold: 77/255 = 0.302 is over kMapDepthAlpha (0.3), 76/255 = 0.298 under it
+        Quad nearEdge = nearQ; nearEdge.a0 = 77; nearEdge.a1 = 76;
+        pair(nearEdge, farQ, c);
+        std::snprintf(text, sizeof text, "G8.threshold: alpha 77/255 blocks the far quad (far %u of 128 on the left), 76/255 does not (far %u of 128 on the right)", count('F', 0, N / 2), count('F', N / 2, N));
+        std::printf("%s\n", text);
+        check(count('F', 0, N / 2) == 0 && count('F', N / 2, N) == N * N / 2, text);
+        // the canvas's shader (alpha is t0.a alone) does the same
+        Quad nearCanvas = nearHalf; nearCanvas.canvas = true;
+        pair(nearCanvas, farQ, c);
+        std::snprintf(text, sizeof text, "G8.canvas: the canvas shader blocks on the left (far %u of 128) and shows on the right (far %u of 128)", count('F', 0, N / 2), count('F', N / 2, N));
+        std::printf("%s\n", text);
+        check(count('F', 0, N / 2) == 0 && count('F', N / 2, N) == N * N / 2, text);
+    }
+    // two quads in the same plane, the second larger: it draws whole, no hole where the first was (the plane is tilted, so each quad interpolates its own depths)
+    {
+        Quad a{-0.5f, -0.5f, 0.5f, 0.5f, 0.12f, 0.03f, 0.02f, {A_ID[0], A_ID[1], A_ID[2]}, 255, 255, false};
+        Quad b{-1.0f, -1.0f, 1.0f, 1.0f, 0.12f, 0.03f, 0.02f, {B_ID[0], B_ID[1], B_ID[2]}, 255, 255, false};
+        pair(a, b, c);
+        const unsigned nb = count('B', 0, N), na = count('N', 0, N);
+        std::snprintf(text, sizeof text, "G8.same-plane: the larger second quad covers %u of 256 pixels, the first quad %u (no hole at D16)", nb, na);
+        std::printf("%s\n", text);
+        check(nb == N * N && na == 0, text);
+        // and the other order: the smaller second quad draws over the first in its own rectangle
+        pair(b, a, c);
+        const unsigned inner = [&] { unsigned n = 0; for (UINT y = 4; y < 12; ++y) for (UINT x = 4; x < 12; ++x) n += id(c, x, y) == 'N'; return n; }();
+        std::snprintf(text, sizeof text, "G8.same-plane-small: the smaller second quad covers %u of its 64 pixels", inner);
+        std::printf("%s\n", text);
+        check(inner == 64, text);
+    }
+}
+
 inline int runAll() {
     Rig rig;
     std::printf("galaxy_map_vs_test: debug layer %s\n", rig.debugLayer ? "ON" : "not installed (messages not checked)");
     const std::vector<uint8_t> icon = compile(edvr::kMapIconFacingVS, "vs_5_0"), iconUv = compile(edvr::kMapIconUvFacingVS, "vs_5_0"), arrow = compile(edvr::kMapArrowDepthVS, "vs_5_0");
+    check(!edvr::mapui::isPanelVs(edvr::mapui::kVsHoverHalo) && edvr::mapui::isPanelVs(edvr::mapui::kVsPanelA) && edvr::mapui::isPanelVs(edvr::mapui::kVsPanelC) &&
+              edvr::mapui::panelIndex(edvr::mapui::kVsHoverHalo) == -1 && edvr::mapui::panelIndex(edvr::mapui::kVsPanelC) == 1,
+          "G9: B10B032BDFD46700 (the hover halo) is not in the mask set; C4B4B3 and 5DAD41 are");
     const std::vector<uint8_t> probeVs = compile(edvr::kMapProbeVS, "vs_5_0"), probePs = compile(edvr::kMapProbePS, "ps_5_0");
     const std::vector<uint8_t> ring = compile(edvr::kMapRingVS, "vs_5_0");
     const Prog pIcon = makeProg(rig, icon), pIconUv = makeProg(rig, iconUv), pArrow = makeProg(rig, arrow);
@@ -1225,8 +1593,10 @@ inline int runAll() {
     runWorldStability(rig, wp);
     runSquareOn(rig, wp);
     runRingTests(rig, wp);
+    runIconUpTests(rig, wp);
     runArrowTests(rig, pArrow, ilArrow.Get());
     runProbeTest(rig, probeVs, probePs);
+    runDepthTests(rig);
     check(rig.problems() == 0, "the debug layer reported nothing");
     std::printf("galaxy_map_vs_test: %u checks, %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
@@ -1239,7 +1609,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("galaxy_map_vs_test: G0-G6, WARP with the debug layer; reads nothing, writes nothing");
+        std::puts("galaxy_map_vs_test: G0-G9, WARP with the debug layer; reads nothing, writes nothing");
         return 0;
     }
     if (mode != "--self-test") return 2;
