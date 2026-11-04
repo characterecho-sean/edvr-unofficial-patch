@@ -12,9 +12,9 @@
 //   vehicle_rig_pose_frame / vehicle_rig_pose     at "flat pixels: copied" (Shift+NumLock): each ship and cockpit record's pose bits, joinable to the pool by exact bits; capped
 //   vehicle_rig: ... (every 30 s)                 "no target seen", or the counts: targets, faults caught, vtable mismatches, absurd counts, and the refresh's cost
 //
-// THE VEHICLE FRAME (the flat profile's use of this, issue 186). The emit tap records the pose of the current COCKPIT RIG's root record (index 0) at the emit, keyed by the present-frame clock the
-// emit folds into its markers, in a small lock-free ring (vehicle_frame.h). The flat resolve takes this frame's entry and last frame's (vehicleRigFrameTake); the root's sphere is read when the rig is
-// first seen. A build that is not 334925, a hook that could not be installed, or no cockpit rig mean no frame, and the resolve is the old path.
+// THE VEHICLE FRAME (the flat profile's use of this, issue 186). The emit tap records the pose of each recent COCKPIT RIG's root record (index 0) at the emit, keyed by the present-frame clock the
+// emit folds into its markers, in a small lock-free ring per rig (vehicle_frame.h, which says why more than one). The flat resolve takes this frame's entry and last frame's from the newest rig that
+// has both (vehicleRigFrameTake); a root's sphere is read when its rig is first seen. A build that is not 334925, a hook that could not be installed, or no such rig mean no frame, and the resolve is the old path.
 #include "vehicle_rig.h"
 
 #include <windows.h>
@@ -166,44 +166,43 @@ struct RigMemo {
 };
 RigMemo g_memo[vr::kRigs];
 
-// ---- the vehicle frame: the current cockpit rig's root, its pose ring and sphere -----------------------------------------------------------------------------------------------
-vframe::Ring g_frameRing;
-std::atomic<uint64_t> g_cockpitRoot{0};          // the root record's address (the first element of the cockpit rig's array); 0: no cockpit rig is ready
-std::atomic<uint32_t> g_cockpitGen{0};           // bumped whenever the cockpit rig, its handle or its record array changes (a vehicle change, a rearranged array)
-std::atomic<uint32_t> g_sphereBits[4] = {};      // the root's sphere in its own frame: centre xyz, radius, as float bits
-std::atomic<uint64_t> g_rigNameWords[6] = {};    // the rig's name, 48 bytes
-uint64_t g_cockpitKey = 0;                       // refresh-owned
-uint64_t g_cockpitUnreadKey = 0;                 // refresh-owned: the rig whose root sphere last failed to read, and when
-int64_t g_cockpitUnreadAt = 0;
-std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
-// TEMPORARY (issue 186): which path the cockpit rig takes (VehicleFrameWindow).
-std::atomic<uint64_t> g_cockpitBytes{0};         // the size of the rig's record array
-std::atomic<uint64_t> g_lastRigRoot{0};          // the root of the rig tracked before this one
-uint64_t g_publishedRoot = 0;                    // refresh-owned
-uint32_t g_lastPoseWords[5] = {};                // refresh-owned
-std::atomic<uint64_t> g_rootDirect{0}, g_rootPrimary{0}, g_rigDirect{0}, g_rigPrimary{0}, g_lastRigRootEmits{0}, g_poseReads{0}, g_poseMoved{0};
+// ---- the vehicle frame: the recent cockpit rigs, each with its root, pose ring and sphere ---------------------------------------------------------------------------------------
+// vframe::kRecentRigs says why more than one. Slots are a circle, g_cockpitNewest the newest; a new rig takes the oldest's slot.
+struct CockpitRig {
+    vframe::Ring ring;
+    std::atomic<uint64_t> root{0};            // the root record's address (the first element of the rig's array); 0: not ready
+    std::atomic<uint32_t> gen{0};             // moved whenever this slot's rig, its handle or its record array changes (0: never used)
+    std::atomic<uint32_t> sphereBits[4] = {}; // the root's sphere in its own frame: centre xyz, radius, as float bits
+    std::atomic<uint64_t> nameWords[6] = {};  // the rig's name, 48 bytes
+    // refresh-owned
+    uint64_t h = 0, E = 0, I = 0;             // the rig; I == 0: an empty slot
+    uint64_t key = 0;
+    uint64_t unreadKey = 0;                   // the rig and array whose root sphere last failed to read, and when
+    int64_t unreadAt = 0;
+};
+CockpitRig g_cockpits[vframe::kRecentRigs];
+std::atomic<uint32_t> g_cockpitNewest{0};
+std::atomic<uint32_t> g_cockpitGenNext{0};
+std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameFromOlder{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
 
 // The old root goes before the generation moves, and the tap reads the generation before the root: a tap holding the new generation can only see no root or the new one, so one
 // generation's poses all come from one rig. The new root goes last, so a reader that sees it sees the whole sphere.
-void retireCockpit() noexcept {
-    g_cockpitRoot.store(0, std::memory_order_release);
-    g_cockpitGen.fetch_add(1, std::memory_order_acq_rel);
+void retireCockpit(CockpitRig& c) noexcept {
+    c.root.store(0, std::memory_order_release);
+    c.gen.store(g_cockpitGenNext.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_release);
 }
 
-void publishCockpit(uint64_t root, uint64_t bytes, const float sphere[4], const char* name) noexcept {
-    retireCockpit();
+void publishCockpit(CockpitRig& c, uint64_t root, const float sphere[4], const char* name) noexcept {
+    retireCockpit(c);
     for (int i = 0; i < 4; ++i) {
         uint32_t b = 0;
         std::memcpy(&b, &sphere[i], 4);
-        g_sphereBits[i].store(b, std::memory_order_relaxed);
+        c.sphereBits[i].store(b, std::memory_order_relaxed);
     }
     uint64_t w[6] = {};
     if (name) std::memcpy(w, name, strnlen(name, 47));
-    for (int i = 0; i < 6; ++i) g_rigNameWords[i].store(w[i], std::memory_order_relaxed);
-    if (g_publishedRoot && g_publishedRoot != root) g_lastRigRoot.store(g_publishedRoot, std::memory_order_relaxed);
-    g_publishedRoot = root;
-    g_cockpitBytes.store(bytes, std::memory_order_relaxed);
-    g_cockpitRoot.store(root, std::memory_order_release);
+    for (int i = 0; i < 6; ++i) c.nameWords[i].store(w[i], std::memory_order_relaxed);
+    c.root.store(root, std::memory_order_release);
 }
 
 uint64_t mixKey(uint64_t h, uint64_t e, uint64_t i) noexcept { return (h * 0x9E3779B97F4A7C15ull) ^ (e * 0xC2B2AE3D27D4EB4Full) ^ (i * 0x165667B19E3779F9ull); }
@@ -226,28 +225,59 @@ void logReady(const Slot& s, const vr::RigRead& rr) noexcept {
     Log::get().note("vehicle_rig ready role=%s rigName=\"%s\" records=%llu rootSphere=%s%s", roleOf(s), info.haveName ? info.name : "?", static_cast<unsigned long long>(rr.count), sphere, radii);
 }
 
-// A cockpit rig that is ready: when it is a different rig (or its array moved) read its root's sphere once and publish the root.
-void trackCockpit(const vr::RigRead& rr, uint64_t key) noexcept {
-    const uint64_t ck = key ^ (rr.lo * 0x9E3779B97F4A7C15ull) ^ (rr.count * 0xC2B2AE3D27D4EB4Full);
-    if (ck == g_cockpitKey && g_cockpitRoot.load(std::memory_order_relaxed) == rr.lo) return;
+// A cockpit rig that is ready: when its array is a new one read its root's sphere once and publish the root.
+void trackCockpit(CockpitRig& c, const vr::RigRead& rr) noexcept {
+    const uint64_t ck = mixKey(c.h, c.E, c.I) ^ (rr.lo * 0x9E3779B97F4A7C15ull) ^ (rr.count * 0xC2B2AE3D27D4EB4Full);
+    if (ck == c.key && c.root.load(std::memory_order_relaxed) == rr.lo) return;
     // A rig whose root sphere did not read is tried again once a second and reported once, not on every refresh.
     const int64_t now = ticks();
-    if (ck == g_cockpitUnreadKey && now - g_cockpitUnreadAt < g_ticksPerSec) return;
-    g_cockpitKey = ck;
+    if (ck == c.unreadKey && now - c.unreadAt < g_ticksPerSec) return;
+    c.key = ck;
     vr::RigInfo info;
     vr::describeRig(g_mem, rr, false, &info);
     if (!info.haveRoot || !std::isfinite(info.rootSphere[3]) || !(info.rootSphere[3] > 0) || !std::isfinite(info.rootSphere[0]) || !std::isfinite(info.rootSphere[1]) ||
         !std::isfinite(info.rootSphere[2])) {
-        retireCockpit();
-        const bool first = ck != g_cockpitUnreadKey;
-        g_cockpitUnreadKey = ck;
-        g_cockpitUnreadAt = now;
+        retireCockpit(c);
+        const bool first = ck != c.unreadKey;
+        c.unreadKey = ck;
+        c.unreadAt = now;
         if (first && g_statusLines.fetch_add(1, std::memory_order_relaxed) < kStatusLineCap)
             Log::get().note("vehicle_rig: the cockpit rig's root sphere could not be read (or is not a sphere); no vehicle frame for this rig until it can");
         return;
     }
-    g_cockpitUnreadKey = 0;
-    publishCockpit(rr.lo, rr.count * vr::kRecordStride, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
+    c.unreadKey = 0;
+    publishCockpit(c, rr.lo, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
+}
+
+// The rig the target names joins the recent list, taking the oldest's slot; a rig already there stays where it is.
+void adoptCockpit(const Slot& s) noexcept {
+    for (const CockpitRig& c : g_cockpits)
+        if (c.I == s.I && c.h == s.h && c.E == s.E) return;
+    const uint32_t slot = (g_cockpitNewest.load(std::memory_order_relaxed) + 1) % vframe::kRecentRigs;
+    CockpitRig& c = g_cockpits[slot];
+    retireCockpit(c);
+    c.h = s.h;
+    c.E = s.E;
+    c.I = s.I;
+    c.key = 0;
+    c.unreadKey = 0;
+    g_cockpitNewest.store(slot, std::memory_order_release);
+}
+
+// Every recent rig is re-read: one that is ready keeps its root current, one that is not has no root, and one that is gone for good leaves the list.
+void refreshCockpits() noexcept {
+    for (CockpitRig& c : g_cockpits) {
+        if (!c.I) continue;
+        vr::RigRead rr;
+        const vr::Status st = vr::readRig(g_mem, c.h, c.E, c.I, g_rigVtable, &rr);
+        if (st == vr::Status::kOk) {
+            trackCockpit(c, rr);
+            continue;
+        }
+        if (c.root.load(std::memory_order_relaxed)) retireCockpit(c);
+        c.key = 0;
+        if (st == vr::Status::kEntityGone || st == vr::Status::kNoHandle || st == vr::Status::kFault || st == vr::Status::kVtableMismatch) c.h = c.E = c.I = 0;
+    }
 }
 
 bool wrongRead(vr::Status st) noexcept {
@@ -260,7 +290,6 @@ void refresh() noexcept {
     Slot slots[vr::kRigs];
     uint32_t n = 0;
     if (readTracked(slots, &n)) {
-        bool cockpitReady = false;
         for (uint32_t i = 0; i < n; ++i) {
             vr::RigRead rr;
             const vr::Status st = vr::readRig(g_mem, slots[i].h, slots[i].E, slots[i].I, g_rigVtable, &rr);
@@ -280,31 +309,13 @@ void refresh() noexcept {
                         Log::get().note("vehicle_rig rig role=%s status=%s", roleOf(slots[i]), vr::statusName(st));
                 }
             }
-            if (st == vr::Status::kOk) {
-                if (slots[i].role == vr::kCockpit && !cockpitReady) {
-                    cockpitReady = true;
-                    trackCockpit(rr, key);
-                }
-                if (!memo.readyLogged) {
-                    memo.readyLogged = true;
-                    logReady(slots[i], rr);
-                }
+            if (st == vr::Status::kOk && !memo.readyLogged) {
+                memo.readyLogged = true;
+                logReady(slots[i], rr);
             }
+            if (slots[i].role == vr::kCockpit) adoptCockpit(slots[i]);
         }
-        if (!cockpitReady && g_cockpitRoot.load(std::memory_order_relaxed) != 0) {
-            g_cockpitKey = 0;
-            retireCockpit();
-        }
-        // TEMPORARY (issue 186): is the root's pose changing in memory, whatever path emits it?
-        const uint64_t root = g_cockpitRoot.load(std::memory_order_relaxed);
-        uint32_t words[5] = {};
-        if (root && g_mem.read(words, static_cast<uintptr_t>(root + vr::kRecPos), 12) && g_mem.read(words + 3, static_cast<uintptr_t>(root + vr::kRecQuat), 8)) {
-            g_poseReads.fetch_add(1, std::memory_order_relaxed);
-            if (std::memcmp(words, g_lastPoseWords, sizeof(words)) != 0) {
-                g_poseMoved.fetch_add(1, std::memory_order_relaxed);
-                std::memcpy(g_lastPoseWords, words, sizeof(words));
-            }
-        }
+        refreshCockpits();
     }
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
     g_refreshTicks.fetch_add(static_cast<uint64_t>(ticks() - t0), std::memory_order_relaxed);
@@ -312,25 +323,16 @@ void refresh() noexcept {
 }
 
 // ---- the emit tap (job threads, only while the game's evaluator gate is open for engine motion) -----------------------------------------------------------------------
-// The record's own canonical pose either producer reads, stamped when it is the cockpit rig's root; TEMPORARY (issue 186): the counts of which path took the rig.
-void takeRecord(uintptr_t record, std::atomic<uint64_t>& rootCount, std::atomic<uint64_t>& rigCount) noexcept {
-    const uint32_t gen = g_cockpitGen.load(std::memory_order_acquire);   // before the root: retireCockpit
-    const uint64_t root = g_cockpitRoot.load(std::memory_order_acquire);
-    if (root && record == root) {
-        // The cockpit rig's root, right after the game's own emit: its pose is what the pool holds. Keyed by the clock the emit folds into its markers.
-        rootCount.fetch_add(1, std::memory_order_relaxed);
+void emitTap(uintptr_t record) noexcept {
+    for (CockpitRig& c : g_cockpits) {
+        const uint32_t gen = c.gen.load(std::memory_order_acquire);   // before the root: retireCockpit
+        if (c.root.load(std::memory_order_acquire) != record || !record) continue;
+        // A recent cockpit rig's root, right after the game's own emit: its pose is what the pool holds. Keyed by the clock the emit folds into its markers.
         vframe::Pose pose;
         if (g_mem.read(pose.pos, static_cast<uintptr_t>(record + vr::kRecPos), 12) && g_mem.read(pose.quat, static_cast<uintptr_t>(record + vr::kRecQuat), 8))
-            g_frameRing.record(engineVelocityPresentClock(), gen, pose);
+            c.ring.record(engineVelocityPresentClock(), gen, pose);
+        break;
     }
-    if (root && record >= root && record - root < g_cockpitBytes.load(std::memory_order_relaxed)) rigCount.fetch_add(1, std::memory_order_relaxed);
-    if (record == g_lastRigRoot.load(std::memory_order_relaxed)) g_lastRigRootEmits.fetch_add(1, std::memory_order_relaxed);
-}
-
-void primaryTap(uintptr_t record) noexcept { takeRecord(record, g_rootPrimary, g_rigPrimary); }
-
-void emitTap(uintptr_t record) noexcept {
-    takeRecord(record, g_rootDirect, g_rigDirect);
     thread_local uint32_t t_calls = 0;
     if ((++t_calls & 15u) == 0) {
         // Once a frame, roughly: the first tap to find the last refresh older than 4 ms takes it.
@@ -565,7 +567,6 @@ void vehicleRigInstall() {
     }
     g_live.store(true, std::memory_order_release);
     kinematicEvalSetVehicleRigTap(&emitTap);
-    kinematicEvalSetVehicleRigPrimaryTap(&primaryTap);
     g_vehicleRigCaptureTap.store(&captureTap, std::memory_order_release);
     g_gate.store(1, std::memory_order_release);
     Log::get().note("vehicle_rig: installed: SetTarget (0x1096640, found by signature at 0x%llX) forwards first and returns the game's result unchanged; reads only (SEH-guarded reads, no writes into the "
@@ -576,16 +577,33 @@ void vehicleRigInstall() {
 vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out) {
     g_frameAsked.fetch_add(1, std::memory_order_relaxed);
     vframe::Why why = vframe::Why::kMissing;
-    if (g_live.load(std::memory_order_acquire) && g_cockpitRoot.load(std::memory_order_acquire)) {
-        const uint32_t gen = g_cockpitGen.load(std::memory_order_acquire);
-        why = vframe::select(g_frameRing, stamp, gen, &out->frame);
+    if (g_live.load(std::memory_order_acquire)) {
+        // Newest first, the ones with a root; the generation before the root, as the tap reads them.
+        const vframe::Ring* rings[vframe::kRecentRigs] = {};
+        uint32_t gens[vframe::kRecentRigs] = {};
+        CockpitRig* rigs[vframe::kRecentRigs] = {};
+        uint32_t n = 0;
+        const uint32_t newest = g_cockpitNewest.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < vframe::kRecentRigs; ++i) {
+            CockpitRig& c = g_cockpits[(newest + vframe::kRecentRigs - i) % vframe::kRecentRigs];
+            const uint32_t gen = c.gen.load(std::memory_order_acquire);
+            if (!c.root.load(std::memory_order_acquire)) continue;
+            rings[n] = &c.ring;
+            gens[n] = gen;
+            rigs[n] = &c;
+            ++n;
+        }
+        uint32_t chosen = 0;
+        why = vframe::selectRecent(rings, gens, n, stamp, &out->frame, &chosen);
         if (why == vframe::Why::kOk) {
+            CockpitRig& c = *rigs[chosen];
             for (int i = 0; i < 4; ++i) {
-                const uint32_t b = g_sphereBits[i].load(std::memory_order_relaxed);
+                const uint32_t b = c.sphereBits[i].load(std::memory_order_relaxed);
                 std::memcpy(&out->sphere[i], &b, 4);
             }
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (g_cockpitGen.load(std::memory_order_acquire) != gen || !g_cockpitRoot.load(std::memory_order_acquire)) why = vframe::Why::kChanged;
+            if (c.gen.load(std::memory_order_acquire) != gens[chosen] || !c.root.load(std::memory_order_acquire)) why = vframe::Why::kChanged;
+            else if (chosen != 0) g_frameFromOlder.fetch_add(1, std::memory_order_relaxed);
         }
     }
     switch (why) {
@@ -603,21 +621,22 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out) {
     out->missing = g_frameMissing.exchange(0, std::memory_order_relaxed);
     out->notAdjacent = g_frameNotAdjacent.exchange(0, std::memory_order_relaxed);
     out->changed = g_frameChanged.exchange(0, std::memory_order_relaxed);
-    out->rootDirect = g_rootDirect.exchange(0, std::memory_order_relaxed);
-    out->rootPrimary = g_rootPrimary.exchange(0, std::memory_order_relaxed);
-    out->rigDirect = g_rigDirect.exchange(0, std::memory_order_relaxed);
-    out->rigPrimary = g_rigPrimary.exchange(0, std::memory_order_relaxed);
-    out->lastRigRoot = g_lastRigRootEmits.exchange(0, std::memory_order_relaxed);
-    out->poseReads = g_poseReads.exchange(0, std::memory_order_relaxed);
-    out->poseMoved = g_poseMoved.exchange(0, std::memory_order_relaxed);
+    out->fromOlder = g_frameFromOlder.exchange(0, std::memory_order_relaxed);
     out->live = g_live.load(std::memory_order_acquire);
-    uint64_t w[6];
-    for (int i = 0; i < 6; ++i) w[i] = g_rigNameWords[i].load(std::memory_order_relaxed);
-    std::memcpy(out->name, w, 48);
-    out->name[47] = 0;
-    uint32_t b = g_sphereBits[3].load(std::memory_order_relaxed);
-    std::memcpy(&out->sphereRadius, &b, 4);
-    out->rigKnown = g_cockpitRoot.load(std::memory_order_relaxed) != 0;
+    // The newest rig that has a root.
+    const uint32_t newest = g_cockpitNewest.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < vframe::kRecentRigs; ++i) {
+        const CockpitRig& c = g_cockpits[(newest + vframe::kRecentRigs - i) % vframe::kRecentRigs];
+        if (!c.root.load(std::memory_order_relaxed)) continue;
+        uint64_t w[6];
+        for (int k = 0; k < 6; ++k) w[k] = c.nameWords[k].load(std::memory_order_relaxed);
+        std::memcpy(out->name, w, 48);
+        out->name[47] = 0;
+        const uint32_t b = c.sphereBits[3].load(std::memory_order_relaxed);
+        std::memcpy(&out->sphereRadius, &b, 4);
+        out->rigKnown = true;
+        break;
+    }
 }
 
 void vehicleRigPoll(uint64_t nowMs) {

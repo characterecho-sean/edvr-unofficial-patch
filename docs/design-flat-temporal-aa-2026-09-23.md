@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** FLOWN on `v0.22.0-rc.6-62-gef407e9c`, on a branch, not merged: the live-switch family loss, the capture key and the vehicle frame (near pixels ride the cockpit rig root's pose, read from the game, where last frame's depth confirms it). Sean: cockpits held up in a Cobra, Vulture, Sidewinder and an SRV, on foot good, stars gone (by eye). The temporary key is gone and the frame is permanent (`687e51c1`). Open: flat-to-VR live unflown (the gate before merging), pink on the body in the FSD countdown and the jump (cause open, three candidates in the last entry), the frame missing for stretches of normal space, no near check in a resolve without a frame, the Options flicker (its own issue). The capture stall (#193) has its cause and a fix, not flown. Temporary instrument, off before merging: `flat vehicle frame 5s` with its path counts, back to a 30 s line, and the refusal census following the view. See the entry "2026-11-04, flight 11:32", last in this file.
+- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** FLOWN on `v0.22.0-rc.6-62-gef407e9c`, on a branch, not merged: the live-switch family loss, the capture key and the vehicle frame (near pixels ride the cockpit rig root's pose, read from the game, where last frame's depth confirms it). Sean: cockpits held up in a Cobra, Vulture, Sidewinder and an SRV, on foot good, stars gone (by eye). The temporary key is gone and the frame is permanent (`687e51c1`). Pink on the body in the FSD countdown and the tunnel: cause found (the camera target names the next instance's rig ahead of it being drawn), fix built, not flown. The capture stall (#193) is fixed and flown. Open: flat-to-VR live unflown (the gate before merging), the Options flicker (its own issue). Temporary instrument, off before merging: `flat vehicle frame 5s`, back to a 30 s line, and the refusal census following the view. See the entry "2026-11-04, flight 12:03", last in this file.
 - **State (2026-10-29, a tool in hand over bare terrain, issue #145):** a tester's `edvr_gfx_20261029_180522` (v0.22.0-rc.3, Steam, DLSS, copy route): on foot, scanner out, panned to bare terrain: 238 frames refused `hdr-camera-changed`, the tool's glow pass (025B4B9F/46F92DC7, first-person camera) against the terrain's first camera. The October pool-less admission needs no source and no first-person draw, and a tool is both (`sources=1 first-person=3`; `overlays-without-named-world=0` all flight). Fix `ebd8c755` on branch `claude/aa-terrain-disengagement-793fa4`: admit when the target's first camera is the last world's and the drawing camera is not. FLOWN OK 2026-10-29 16:29 on Steam (`edvr_gfx_20261029_162800`): 1,478 frames on the path, all treated and selected source-free on the world camera, zero `hdr-camera-changed`. Last entry.
 - **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
@@ -19090,3 +19090,40 @@ This corrects the 10:00 entry: the jump is not simply where the frame goes missi
 4. The rig is evaluated with no emit. Signature: all counts 0, `root-pose[moved]` above 0.
 
 **Temporary, off before merging:** `flat vehicle frame` every 5 s with the path counts in it, and the refusal census running whenever the view is on, so the colours are counted without a key press.
+
+## 2026-11-04, flight 12:03: the pink is the rig the target names ahead of time (issue #186), cause found
+
+Flight `edvr_gfx_20261104_120340` (`v0.22.0-rc.6-67-g0b55c935`, `--expect-build HEAD` passed), launched flat, a Sidewinder, Motion source view on. The journal has no jump events, so this is a scenario outside its record. Sean: the body went pink twice, in the 4 second countdown to supercruise from normal space and in the hyperspace tunnel, and he pressed Shift+NumLock each time. Both captures worked (`byte-cap`, copied 3, 12:07:53 and 12:08:55), which is the #193 fix flown: the route did not stop.
+
+**Measured, 5 s windows.** Rig names `Sidewinder_Cockpit` throughout.
+
+| Window ends | Stage | `asked` | `with-frame` | `root[direct]` | `last-rig-root` | Pink share of pixels | Vehicle frame kept | Camera step max |
+|---|---|---|---|---|---|---|---|---|
+| 12:07:51 | normal space | 450 | 450 | 450 | 0 | 0.1% | 12.4% | 2.9 m |
+| 12:07:56 | target #3 at 12:07:51.5, countdown | 413 | 41 | 42 | 368 | 4.6% | 0.2% | 51.8 m |
+| 12:08:01 | supercruise | 426 | 404 | 405 | 21 | 0.4% | 3.0% | rebase |
+| 12:08:41 | target #4 at 12:08:33.4, still supercruise | 450 | 0 | 0 | 450 | 0.03% | 0.0% | .0007 m |
+| 12:08:56 | target #5 at 12:08:54.0 | 417 | 38 | 40 | 373 | 3.5% | 0.3% | rebase |
+| 12:09:01 | tunnel | 447 | 0 | 0 | 447 | 8.7% | 0.0% | 6.2 m |
+| 12:09:06 | tunnel | 450 | 0 | 0 | 450 | 7.6% | 0.0% | 2.5 m |
+| 12:09:11 | arrival | 447 | 383 | 384 | 63 | 1.3% | 10.0% | rebase |
+
+Across the flight 3,313 resolves had no frame and `last-rig-root` counted 3,299. `root[primary]` and `rig[primary]` were 0 in every window. `rig[direct]` is 16 records per frame with the root and 0 without it.
+
+ruled out: the primary producer carrying the rig, because `root[primary]` and `rig[primary]` are 0 in all windows.
+
+ruled out: the root being culled while the rest of the rig draws, because `rig[direct]` falls to 0 with it.
+
+ruled out: a rig evaluated with no emit, because the earlier rig's root emits on those frames.
+
+**Cause.** `SetTarget` names the rig of the instance coming next, seconds before it is drawn, and the rig named before it goes on being drawn until then. Between the two, the frame looked only at the named rig and found nothing. The switch to the named rig is at the instance change: #3 starts emitting about half a second before 12:07:56, and #4 about half a second before #5 is named. The stretches of ordinary flight with no frame in flight 11:32 may be the same thing, but that log has no count of the earlier rig, and this flight has no supercruise exit, so that part is unmeasured. In 11:32 the missing stretch after `SupercruiseExit` 11:36:33 begins nine seconds before the next target change, so it needs more than this one step back, or another cause.
+
+So candidate 2 of the 11:32 entry, and candidate 3 of the missing frame. Candidate 1, the body rocking against the rig, is not what this is.
+
+**The captures agree.** In both, the refused pixels are 10% to 12% of the screen, all within 10 m (median .62 m), along the bottom from y 531 and 573 down, which is the body. Their depth at the same screen position last frame is within .5% for 97% (countdown) and 91% (tunnel), so they ride the camera, and a frame's answer would pass the depth check. Near pixels that were kept had a 95th percentile motion of 600 and 520 pixels: those are kind-0 pixels on the unchecked camera term, the hole the review named, at the speed of the ship. They are the same missing frame.
+
+Why the pink needs the camera to move: at 12:08:41 the frame is equally missing, but the camera step is .0007 m, so the camera term stands and pink is .03%. In the tunnel the step is up to 6.2 m and the camera term cannot explain a body that rides along.
+
+**Fix, built, not flown.** The four most recent cockpit rigs are kept, each with its own ring, and the newest with this frame's entry and last frame's answers (`vframe::selectRecent`). In a steady state that is the rig the target names, even with another of them on screen, like a parked ship seen from an SRV. A rig leaves the list when its entity goes or a newer one takes its slot. The primary tap and the path counts are gone again. `flat vehicle frame 5s` now reads `with-frame` and `from-older-rig`.
+
+**What the next flight should show.** In the same two moments: `with-frame` near `asked`, `from-older-rig` near `asked`, the pink share under 1%, and `vehicle-frame=` around 10%. Pink that stays with the frame present would be candidate 1 after all. It should also drop out of supercruise and fly on for 20 s: `no-frame[missing]` there says whether four rigs cover the 11:32 stretches.

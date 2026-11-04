@@ -193,6 +193,27 @@ inline void ringAndGateTests() {
         check(!old.read(93, &gone) && select(old, 101, 7, &frame) == Why::kMissing, "vehicle ring: a slot reused by a stamp eight frames on does not answer for the old one");
     }
     {
+        // The recent rigs: the target names a rig ahead of it being drawn, so the newest with both stamps answers.
+        Ring named, drawn;
+        const Ring* rings[2] = {&named, &drawn};
+        const uint32_t gens[2] = {8, 7};
+        uint32_t chosen = 99;
+        Frame recent;
+        check(selectRecent(rings, gens, 0, 101, &recent, &chosen) == Why::kMissing && selectRecent(rings, gens, 2, 101, &recent, &chosen) == Why::kMissing, "recent rigs: no rig, or none that emitted, is missing");
+        drawn.record(100, 7, pose(100)); drawn.record(101, 7, pose(101));
+        check(selectRecent(rings, gens, 2, 101, &recent, &chosen) == Why::kOk && chosen == 1 && recent.now.pos[0] == 101 && recent.prev.pos[0] == 100,
+              "recent rigs: the named rig emits nothing and the earlier one is drawn: the earlier one answers");
+        named.record(101, 8, pose(201));
+        check(selectRecent(rings, gens, 2, 101, &recent, &chosen) == Why::kOk && chosen == 1 && recent.now.pos[0] == 101, "recent rigs: the named rig's first frame has no last frame, so the earlier one still answers");
+        named.record(102, 8, pose(202));
+        check(selectRecent(rings, gens, 2, 102, &recent, &chosen) == Why::kOk && chosen == 0 && recent.now.pos[0] == 202 && recent.prev.pos[0] == 201, "recent rigs: from its second frame the named rig answers");
+        drawn.record(103, 7, pose(103)); drawn.record(102, 7, pose(102)); named.record(103, 8, pose(203));
+        check(selectRecent(rings, gens, 2, 103, &recent, &chosen) == Why::kOk && chosen == 0 && recent.now.pos[0] == 203, "recent rigs: both emitting, a parked ship on screen, the newest answers");
+        const uint32_t retired[2] = {9, 7};
+        check(selectRecent(rings, retired, 2, 103, &recent, &chosen) == Why::kOk && chosen == 1 && recent.now.pos[0] == 103, "recent rigs: entries from before a slot's rig changed do not answer, the next rig does");
+        check(selectRecent(rings, retired, 1, 103, &recent, &chosen) == Why::kChanged, "recent rigs: with nothing else to answer the reason survives");
+    }
+    {
         // A torn read never returns mixed words: a writer rewrites one slot with all five words equal while a reader asks for it.
         Ring ring;
         std::atomic<bool> stop{false};

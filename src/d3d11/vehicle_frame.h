@@ -102,6 +102,24 @@ inline Why select(const Ring& ring, uint32_t stamp, uint32_t generationNow, Fram
     return Why::kOk;
 }
 
+// THE RECENT RIGS. The camera target names the vehicle of the instance coming next, ahead of it being drawn: in the countdown to supercruise and through the hyperspace tunnel the rig it names
+// emits nothing while the one named before it goes on emitting (flight 12:03: 3,313 resolves had no frame, and the earlier rig's root emitted on 3,299 frames in those windows), and the cockpit in those
+// seconds rides the earlier one. So a few are kept, each with its own ring, and the newest with this frame's entry and last frame's answers. In a steady state that is the one the target names.
+constexpr uint32_t kRecentRigs = 4;
+// rings[0..count) and generations[0..count) newest first. kOk: `out` is the answer and `chosen` its index. Otherwise the most telling reason: missing only when no rig had more to say.
+inline Why selectRecent(const Ring* const* rings, const uint32_t* generations, uint32_t count, uint32_t stamp, Frame* out, uint32_t* chosen) {
+    Why best = Why::kMissing;
+    for (uint32_t i = 0; i < count; ++i) {
+        const Why w = select(*rings[i], stamp, generations[i], out);
+        if (w == Why::kOk) {
+            *chosen = i;
+            return w;
+        }
+        if (best == Why::kMissing) best = w;
+    }
+    return best;
+}
+
 // The gate. `known` is the journal watcher's answer for the flat profile (journalFlatOnFoot's return), `onFoot` its value. The vehicle frame is used only in a vehicle the journal says
 // so of, with a frame in hand.
 enum class Gate : uint8_t { kOn = 0, kNoStatus, kOnFoot };

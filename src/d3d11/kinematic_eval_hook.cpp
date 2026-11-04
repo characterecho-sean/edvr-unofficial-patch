@@ -62,7 +62,6 @@ alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 alignas(8) std::atomic<EnginePrimaryEmitObserverFn> primaryEmitObserver{nullptr};
 // The vehicle rig's tap (kinematic_eval_hook.h): read-only, no want on the gate.
 alignas(8) std::atomic<VehicleRigEmitTapFn> vehicleRigTap{nullptr};
-alignas(8) std::atomic<VehicleRigEmitTapFn> vehicleRigPrimaryTap{nullptr};
 alignas(8) std::atomic<uintptr_t> primaryGate{0};
 std::atomic<uintptr_t> g_primaryReturn{0};
 std::atomic<const char*> g_primaryStatus{"not requested"};
@@ -692,10 +691,6 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
         // can create a replacement claim.
         if(observe)observe(eligible?identity:engine_velocity_emit::PrimaryIdentity{},owner,model+0x40,position,quaternion,
                            complete?before:0,complete?after:0);
-        if(returned && eligible) {
-            const auto rigTap=vehicleRigPrimaryTap.load(std::memory_order_acquire);
-            if(rigTap)rigTap(identity.record);
-        }
         if(!complete || !eligible)g_primaryUnowned.fetch_add(1,std::memory_order_relaxed);
         emcpu::leave(engineMotion);
     }
@@ -1381,9 +1376,6 @@ void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
 }
 void kinematicEvalSetVehicleRigTap(VehicleRigEmitTapFn fn) noexcept {
     vehicleRigTap.store(fn,std::memory_order_release);
-}
-void kinematicEvalSetVehicleRigPrimaryTap(VehicleRigEmitTapFn fn) noexcept {
-    vehicleRigPrimaryTap.store(fn,std::memory_order_release);
 }
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn fn) noexcept {
     primaryEmitObserver.store(fn,std::memory_order_release);

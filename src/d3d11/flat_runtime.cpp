@@ -4838,15 +4838,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root), zeros included, so a gate that never opens cannot hide.
             // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
             // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
-            // TEMPORARY (issue 186, the frame missing in normal space and the jump): every 5 s, with which path the cockpit rig took (VehicleFrameWindow).
+            // TEMPORARY (issue 186, the frame across the countdown and the tunnel): every 5 s, back to 30 s before merging.
             VehicleFrameWindow vw;
             vehicleRigFrameWindow(&vw);
-            Log::get().note("flat vehicle frame 5s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu] "
-                            "root[direct=%llu primary=%llu] rig[direct=%llu primary=%llu] last-rig-root=%llu root-pose[reads=%llu moved=%llu]%s",
-                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,
+            Log::get().note("flat vehicle frame 5s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,(unsigned long long)vw.fromOlder,
                 (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
-                (unsigned long long)vw.rootDirect,(unsigned long long)vw.rootPrimary,(unsigned long long)vw.rigDirect,(unsigned long long)vw.rigPrimary,
-                (unsigned long long)vw.lastRigRoot,(unsigned long long)vw.poseReads,(unsigned long long)vw.poseMoved,
                 !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
         }
         {

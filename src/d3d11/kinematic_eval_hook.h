@@ -63,8 +63,6 @@ const char* kinematicEvalClearStatus() noexcept;
 // the tap, and with engine motion off the tap is never called. Null = off: one atomic load.
 using VehicleRigEmitTapFn = void (*)(uintptr_t record) noexcept;
 void kinematicEvalSetVehicleRigTap(VehicleRigEmitTapFn fn) noexcept;
-// The same record through the primary producer (42B6D50), with its identity proven by 42B7040's bracket: its pose is the same canonical +0x170/+0x17C. Same rules as the tap above.
-void kinematicEvalSetVehicleRigPrimaryTap(VehicleRigEmitTapFn fn) noexcept;
 // The emit's own want on the shared hook set: validates the executable and
 // installs the same hooks as the probe's attach, then holds the gate open
 // for the direct-producer relay. Same return vocabulary as

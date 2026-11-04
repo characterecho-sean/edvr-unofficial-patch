@@ -25,12 +25,9 @@ struct VehicleFrameRead {
 };
 vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out);
 // The counts since the last call (they restart), for the flat runtime's 5 s line; the tracked rig's name and root sphere radius.
-// TEMPORARY (issue 186): which path the cockpit rig took. rootDirect, rootPrimary: its root through FUN_144315A20 and through 42B6D50, the two that fill the ring. rigDirect, rigPrimary: any
-// record of its array through each (the root included). lastRigRoot: the root of the rig tracked before this one, still emitting. poseReads, poseMoved: the root's pose read from
-// memory at each refresh, and how many reads differed from the one before, so an evaluated rig that no path emits shows.
+// fromOlder: of `with`, the frames that came from a rig older than the one the camera target names now (the countdown and the tunnel, vframe::kRecentRigs).
 struct VehicleFrameWindow {
-    uint64_t asked = 0, with = 0, missing = 0, notAdjacent = 0, changed = 0;
-    uint64_t rootDirect = 0, rootPrimary = 0, rigDirect = 0, rigPrimary = 0, lastRigRoot = 0, poseReads = 0, poseMoved = 0;
+    uint64_t asked = 0, with = 0, fromOlder = 0, missing = 0, notAdjacent = 0, changed = 0;
     bool live = false, rigKnown = false;
     float sphereRadius = 0;
     char name[48] = {};
