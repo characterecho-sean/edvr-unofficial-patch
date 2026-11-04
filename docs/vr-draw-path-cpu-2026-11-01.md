@@ -45,7 +45,7 @@
   S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
   Closing build (#194, `a7941eb0`): S1 and the temporary lines out. Flown
   2026-11-04: no regression; F95c's NEVER APPLIED is the scene, not the build.
-  Arc total about 1.4-1.75 ms a frame. Next: fly the merge (PR #166).
+  Arc total about 1.4-1.75 ms a frame. Merged unflown; next flight at the end.
 - **Superseded (item 1, #163):** removed at review. `main`'s F196 and F207 want
   the depth probe on foot with AA off, so its size test could never decide. Its
   figures came from a tree without them.
@@ -3435,8 +3435,9 @@ The maintainer's review of `40dfb5df` requested changes. Done here:
 - **Dead code:** `drawReissuesFor`'s `ended` parameter, `perfMonitorFrameNo`.
 - **Corrections:** the total above is net of build 2's rises; decompiler detail
   taken out of this doc's later review sections (the maintainer holds the
-  private analysis repository, and this text stays in the branch's older commits
-  `639904db`, `e998a360` and `cfa5e806`).
+  private analysis repository). The text stays in the branch's older commits,
+  which merge unsquashed because this doc cites them; `main`'s own docs already
+  carry the same function names.
 - **S2 is a behaviour change, approved, and not exact by construction**
   (see "Build 6: one interest mask"): the flights' 0 disagreements are evidence
   for it, not proof.
@@ -3447,11 +3448,18 @@ The maintainer's review of `40dfb5df` requested changes. Done here:
   config shuts the gate.
 
 A second read of the merge for changed premises (Opus, git objects only, not
-run; `native_on_foot.cpp` and `ui_layer.cpp` by keyword) found no other. S2's key
-against upstream's VR overlay guard is inference: the guard's t3 binds change
-the pointer, so they should move the key, and the 0 disagreements predate it.
+run; `native_on_foot.cpp` and `ui_layer.cpp` by keyword) found no other.
 
-**Before merging, fly the merge:** `--expect-build` and `--health`, then:
+S2's key against upstream's VR overlay guard holds, read from the code. The
+guard's t3 sets run under `FlatComputeInternalScope`, so
+`hookedPSSetShaderResources` returns before `bindingSet`: neither the shadow nor
+the key hears them. The classifiers read the shadow, which keeps the game's t3
+throughout. A game re-set of the same pointer still moves the slot's own
+generation, which is what the guard and `cache.srv3` compare. The flights' 0
+disagreements predate the guard, so this rests on the read, not on a count.
+
+**This merge is not flown.** The maintainer chose to merge on a green build. The
+next flight, with `--expect-build` and `--health`, should cover:
 - DLAA, on foot, weapon drawn: ADS, scope lens, markers, weapon readout (the
   arc's concourse flights cannot draw a weapon).
 - AA off, the same; no AA-off flight is recorded since build 1.
