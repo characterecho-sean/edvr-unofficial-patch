@@ -103,6 +103,14 @@ int main() {
     }
     check(edvr::temporalModeEnabledFor("XeSS", true) && edvr::temporalModeEnabledFor("XeSS", false),
           "XeSS producers arm in flat and VR, including mixed-case ini value");
+    // The VR map gate: the Galaxy Map, System Map and Orrery (GuiFocus 6, 7, 8) and nothing else; an unknown focus (on foot, a menu) is no map.
+    check(edvr::temporalMapOpen(true, 6) && edvr::temporalMapOpen(true, 7) && edvr::temporalMapOpen(true, 8),
+          "the Galaxy Map, the System Map and the Orrery are maps");
+    check(!edvr::temporalMapOpen(true, 0) && !edvr::temporalMapOpen(true, 5) && !edvr::temporalMapOpen(true, 9) &&
+          !edvr::temporalMapOpen(true, 10) && !edvr::temporalMapOpen(true, 4294967295u),
+          "no focus, station services, the Full System Scanner and anything past the orrery are not maps");
+    check(!edvr::temporalMapOpen(false, 6) && !edvr::temporalMapOpen(false, 0),
+          "a focus the journal cannot state is never a map, whatever the stale value");
     check(edvr::temporalEngineFor("XeSS") == edvr::TemporalEngine::Intel &&
           edvr::temporalExternalEngine("xess") && edvr::temporalEngineFor("dlss") == edvr::TemporalEngine::Nvidia,
           "xess maps to the Intel engine, an external one, in VR");

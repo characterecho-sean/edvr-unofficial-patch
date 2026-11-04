@@ -106,6 +106,9 @@ void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
 unsigned coverNotes=0;float coverLast[2][4]{};
 namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
+// The journal watcher's GuiFocus (src/d3d11/journal_watch.cpp), which begin() reads once a frame for the map gate: scripted here.
+bool mapFocusKnown=false;uint32_t mapFocus=0;
+namespace edvr{bool journalGuiFocus(uint32_t* focus){if(focus)*focus=mapFocus;return mapFocusKnown;}}
 // The light grid cache's jitter probe (src/d3d11/light_grid_cache_hook.cpp), which begin() tells this frame's jitter: recorded here, asserted below.
 unsigned jitterNotes=0;float jitterLastShift[2][2]{};
 namespace edvr{void lightGridCacheNoteJitter(uint64_t,float,float,const float shift[2][2]){++jitterNotes;std::memcpy(jitterLastShift,shift,sizeof(jitterLastShift));}}
@@ -402,6 +405,26 @@ void run(){
   f=frame(11,8);p=begin(t,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"flipped eye suppresses jitter");
   check(treat(t,8,0,source.Get())==S_OK&&(calls.back().flags&1),"unflipped image resets history");
   f=frame(11,9);begin(t,f,false);check(treat(t,9,0,source.Get())==E_PENDING,"no projection query cannot justify jittered image metadata");
+  // A map is open (GuiFocus 6, 7, 8; temporal_mode.h temporalMapOpen): no jitter and no history while it is, and one more history-free frame after it.
+  // On this channel (the rig's pool of 16 states has none to spare); the sequences continue from the last begun frame, 9.
+  {
+    auto shiftedNow=[](const EdvrNativeTemporalProjection& q){return q.tangentShift[0][0]!=0||q.tangentShift[0][1]!=0||q.tangentShift[1][0]!=0||q.tangentShift[1][1]!=0;};
+    mapFocusKnown=true;mapFocus=0;
+    auto fm=frame(11,10);begin(t,fm);check(treat(t,10,0,source.Get())==S_OK&&treat(t,10,1,source.Get())==S_OK,"map gate: a first frame rebuilds the history");
+    fm=frame(11,11);auto pm=begin(t,fm);
+    check(shiftedNow(pm),"map gate: with no screen open the frame is jittered");
+    check(treat(t,11,0,source.Get())==S_OK&&!(calls.back().flags&1),"map gate: and its history carries");treat(t,11,1,source.Get());
+    mapFocus=6;fm=frame(11,12);pm=begin(t,fm);
+    check(!shiftedNow(pm),"map gate: the Galaxy Map takes the jitter away");
+    check(treat(t,12,0,source.Get())==S_OK&&(calls.back().flags&1),"map gate: and hands the pass no history");treat(t,12,1,source.Get());
+    mapFocus=7;fm=frame(11,13);pm=begin(t,fm);check(!shiftedNow(pm)&&treat(t,13,0,source.Get())==S_OK&&(calls.back().flags&1),"map gate: the System Map the same, frame after frame");treat(t,13,1,source.Get());
+    mapFocus=9;fm=frame(11,14);pm=begin(t,fm);
+    check(shiftedNow(pm),"map gate: the Full System Scanner is not a map here: the jitter is back");
+    check(treat(t,14,0,source.Get())==S_OK&&(calls.back().flags&1),"map gate: and the frame after the map still takes no history (the map is not carried out)");treat(t,14,1,source.Get());
+    fm=frame(11,15);pm=begin(t,fm);check(shiftedNow(pm)&&treat(t,15,0,source.Get())==S_OK&&!(calls.back().flags&1),"map gate: then the history is back");treat(t,15,1,source.Get());
+    mapFocusKnown=false;mapFocus=6;fm=frame(11,16);pm=begin(t,fm);check(shiftedNow(pm),"map gate: a focus the journal cannot state is not a map, whatever the stale value");
+    mapFocusKnown=false;mapFocus=0;
+  }
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");

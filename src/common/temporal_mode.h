@@ -38,6 +38,13 @@ inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
     return {11, model.empty()};
 }
 
+// ---- A map is open (VR) -----------------------------------------------------------------------------------------------------
+// Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. Their lines, grid, stars and text write no depth, so the
+// temporal pass has no motion source for them and accumulates a ghost (the flat profile's finding, docs\design-flat-temporal-aa-2026-09-23.md,
+// 2026-10-10). While one is open the VR pass runs with no jitter and no history. The Full System Scanner (9) is not here: in VR its own
+// latch (fss_reveal) owns that screen. `known` is false when the journal cannot say (the field is absent: on foot, in a menu).
+inline bool temporalMapOpen(bool known, unsigned focus) { return known && focus >= 6u && focus <= 8u; }
+
 inline constexpr float kTemporalShipMetres = 10.0f;
 
 // ---- The ship split on foot ----------------------------------------------------------------------------------------------

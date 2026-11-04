@@ -9,6 +9,7 @@
 #include "vr_world_route.h"    // the VR world route: does it own the next frame, did the layer take this eye
 #include "native_on_foot.h"    // the F0 gate counters (log only): the route's engagements while native stereo is on foot
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
+#include "journal_watch.h"      // journalGuiFocus: the map gate (a map open: no jitter, no history)
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
 #include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter, and whether eye 0 is zoomed
@@ -94,6 +95,9 @@ struct State {
   Settings currentSettings{}, pendingSettings{};
   float renderedJitter[2][2]{},previousJitter[2][2]{};
   uint64_t treatedCount=0,projectionReads=0,missingProjections=0,jitterFrames=0,resets=0;
+  // A map is open (temporal_mode.h temporalMapOpen): this frame's answer, the last frame's (one more history-free frame follows the
+  // screen so the map is not carried into the next picture), the frames it held, and the transition lines said.
+  bool mapOpen=false,mapWasOpen=false; uint32_t mapFocus=0,mapNotes=0; uint64_t mapFrames=0;
   uint32_t separationNotes=0;   // history resets said in the log for a moved eye separation (kSeparationNotes at most)
   bool flippedNoted=false,engagedNoted=false;
   FloorDecision floor[2]{}, floorNoted{};
@@ -448,7 +452,21 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // lock-free read of what the last frame boundary left): an owned world is resolved once, in the game's flat
   // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
   // While the route owns nothing this is what it always was.
-  if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
+  // A map is open: no jitter (the pass has no motion for it to resolve against), and treat() takes no history. The focus is the
+  // journal watcher's last read (up to half a second behind the game, as flat's is); one read per frame, here.
+  {
+    uint32_t focus=0; const bool known=edvr::journalGuiFocus(&focus);
+    s->mapWasOpen=s->mapOpen; s->mapOpen=edvr::temporalMapOpen(known,focus);
+    if(s->mapOpen){++s->mapFrames;s->mapFocus=focus;}
+    if(s->mapOpen!=s->mapWasOpen&&s->mapNotes<32){
+      ++s->mapNotes;
+      if(s->mapOpen) edvr::Log::get().note("native temporal: map aa: no jitter and no history on %s (GuiFocus %u), the pass still upscales; sequence %llu.",
+          focus==6?"the Galaxy Map":focus==7?"the System Map":"the Orrery",focus,(unsigned long long)f->sequence);
+      else edvr::Log::get().note("native temporal: map aa: jitter and history back after the map (GuiFocus %s, was %u); %llu map frames so far.",
+          known?"known":"unknown",s->mapFocus,(unsigned long long)s->mapFrames);
+    }
+  }
+  if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!s->mapOpen&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
     edvr::temporalJitter(s->frameCounter,&jx,&jy,jitterCycleFor(*s,unsigned(e))); float dx=0,dy=0;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
     out->tangentShift[e][0]=dx;out->tangentShift[e][1]=dy;
@@ -552,9 +570,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // B3: eye 0's frustum changes M-fold where the scope zoom's window starts and ends; a history of the other view would be reprojected into this one.
   const bool zoomedHere=eye==0&&s->zoomedNow;
   const bool zoomMoved=s->history[eye].valid&&edvr::scopezoom::b3ResetEdge(s->history[eye].zoomed,zoomedHere);
-  const bool resetHistory=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->continuity[eye]+1!=seq||
+  // A map open (or just closed): the pass is handed no history, so the upscaler works from this frame alone and nothing of the map is carried in or out.
+  const bool mapHold=s->mapOpen||s->mapWasOpen;
+  const bool historyBroken=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->continuity[eye]+1!=seq||
       s->history[eye].width!=w||s->history[eye].height!=h||s->history[eye].format!=d.Format||
       s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH||separationMoved||zoomMoved;
+  const bool resetHistory=historyBroken||mapHold;
   float delta[9]={1,0,0,0,1,0,0,0,1},trans[3]={},transOther[3]={}; const float* pd=nullptr;const float* pt=nullptr;const float* pto=nullptr;
   float headDegrees=0;
   if(!resetHistory){
@@ -592,7 +613,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
   // layer arms for the next frame only behind a frame the pass produced.
   edvr::uiLayerNoteTemporal(seq,eye,result);
-  if(resetHistory){++s->resets;++s->resetsEye[eye];if(zoomMoved)++s->zoomEdgeResets;}
+  if(resetHistory&&!mapHold){++s->resets;++s->resetsEye[eye];if(zoomMoved)++s->zoomEdgeResets;}   // a map's held frames are counted as map_frames, not as resets
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
   auto& hst=s->history[eye];hst.valid=true;hst.sequence=seq;hst.reference=s->reference;
@@ -622,6 +643,8 @@ HRESULT WINAPI close(void* p){
       (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
       (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts,
       (unsigned long long)s->layerOnly,(unsigned long long)s->layerOnlyDeclined);
+  edvr::Log::get().note("native temporal map aa: map_frames=%llu (frames a map was open: no jitter, no history), transition lines said=%u.",
+      (unsigned long long)s->mapFrames,s->mapNotes);
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);releaseBlank(s->blank[0]);releaseBlank(s->blank[1]);s->active=false;s->begun=false;s->device=nullptr;
