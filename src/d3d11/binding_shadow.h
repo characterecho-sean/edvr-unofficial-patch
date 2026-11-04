@@ -129,8 +129,6 @@ extern BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 extern uint32_t g_bindingEyeKeyGen;
 // Build 5, item 4: engine velocity's aggregate over Vs, Ps, Rtv0, Dsv0 and Blend (bindingEvKeyGeneration); starts at 1 and never takes 0.
 extern uint32_t g_bindingEvKeyGen;
-// TEMPORARY (build 5, item 6): the eye key without the same-pointer PS SRV re-sets (bindingEyeKeyPtrGeneration).
-extern uint32_t g_bindingEyeKeyPtrGen;
 }  // namespace detail
 
 // The pointer last seen bound to a slot, or nullptr.
@@ -149,6 +147,7 @@ inline uint32_t bindingGeneration(BindSlot slot) {
 // target 0 or the depth view moves, and on every forget-all and frame boundary. A classifier that depends on those bindings keys
 // its memo on this one load instead of reading eight. It is the set the binding-repeat flight measured (91% of eye draws repeat
 // the previous draw's bindings), so the memo's hit rate is that flown figure. Like the readers above it is a load, not a call.
+// Build 6, S2: a PS SRV 0..3 set of the pointer already bound leaves this key alone (that slot's own generation still moves).
 inline uint32_t bindingEyeKeyGeneration() {
     return detail::g_bindingEyeKeyGen;
 }
@@ -157,11 +156,6 @@ inline uint32_t bindingEyeKeyGeneration() {
 // (all zeros) always reads as stale.
 inline uint32_t bindingEvKeyGeneration() {
     return detail::g_bindingEvKeyGen;
-}
-// TEMPORARY (build 5, item 6): the eye key's pointer-only form. It moves with bindingEyeKeyGeneration except that a PS SRV 0..3 set of the pointer already bound
-// leaves it alone; bindingInvalidate, bindingSetShader, forget-all and the frame boundary always move it. It decides nothing: only the shadow memos read it.
-inline uint32_t bindingEyeKeyPtrGeneration() {
-    return detail::g_bindingEyeKeyPtrGen;
 }
 inline uint8_t bindingVsMayWant() {
     return detail::g_bindingSlots[static_cast<size_t>(BindSlot::Vs)].mayWant;
@@ -172,7 +166,6 @@ void* bindingGet(BindSlot slot);
 uint32_t bindingGeneration(BindSlot slot);
 uint32_t bindingEyeKeyGeneration();
 uint32_t bindingEvKeyGeneration();
-uint32_t bindingEyeKeyPtrGeneration();
 #endif
 
 // Record a new binding. Bumps that slot's generation even when the pointer is

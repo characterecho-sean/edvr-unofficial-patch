@@ -1,4 +1,5 @@
 #include "object_probe.h"
+#include "draw_interest.h"   // build 6: the interest mask
 #include "device_hook.h"
 
 #include <atomic>
@@ -1424,6 +1425,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, eye route=%s (%u source-resource candidates; native part identity unmatched), %u route-cap refusals, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. GUI source targets matched against actual eye-draw PS resources; candidate eye comes from the scene DSV mapping when known.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.routeStatus(),unsigned(g_guiSnapshot.routeCount()),g_guiSnapshot.routeDeclines,g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     detail::g_objectProbeLedgerOn = false;
+    objectProbeRecomputeInterest();
     g_skin.reset();   // its report went out above; a run that never reported is said at shutdown
     ledgerRelease();
     objectClassificationProbe.reset();
@@ -1468,6 +1470,7 @@ void objectProbeConfigure(Config& cfg) {
     cullGateProbe.configure(cfg.getBool("advanced.cull_gate_capture", false));
     detail::g_objectProbeOn = g_verbose ||
         temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), runtimeFlatProfile());
+    objectProbeRecomputeInterest();
 }
 
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
@@ -1724,6 +1727,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             releaseRing();
             releasePool();
             detail::g_objectProbeLedgerOn = false;
+            objectProbeRecomputeInterest();
             g_lateMenuSnapshot.release();
             nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
             g_wasOn = false;
@@ -1797,6 +1801,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     nativeOnFootMenuInputArm(g_ledgerStamp,g_ledgerFrame0,g_ledgerLastFrame);
     flatStationaryCameraEyeArm(g_lateMenuSnapshot.window.frame,g_ledgerStamp);
     detail::g_objectProbeLedgerOn = true;
+    objectProbeRecomputeInterest();
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
     g_skin.arm(g_ledgerFrame0);
@@ -1852,9 +1857,18 @@ void objectProbeShutdown() {
     releasePool();
     detail::g_objectProbeLedgerOn = false;
     detail::g_objectProbeOn = false;
+    objectProbeRecomputeInterest();
     g_lateMenuSnapshot.release();
     nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
     g_wasOn = false;
 }
 
+}  // namespace edvr
+
+namespace edvr {
+// Build 6, item 1 (draw_interest.h): the interest bits for objectProbeWantsDraws() and objectProbeLedgerActive(), recomputed after each write to g_objectProbeOn or g_objectProbeLedgerOn.
+uint64_t objectProbeInterestBits() {
+    return interestIf(objectProbeWantsDraws(), kInterestObjectProbe) | interestIf(objectProbeLedgerActive(), kInterestObjectProbeLedger);
+}
+void objectProbeRecomputeInterest() { drawInterestStore(kInterestObjectProbeModule, objectProbeInterestBits()); }
 }  // namespace edvr

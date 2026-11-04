@@ -460,8 +460,8 @@ static void build2WiringTests() {
 
     // The instanced thunk takes the fast path like the other three, with the body cull's and the intro curve's ends outside it.
     const std::string x = bodyFrom(vscreen, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
-    check(hasIn(x, "const bool fast = drawPathFast(v);") && hasIn(x, "if (fast) {") && hasIn(x, "} else forwardWithVerdict(self, v, 'X'"), "the instanced thunk asks drawPathFast and has a fast branch");
-    check(beforeIn(x, "nativeOnFootBodyCullBegin(", "if (fast) {") && beforeIn(x, "} else forwardWithVerdict(self, v, 'X'", "if (bodyCull) nativeOnFootBodyCullEnd(self);") &&
+    check(hasIn(x, "const bool fast = drawPathFast(v);") && hasIn(x, "if (fast) {") && hasIn(x, "} else forwardWithVerdict(self, v, flags, 'X'"), "the instanced thunk asks drawPathFast and has a fast branch");
+    check(beforeIn(x, "nativeOnFootBodyCullBegin(", "if (fast) {") && beforeIn(x, "} else forwardWithVerdict(self, v, flags, 'X'", "if (bodyCull) nativeOnFootBodyCullEnd(self);") &&
               beforeIn(x, "if (bodyCull) nativeOnFootBodyCullEnd(self);", "introCurveEndDraw();"),
           "the body cull begins before and ends after the fast branch, and the intro curve ends after it");
     check(hasIn(x, "if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {") && hasIn(x, "uiLayerIssueBlocked()"),
@@ -470,8 +470,8 @@ static void build2WiringTests() {
     // The UI family check is skipped inside the branch that calls it and never reaches the probe branch after it.
     const std::string fwd = bodyFrom(vscreen, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
     check(countIn(fwd, "uiLayerFamilyOf(g_state, kind, count, instances)") == 1 && hasIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1") &&
-              beforeIn(fwd, "if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {", "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)") &&
-              beforeIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)", "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {") &&
+              beforeIn(fwd, "if (owner && interestHas(g_state, kInterestUiLayerLive) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {", "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)") &&
+              beforeIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)", "} else if (owner && interestHas(g_state, kInterestUiQualityLive) && v != DrawVerdict::kQuadSkip) {") &&
               hasIn(fwd, "compositeCounted = uiDepthScope.composite;"),
           "the family skip sits inside the live branch, on kind 1 only, before the probe branch, with the composite census untouched");
     check(hasIn(x, "vsMaySkip(mayWant, kVsMayScreenUi)") && hasIn(x, "vsMaySkip(mayWant, kVsMayScreenRecognize)") && hasIn(x, "vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion)") &&
@@ -503,7 +503,7 @@ static void build4WiringTests() {
     check(hasIn(vscreen, "if (targetSharpShape(kind, count, instances) && targetSharpWantsDraws() &&") &&
               hasIn(vscreen, "if (holoPatternShape(kind, count, instances) && holoWantsDraws() &&") &&
               hasIn(vscreen, "if (backdropCompositeShape(kind, count, instances) && backdropWantsDraws() &&") &&
-              hasIn(vscreen, "scrimWantsDraws() && scrimWashShape(kind, count, instances)"),
+              hasIn(vscreen, "interestHas(s, kInterestScrim) && scrimWashShape(kind, count, instances)"),
           "item 6: the (X, 6, 1) shapes go before the flag loads, and scrim keeps its own order (its shape is count >= 100)");
     // Item 6: the hash test goes before the guard.
     check(beforeIn(vscreen, "const uint64_t fssVs = bindingShaderHash(BindSlot::Vs);", "guardedBudget(g_panelCbBudget, [&] {") &&
@@ -514,7 +514,7 @@ static void build4WiringTests() {
     const std::string station = readFile("src/d3d11/optimized_station.h");
     check(hasIn(station, "inline bool optimizedStationSunOff() noexcept { return detail::g_sunOff.load(std::memory_order_acquire); }") &&
               hasIn(readFile("src/d3d11/optimized_station.cpp"), "if (!optimizedStationSunOff() || vs != kSunVs || ps != kSunPs) return false;") &&
-              hasIn(vscreen, "if (optimizedStationSunOff() && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;"),
+              hasIn(vscreen, "if (interestHas(s, kInterestSunOff) && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;"),
           "item 1: the sun skip's acquire load is tested before its two hash arguments are read, by the same accessor the callee uses");
     const std::string temporalH = readFile("src/d3d11/temporal_pass.h");
     check(hasIn(temporalH, "inline bool temporalPassRigidDrawMayWant(int eye) { return detail::g_temporalPassWantedFssChrome && eye >= 0 && eye <= 1; }") &&
@@ -568,8 +568,8 @@ static void build4WiringTests() {
     // Item 9: the hologram pass is skipped on the may-want bit, counted, with the callee's one store made inline.
     const std::string maskH = readFile("src/d3d11/draw_mask_line.h");
     check(hasIn(vscreen, "if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {") && hasIn(vscreen, "uiDepthHologramSkippedDraw();") &&
-              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "uiDepthHologramSkippedDraw();", "t_holoDepthThisDraw = false;") &&
-              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "t_holoDepthThisDraw = false;", "maskNoteSkip(MaskSkip::HoloDepth);") &&
+              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "uiDepthHologramSkippedDraw();", "flags.holoDepth = false;") &&
+              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "flags.holoDepth = false;", "maskNoteSkip(MaskSkip::HoloDepth);") &&
               hasIn(maskH, "\"weapon_motion\", \"hologram_depth\"}") && hasIn(maskH, "WeaponMotion, HoloDepth, Count"),
           "item 9: a clear bit skips the hologram pass, sets the eye to -1 inline, clears the flag and counts it; the enum and names end with hologram_depth");
     check(hasIn(readFile("src/d3d11/binding_shadow.cpp"), "s.mayWant = 0xFF;   // a cleared shader slot must not keep a stale may-want byte"),
@@ -1160,7 +1160,7 @@ static bool wiredVscreen(const std::string& t) {
     const size_t first = t.rfind("pureDrawReissue(ReissueCaller::CrispHud, self, kind, count, instances, args);", loop);
     const size_t end = t.find("uiLayerCrispToneEnd(self);", loop);
     return loop != std::string::npos && first != std::string::npos && end != std::string::npos && first < loop && loop < end &&
-           has(t, "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {");
+           has(t, "} else if (owner && interestHas(g_state, kInterestUiQualityLive) && v != DrawVerdict::kQuadSkip) {");
 }
 static bool wiredSnapshot(const std::string& t) {
     const size_t fn = t.find("static bool watches(uint64_t vs) {");

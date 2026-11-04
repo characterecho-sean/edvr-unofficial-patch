@@ -431,8 +431,6 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
 bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants, const float (&rows)[6][4]);
 // Frames prepared from nothing since the module went live, for the 5 s line.
 uint64_t engineVelocitySourceFreeFrames();
-// TEMPORARY (build 5, item 6, b5_counts_line.h): beforeDrawSlow entries since the start, for the perf window line.
-uint64_t engineVelocitySlowEntries();
 // The VR world route's two reads of the source's naming (vr_world_route.cpp; docs section 82): is `depth` the source depth
 // screen_motion named in THIS present frame, and the source camera's rows 270..275 (the resolver's camera[6][4]: b1's first
 // 96 bytes from row 270) as the watch last saw them written for that naming. False when nothing was named this frame, the

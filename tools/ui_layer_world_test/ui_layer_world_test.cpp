@@ -54,6 +54,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/depth_probe.h"
+#include "../../src/d3d11/draw_interest.h"
 #include "../../src/d3d11/device_hook.h"
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/gpu_timing.h"
@@ -1861,6 +1862,40 @@ int main(int argc, char** argv) {
     testMapsGate(r);
     testMapsTransitions(r);
     testDsvMemo(r);
+    {
+        // Build 6, item 1 (draw_interest.h): the UI layer's interest bits against its accessors after each writer this rig can drive. The named case for the fence: restore()'s raise
+        // (ui_layer.cpp, a failed hologram restore) needs a hologram binding that fails to put EDVR's shader back, which this rig has no way to stage, so the raise is pinned by
+        // gate_test's source-text check (every write of g_uiLayerIssueBlocked is followed by uiLayerRecomputeInterest() with no D3D call between) and the rig drives its other
+        // writers: the recompute after a raise made by hand, the lift at the frame boundary, and refreshLive through uiLayerConfigure.
+        uint64_t mask = 0;
+        g_drawInterestPtr = &mask;
+        const auto bit = [](DrawInterestBit b) { return interestMask(b); };
+        const auto matches = [&](const char* what) {
+            check(mask == uiLayerInterestBits() && (mask & ~kInterestUiLayer) == 0 &&
+                      ((mask & bit(kInterestUiLayerIssueBlocked)) != 0) == uiLayerIssueBlocked() && ((mask & bit(kInterestUiQualityLive)) != 0) == uiLayerQualityLive() &&
+                      ((mask & bit(kInterestUiLayerLive)) != 0) == uiLayerLive() && ((mask & bit(kInterestUiLayerCrispOn)) != 0) == uiLayerCrispOn() &&
+                      ((mask & bit(kInterestUiLayerWatching)) != 0) == uiLayerWatching() && ((mask & bit(kInterestUiLayerCrispPending)) != 0) == uiLayerCrispPending() &&
+                      ((mask & bit(kInterestUiSeedDiagnostics)) != 0) == uiLayerSeedDiagnostics(),
+                  what);
+        };
+        uiLayerRecomputeInterest();
+        matches("interest mask: after a recompute every UI layer bit equals its accessor");
+        check((mask & bit(kInterestUiQualityLive)) != 0 && (mask & bit(kInterestUiLayerLive)) != 0, "interest mask: the layer is live in the rig, so the live bits are set");
+        detail::g_uiLayerIssueBlocked = true;
+        uiLayerRecomputeInterest();
+        check((mask & bit(kInterestUiLayerIssueBlocked)) != 0, "interest mask: a raised fence is a set bit");
+        uiLayerFrameBoundary(r.ctx.Get());   // settleIssueFence: nothing is held to put back, so the fence lifts
+        check(!uiLayerIssueBlocked() && (mask & bit(kInterestUiLayerIssueBlocked)) == 0, "interest mask: the boundary's lift of the fence clears its bit");
+        matches("interest mask: after the boundary every UI layer bit still equals its accessor");
+        cfg.set("fix.ui_quality", "0");
+        uiLayerConfigure(cfg);   // refreshLive writes the quality, live and crisp-on flags
+        matches("interest mask: after uiLayerConfigure turned fix.ui_quality off the bits equal the accessors (refreshLive)");
+        cfg.set("fix.ui_quality", "100");
+        uiLayerConfigure(cfg);
+        matches("interest mask: and again with it back on");
+        check((mask & bit(kInterestUiQualityLive)) != 0, "interest mask: the quality bit is set again");
+        g_drawInterestPtr = nullptr;
+    }
     uiLayerShutdown();
     std::printf("ui_layer_world_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

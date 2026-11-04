@@ -1,4 +1,5 @@
 #include "celestial_motion.h"
+#include "draw_interest.h"   // build 6: the interest mask
 #include "binding_shadow.h"
 #include "depth_probe.h"
 #include "../common/celestial_math.h"
@@ -39,7 +40,10 @@ const char* gateName(Gate g) {
         default: return "off (no status yet)";
     }
 }
-void setLive() { detail::g_celestialLive = g_enabled && !g_failed && g_gate == kGateOn; }
+void setLive() {
+    detail::g_celestialLive = g_enabled && !g_failed && g_gate == kGateOn;
+    celestialMotionRecomputeInterest();   // build 6: the single writer of g_celestialLive
+}
 
 uint64_t qpc() {
     LARGE_INTEGER v{};
@@ -669,4 +673,10 @@ void celestialMotionShutdown() {
     setLive();
 }
 
+}  // namespace edvr
+
+namespace edvr {
+// Build 6, item 1 (draw_interest.h): the interest bit for celestialMotionLive(), recomputed by setLive, the single writer of g_celestialLive.
+uint64_t celestialMotionInterestBits() { return interestIf(celestialMotionLive(), kInterestCelestialLive); }
+void celestialMotionRecomputeInterest() { drawInterestStore(kInterestCelestial, celestialMotionInterestBits()); }
 }  // namespace edvr

@@ -99,6 +99,9 @@ struct MetadataCache {
 extern MetadataCache g_washMetadata;   // PS slot 0: is it the wash's 16x16 BC1 (scrim_fix.cpp)
 }  // namespace detail
 inline bool scrimWantsDraws() { return detail::g_scrimOn; }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t scrimInterestBits();
+void scrimRecomputeInterest();
 // True only when the slot-0 cache holds a SUCCESSFUL resolve of the view bound now, at this binding generation, and that view is not the
 // wash's texture: exactly the state in which scrimOnEyeDraw's first cached test returns false without a resolve and without writing
 // anything. Any other state (empty, a failed resolve, another view or generation, a match) is false here and the call decides.

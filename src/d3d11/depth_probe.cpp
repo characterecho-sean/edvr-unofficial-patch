@@ -1,5 +1,6 @@
 #include "temporal_shader_bytecode.h"
 #include "depth_probe.h"
+#include "draw_interest.h"   // build 6: the interest mask
 
 #include <cmath>
 #include <cstdio>
@@ -523,6 +524,7 @@ void depthProbeConfigure(Config& cfg) {
     invalidateScenePickCache();
     g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
                cfg.getBool("advanced.eye_depth_capture", false);
+    depthProbeRecomputeInterest();
 }
 
 namespace {
@@ -1446,6 +1448,7 @@ extern "C" __declspec(dllexport) unsigned edvrDepthProbeSelftest(void* devicePtr
     dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     const bool wantedBefore = g_wanted;
     g_wanted = true;
+    depthProbeRecomputeInterest();   // build 6: before the hooked calls below, which can reach the draw path
     if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex)) && tex &&
         SUCCEEDED(dev->CreateDepthStencilView(tex, &dd, &dsv)) && dsv &&
         ensureGpu(dev, ctx)) {
@@ -1480,6 +1483,7 @@ extern "C" __declspec(dllexport) unsigned edvrDepthProbeSelftest(void* devicePtr
         }
     }
     g_wanted = wantedBefore;
+    depthProbeRecomputeInterest();
     if (dsv) dsv->Release();
     if (tex) tex->Release();
     releaseGpu();
@@ -1487,3 +1491,10 @@ extern "C" __declspec(dllexport) unsigned edvrDepthProbeSelftest(void* devicePtr
     ctx->Release();
     return bits;
 }
+
+namespace edvr {
+// Build 6, item 1 (draw_interest.h): the interest bit for depthProbeWanted() (the stored flag; depthProbeEyeDrawNeedsNote's per-draw tail stays behind it), recomputed
+// after each write to g_depthProbeWanted, through the g_wanted alias included.
+uint64_t depthProbeInterestBits() { return interestIf(depthProbeWanted(), kInterestDepthProbe); }
+void depthProbeRecomputeInterest() { drawInterestStore(kInterestDepthProbeModule, depthProbeInterestBits()); }
+}  // namespace edvr

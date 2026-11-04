@@ -151,7 +151,7 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
                     flat == "__declspec(noinline)voidworldScreenReissue(ID3D11DeviceContext*self,charkind,UINTcount,UINTinstances,constDrawArgs&args){"
                             "if(uiLayerIssueBlocked())return;VrWorldInternalScopeinternal;if(uiLayerWorldReissueBegin(self)){"
                             "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);pureDrawReissue(ReissueCaller::WorldScreen,self,kind,count,instances,args);uiLayerWorldReissueEnd(self);}}" &&
-                        has(fwd, "if(originalIssued&&uiLayerCrispPending()){crispHudTonemapReissue(self,kind,count,instances,args);}"
+                        has(fwd, "if(originalIssued&&interestHas(g_state,kInterestUiLayerCrispPending)){crispHudTonemapReissue(self,kind,count,instances,args);}"
                                  "if(worldReissue.on&&originalIssued){worldScreenReissue(self,kind,count,instances,args);}") &&
                         countOf(all, "worldScreenReissue(") == 2 && countOf(all, "uiLayerWorldReissueEnd(self);") == 1,
                     "the flat re-issue is unchanged: worldScreenReissue's body is exactly what it was, and `if (worldReissue.on && originalIssued) worldScreenReissue(self, "

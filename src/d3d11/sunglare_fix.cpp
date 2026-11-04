@@ -1,6 +1,7 @@
 #include "shader_swap.h"
 #include "temporal_shader_bytecode.h"
 #include "sunglare_fix.h"
+#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -157,6 +158,7 @@ void sunglareConfigure(Config& cfg) {
     detail::g_sunglareWorld = (g_mode == Mode::kRealistic || g_mode == Mode::kVivid)
                   ? 1
                   : 0;
+    sunglareRecomputeInterest();
     // The billboard loan's tee stays armed for world mode: the per-draw
     // camera solve reads the shadowed CB.
     billboardGlareWatch(detail::g_sunglareWorld != 0);
@@ -396,4 +398,10 @@ void sunglareEnd(ID3D11DeviceContext* ctx) {
     }
 }
 
+}  // namespace edvr
+
+namespace edvr {
+// Build 6, item 1 (draw_interest.h): the interest bit for sunglareWorldActive(), recomputed after each write to g_sunglareWorld.
+uint64_t sunglareInterestBits() { return interestIf(sunglareWorldActive(), kInterestSunglareWorld); }
+void sunglareRecomputeInterest() { drawInterestStore(kInterestSunglare, sunglareInterestBits()); }
 }  // namespace edvr

@@ -1672,6 +1672,161 @@ int journalWorkerChecks() {
 
 }  // namespace
 
+
+// Build 6 (VR draw path CPU; docs\vr-draw-path-cpu-2026-11-01.md, "Build 6"): source-text checks on the interest mask, the draw's own flags and the removed build-5 forms.
+//
+// The interest mask (draw_interest.h) mirrors module-scope flags, and a bit is exact only if the module recomputes it after EVERY write to one of its flags, before its next
+// D3D call or return. No rig can run most of those writers (seven mirrored modules have no rig at all), so this reads each module and, for each writer of a mirrored flag, the
+// alias and reference-parameter writers included (depth_probe.cpp's g_wanted, native_on_foot.cpp's g_b3Counting, particle_fix.cpp's g_hideWitchspaceStars and applyDustKey's
+// `hidden`), requires the module's recompute call after it in the same function with no D3D call (`->`) in between. The count of writers is pinned too: a writer added without
+// a recompute changes the count and fails here.
+int interestSourceChecks(const std::string& root) {
+    int bad = 0;
+    auto verify = [&](bool ok, const std::string& what) {
+        ++g_checks;
+        if (ok) return;
+        printf("  FAIL  %s\n", what.c_str());
+        ++bad;
+    };
+    const std::wstring base = std::wstring(root.begin(), root.end()) + L"\\src\\d3d11\\";
+    const auto load = [&](const char* name) {
+        const std::string n(name);
+        return withoutLineComments(readWholeFile(base + std::wstring(n.begin(), n.end())));
+    };
+    const auto countOf = [](const std::string& text, const std::string& needle) {
+        int n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++n;
+        return n;
+    };
+    struct Writer { const char* file; const char* pattern; int count; const char* call; };
+    static const Writer kWriters[] = {
+        {"optimized_station.cpp", "detail::g_sunOff.store(", 2, "optimizedStationRecomputeInterest();"},
+        {"desktop_window.cpp", "g_desktopWindowBack.store(", 3, "desktopWindowRecomputeInterest();"},
+        {"native_on_foot.cpp", "g_nativeOnFootLabelPendingValid.store(", 4, "nativeOnFootRecomputeInterest();"},
+        {"native_on_foot.cpp", "g_nativeOnFootCoatPackLive.store(", 1, "nativeOnFootRecomputeInterest();"},
+        {"native_on_foot.cpp", "g_nativeOnFootSpawnLive.store(", 2, "nativeOnFootRecomputeInterest();"},
+        {"native_on_foot.cpp", "g_b3Counting.store(", 4, "nativeOnFootRecomputeInterest();"},
+        {"flat_temporal.cpp", "detail::g_flatTemporalCapturing.store(", 5, "flatTemporalRecomputeInterest();"},
+        {"particle_fix.cpp", "g_hideWitchspaceStars = true;", 1, "particleRecomputeInterest();"},
+        {"particle_fix.cpp", "g_hideWitchspaceStars = false;", 1, "particleRecomputeInterest();"},
+        {"particle_fix.cpp", "hidden = ", 2, "particleRecomputeInterest();"},
+        {"particle_fix.cpp", "detail::g_particleMode = Mode::", 2, "particleRecomputeInterest();"},
+        {"quad_probe.cpp", "detail::g_quadProbeTaken = ", 4, "quadProbeRecomputeInterest();"},
+        {"quad_probe.cpp", "detail::g_quadProbeArmed = ", 1, "quadProbeRecomputeInterest();"},
+        {"depth_probe.cpp", "g_wanted = (", 1, "depthProbeRecomputeInterest();"},
+        {"depth_probe.cpp", "g_wanted = true;", 1, "depthProbeRecomputeInterest();"},
+        {"depth_probe.cpp", "g_wanted = wantedBefore;", 1, "depthProbeRecomputeInterest();"},
+        {"sunglare_fix.cpp", "detail::g_sunglareWorld = ", 1, "sunglareRecomputeInterest();"},
+        {"draw_census.cpp", "detail::g_drawCensusPending = ", 6, "drawCensusRecomputeInterest();"},
+        {"draw_census.cpp", "detail::g_drawCensusFramesLeft = ", 1, "drawCensusRecomputeInterest();"},
+        {"draw_census.cpp", "--detail::g_drawCensusFramesLeft", 1, "drawCensusRecomputeInterest();"},
+        {"object_probe.cpp", "detail::g_objectProbeLedgerOn = ", 4, "objectProbeRecomputeInterest();"},
+        {"object_probe.cpp", "detail::g_objectProbeOn = ", 2, "objectProbeRecomputeInterest();"},
+        {"remlok_fix.cpp", "detail::g_remlokMode = Mode::", 4, "remlokRecomputeInterest();"},
+        {"scrim_fix.cpp", "detail::g_scrimOn = ", 1, "scrimRecomputeInterest();"},
+        {"fss_panel.cpp", "detail::g_fssPanelEnabled = ", 1, "fssPanelRecomputeInterest();"},
+        {"panel_curve.cpp", "detail::g_panelCurveStoodDown = true;", 3, "panelCurveRecomputeInterest();"},
+        {"panel_curve.cpp", "detail::g_panelCurveCurvature = ", 1, "panelCurveRecomputeInterest();"},
+        {"panel_curve.cpp", "detail::g_panelCurveSegments = ", 1, "panelCurveRecomputeInterest();"},
+        {"blend_probe.cpp", "detail::g_blendProbePhase.store(", 4, "blendProbeRecomputeInterest();"},
+        {"blend_probe.cpp", "detail::g_blendProbePhase.compare_exchange_strong(", 1, "blendProbeRecomputeInterest();"},
+        {"celestial_motion.cpp", "detail::g_celestialLive = ", 1, "celestialMotionRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiLayerIssueBlocked = ", 3, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiLayerWatching = ", 4, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiLayerCrispPending = ", 7, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiSeedDiagnostics = ", 2, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiQualityLive = ", 1, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiLayerLive = ", 1, "uiLayerRecomputeInterest();"},
+        {"ui_layer.cpp", "detail::g_uiLayerCrispOn = ", 1, "uiLayerRecomputeInterest();"},
+        {"ui_depth.cpp", "detail::g_uiDepthOn = ", 2, "uiDepthRecomputeInterest();"},
+        {"ui_depth.cpp", "detail::g_uiDepthStoodDown = true;", 1, "uiDepthRecomputeInterest();"},
+        {"ui_depth.cpp", "detail::g_holoDepthOn = ", 1, "uiDepthRecomputeInterest();"},
+    };
+    for (const Writer& w : kWriters) {
+        const std::string text = load(w.file);
+        const std::string where = std::string(w.file) + " `" + w.pattern + "`";
+        if (text.empty()) { verify(false, "could not read src\\d3d11\\" + std::string(w.file)); continue; }
+        verify(countOf(text, w.pattern) == w.count, where + ": the writers of the flag are the " + std::to_string(w.count) + " this check knows (a new writer needs its recompute and a row here)");
+        const std::string call(w.call);
+        for (size_t at = text.find(w.pattern); at != std::string::npos; at = text.find(w.pattern, at + 1)) {
+            const size_t rec = text.find(call, at);
+            bool ok = rec != std::string::npos;
+            if (ok) {
+                const std::string span = text.substr(at, rec - at);
+                ok = span.find("\n}\n") == std::string::npos && span.find("->") == std::string::npos;
+            }
+            verify(ok, where + ": a write is followed by " + call + " in the same function with no D3D call between");
+        }
+    }
+
+    // vscreen.cpp: the pointer follows the State, the mask is never held in a local, and the draw's own flags replaced the thread_locals.
+    const std::string vs = load("vscreen.cpp");
+    verify(!vs.empty(), "could not read src\\d3d11\\vscreen.cpp");
+    {
+        verify(countOf(vs, "g_drawInterestPtr = &g_state->interest;") == 1, "vscreen.cpp points g_drawInterestPtr at State::interest once, after `new State`");
+        const size_t made = vs.find("g_state = new State();");
+        const size_t pointed = vs.find("g_drawInterestPtr = &g_state->interest;");
+        verify(made != std::string::npos && pointed != std::string::npos && pointed > made && pointed - made < 120, "the pointer is set right after `new State`");
+        int deletes = 0;
+        bool allCleared = true;
+        for (size_t at = vs.find("delete g_state;"); at != std::string::npos; at = vs.find("delete g_state;", at + 1)) {
+            ++deletes;
+            const size_t from = at > 160 ? at - 160 : 0;
+            allCleared = allCleared && vs.substr(from, at - from).find("g_drawInterestPtr = nullptr;") != std::string::npos;
+        }
+        verify(deletes == 2 && allCleared, "g_drawInterestPtr is cleared before BOTH deletes of g_state");
+        verify(vs.find("uint64_t interest = 0;") != std::string::npos, "DrawHot carries the 64-bit mask");
+        const std::string noSpace = withoutSpaces(vs);
+        // A copy of the mask into anything (`= g_state->interest;`, `= s->interest;`) is the held local the fence forbids; the only reads are the bit tests.
+        const bool heldLocal = noSpace.find("=g_state->interest;") != std::string::npos || noSpace.find("=s->interest;") != std::string::npos ||
+                               noSpace.find("{g_state->interest}") != std::string::npos || noSpace.find("{s->interest}") != std::string::npos;
+        verify(!heldLocal, "no local copy of the mask is held across a call: every site reads State::interest where it stands");
+        verify(vs.find("thread_local bool t_uiDepthThisDraw") == std::string::npos && vs.find("thread_local bool t_holoDepthThisDraw") == std::string::npos &&
+                   vs.find("thread_local bool t_compositeThisDraw") == std::string::npos,
+               "the three thread_local per-draw flags are gone (#184)");
+        const char kinds[] = {'D', 'I', 'N', 'X'};
+        for (char k : kinds) {
+            const std::string begin = std::string("beginPanelOverride(self, '") + k + "'";
+            const size_t b = vs.find(begin);
+            const size_t bEnd = b == std::string::npos ? b : vs.find(';', b);
+            verify(b != std::string::npos && vs.substr(b, bEnd - b).find(", flags)") != std::string::npos, std::string("the '") + k + "' thunk passes its DrawCallFlags to beginPanelOverride");
+            verify(vs.find(std::string("forwardWithVerdict(self, v, flags, '") + k + "'") != std::string::npos, std::string("the '") + k + "' thunk passes its DrawCallFlags to forwardWithVerdict");
+        }
+        verify(countOf(vs, "beginPanelOverride(self, '") == 4 && countOf(vs, "forwardWithVerdict(self, v, flags, '") == 4, "beginPanelOverride and forwardWithVerdict have only the four thunks as callers");
+        // N7: the pending flags are cleared only by a draw that set them.
+        verify(vs.find("ownsPending(drawCallOwnsPending(f))") != std::string::npos && vs.find("if (ownsPending) uiDepthClearPending();") != std::string::npos &&
+                   vs.find("if (drawCallOwnsPending(flags)) uiDepthClearPending();") != std::string::npos,
+               "forwardWithVerdict clears the module's pending flags on a return only when this draw's own flags set one (N7)");
+        verify(countOf(vs, "uiDepthClearPending()") == 2, "uiDepthClearPending is called from the blocked return and the scope, and nowhere else");
+        verify(vs.find("if (flags.uiDepth) uiDepthEnd(self);") != std::string::npos, "the blocked return ends the interface depth mode this draw's classification left");
+        verify(vs.find("t_markerTeeClockOrdinal") != std::string::npos && vs.find("t_drawClockOrdinal") != std::string::npos, "the two clock ordinals stay (they are not the per-draw flags)");
+    }
+    // Item 5 and item 4: build 5's items 2 and 3, its shadow aggregate and its counts line are gone from the source.
+    {
+        const char* const kGone[] = {"viewIsSurfaceFront", "g_viewFront", "ViewFront", "g_viewMemoPuts", "g_uiDepthDrawDirty", "uiDepthOnEyeDrawMiss", "bindingEyeKeyPtrGeneration",
+                                     "g_bindingEyeKeyPtrGen", "g_eyeMemoPtr", "g_holoMemoPtr", "B5Counts", "b5_counts_line", "g_b5vs", "engineVelocitySlowEntries"};
+        const char* const kFiles[] = {"vscreen.cpp", "vscreen.h", "ui_depth.cpp", "ui_depth.h", "binding_shadow.cpp", "binding_shadow.h", "perf_monitor.cpp", "engine_velocity.cpp", "engine_velocity.h"};
+        for (const char* f : kFiles) {
+            const std::string text = load(f);
+            for (const char* g : kGone) verify(text.find(g) == std::string::npos, std::string(f) + " no longer names " + g + " (build 6 removed it)");
+        }
+        const std::string depthH = load("ui_depth.h");
+        verify(depthH.find("inline bool uiDepthOnEyeDraw") == std::string::npos && depthH.find("bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});") != std::string::npos,
+               "uiDepthOnEyeDraw is declared out of line in ui_depth.h (build 4's form)");
+        const std::string depth = load("ui_depth.cpp");
+        const size_t fn = depth.find("bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {");
+        const std::string body = fn == std::string::npos ? std::string() : depth.substr(fn, 1400);
+        const std::string flat = withoutSpaces(body);
+        verify(flat.find("detail::g_uiDepthDraw=detail::UiDepthDraw{};g_holoDraw=draw;if(!detail::g_uiDepthOn||detail::g_uiDepthStoodDown)returnfalse;") != std::string::npos &&
+                   flat.find("classifiermemo::hit(g_eyeMemo,now))returnfalse;++g_b6.eyeMisses;") != std::string::npos,
+               "uiDepthOnEyeDraw is build 4's body: the reset, g_holoDraw = draw, the gate, the memo, and the miss counted after the memo-hit test");
+        const std::string binding = load("binding_shadow.cpp");
+        verify(withoutSpaces(binding).find("constbooleyeKeyMoves=!(srv&&s.ptr==ptr);s.ptr=ptr;++s.gen;noteEyeKeySlot(slot,eyeKeyMoves);") != std::string::npos,
+               "S2: bindingSet bumps the slot's own generation on every set and the eye key only when a PS SRV 0..3 pointer changed");
+    }
+    return bad;
+}
+
 int main(int argc, char** argv) {
     // The real ini, so the checks that read the shipped configuration run
     // against the numbers that ship rather than against numbers this file made
@@ -1696,6 +1851,7 @@ int main(int argc, char** argv) {
     g_bad += periodicWorkChecks();
     g_bad += loggedNotesChecks();
     g_bad += boundarySourceChecks(dir);
+    g_bad += interestSourceChecks(dir);
     edvr::g_clockForTest = nullptr;
     // Last, and with the real clock the worker reads: it configures the watcher
     // and leaves it off, which the fixtures above never see.

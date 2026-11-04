@@ -13,6 +13,7 @@
 // owner, which may open a frame -- is only read, under native_temporal's own
 // lock, through nativeTemporalDrawJitter.
 #include "ui_layer.h"
+#include "draw_interest.h"   // build 6: the interest mask
 
 #include "ui_layer_math.h"
 #include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
@@ -155,6 +156,7 @@ void refreshLive() {
     detail::g_uiQualityLive = quality;
     detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);
     detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
+    uiLayerRecomputeInterest();   // build 6: refreshLive writes three of the mirrored flags
 }
 
 // The HDR HUD path fails alone: the cockpit HUD families (the holo panels,
@@ -1864,7 +1866,10 @@ void restore(ID3D11DeviceContext* ctx) {
     g_draw.holoRestoreOk = holoRestore.restored;
     // Raises the fence: the game's owner-context draws are dropped until the
     // frame boundary settles the binding (settleIssueFence).
-    if (!holoRestore.restored) detail::g_uiLayerIssueBlocked = true;
+    if (!holoRestore.restored) {
+        detail::g_uiLayerIssueBlocked = true;
+        uiLayerRecomputeInterest();   // build 6: mid-draw, the fence forwardWithVerdict reads again later in the same call
+    }
     if (holoRestore.retried)
         standDown(holoRestore.restored ? "a hologram shader/b13 restoration fault recovered on the bounded retry"
                                      : "hologram shader/b13 restoration failed; original state untrusted, owner draw issues suppressed until the frame boundary puts it back");
@@ -2409,6 +2414,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (which == 1) ++g_win.multiplies;
     g_lastRedirectSeq = g_draw.seq;
     detail::g_uiLayerWatching = true;
+    uiLayerRecomputeInterest();
     // Once per family: where its first draw landed and the cancel it took,
     // so a family placed in fixed clip space rather than through the eye's
     // projection (which the cancel would jitter) can be told on the flight.
@@ -3694,6 +3700,7 @@ bool rippleR1Allows(ID3D11DeviceContext* ctx);
 
 void uiLayerConfigure(Config& cfg) {
     detail::g_uiSeedDiagnostics = g_hdrDrawTimingOn;
+    uiLayerRecomputeInterest();
     g_seedCensus.configure(g_hdrDrawTimingOn);
     // The fallback, for an ini with no such line (a hand-copied DLL over an old
     // file, a deleted line), is the shipped default: 100 since 2026-09-29. A line
@@ -5374,6 +5381,7 @@ void crispArm(int eye, uint64_t seq, int hdrSlot, const void* rtvRes, const void
     g_crispPending.vs = vs;
     g_crispPending.ps = ps;
     detail::g_uiLayerCrispPending = true;
+    uiLayerRecomputeInterest();
 }
 }  // namespace
 
@@ -5381,6 +5389,7 @@ bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t c
                                  uint32_t startInstance) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     if (!detail::g_uiLayerCrispOn || !ctx) return false;
     if ((kind != 'D' && kind != 'N') || count != 3 || instances != 1 || startInstance != 0)
         return false;
@@ -5491,6 +5500,7 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
                           uint64_t vs, uint64_t ps, char* why, size_t whyN) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     const auto say = [&](const char* text) {
         if (why && whyN) _snprintf_s(why, whyN, _TRUNCATE, "%s", text);
         return 0;
@@ -5675,6 +5685,7 @@ void crispFindSceneImages(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* ga
 // the draw once for this Begin and once more for every true uiLayerCrispToneNext.
 bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     if (!g_crispPending.pending || !ctx) return false;
     const CrispTonePending p = g_crispPending;
     g_crispPending = CrispTonePending{};
@@ -5999,6 +6010,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     }
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
+    uiLayerRecomputeInterest();
     ++g_win.hdrReissued;
     if (hadWeapons && e.wFires) {
         // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to. A frame that held a gunsight mark alone is the
@@ -6790,6 +6802,7 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
         break;
     }
     detail::g_uiLayerIssueBlocked = false;
+    uiLayerRecomputeInterest();
 }
 }  // namespace
 
@@ -6826,11 +6839,13 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         if (!g_stoodDown) g_eyeStoodDown = false;
     }
     detail::g_uiLayerWatching = false;
+    uiLayerRecomputeInterest();
     g_watchBudget = kWatchPerFrame;
     // A tonemap admission whose draw never issued (swallowed) does not
     // survive the frame.
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     // ...nor does a headset eye's wait for its first level (the next frame's first HUD draw sets it again).
     detail::g_uiLayerHudGlowPending = false;
     // ...nor does the VR world route's pending re-issue (a screen draw the game's frame never issued).
@@ -6943,6 +6958,7 @@ bool uiLayerFlatRelease() {
     g_flatDraw = FlatDraw{};
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     return any;
 }
 
@@ -7054,11 +7070,13 @@ void uiLayerDeviceReset() {
     g_dsvMemo = DsvResolveMemo{};  // the old device's views are gone; nothing resolved through them is kept
     detail::g_uiLayerRedirecting = false;
     detail::g_uiLayerWatching = false;
+    uiLayerRecomputeInterest();
 }
 
 void uiLayerShutdown() {
     g_holoBinding.clear(); g_holoCache.reset();
     detail::g_uiLayerIssueBlocked = false;
+    uiLayerRecomputeInterest();
     g_holoSettleFailed = 0;
     g_privateDepthGuard.reset();
     g_hdrSeedGpu.reset(); // release-only shutdown; the owner/device may already be gone
@@ -7066,11 +7084,13 @@ void uiLayerShutdown() {
     g_seedCensus = UiSeedCensus{};
     g_dsvMemo = DsvResolveMemo{};
     detail::g_uiSeedDiagnostics = false;
+    uiLayerRecomputeInterest();
     if (g_draw.active) releaseSaved();
     g_draw = Draw{};
     g_crispPending = CrispTonePending{};
     g_crispSave = CrispToneSave{};
     detail::g_uiLayerCrispPending = false;
+    uiLayerRecomputeInterest();
     worldReissueReset();
     g_maps = Maps{};
     g_frameTakenDraws = 0;
@@ -7087,4 +7107,16 @@ void uiLayerShutdown() {
     }
 }
 
+}  // namespace edvr
+
+namespace edvr {
+// Build 6, item 1 (draw_interest.h): the interest bits for the UI layer's draw-path flags, recomputed after each write to one of them: refreshLive's three, the fence a failed
+// hologram restore raises (mid-draw), the watching flag (mid-draw), the crisp-HUD pending flag, the seed diagnostics switch.
+uint64_t uiLayerInterestBits() {
+    return interestIf(uiLayerCrispOn(), kInterestUiLayerCrispOn) | interestIf(uiLayerIssueBlocked(), kInterestUiLayerIssueBlocked) |
+           interestIf(uiLayerSeedDiagnostics(), kInterestUiSeedDiagnostics) | interestIf(uiLayerLive(), kInterestUiLayerLive) |
+           interestIf(uiLayerQualityLive(), kInterestUiQualityLive) | interestIf(uiLayerWatching(), kInterestUiLayerWatching) |
+           interestIf(uiLayerCrispPending(), kInterestUiLayerCrispPending);
+}
+void uiLayerRecomputeInterest() { drawInterestStore(kInterestUiLayer, uiLayerInterestBits()); }
 }  // namespace edvr

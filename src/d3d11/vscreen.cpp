@@ -67,6 +67,8 @@
 #include "wake_pulse.h"
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
 #include "ui_depth.h"
+#include "draw_interest.h"      // build 6, item 1: the interest mask
+#include "draw_call_flags.h"     // build 6, item 3: a draw's own flags
 #include "ui_layer.h"
 #include "scope_zoom.h"          // scopeZoomMarkArmed: the scope's gunsight mark family is named only while the lens is armed
 #include "ui_layer_math.h"
@@ -123,8 +125,9 @@ std::atomic<bool> g_shadowsSkipped{false};
 // perf_monitor.cpp reads them (vScreenDrawMaskCounts) and subtracts the last window's.
 std::atomic<uint32_t> g_maskDraws{0};
 std::atomic<uint32_t> g_maskSkips[kMaskSkips];
-// TEMPORARY (build 5, item 6, b5_counts_line.h): the #184 counts and engine velocity's slow-half entries. Plain counters, as build 4's were.
-VScreenB5Counts g_b5vs;
+// TEMPORARY (build 6, item 1, build6_counts_line.h): the interest mask's drift check. Plain counters, as build 4's and 5's were; written by the draw thread only.
+DrawInterestDrift g_drift;
+bool g_driftNoted = false;
 inline void maskNoteSkip(MaskSkip k) {
     std::atomic<uint32_t>& a = g_maskSkips[static_cast<size_t>(k)];
     a.store(a.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
@@ -429,6 +432,9 @@ struct alignas(64) DrawHot {
     bool     introCurveThisDraw = false;
     bool     quadSkipArmed = false;
     bool     distanceEnabled = false;
+    // Build 6, item 1 (draw_interest.h): one bit per module-scope flag (or stored first test) the ladder reads, written through by the modules that own them. Every read is
+    // `s->interest` where the site stands, never a copy held across a call.
+    uint64_t interest = 0;
 };
 static_assert(sizeof(DrawHot) == 64 && alignof(DrawHot) == 64, "DrawHot is one 64-byte cache line: growing it spills the per-draw fields onto a second line");
 
@@ -1615,29 +1621,8 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // with its instance count clamped to sunglareKeep() -- SV_InstanceID
 // restarts at zero per call, so a prefix is the only subset that keeps
 // every element's identity.
-// Set by beginPanelOverride when this eye draw is a piece of the interface
-// that should write its depth (ui_depth.h), consumed by forwardWithVerdict's
-// scope. A flag rather than a DrawVerdict for curveThisDraw's reason: it
-// composes with whatever verdict claims the draw. Thread-local rather than
-// a State member so a draw recorded on a deferred context by another thread
-// cannot take a flag the render thread set for its own next draw.
-thread_local bool t_uiDepthThisDraw = false;
-// The generic hologram/icon depth pass's own flag, alongside the above:
-// a separate classification (ui_depth.cpp's uiDepthHologramOnEyeDraw), so
-// it composes independently of whether the family reissue above also
-// claims this draw.
-thread_local bool t_holoDepthThisDraw = false;
-// This eye draw samples a learned interface surface -- a composite (ui_depth's
-// test, published by uiDepthOnEyeDraw) -- for the layer's census of the
-// composites it leaves in the scene (ui_scene_composites.h). Set by
-// beginPanelOverride, consumed and cleared by forwardWithVerdict's scope, the
-// same take-and-clear the two flags above have, so it is only ever the draw's
-// own.
-thread_local bool t_compositeThisDraw = false;
-// TEMPORARY (build 5, item 6, #184): a draw stamp, bumped first thing in beginPanelOverride (before every return), and the stamp each flag above was set under. A
-// UiDepthScope that consumes a flag set under another stamp is consuming a flag an earlier draw left (b5_counts_line.h).
-thread_local uint32_t t_drawStamp = 0;
-thread_local uint32_t t_uiDepthStamp = 0, t_holoDepthStamp = 0, t_compositeStamp = 0;
+// This draw's own flags (draw_call_flags.h): beginPanelOverride fills a DrawCallFlags the draw thunk declares, and the thunk hands it to forwardWithVerdict. They were
+// three thread_local booleans until build 6 (#184), which an early return left set for a later draw.
 
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo,
@@ -1702,7 +1687,35 @@ const char* drawVerdictName(DrawVerdict v) {
 // hash is the memo's or the registry's. Reported at most every thirty
 // seconds and only when they disagreed. A Get and a Release per thousand
 // draws is nothing against the three a draw this replaced.
+// Build 6, item 1: every module's bits from its real expressions (the one copy each module keeps in its ...InterestBits()). Install stores this once; the drift check below compares
+// the live mask with it.
+uint64_t drawInterestExpected() {
+    return optimizedStationInterestBits() | desktopWindowInterestBits() | nativeOnFootInterestBits() | flatTemporalInterestBits() | particleInterestBits() |
+           quadProbeInterestBits() | depthProbeInterestBits() | uiDepthInterestBits() | sunglareInterestBits() | drawCensusInterestBits() | objectProbeInterestBits() |
+           remlokInterestBits() | scrimInterestBits() | fssPanelInterestBits() | panelCurveInterestBits() | blendProbeInterestBits() | celestialMotionInterestBits() |
+           uiLayerInterestBits();
+}
+
 void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
+    // TEMPORARY (build 6, item 1, build6_counts_line.h): the interest mask's drift check, on the audit's own 1-in-1024 owner draw. Every check is counted, so the perf line tells a
+    // check that found nothing from one that never ran; a mismatch is logged once, naming the lowest differing bit. It cannot see a missed recompute on a path this draw does not
+    // take (the fence, raised mid-draw and cleared at the boundary): the rigs and the source-text check cover the writers.
+    {
+        const uint64_t expected = drawInterestExpected();
+        ++g_drift.checks;
+        g_drift.bitsSet = interestPopcount(s->interest);
+        const uint64_t diff = expected ^ s->interest;
+        if (diff) {
+            ++g_drift.mismatches;
+            if (!g_driftNoted) {
+                g_driftNoted = true;
+                const unsigned bit = interestLowestBit(diff);
+                Log::get().note("draw interest: DRIFT -- the mask held 0x%llX where the modules' expressions give 0x%llX; the lowest differing bit is %u (%s), %s in the mask. Said once.",
+                                static_cast<unsigned long long>(s->interest), static_cast<unsigned long long>(expected), bit, interestBitName(bit),
+                                (s->interest >> bit) & 1u ? "set" : "clear");
+            }
+        }
+    }
     ID3D11VertexShader* vs = nullptr;
     ctx->VSGetShader(&vs, nullptr, nullptr);
     ++s->auditSampled;
@@ -1908,11 +1921,16 @@ __forceinline const ResourceInfo* rtv0Resolved(State* s) {
     return &s->rtv0Info;
 }
 
+// Build 6, item 1 (draw_interest.h): one interest bit, read from the State where the site stands. Never hold the mask in a local across a call: the UI layer's fence rises in the middle
+// of a draw (ui_layer.cpp, a failed hologram restore) and forwardWithVerdict reads it again later in the same call.
+__forceinline bool interestHas(const State* s, DrawInterestBit b) { return (s->interest & interestMask(b)) != 0; }
+
 // visual.desktop_window (desktop_window.h): a draw whose render target 0 is the swap chain's buffer 0 is Elite's own desktop mirror, which the feature replaces while it
 // draws the eye image there. The cost on the draw path is one relaxed load while the feature is off; while it draws, the compare reads the answer the binding shadow already
 // holds for this binding generation (rtv0Resolved). The buffer's identity is a raw pointer used only for this compare; nothing holds a reference to the buffer.
 // A skipped draw is also counted by its shader pair, kind and depth view for the census (desktop_window_census.h): kind is the hook's letter (D I N X Y Z A).
 __forceinline bool desktopWindowSkipsDraw(State* s, ID3D11DeviceContext* self, char kind) {
+    if (!interestHas(s, kInterestDesktopWindowBack)) return false;   // build 6: the bit is `desktopWindowBackIdentity() != nullptr`
     void* back = desktopWindowBackIdentity();
     if (!back) return false;
     const ResourceInfo* rt = rtv0Resolved(s);
@@ -1998,15 +2016,17 @@ inline bool drawPathFast(DrawVerdict v) {
 }
 
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
-                               UINT instances, const DrawArgs& args) {
-    ++t_drawStamp;   // TEMPORARY (build 5, item 6, #184): first thing, before every return
+                               UINT instances, const DrawArgs& args, DrawCallFlags& flags) {
+    // `flags` is all false on entry (the thunk declares it) and only the eye branch writes it, so every earlier return leaves it false (build 6, item 3).
     // F3 (native on foot): the on-foot HUD issuers' stacks. Ahead of everything else, so every game draw of the four VR-path thunks is
     // seen; the EDVR-internal reissues return before this call. One shader-hash load and two compares, the rest only on a match.
     nativeOnFootHudProbe(bindingShaderHash(BindSlot::Vs));
     State* s = g_state;
     // The roll-free billboard block's pending rebind belongs to ONE draw: forwardWithVerdict consumes it, and a draw that
     // never gets there (the AA-off fast path, a foreign context) must not leave it for the next (particle_fix.h).
-    particleRollFreeClear();
+    // Build 6: g_rollFreePending is set only behind particleSteady() and cleared on leaving steady (particle_fix.cpp), so the clear is skipped while the steady bit is clear. This
+    // runs for foreign contexts too: the bit is read there as the flag it replaces was written (particle_fix.h), a race that is not new.
+    if (interestHas(s, kInterestParticleSteady)) particleRollFreeClear();
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
@@ -2117,8 +2137,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
-    // The callee's own first test (g_sunOff, an acquire load) goes first, before its two hash arguments are read; the callee keeps it.
-    if (optimizedStationSunOff() && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
+    // The bit is g_sunOff (the accessor's acquire load) and goes first, before the two hash arguments are read; the callee keeps its own acquire test.
+    if (interestHas(s, kInterestSunOff) && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
     // visual.desktop_window: Elite's own draw into the swap chain's buffer, while the eye image is drawn there instead (the other draw thunks ask the same, below).
     if (desktopWindowSkipsDraw(s, self, kind)) return DrawVerdict::kSkip;
     // F157: the coat outfit's pack, a draw of the local body, is left out of both eyes while the coat outfit is armed (native on foot active, Gear_Back decided as the outer garment).
@@ -2126,7 +2146,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // (the same refresh the eye gate makes further down, and the same answer). The index count and instance count are checked first, from the call's own arguments.
     // F158 (measure only): while its window is open (a second relaxed load, its own), every indexed draw into an eye-sized target is handed to nativeOnFootSpawnDraw first, so the pack
     // is counted as the game issues it, before F157 leaves it out. That call never skips a draw.
-    if ((kind == 'X' || kind == 'I') && (nativeOnFootSpawnLive() || (nativeOnFootCoatPackLive() && nofoot::f157::countsMatch(count, instances)))) {
+    // Build 6: the bit is SpawnLive || CoatPackLive; the per-draw countsMatch test stays behind it.
+    if ((kind == 'X' || kind == 'I') && interestHas(s, kInterestNativeFootBody) && (nativeOnFootSpawnLive() || (nativeOnFootCoatPackLive() && nofoot::f157::countsMatch(count, instances)))) {
         const uint32_t bodyRtvGen = bindingGeneration(BindSlot::Rtv0);
         if (s->rtv0EyeGen != bodyRtvGen) {
             s->rtv0Cand = -1;
@@ -2140,13 +2161,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (nativeOnFootCoatPackLive() && nofoot::f157::countsMatch(count, instances) && nativeOnFootCoatPackSkips(self, count, instances, true, bodyRes)) return DrawVerdict::kSkip;
         }
     }
-    if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
+    // Build 6: the bit is g_flatTemporalCapturing, the accessor's first test; its slow half (the pause, the compute-internal and owner-thread tests) stays behind it, in order.
+    if (interestHas(s, kInterestFlatTemporal) && flatTemporalCapturingSlow()) flatTemporalDraw(self, count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
     s->introCurveThisDraw = false;
-    t_uiDepthThisDraw = false;
-    t_compositeThisDraw = false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -2220,7 +2240,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // ahead of its first effect -- shape, then the held vertex shader hash
     // against the two transcriptions -- inline, so the draws that are not a
     // billboard (nearly all of them) no longer make the call.
-    if (particleSteady() &&
+    if (interestHas(s, kInterestParticleSteady) &&
         particleOnDrawMayMatch(kind, count, instances,
                                bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0) &&
         particleOnDraw(self, kind, count, instances)) {
@@ -2242,7 +2262,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // jump tunnel draws into the panel on foot as well.
     // witchspaceStarsHidden() is the callee's own first test, inline: with
     // fix.witchspace_stars at its default (on), the call only returned false.
-    if (witchspaceStarsHidden() && witchspaceStarsSkip(self, kind, count, instances)) {
+    if (interestHas(s, kInterestParticleHideStars) && witchspaceStarsSkip(self, kind, count, instances)) {
         if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
@@ -2251,7 +2271,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The UI layer's routing is decided later, in forwardWithVerdict, whose kSkip
     // return comes before uiLayerFamilyOf / uiLayerDecide / uiLayerNoteOther, so a
     // skipped dust draw is neither drawn in the scene nor taken into the layer.
-    if (spaceDustHidden() && spaceDustSkip(self, kind, count, instances)) {
+    if (interestHas(s, kInterestParticleDust) && spaceDustSkip(self, kind, count, instances)) {
         if (drawCensusArmed()) drawCensusNoteUnseen('d');
         return DrawVerdict::kSkip;
     }
@@ -2276,7 +2296,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // Still before every skip and re-issue below, which is the ordering rule
     // that matters: a capture must describe what the GAME submitted rather
     // than what a clip left.
-    if (quadProbeWants()) {
+    if (interestHas(s, kInterestQuadProbe)) {
         ResourceInfo info;
         if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
             info.isTexture2D) {
@@ -2288,7 +2308,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // game's depth actually goes (depth_probe.h): one pointer compare --
     // and, while nothing arms the probe, not even the call (depthProbeWanted
     // is the note's own first test, inline).
-    if (depthProbeWanted()) {
+    if (interestHas(s, kInterestDepthProbe)) {
         depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
                            bindingGet(BindSlot::Rtv0) == nullptr);
     }
@@ -2490,7 +2510,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssPanelWantsDraws()) {
+        if (interestHas(s, kInterestFssPanel)) {
             if (s->fssBodyLayerGen != rtvGen) {
                 s->fssBodyLayerGen = rtvGen;
                 s->fssBodyLayerBound = false;
@@ -2520,7 +2540,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
-    if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();   // B3: the eye this draw is drawn into, counted while a press of the full-detail scope lens is open (one relaxed load otherwise)
+    if (interestHas(s, kInterestNativeB3Counting)) nativeOnFootB3NoteEyeDraw();   // B3: the eye this draw is drawn into, counted while a press of the full-detail scope lens is open (one relaxed load otherwise)
     // (The temporal pass's camera latch used to fire at the frame's first
     // eye draw here; since 2026-09-04 the depth probe fires it at the
     // first draw into the scene pair's depth, which is the scene camera's
@@ -2530,32 +2550,34 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // now made here, inline, before the call rather than inside it.
     {
         void* const eyeDsv = bindingGet(BindSlot::Dsv0);
-        if (depthProbeEyeDrawNeedsNote(eyeDsv))
+        // Build 6: the bit is depthProbeWanted(), the accessor's first test; its per-draw dsv tail stays behind it.
+        if (interestHas(s, kInterestDepthProbe) && depthProbeEyeDrawNeedsNote(eyeDsv))
             depthProbeNoteEyeDraw(self, eyeDsv, s->eyeDrawsThisFrame);
     }
     // The interface's depth (ui_depth.h): a composite of a learned surface,
     // or a named family drawn straight into the eye, writes its depth. A
     // flag and not a verdict, so it composes with whatever claims the draw
     // below; forwardWithVerdict's scope consumes it.
-    if (uiDepthWantsDraws()) {
-        t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
+    if (interestHas(s, kInterestUiDepth)) {
+        flags.uiDepth = uiDepthOnEyeDraw(self,
             {kind,count,instances,args.start,args.base,args.startInstance});
-        t_compositeThisDraw = uiDepthDrawSampledSurface();
-        t_uiDepthStamp = t_compositeStamp = t_drawStamp;   // TEMPORARY (build 5, item 6)
+        flags.composite = uiDepthDrawSampledSurface();
+        // The pending coverage flags this classification may have set, this draw's own (build 6, #184): forwardWithVerdict tests these, not the module's copy.
+        flags.planetPending = uiDepthPlanetPending();
+        flags.worldScreenPending = uiDepthWorldScreenPending();
     }
     // The generic hologram/icon depth pass (ui_depth.h): its own family
     // list, checked independently of the classification above.
     // The vertex shader's may-want byte (vs_may_want.h) skips the call whose first declines would reject this hash: the one store a decline
     // leaves, g_holoEye = -1, is made inline, and the flag is false as the call's return would make it.
-    if (uiDepthHologramWantsDraws()) {
+    if (interestHas(s, kInterestHoloDepth)) {
         if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {
             uiDepthHologramSkippedDraw();
-            t_holoDepthThisDraw = false;
+            flags.holoDepth = false;
             maskNoteSkip(MaskSkip::HoloDepth);
         } else {
-            t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
+            flags.holoDepth = uiDepthHologramOnEyeDraw(self);
         }
-        t_holoDepthStamp = t_drawStamp;   // TEMPORARY (build 5, item 6)
     }
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
@@ -2594,7 +2616,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // with THIS eye's true rows -- the head-look clamp never touches
     // them. Pointer-cached so the resolve runs once per change, not per
     // draw.
-    if (sunglareWorldActive() && count > 10000) {
+    if (interestHas(s, kInterestSunglareWorld) && count > 10000) {
         void* cb = bindingGet(BindSlot::VsCb0);
         if (cb && cb != s->sceneCbNominated) {
             ResourceInfo info;
@@ -2609,7 +2631,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The census line for this draw, recorded while its bindings are certainly
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
-    if (drawCensusArmed()) {
+    if (interestHas(s, kInterestDrawCensus)) {
         drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
     // the crisp-HUD half of fix.ui_quality (ui_layer.h): admit the game's tonemap draw for its
@@ -2618,7 +2640,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // bool load while off (the default); while on, the 3-vertex prefilter
     // and the structural admission run for a handful of full-screen draws a
     // frame.
-    if (uiLayerCrispOn() && self == g_state->ownerCtx) {
+    if (interestHas(s, kInterestUiLayerCrispOn) && self == g_state->ownerCtx) {
         uiLayerCrispNoteEyeDraw(self, kind, count, instances, args.startInstance);
     }
     // The pool probe (object_probe.h): one bool while off; a few t33 reads a
@@ -2627,7 +2649,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // and with the probe off the call per eye draw only returned (63
     // innermost samples of the 1355-frame parked-5 window, all prologue,
     // test and epilogue).
-    if (objectProbeWantsDraws())
+    if (interestHas(s, kInterestObjectProbe))
         objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
 
     // The suppression probe, after the census so a census taken while probing
@@ -2713,7 +2735,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only). The vertex shader is asked inline first: the call returns
     // at once for any other, and was made on every eye draw.
     if (remlokOnFootVisorVsBound()) remlokOnFootDiagnose(kind, count, instances);
-    if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
+    if (interestHas(s, kInterestRemlok) && remlokOverlayShape(kind, count, instances)) {
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
         if (a == RemlokAction::kScissor) return DrawVerdict::kRemlok;
@@ -2740,7 +2762,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // and small draws before the call, and then by its slot-0 cache's decline,
     // inline too: most meshes bind a texture that cache already knows is not
     // the wash's, and the call would only have said so.
-    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) && !scrimWashSrv0Declines() &&
+    if (interestHas(s, kInterestScrim) && scrimWashShape(kind, count, instances) && !scrimWashSrv0Declines() &&
         scrimOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kScrim;
     }
@@ -2764,7 +2786,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // world-quad pipeline, not the scanner: on 2026-08-25 the hash alone
     // also matched the loading screen's text quad and moved it. The body
     // layer is the one thing only the scanner draws.
-    if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
+    if (interestHas(s, kInterestFssPanel) && s->fssBodyFrame != 0 &&
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssPanelOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssPanel;
@@ -2818,7 +2840,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // panel's size under a stock vscreen_res (1920x1080, the front end's own), this recognition is by size alone, and a substitution for it finds
     // no SIZE in vertex slots 1..3 and stands the WHOLE on-foot curve down for the session. Those two surfaces are the surface strip's
     // (introCurveThisDraw, forwardWithVerdict). The new term sits behind panelCurveWants(), so at curvature 0 nothing new is read.
-    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
+    if (interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count) &&
         !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
         s->curveThisDraw = true;
     }
@@ -4301,7 +4323,7 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
 template <typename RealDraw>
-void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
+void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCallFlags& flags,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
     maskNoteDraw();
     // Asked once. ownerCtx is written only at install (installVScreenFixes),
@@ -4310,22 +4332,21 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    if (owner && uiLayerIssueBlocked()) {
-        // TEMPORARY (build 5, item 6, #184): the owner return that can leave the flags set for a later draw.
-        ++g_b5vs.blockedReturns;
-        if (t_uiDepthThisDraw) ++g_b5vs.blockedUi;
-        if (t_holoDepthThisDraw) ++g_b5vs.blockedHolo;
-        if (t_compositeThisDraw) ++g_b5vs.blockedComposite;
+    if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) {
+        // Build 6, item 3 (#184): the draw's own flags die with it. The scope below is not built yet, so what it would do on this return is done here: the interface depth's mode
+        // this draw's classification left does not outlive it, and the module's pending coverage flags this draw set are cleared (never another draw's: drawCallOwnsPending).
+        if (flags.uiDepth) uiDepthEnd(self);
+        if (drawCallOwnsPending(flags)) uiDepthClearPending();
         return;
     }
     // TEMPORARY, the blend probe (blend_probe.h): an eye draw of a collecting capture is offered once its routing is decided. One relaxed
     // load for every draw while no capture runs.
-    const bool blendProbing = owner && g_state->rtv0Eye && blendProbeWantsDraws();
+    const bool blendProbing = owner && g_state->rtv0Eye && interestHas(g_state, kInterestBlendProbe);
     const uint32_t blendDecisionsBefore = blendProbing ? uiLayerDecisionCount() : 0;
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
-    } effectCaptureScope{owner && objectProbeLedgerActive()?self:nullptr};
+    } effectCaptureScope{owner && interestHas(g_state, kInterestObjectProbeLedger)?self:nullptr};
     // Per-draw coverage classification is cleared on every exit, including
     // skips and fixes that draw their own geometry. The original draw keeps
     // its depth state; supported coverage is reissued into private depth below.
@@ -4334,35 +4355,31 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         bool                 on;
         bool                 holoOn;      // the generic hologram/icon pass's own classification
         bool                 composite;   // this eye draw samples a learned interface surface (the layer's census)
-        explicit UiDepthScope(ID3D11DeviceContext* c)
-            : ctx(c), on(t_uiDepthThisDraw), holoOn(t_holoDepthThisDraw), composite(t_compositeThisDraw) {
-            // TEMPORARY (build 5, item 6, #184): a flag set under another draw's stamp is a stale consume.
-            ++g_b5vs.scopes;
-            if (on && t_uiDepthStamp != t_drawStamp) ++g_b5vs.staleUi;
-            if (holoOn && t_holoDepthStamp != t_drawStamp) ++g_b5vs.staleHolo;
-            if (composite && t_compositeStamp != t_drawStamp) ++g_b5vs.staleComposite;
-            t_uiDepthThisDraw = false;
-            t_holoDepthThisDraw = false;
-            t_compositeThisDraw = false;
-        }
+        bool                 ownsPending; // this draw set the module's planet or world-screen pending flag (draw_call_flags.h)
+        UiDepthScope(ID3D11DeviceContext* c, const DrawCallFlags& f)
+            : ctx(c), on(f.uiDepth), holoOn(f.holoDepth), composite(f.composite), ownsPending(drawCallOwnsPending(f)) {}
         ~UiDepthScope() {
             if (on) uiDepthEnd(ctx);
+            // Build 6, N7: a return that never reached the Begin that clears the pending coverage flags (a kSkip, the fence, a curved-screen swallow, `layered`) clears them here,
+            // and only when THIS draw set them: a foreign-context draw, or one that set neither, must leave the owner draw's copy alone (its Begins decide on the module's copy).
+            if (ownsPending) uiDepthClearPending();
             // holoOn needs no matching End here: uiDepthHologramOnEyeDraw
             // resets its own classification at the top of every call, and
             // the reissue below is the only caller of the two Begins it
             // feeds, so an early return that skips the reissue leaves
             // nothing armed to clean up.
         }
-    } uiDepthScope(self);
+    } uiDepthScope(self, flags);
     // The roll-free billboard block (particle_fix.h, billboard_rollfree.h): a camera-facing billboard whose vertex shader is
     // not transcribed gets a copy of the scene block with the roll taken out of rows 277/278 at VERTEX slot 1 for this draw
     // and every re-issue of it below; put back on every way out. Owner context only. Never a verdict of its own: the draw
     // goes through the whole ladder as the game made it.
     struct RollFreeScope {
         ID3D11DeviceContext* ctx;
-        ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
+        // Build 6: g_rollFreeEngaged is set only when g_rollFreePending is, which is set only behind particleSteady(): both are skipped while the steady bit is clear.
+        ~RollFreeScope() { if (interestHas(g_state, kInterestParticleSteady) && detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
     } rollFreeScope{self};
-    if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
+    if (owner && v != DrawVerdict::kSkip && interestHas(g_state, kInterestParticleSteady) && detail::g_rollFreePending) particleRollFreeBegin(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -4386,7 +4403,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         ~SeedOutcomeScope() {
             if (on) uiLayerSeedDrawOutcome(original, substituted, redirected, known);
         }
-    } seedOutcome{owner && uiLayerSeedDiagnostics()};
+    } seedOutcome{owner && interestHas(g_state, kInterestUiSeedDiagnostics)};
     // The VR world route's pending re-issue of THIS draw (ui_layer.h): held for this call and no longer, so a draw
     // that goes no further (swallowed, or never issued) cannot leave it for the next one.
     struct WorldReissueScope {
@@ -4402,7 +4419,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // (gpu_census.h), so the thunk's real-draw call can be timed as that section. Every
     // other issue through `draw` below passes None and is timed by its own section.
     auto observedDraw = [&](AlteredDraw altered) {
-        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }
+        if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) { objectProbeCandidateDrawIssued(self,false); return false; }
         if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place
         const bool issued = draw(altered);
         objectProbeCandidateDrawIssued(self,issued); // observe effective issue state before any bracket restores
@@ -4418,7 +4435,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // This draw is the supercruise bars' (ui_layer_math.h kSupercruiseBars): when the layer takes it, its issue is made through a
     // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
     bool barsFamily = false;
-    if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
+    if (owner && interestHas(g_state, kInterestUiLayerLive) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         // The may-want byte (vs_may_want.h): on the HDR target a vertex shader the family rule never names is kNone without the check. Inside this branch
         // alone, so the probe branch below is reached or not exactly as before; kind 2 always runs the check.
         const bool skipFamily = vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1;
@@ -4442,7 +4459,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionLive() && screenMotionRecognize())
                 uiLayerMapsNoteRecognised();
         }
-    } else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {
+    } else if (owner && interestHas(g_state, kInterestUiQualityLive) && v != DrawVerdict::kQuadSkip) {
         // The two composites into a target vScreen does not call an eye's:
         // counted for the family census (one hash load a draw while live).
         const uint64_t vs = bindingShaderHash(BindSlot::Vs);
@@ -4462,7 +4479,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // shown to it: the tonemap READS the HDR target the HUD families were
     // taken from, which is exactly what the re-issue re-points -- not a post
     // pass to name.
-    if (!uiLayer && owner && uiLayerWatching() && !uiLayerCrispPending()) {
+    if (!uiLayer && owner && interestHas(g_state, kInterestUiLayerWatching) && !interestHas(g_state, kInterestUiLayerCrispPending)) {
         // rc-since-rc2 review F4: the retry preserves the original decision's
         // exclusions -- the shader exclusion (ui_depth's list, as
         // uiLayerFamilyOf reads it) and the held world-screen identity (the
@@ -4564,7 +4581,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v != DrawVerdict::kNone) forwardVerdictBegin(self, v);
     // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
     // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
-    if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+    if (owner && interestHas(g_state, kInterestCelestialLive) && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
     // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
@@ -4595,7 +4612,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // delta), bound inside the layer's bracket for the game's own issue and the layer's second issues alone; End below, after them, puts the
     // game's b0 back. Begin binds nothing unless the draw tee decided this very draw. Two loads while off.
     const bool markerFixed = layered && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
-    if (owner && nativeOnFootLabelPending() && nativeOnFootMarkerProbeLive()) nativeOnFootLabelIssue(self, layered);   // F87p: the label instrument's issue facts (read only)
+    if (owner && interestHas(g_state, kInterestLabelPending) && nativeOnFootMarkerProbeLive()) nativeOnFootLabelIssue(self, layered);   // F87p: the label instrument's issue facts (read only)
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.
     // Here and not in the on-foot branch above, which returns before the verdict's Begin: kBackdrop's slot swap is in place by now, and the splash
@@ -4622,7 +4639,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             stripToward = introCurveToward();
             stripReverseU = introCurveReverseU();
         }
-        if (stripToward != 0 && !uiLayerIssueBlocked()) {
+        if (stripToward != 0 && !interestHas(g_state, kInterestUiLayerIssueBlocked)) {
             stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);
             if (seedOutcome.on && stripIssued) {
                 seedOutcome.substituted = true;
@@ -4650,7 +4667,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // eye's 8-bit layer, which the door's composite shows. AFTER the game's
     // own issue, so the picture is stock whether or not the re-issue runs;
     // one bool load for the ordinary draw.
-    if (originalIssued && uiLayerCrispPending()) {
+    if (originalIssued && interestHas(g_state, kInterestUiLayerCrispPending)) {
         crispHudTonemapReissue(self, kind, count, instances, args);
     }
     // The VR world route: the 2D screen composite the layer did not take, issued above exactly as the game
@@ -4664,13 +4681,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // reactive mask exist to tell the upscaler about pixels the upscaler no
     // longer sees.
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
-    if (owner && uiLayerIssueBlocked()) {
+    if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) {
         // Begin failed with untrusted shader state: close existing brackets,
         // but issue neither the stock fallback nor any depth/motion replay.
         if (v == DrawVerdict::kBackdrop) backdropEnd(self);
         if (v != DrawVerdict::kNone) forwardVerdictEnd(self, v);
         return;
     }
+    // Which second issues this draw's own flags ask for (draw_call_flags.h), now that `layered` is known and no early return is left.
+    const DrawReissues reissues = drawReissuesFor(flags, owner, layered, false);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth
     // only, right after its own draw and inside the scope that owns the
@@ -4689,7 +4708,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // a second time, in full colour, over itself -- and the paths that
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
-    if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
+    if (reissues.uiDepthCoverage && uiDepthWantsReissue()) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
         if (uiDepthReissueBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthReissueEnd(self);
@@ -4706,24 +4725,22 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // skip it like any taken draw -- the pass's resolve then declines the
     // eye-frame as "nothing listed", which its census line counts (expected
     // with the take on, not a pass failure).
-    if (!layered && uiDepthScope.holoOn) {
+    if (reissues.hologram) {
         GpuCensusScope census(self, GpuCensusSection::FrameHologramPasses);
         if (uiDepthHologramContributionBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthHologramContributionEnd(self);
         if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);
         uiDepthHologramElementDepthEnd(self);
     }
-    // uiDepthPlanetPending() is the function's own first test, inline: it
-    // clears both flags and then declines unless one was set, so skipping it
-    // when neither is set skips only the clearing of two false bools
-    // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
-    if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
+    // The planet's pending flag is this draw's own (flags.planetPending): uiDepthPlanetBegin clears both flags and declines unless one was set, so skipping it when
+    // neither is set skips only the clearing of two false bools (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
+    if (reissues.planet && uiDepthPlanetBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
         pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);uiDepthPlanetEnd(self);
     }
     // F105: an in-world screen (world_screen_coverage.h), the same draw once more into the eye's coverage and edit masks,
     // while the game's state for it is still bound. The pending test is inline, like the planets' above.
-    if (owner && !layered && uiDepthWorldScreenPending() && uiDepthWorldScreenBegin(self)) {
+    if (reissues.worldScreen && uiDepthWorldScreenBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
         pureDrawReissue(ReissueCaller::UiDepth,self,kind,count,instances,args);uiDepthWorldScreenEnd(self);
     }
@@ -5291,7 +5308,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
-    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
+    DrawCallFlags flags;   // this draw's own (draw_call_flags.h)
+    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args, flags);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
@@ -5305,7 +5323,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             g_state->realDraw(self, count, start);
             if (clock.on) clock.realCall(r0);
         }
-    } else forwardWithVerdict(self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
+    } else forwardWithVerdict(self, v, flags, 'D', count, 1, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
@@ -5374,7 +5392,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     DrawArgs args;
     args.start = startIndex;
     args.base = baseVertex;
-    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
+    DrawCallFlags flags;   // this draw's own (draw_call_flags.h)
+    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args, flags);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeBefore(g_state, self);
@@ -5387,7 +5406,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
             if (clock.on) clock.realCall(r0);
         }
-    } else forwardWithVerdict(self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
+    } else forwardWithVerdict(self, v, flags, 'I', count, 1, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
@@ -5454,7 +5473,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     DrawArgs args;
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
-    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
+    DrawCallFlags flags;   // this draw's own (draw_call_flags.h)
+    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args, flags);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -5476,7 +5496,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance);
             if (clock.on) clock.realCall(r0);
         }
-    } else forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&](AlteredDraw altered) {
+    } else forwardWithVerdict(self, v, flags, 'N', perInstance, drawn, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
@@ -5540,7 +5560,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.start = startIndex;
     args.base = baseVertex;
     args.startInstance = startInstance;
-    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    DrawCallFlags flags;   // this draw's own (draw_call_flags.h)
+    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args, flags);
     const bool fast = drawPathFast(v);   // draw_fast_path.h: the gate's tail below (weapon and screen motion, the temporal draws, the census and the footprint) is all behind a subscriber the fast path excludes
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
@@ -5568,7 +5589,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
             if (clock.on) clock.realCall(r0);
         }
-    } else forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
+    } else forwardWithVerdict(self, v, flags, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             // The game's own draw, and only it (gpu_census.h): the weapon and screen motion
@@ -6219,11 +6240,10 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
 
-B5Counts vScreenB5Counts() {
-    B5Counts c;
-    c.ui = uiDepthB5Counts();
-    c.vs = g_b5vs;
-    c.vs.evSlowEntries = engineVelocitySlowEntries();
+B6Counts vScreenB6Counts() {
+    B6Counts c;
+    c.ui = uiDepthB6Counts();
+    c.drift = g_drift;
     return c;
 }
 
@@ -7347,6 +7367,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     gpuFrameBind(device, ctx, cfg.getBool("advanced.app_gpu_timing", false));
 
     g_state = new State();
+    g_drawInterestPtr = &g_state->interest;   // build 6, item 1: the modules' recomputes write through this from now on; cleared before State is deleted, below
     g_state->installMs = stampMs();
     g_state->windowStartMs = g_state->installMs;
     g_state->blackVoid = wantVoid;
@@ -7384,6 +7405,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
+    // Build 6, item 1: every bit from the real expressions now, after the configure sweep (modules that no configure above touches carry state from before this install).
+    g_state->interest = drawInterestExpected();
 
     // The panel size is NOT read from config here.
     //
@@ -7402,6 +7425,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         // g_state back to null, not merely leaked. Leaving it set makes the
         // guard at the top of this function refuse a later attempt, and leaves
         // the periodic totals reporting on a fix that was never installed.
+        g_drawInterestPtr = nullptr;   // build 6: before the delete, so no later write reaches freed memory
         delete g_state;
         g_state = nullptr;
         return;
@@ -7547,6 +7571,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         Log::get().note("vScreen: vtable commit failed; not installing");
         s.hook.uninstall();
         ctx->Release();
+        g_drawInterestPtr = nullptr;   // build 6: before the delete, so no later write reaches freed memory
         delete g_state;
         g_state = nullptr;
         return;

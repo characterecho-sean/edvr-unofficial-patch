@@ -53,6 +53,9 @@ namespace detail {
 extern bool g_fssPanelEnabled;
 }  // namespace detail
 inline bool fssPanelWantsDraws() { return detail::g_fssPanelEnabled; }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t fssPanelInterestBits();
+void fssPanelRecomputeInterest();
 
 // Called for eye draws. Matches X n=6 i=1, then the bound vertex shader's
 // content hash against the pair. Remembers which shader matched for

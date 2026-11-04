@@ -25,6 +25,9 @@ namespace edvr {
 // The identity of the swap chain's buffer 0 while the feature draws into it, or null. Written at each Present by desktopWindowPresent, read on every Elite draw.
 extern std::atomic<void*> g_desktopWindowBack;
 inline void* desktopWindowBackIdentity() { return g_desktopWindowBack.load(std::memory_order_relaxed); }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t desktopWindowInterestBits();
+void desktopWindowRecomputeInterest();
 inline bool desktopWindowSkipping() { return desktopWindowBackIdentity() != nullptr; }
 // A draw was skipped because its render target 0 was the buffer: counted for the 10 s line and, by its shader hashes, the draw kind letter of the hook (D I N X Y Z A) and
 // whether a depth-stencil view was bound, for the census line (desktop_window_census.h). Render thread only, no allocation, no lock. One skipped draw in 32 is also checked

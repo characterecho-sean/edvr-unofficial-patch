@@ -74,6 +74,9 @@ extern bool g_rollFreeEngaged;
 extern const void* g_watchedBlocks[4];
 }  // namespace detail
 inline bool particleSteady() { return detail::g_particleMode == detail::ParticleMode::kSteady; }
+// Build 6, item 1 (draw_interest.h): the module's interest bits (steady, starfield hidden, dust hidden) as their expressions give them now, and the write of them.
+uint64_t particleInterestBits();
+void particleRecomputeInterest();
 
 // Is this draw the witchspace starfield, with fix.witchspace_stars = off?
 // True means do not forward it. Nothing is substituted: the draw is simply

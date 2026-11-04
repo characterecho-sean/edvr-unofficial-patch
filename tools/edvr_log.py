@@ -17385,10 +17385,10 @@ def _perf_window_of(line):
 #   marker fix (F87c) Unmap copy: U Unmaps, requested R bytes, copied C bytes in N ranges (J windows joined), whole stream W bytes, faults F, M ms; over S s        build 3
 PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
 PERF_QUERY_RE = re.compile(r"gpu timing queries: \d+-frame window ending (?P<end>\d+); (?P<per>[\d.]+) EDVR timing-query Ends a frame over \d+ frames \((?P<all>\d+) in all\); by owner a frame: (?P<rest>.*)\.$")
-# TEMPORARY (build 5, item 6; src/d3d11/b5_counts_line.h): the #184 counts, S2's size, the front cache's and engine velocity's slow-half entries, as key=value pairs, beside
-# `draw mask:` on the same window (it replaces build 4's `binding re-sets:` line). Decides build 6.
-PERF_B5_RE = re.compile(r"build 5 counts: \d+-frame window ending (?P<end>\d+); (?P<rest>.*)\.$")
-PERF_B5_PAIR_RE = re.compile(r"(?P<key>[a-z_0-9]+)=(?P<value>\d+)")
+# TEMPORARY (build 6, item 4; src/d3d11/build6_counts_line.h): the eye and hologram memo misses and the interest mask's drift check (checks run, mismatches, the mask's popcount at
+# the last check), as key=value pairs, beside `draw mask:` on the same window. It replaces build 5's `build 5 counts:` line.
+PERF_B6_RE = re.compile(r"build 6 counts: \d+-frame window ending (?P<end>\d+); (?P<rest>.*)\.$")
+PERF_B6_PAIR_RE = re.compile(r"(?P<key>[a-z_0-9]+)=(?P<value>\d+)")
 PERF_GATE_RE = re.compile(r"draw gate holders: (?P<n>\d+) of (?P<of>\d+) terms hold the gate open: (?P<names>.*)\.$")
 PERF_COPY_RE = re.compile(r"marker fix \(F87c\) eye (?P<eye>\d): .*?Unmap copy (?P<copies>\d+) copies, (?P<bytes>\d+) bytes, (?P<ms>[\d.]+) ms")
 PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Unmaps, requested (?P<req>\d+) bytes, copied (?P<copied>\d+) bytes in (?P<ranges>\d+) ranges "
@@ -17396,15 +17396,15 @@ PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Un
 
 
 def perf_extra_of(msg):
-    """The build-2, build-3 or build-5 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures), merged (build 3's one line) or b5 (build 5's TEMPORARY counts: the dict has end and every key=value pair as an int)."""
+    """The build-2, build-3 or build-6 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures), merged (build 3's one line) or b6 (build 6's TEMPORARY counts: the dict has end and every key=value pair as an int)."""
     m = PERF_MASK_RE.search(msg)
     if m:
         return "mask", {"end": int(m.group("end")), "draws": int(m.group("draws")), "rest": m.group("rest")}
-    m = PERF_B5_RE.search(msg)
+    m = PERF_B6_RE.search(msg)
     if m:
-        d = {pm.group("key"): int(pm.group("value")) for pm in PERF_B5_PAIR_RE.finditer(m.group("rest"))}
+        d = {pm.group("key"): int(pm.group("value")) for pm in PERF_B6_PAIR_RE.finditer(m.group("rest"))}
         d["end"] = int(m.group("end"))
-        return "b5", d
+        return "b6", d
     m = PERF_QUERY_RE.search(msg)
     if m:
         return "query", {"end": int(m.group("end")), "per": float(m.group("per")), "all": int(m.group("all")), "rest": m.group("rest")}
@@ -17422,21 +17422,17 @@ def perf_extra_of(msg):
     return None
 
 
-def perf_b5_text(b5):
-    """The build-5 counts of one window, for --perf-windows (TEMPORARY): every pair, then what the totals say. No health rule."""
-    if not b5:
-        return "build 5 counts: NO LINE (a build without the item-6 counts)"
-    keys = [k for k in b5 if k != "end"]
-    text = "build 5 counts: " + " ".join("%s=%d" % (k, b5[k]) for k in keys)
+def perf_b6_text(b6):
+    """The build-6 counts of one window, for --perf-windows (TEMPORARY): every pair, then what the drift check says. No health rule."""
+    if not b6:
+        return "build 6 counts: NO LINE (a build without the item-4 counts)"
+    keys = [k for k in b6 if k != "end"]
+    text = "build 6 counts: " + " ".join("%s=%d" % (k, b6[k]) for k in keys)
     notes = []
-    if b5.get("blocked_returns", 0) == 0:
-        notes.append("#184 UNDETERMINED: no blocked owner return in the window, so zero stale consumes proves nothing")
-    if b5.get("eye_shadow_lookups") != b5.get("eye_misses") or b5.get("holo_shadow_lookups") != b5.get("holo_misses"):
-        notes.append("SHADOW LOOKUPS != REAL MISSES: the shadow memo did not run where it should")
-    if b5.get("front_lookups", 0) > 0 and b5.get("front_hits", 0) == 0:
-        notes.append("FRONT CACHE NEVER HIT: item 3 did not run")
-    if b5.get("eye_ptr_would_disagree", 0) or b5.get("holo_ptr_would_disagree", 0):
-        notes.append("a pointer-only key would have changed an answer (S2's exactness question)")
+    if b6.get("drift_checks", 0) == 0:
+        notes.append("DRIFT CHECK NEVER RAN: no check in the window, so zero mismatches proves nothing (item 1 may not have run)")
+    elif b6.get("drift_mismatches", 0):
+        notes.append("DRIFT: the interest mask differed from its expressions %d time(s); the log names the first bit" % b6["drift_mismatches"])
     return text + ("; " + "; ".join(notes) if notes else "")
 
 
@@ -17471,7 +17467,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
     the runtime windows whose span overlaps the window, weighted by the seconds they overlap. since and until: seconds of the day, bounding the window's closing stamp.
     Returns the process exit code: 1 when there is no window to report."""
     wins, rt = [], {}
-    extra = {"mask": {}, "query": {}, "b5": {}}
+    extra = {"mask": {}, "query": {}, "b6": {}}
     gates, copies, merged = [], [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures (build 2's per-eye lines, build 3's merged line)
 
     def on_gfx(msg, t):
@@ -17553,7 +17549,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
         # build 2: what the may-want byte skipped, who issued the timing queries, what held the draw gate, the marker fix's Unmap copy
         mk, qy = extra["mask"].get(w["end"]), extra["query"].get(w["end"])
         parts.append("draw mask: %d draws through the full path, skipped %s" % (mk["draws"], mk["rest"]) if mk else "draw mask: NO LINE (a build without the may-want byte)")
-        parts.append(perf_b5_text(extra["b5"].get(w["end"])))   # build 5, item 6 (TEMPORARY)
+        parts.append(perf_b6_text(extra["b6"].get(w["end"])))   # build 6, item 4 (TEMPORARY)
         parts.append("timing queries a frame: %.3f (%s)" % (qy["per"], qy["rest"]) if qy else "timing queries: NO LINE (a build without the counter)")
         held = [g for t, g in gates if t <= w["close"]]
         parts.append("gate held by %s" % ("%d of %d: %s" % (held[-1]["n"], held[-1]["of"], held[-1]["names"]) if held else "n/a (no `draw gate holders:` line before this window)"))
@@ -24356,9 +24352,7 @@ def self_test_perf_windows():
         fail("a window with none of the build-2 lines should say each is absent:\n%s" % bare)
     mask = ("draw mask: 1800-frame window ending 1800; 14000 draws through the full path; calls skipped by the vertex shader's may-want byte: "
             "ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3.")
-    b5line = ("build 5 counts: 1800-frame window ending 1800; blocked_returns=3 blocked_ui=1 blocked_holo=2 blocked_composite=0 scopes=30800000 stale_ui=0 stale_holo=1 stale_composite=0; "
-              "eye_misses=420 eye_shadow_lookups=420 eye_ptr_would_hit=300 eye_ptr_would_disagree=0; holo_misses=210 holo_shadow_lookups=210 holo_ptr_would_hit=150 holo_ptr_would_disagree=2; "
-              "view_is_surface_calls=9000 front_lookups=61000000 front_hits=60000000; ev_slow_entries=15000.")
+    b6line = ("build 6 counts: 1800-frame window ending 1800; eye_misses=420 holo_misses=210; drift_checks=16 drift_mismatches=0 mask_bits=9.")
     qry = ("gpu timing queries: 1800-frame window ending 1800; 6.500 EDVR timing-query Ends a frame over 1800 frames (11700 in all); by owner a frame: "
            "other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000.")
     gate = "draw gate holders: 2 of 28 terms hold the gate open: ui_depth, footprint."
@@ -24366,34 +24360,37 @@ def self_test_perf_windows():
            "eye-1 first/last ring -; over 10 s")
     cp1 = cp0.replace("eye 0", "eye 1").replace("600 copies", "300 copies")
     mtext = ("[10:00:00.000] version v0.0.0 (build 00000000)\n[10:00:01.000] " + gate + "\n[10:00:01.500] " + cp0 + "\n[10:00:01.600] " + cp1 + "\n" +
-             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n[10:00:02.003] " + b5line + "\n")
+             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n[10:00:02.003] " + b6line + "\n")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(mtext)
     mo = buf.getvalue()
     for want in ("draw mask: 14000 draws through the full path, skipped ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3",
-                 "build 5 counts: blocked_returns=3 blocked_ui=1 blocked_holo=2 blocked_composite=0 scopes=30800000 stale_ui=0 stale_holo=1 stale_composite=0 eye_misses=420 "
-                 "eye_shadow_lookups=420 eye_ptr_would_hit=300 eye_ptr_would_disagree=0 holo_misses=210 holo_shadow_lookups=210 holo_ptr_would_hit=150 holo_ptr_would_disagree=2 "
-                 "view_is_surface_calls=9000 front_lookups=61000000 front_hits=60000000 ev_slow_entries=15000; a pointer-only key would have changed an answer",
+                 "build 6 counts: eye_misses=420 holo_misses=210 drift_checks=16 drift_mismatches=0 mask_bits=9",
                  "timing queries a frame: 6.500 (other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000)",
                  "gate held by 2 of 28: ui_depth, footprint", "marker copy (F87c lines in window): eye 0 600 copies 4800000 bytes 120.500 ms, eye 1 300 copies 4800000 bytes 120.500 ms"):
         if want not in mo:
             fail("--perf-windows with the build-2 lines lacks %r:\n%s" % (want, mo))
-    if perf_extra_of("draw mask: nothing like it") is not None or perf_extra_of("build 5 counts: nothing like it") is not None:
-        fail("a line of another instrument parsed as a build-2 or build-5 line")
+    if perf_extra_of("draw mask: nothing like it") is not None or perf_extra_of("build 6 counts: nothing like it") is not None:
+        fail("a line of another instrument parsed as a build-2 or build-6 line")
     if perf_extra_of("binding re-sets: 1800-frame window ending 1800; mapMemo lookups 52000, misses 310; bindingSet calls/same pointer/null to null: rtv0 9000/4200/0.") is not None:
         fail("build 4's retired binding re-sets line still parses")
-    bk, bdict = perf_extra_of(b5line) or (None, {})
-    if bk != "b5" or (bdict.get("end"), bdict.get("blocked_returns"), bdict.get("stale_holo"), bdict.get("eye_ptr_would_hit"), bdict.get("holo_ptr_would_disagree"),
-                      bdict.get("front_hits"), bdict.get("ev_slow_entries")) != (1800, 3, 1, 300, 2, 60000000, 15000) or len(bdict) != 21:
-        fail("the build-5 counts line did not parse: %r" % (perf_extra_of(b5line),))
-    if "build 5 counts: NO LINE" not in bare:
-        fail("a window without the build-5 line should say it is absent:"+chr(10)+"%s" % bare)
-    # No blocked owner return reads UNDETERMINED; a shadow lookup count that differs from the misses, and a front cache that never hit, are named.
-    quiet = perf_b5_text(perf_extra_of(b5line.replace("blocked_returns=3", "blocked_returns=0").replace("eye_shadow_lookups=420", "eye_shadow_lookups=419").replace("front_hits=60000000", "front_hits=0"))[1])
-    for want in ("#184 UNDETERMINED", "SHADOW LOOKUPS != REAL MISSES", "FRONT CACHE NEVER HIT"):
-        if want not in quiet:
-            fail("perf_b5_text lacks %r for a quiet, drifting window: %s" % (want, quiet))
+    bk, bdict = perf_extra_of(b6line) or (None, {})
+    if bk != "b6" or (bdict.get("end"), bdict.get("eye_misses"), bdict.get("holo_misses"), bdict.get("drift_checks"), bdict.get("drift_mismatches"),
+                      bdict.get("mask_bits")) != (1800, 420, 210, 16, 0, 9) or len(bdict) != 6:
+        fail("the build-6 counts line did not parse: %r" % (perf_extra_of(b6line),))
+    if perf_extra_of(b6line.replace("build 6 counts", "build 5 counts")) is not None:
+        fail("build 5's retired counts line still parses")
+    if "build 6 counts: NO LINE" not in bare:
+        fail("a window without the build-6 line should say it is absent:"+chr(10)+"%s" % bare)
+    # The drift check's positive line: a window where it ran and found nothing prints no note; one where it never ran, and one that found a difference, are named.
+    clean = perf_b6_text(perf_extra_of(b6line)[1])
+    if "DRIFT" in clean:
+        fail("perf_b6_text names drift for a clean window: %s" % clean)
+    never = perf_b6_text(perf_extra_of(b6line.replace("drift_checks=16", "drift_checks=0"))[1])
+    drift = perf_b6_text(perf_extra_of(b6line.replace("drift_mismatches=0", "drift_mismatches=2"))[1])
+    if "DRIFT CHECK NEVER RAN" not in never or "DRIFT: the interest mask differed" not in drift:
+        fail("perf_b6_text lacks its drift notes: never=%s drift=%s" % (never, drift))
     # Build 3: the merged copy line and the per-eye text it brings. A build-3 log prints the merged copy; an L2-style (build 2) log keeps the per-eye figures.
     mg = ("marker fix (F87c) Unmap copy: 600 Unmaps, requested 9600000 bytes, copied 7200000 bytes in 1200 ranges (900 windows joined), whole stream 0 bytes, "
           "faults 2, 150.250 ms; over 10 s")
@@ -24421,11 +24418,9 @@ def self_test_perf_windows():
     # The formatters' own text: the fragments the parser reads are held to the sources, so a formatter that drifts fails here.
     srcdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11")
     for name, frags in (("draw_mask_line.h", ("draw mask: 1800-frame window ending %u; %u draws through the full path; calls skipped by the vertex shader's may-want byte: ",)),
-                        ("b5_counts_line.h", ("build 5 counts: 1800-frame window ending %u; ",
-                                              "blocked_returns=%llu blocked_ui=%llu blocked_holo=%llu blocked_composite=%llu scopes=%llu stale_ui=%llu stale_holo=%llu stale_composite=%llu; ",
-                                              "eye_misses=%llu eye_shadow_lookups=%llu eye_ptr_would_hit=%llu eye_ptr_would_disagree=%llu; ",
-                                              "holo_misses=%llu holo_shadow_lookups=%llu holo_ptr_would_hit=%llu holo_ptr_would_disagree=%llu; ",
-                                              "view_is_surface_calls=%llu front_lookups=%llu front_hits=%llu; ev_slow_entries=%llu.")),
+                        ("build6_counts_line.h", ("build 6 counts: 1800-frame window ending %u; ",
+                                                  "eye_misses=%llu holo_misses=%llu; ",
+                                                  "drift_checks=%llu drift_mismatches=%llu mask_bits=%u.")),
                         ("gpu_query_count.h", ("gpu timing queries: 1800-frame window ending %u; %.3f EDVR timing-query Ends a frame over %u frames (%llu in all); by owner a frame: ",)),
                         ("draw_gate_holders.h", ("draw gate holders: %u of %u terms hold the gate open: ",)),
                         ("native_on_foot.cpp", ("Unmap copy %llu copies, requested %llu bytes; eye-%d first/last ring %s; over %u s",

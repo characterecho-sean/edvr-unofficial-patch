@@ -48,6 +48,9 @@ extern uint32_t g_drawCensusFramesLeft;
 inline bool drawCensusArmed() {
     return detail::g_drawCensusPending || detail::g_drawCensusFramesLeft > 0;
 }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t drawCensusInterestBits();
+void drawCensusRecomputeInterest();
 
 // The hotkey. Arms a capture of the next few WHOLE frames -- recording starts
 // at the coming frame boundary, so a census never contains a partial frame.

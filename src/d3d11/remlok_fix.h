@@ -67,6 +67,9 @@ enum class RemlokMode : uint32_t { kStock, kOuter, kHide };
 extern RemlokMode g_remlokMode;
 }  // namespace detail
 inline bool remlokWantsDraws() { return detail::g_remlokMode != detail::RemlokMode::kStock; }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t remlokInterestBits();
+void remlokRecomputeInterest();
 // F26: the one-shot diagnostic for the on-foot visor draw (VS B553BB479B7C0B97; read only).
 // remlokOnFootDiagnose returns on its first line unless the bound vertex shader is that one, and does nothing before that line, so the
 // draw path asks remlokOnFootVisorVsBound (inline, one field read) first and makes the call only for the visor's own draws.

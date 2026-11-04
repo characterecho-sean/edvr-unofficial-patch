@@ -136,7 +136,7 @@ static bool wiredLayerTakeVscreen(const std::string& t) {
     const size_t issue = t.find("const bool originalIssued=observedDraw(", fn);
     const size_t end = t.find("if (orbitScaled) orbitalWidthEnd(self);", fn);
     const size_t layerEnd = t.find("        uiLayerEnd(self);\n        if (originalIssued) uiLayerSecondIssues(", fn);
-    const size_t twin = t.find("if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", fn);
+    const size_t twin = t.find("if (reissues.uiDepthCoverage && uiDepthWantsReissue()) {", fn);
     const size_t twinBegin = t.find("uiDepthReissueBegin(self)", fn);
     if (!found(gate) || !found(begin) || !found(layerBegin) || !found(issue) || !found(end) || !found(layerEnd) || !found(twin) || !found(twinBegin)) return false;
     // the same factor in the layer: the gate never asks whether the layer takes the draw
@@ -234,7 +234,7 @@ static void wiringCases() {
           "control: a width patch that stands down for a draw the layer takes (another factor in the layer) trips the pin");
     check(!wiredLayerTakeVscreen(replacedAfter(vscreen, "const bool orbitScaled = ", gateText, gateText + " !barsDecided &&")),
           "control: ...whatever name the layer's decision goes by");
-    check(!wiredLayerTakeVscreen(replaced(vscreen, "if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
+    check(!wiredLayerTakeVscreen(replaced(vscreen, "if (reissues.uiDepthCoverage && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
           "control: a coverage twin that also runs for a draw the layer took (a second, phantom line in the scene's account) trips the pin");
     check(!wiredLayerTakeVscreen(replaced(without(vscreen, "    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks\n"),
                                           "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n",

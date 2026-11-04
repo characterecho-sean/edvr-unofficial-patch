@@ -536,10 +536,10 @@ std::vector<Pin> wiringPins(const Sources& src) {
             const char* after;
         };
         const Thunk thunks[] = {
-            {"void STDMETHODCALLTYPE hookedDraw(", "hookedDraw", "}elseforwardWithVerdict(self,v,'D'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'D'"},
-            {"void STDMETHODCALLTYPE hookedDrawIndexed(", "hookedDrawIndexed", "}elseforwardWithVerdict(self,v,'I'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'I'"},
-            {"void STDMETHODCALLTYPE hookedDrawInstanced(", "hookedDrawInstanced", "}elseforwardWithVerdict(self,v,'N'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'N'"},
-            {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "hookedDrawIndexedInstanced", "forwardWithVerdict(self,v,'X'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'X'"},
+            {"void STDMETHODCALLTYPE hookedDraw(", "hookedDraw", "}elseforwardWithVerdict(self,v,flags,'D'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'D'"},
+            {"void STDMETHODCALLTYPE hookedDrawIndexed(", "hookedDrawIndexed", "}elseforwardWithVerdict(self,v,flags,'I'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'I'"},
+            {"void STDMETHODCALLTYPE hookedDrawInstanced(", "hookedDrawInstanced", "}elseforwardWithVerdict(self,v,flags,'N'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'N'"},
+            {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "hookedDrawIndexedInstanced", "forwardWithVerdict(self,v,flags,'X'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'X'"},
         };
         bool all = true;
         for (const Thunk& t : thunks) {

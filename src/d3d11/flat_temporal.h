@@ -36,6 +36,10 @@ __forceinline bool flatTemporalCapturing() {
     return flatTemporalCapturingSlow();
 }
 
+// Build 6, item 1 (draw_interest.h): the interest bit for g_flatTemporalCapturing as it reads now, and the write of it.
+uint64_t flatTemporalInterestBits();
+void flatTemporalRecomputeInterest();
+
 // Unlike the observer gate this policy query does not count foreign calls.
 // Paused/internal/foreign work cannot demand restoration on the owner's context.
 inline bool flatTemporalNeedsOriginalState() {

@@ -100,6 +100,9 @@ __forceinline bool panelCurveWants() {
     return detail::g_panelCurveCurvature > 0.0f ||
            detail::g_panelCurveSegments != detail::kDefaultSegments;
 }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t panelCurveInterestBits();
+void panelCurveRecomputeInterest();
 
 // Replace one recognised composite draw with the bent strip: save the input
 // assembler state actually touched, bind ours, issue the equivalent draw,

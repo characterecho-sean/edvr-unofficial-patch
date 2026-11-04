@@ -92,6 +92,9 @@ extern bool g_quadProbeTaken;
 inline bool quadProbeWants() {
     return detail::g_quadProbeArmed && !detail::g_quadProbeTaken;
 }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t quadProbeInterestBits();
+void quadProbeRecomputeInterest();
 
 // Ask for a capture now, replacing any already taken. Bound to the draw
 // census key so a transient widget -- a marker that only shows during a

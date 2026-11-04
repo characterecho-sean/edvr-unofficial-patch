@@ -21,7 +21,7 @@
 
 #include "../common/vtable_hook.h"  // HookMode
 #include "draw_mask_line.h"         // DrawMaskCounts
-#include "b5_counts_line.h"          // B5Counts (TEMPORARY, build 5)
+#include "build6_counts_line.h"       // B6Counts (TEMPORARY, build 6)
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -126,8 +126,8 @@ uint32_t vScreenEyeDrawsThisFrame();
 bool vScreenAaOffForDraws();
 // The may-want byte's counters since the start (draw_mask_line.h), for the perf window line.
 DrawMaskCounts vScreenDrawMaskCounts();
-// TEMPORARY (build 5, item 6, b5_counts_line.h): the #184, S2, front-cache and engine velocity counts since the start, for the perf window line.
-B5Counts vScreenB5Counts();
+// TEMPORARY (build 6, item 4, build6_counts_line.h): the memo-miss counts and the interest mask's drift figures since the start, for the perf window line.
+B6Counts vScreenB6Counts();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

@@ -17,9 +17,6 @@ uint32_t g_bindingEyeKeyGen = 0;
 // Build 5, item 4: engine velocity's aggregate over its five slots. Starts at 1 and never takes 0 (the increment skips it): engine_velocity.h's DrawCache holds
 // 0 when fresh or reset and has no valid flag, so 0 must never equal a live value. The per-slot generations start at 1 for the same reason.
 uint32_t g_bindingEvKeyGen = 1;
-// TEMPORARY (build 5, item 6): the eye key's pointer-only form. Bumped as the eye key is, except that a PS SRV 0..3 bindingSet bumps it only when the pointer changes.
-// It decides nothing; the shadow memos in ui_depth.cpp are keyed on it.
-uint32_t g_bindingEyeKeyPtrGen = 0;
 }  // namespace detail
 
 namespace {
@@ -44,13 +41,10 @@ void bumpEvKey() {
 }
 
 // The one helper bindingSet, bindingInvalidate and bindingSetShader call after bumping the slot's own generation. `ptrMoved` is false only for a PS SRV 0..3
-// set of the pointer already bound: the eye key still moves, the pointer-only key does not.
-void noteEyeKeySlot(BindSlot s, bool ptrMoved = true) {
+// set of the pointer already bound (build 6, S2): the eye key stays, the slot's own generation moved. The engine velocity key follows every set, as before.
+void noteEyeKeySlot(BindSlot s, bool eyeKeyMoves = true) {
     const uint32_t bit = slotBit(s);
-    if (kEyeKeySlots & bit) {
-        ++detail::g_bindingEyeKeyGen;
-        if (ptrMoved) ++detail::g_bindingEyeKeyPtrGen;
-    }
+    if (eyeKeyMoves && (kEyeKeySlots & bit)) ++detail::g_bindingEyeKeyGen;
     if (kEvKeySlots & bit) bumpEvKey();
 }
 
@@ -127,10 +121,12 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
 void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
     const bool srv = slot >= BindSlot::PsSrv0 && slot <= BindSlot::PsSrv3;
-    const bool ptrMoved = !(srv && s.ptr == ptr);   // compared before the pointer is overwritten
+    // Build 6, S2 (maintainer-approved behaviour change, 2026-11-04): a PS SRV 0..3 set of the pointer already bound moves the slot's own generation (the scrim
+    // cache, engine velocity and srv0IsPanelSized compare it) but not the eye key. Compared before the pointer is overwritten.
+    const bool eyeKeyMoves = !(srv && s.ptr == ptr);
     s.ptr = ptr;
     ++s.gen;
-    noteEyeKeySlot(slot, ptrMoved);
+    noteEyeKeySlot(slot, eyeKeyMoves);
 }
 
 void bindingInvalidate(BindSlot slot) {
@@ -162,7 +158,6 @@ void bindingForgetAll() {
         ++s.gen;
     }
     ++detail::g_bindingEyeKeyGen;   // every slot moved, so the aggregate does, once
-    ++detail::g_bindingEyeKeyPtrGen;
     bumpEvKey();
 }
 
@@ -173,7 +168,6 @@ void bindingFrameBoundary() {
     // the change and 1 after.
     for (Slot& s : detail::g_bindingSlots) ++s.gen;
     ++detail::g_bindingEyeKeyGen;   // ...and the aggregate, so a memo keyed on it cannot outlive a frame either
-    ++detail::g_bindingEyeKeyPtrGen;
     bumpEvKey();
 }
 

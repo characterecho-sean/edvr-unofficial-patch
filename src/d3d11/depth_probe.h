@@ -65,6 +65,9 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
 // epilogue.
 namespace detail { extern bool g_depthProbeWanted; }
 inline bool depthProbeWanted() { return detail::g_depthProbeWanted; }
+// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
+uint64_t depthProbeInterestBits();
+void depthProbeRecomputeInterest();
 
 // The indirect draws (DrawIndexedInstancedIndirect and its twin), which
 // never reach the classifier: counted and their depth target noted, so a
