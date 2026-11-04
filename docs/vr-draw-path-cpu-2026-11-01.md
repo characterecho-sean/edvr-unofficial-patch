@@ -6,15 +6,14 @@
   Draw path), and how much can go without changing what reaches the screen?
   Earlier investigation: `docs\stereo-cpu-sharing-2026-10-16.md`.
 - **Build 1 (flown 2026-11-02, `53c965cd`, draft PR #166):** failed the total
-  criterion. Shipped items 1 and 3 and the re-issue counter; removed items 2
-  and 4 and all three temporary keys. Its DLAA items were worth 0.2-0.4 ms
-  against a 0.8 ms noise floor.
+  criterion. Shipped items 1 and 3 and the re-issue counter; removed the
+  rest and all three temporary keys (0.2-0.4 ms against 0.8 ms of noise).
 - **Build 2 (#168, flown 2026-11-03):** the VS "may-want" byte and pair test
   before `GetType`, `drawPathFast` in the instanced hook, instruments read with
   `edvr_log.py --perf-windows`. Its targets fell about 0.6 ms a frame, nothing
   rose more than 0.2 ms.
-- **Post-build-2 review (2026-11-03):** kept the marker copy, the bind and map
-  hooks; ruled out the tee trap under DLAA (0.08 ms), the EDHM bypass.
+- **Post-build-2 review (2026-11-03):** ruled out the tee trap (0.08 ms), the
+  EDHM bypass.
 - **Build 3 (#180, `cfa5e806`; "Flight 2026-11-03 (build 3)"):** both eyes'
   marker windows copied once per Unmap. Passed: coverage held, R5
   `streamUnmapCopy` 0.697 to 0.506 ms. B1: 607 of 676 non-eye draws are
@@ -44,8 +43,9 @@
   was the cost). S2 cleared: 40% of eye-memo misses, 0 disagreements in 8.1M.
   #184 undetermined (no blocked return), as expected.
 - **Build 6 (draft 2026-11-04, "Build 6: one interest mask"):** S1 as a
-  write-through mask, S2, #184 (asked), the temporary lines retired. Next:
-  the maintainer's answers, then Argon and Opus review.
+  write-through mask, S2, #184 with the pending flags (yes, 2026-11-04),
+  build 5's items 2-3 removed, the temporary lines retired. Next: Argon and
+  Opus review.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2804,8 +2804,9 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
    ruled out. Rig: `scrim_metadata_test.cpp:121-123` asserts that a
    same-pointer re-set moves the key for all eight slots; it splits, PsSrv0-3
    asserting the key stays and the per-slot `gen` moves.
-3. **#184: the three per-draw flags become the draw's own** (a BEHAVIOUR
-   CHANGE, needing the maintainer's yes). Today: an owner draw blocked at
+3. **#184: the per-draw flags become the draw's own** (a BEHAVIOUR CHANGE;
+   the maintainer said yes on 2026-11-04, the two pending flags below
+   included). Today: an owner draw blocked at
    `vscreen.cpp:4308` leaves its flags in TLS. The fence that blocks it is
    raised only on a failed hologram-binding restore (`ui_layer.cpp:1865-1867`)
    and holds to the frame boundary (`:6792`), so every owner draw for the
@@ -2828,24 +2829,32 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
    accesses a draw, 0.02-0.04 ms). Build 5's counter will most likely read
    0 (the fence is a fault path); the case rests on the code, which is why
    it is put to the maintainer rather than gated on the count.
-   - **Asked, not proposed:** `planetPending` and `worldScreenPending`
-     (`ui_depth.cpp:2675`, `:2688`) leak past the same returns (consumed
-     only at `vscreen.cpp:4703`, `:4709`, reset by the next eye draw). The
-     same struct could carry them; that is another behaviour change.
+   - **Included (maintainer, 2026-11-04):** `planetPending` and
+     `worldScreenPending` (`ui_depth.cpp:2675`, `:2688`) leak past the same
+     returns (consumed only at `vscreen.cpp:4703`, `:4709`, reset by the next
+     eye draw), so `DrawCallFlags` carries them too, false on every early
+     return. Fixing the three and not these would leave the same hazard
+     half open.
 4. **The arc's temporary lines retired.**
-   - Build 4's `binding re-sets:` line, marked TEMPORARY: `bind_set_line.h`
-     and its includes (`binding_shadow.h:45`, `vscreen.h:24`,
-     `perf_monitor.cpp:5`), `binding_shadow.cpp:107-110`, `:114`,
-     `binding_shadow.h:167-168`, `vscreen.cpp:126-127`, `:3626`, `:3628`,
-     `:6205-6210`, `vscreen.h:129-130`, `perf_monitor.cpp:1278-1291`, and
-     its parser in `edvr_log.py`. (Build 5 already drops its `bindSetNote`
-     call.)
+   - Build 4's `binding re-sets:` line: already removed in build 5.
    - Build 5's item 6 line (the #184 and S2 counts) and item 1's drift check
      above, after build 6's flight.
    - **Asked:** `draw mask:` (`draw_mask_line.h`, which calls itself a
      standing line, so it is not removed without a yes). It costs a load and
      a store on `g_maskDraws` every draw (`vscreen.cpp:4301`) plus the skip
      counts. Keep it, or retire it with the arc.
+5. **Build 5's items 2 and 3 removed** (maintainer, 2026-11-04; exact both
+   ways). Each saved nothing ("Flight 2026-11-04 (build 5)"), so the code
+   goes:
+   - Item 2: `uiDepthOnEyeDraw` back out of line in `ui_depth.cpp`, in build
+     4's form (`c86670bd`, `:2890-2904`): the reset, `g_holoDraw = draw`, the
+     gate, then the memo. `g_uiDepthDrawDirty` and its sets go. S2's key
+     change and build 6's other edits to the function stay.
+   - Item 3: `ViewFront`, `g_viewFront`, `viewIsSurfaceFront` and
+     `g_viewMemoPuts` (with its bumps) go; the two slot loops and the
+     `ui_layer.cpp` log caller call `viewIsSurface` again.
+   - Their rig cases go with them; build 4's `ui_depth_test` checks come
+     back where they still apply.
 
 ### Left out
 
@@ -2869,8 +2878,12 @@ those loads (the 0.02-0.06 ms lines in "Flight 2026-11-03 (build 4)").
   t_*ThisDraw` remains and all four call pairs pass the flags;
   `hologram_depth_test`: Begin declines after `uiDepthHologramSkippedDraw()`;
   `ui_depth_test`: after `uiDepthEnd`, `uiDepthWantsReissue()` is false.
+- Item 3 also: `DrawCallFlags` carries `planetPending` and
+  `worldScreenPending`; the source-text check covers them.
 - Item 4: `edvr_log.py --self-test` without the retired lines; the build's
   gates.
+- Item 5: the removed symbols absent (a source-text check); `ui_depth_test`
+  over hit, miss, hit, reissue gives build 4's accessor values.
 
 ### Flight and pass criteria
 
