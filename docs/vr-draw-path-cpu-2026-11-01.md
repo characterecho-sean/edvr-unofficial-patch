@@ -49,7 +49,8 @@
   `eyeOfDraw` itself (`rowSourceDraw` and five census callers would shift).
 - **Left out, tracked:** #151 (`drawPathFast` in
   `hookedDrawIndexedInstanced`), #152 (per-scene subscriber mask), #153
-  (cross-profile per-bind counter), #154 (`/GL /LTCG`).
+  (cross-profile per-bind counter), #154 (`/GL /LTCG`), #183 (cleanup when
+  the arc closes: worktrees, branches, captures, notes, install backups).
 
 ## Evidence in brief
 
