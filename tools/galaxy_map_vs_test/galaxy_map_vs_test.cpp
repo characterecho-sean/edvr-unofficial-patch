@@ -7,7 +7,7 @@
 //      negated rows keep the game's on-screen orientation
 //   G4 the ring's transcription against its formula, random instances
 //   G5 the arrow's transcription: the game's maths for a positive scale, the eye origin taken out for a negative one
-//   G12 one pair of axes for every world quad (galaxy_map_axes.h mapCamAxes): finite, R with no y and U along the grid's vertical with the key stems, the camera's rows with the key camera; label
+//   G12 one pair of axes for every world quad (galaxy_map_axes.h mapCamAxes): finite, and the camera's rows; label
 //       baselines parallel and with no y over five places and three eyes; a top-down camera and a camera whose right is vertical write no NaN
 //   G8 the sprites' depth with the real states and pixel shaders: reversed depth (a nearer clip position is larger), a far quad drawn after a near one is rejected where the near one's
 //      alpha is at or over kMapDepthAlpha and shows where it is under, near over far in either order, a second quad in the same plane draws whole at D16, the bias is four steps farther
@@ -344,10 +344,10 @@ inline double dp4(const float row[4], V3 p) { return row[0] * p.x + row[1] * p.y
 inline double dp3(const float row[4], V3 p) { return row[0] * p.x + row[1] * p.y + row[2] * p.z; }
 // MapCam's one pair of axes and its forward, as the CPU writes them (galaxy_map_axes.h mapCamAxes), in the map frame.
 struct CamAxes { V3 R, U, F; };
-inline CamAxes camAxesFromRows(const V3 rows[3], bool cameraUp) {
+inline CamAxes camAxesFromRows(const V3 rows[3]) {
     float r[3][3];
     for (int i = 0; i < 3; ++i) { r[i][0] = static_cast<float>(rows[i].x); r[i][1] = static_cast<float>(rows[i].y); r[i][2] = static_cast<float>(rows[i].z); }
-    const edvr::mapui::MapAxes a = edvr::mapui::mapCamAxes(r, cameraUp);
+    const edvr::mapui::MapAxes a = edvr::mapui::mapCamAxes(r);
     return {{a.R[0], a.R[1], a.R[2]}, {a.U[0], a.U[1], a.U[2]}, {a.F[0], a.F[1], a.F[2]}};
 }
 // mode 0: the icon (C31238), 1: the icon with b2 (12382D), 2: the arrow (4EF6DD, replaced)
@@ -437,12 +437,12 @@ inline void setEye(Gen& g, Consts& c, V3 R, V3 U, V3 F, bool identityWorld) {
     setRow(c.cb1[278], g.u(-0.02, 0.02), g.u(-0.02, 0.02), g.u(-0.02, 0.02), 0);
     setRow(c.cb2[0], 0, 0, 0, 0);
     setRow(c.cb2[1], g.u(0.2, 1.5), g.u(0.2, 1.5), g.u(-0.5, 0.5), g.u(-0.5, 0.5));
-    // MapCam's axes from a random map camera (a pitched camera, now and then top-down, in either choice of up)
+    // MapCam's axes from a random map camera (a pitched camera, now and then top-down)
     const double yaw = g.u(-3.1, 3.1), pitch = g.u(0.2, 1.57);
     const V3 right{std::cos(yaw), 0, -std::sin(yaw)}, fwdH{std::sin(yaw), 0, std::cos(yaw)};
     const V3 fwd = fwdH * std::cos(pitch) + V3{0, -std::sin(pitch), 0};
     const V3 rows[3] = {right, cross(fwd, right), fwd};
-    const CamAxes ax = camAxesFromRows(rows, (g.r32() & 1u) != 0);
+    const CamAxes ax = camAxesFromRows(rows);
     setRow(c.cb10[0], ax.R.x, ax.R.y, ax.R.z, 0);
     setRow(c.cb10[1], ax.U.x, ax.U.y, ax.U.z, 0);
     setRow(c.cb10[2], ax.F.x, ax.F.y, ax.F.z, 0);
@@ -724,7 +724,7 @@ struct WorldProgs { const Prog* icon; const Prog* label; const Prog* ring; ID3D1
 // position at every corner, for the four kinds; the clip outputs do change (the test sees the eye move). The axes are MapCam's: nothing of the eye enters.
 inline void runWorldStability(Rig& rig, const WorldProgs& w) {
     const V3 camRows[3] = {{1, 0, 0}, {0, 0.70710678, 0.70710678}, {0, -0.70710678, 0.70710678}};
-    const CamAxes ax = camAxesFromRows(camRows, false);
+    const CamAxes ax = camAxesFromRows(camRows);
     const Frame a = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});   // a rolled head
     const Frame b{rodrigues(a.R, a.U, 0.5), a.U, rodrigues(a.F, a.U, 0.5)};
     const Frame c{a.R, rodrigues(a.U, a.R, 0.2), rodrigues(a.F, a.R, 0.2)};
@@ -839,11 +839,11 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
         std::printf("%s\n", label);
         check(same < 1e-4, label);
     }
-    // (b) the key `camera`: MapCam holds the camera's rows, so a facing record is the game's maths WHEREVER it is (the quaternion faces the head-free camera), not only on the camera's forward
+    // (b) MapCam holds the camera's rows, so a facing record is the game's maths WHEREVER it is (the quaternion faces the head-free camera), not only on the camera's forward
     const V3 rowsCam[3] = {{1, 0, 0}, {0, 0.70710678, 0.70710678}, {0, -0.70710678, 0.70710678}};
-    const CamAxes camera = camAxesFromRows(rowsCam, true);
+    const CamAxes camera = camAxesFromRows(rowsCam);
     check(camera.R.x == 1.0 && camera.R.y == 0.0 && camera.R.z == 0.0 && std::fabs(camera.U.y - 0.70710678) < 1e-7 && std::fabs(camera.F.y + 0.70710678) < 1e-6,
-          "G12.camera: the key camera gives R = rows[0] exactly, U = rows[1] and F = rows[2]");
+          "G12.camera: the axes are R = rows[0] exactly, U = rows[1] and F = rows[2]");
     const Frame camFrame{camera.R, camera.U, camera.F};
     for (const V3 ray : {V3{7, -20, 15}, V3{-12, -18, 9}, V3{20, -30, -14}}) {
         const Consts cc = cleanEye(camFrame, kCam, camera, 0.02, 0.02);
@@ -905,14 +905,14 @@ inline void runSquareOn(Rig& rig, const WorldProgs& w) {
     }
 }
 
-// G12: one pair of axes for every world quad (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"): the CPU's function, the stems' choice (U along the grid's vertical, R with no y),
-// parallel baselines, a camera looking straight down or with its right vertical, and no NaN.
+// G12: one pair of axes for every world quad (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"): the CPU's function,
+// parallel baselines with no y at a camera with no roll, a camera looking straight down or with its right vertical, and no NaN.
 inline void runSharedAxes(Rig& rig, const WorldProgs& w) {
     const V3 Y{0, 1, 0};
-    // (a) mapCamAxes over random cameras, both choices
+    // (a) mapCamAxes over random cameras
     {
         Gen g;
-        double worstRy = 0, worstOrth = 0, worstLen = 0, worstUY = 0, worstCamR = 0, worstRight = 0;
+        double worstOrth = 0, worstLen = 0, worstCamR = 0, worstRight = 0;
         bool finite = true;
         unsigned n = 0;
         for (int i = 0; i < 4000; ++i) {
@@ -924,72 +924,64 @@ inline void runSharedAxes(Rig& rig, const WorldProgs& w) {
             r = rodrigues(r, fwd, roll);
             const V3 up = cross(fwd, r);
             const V3 rows[3] = {r, up, fwd};
-            for (int camera = 0; camera < 2; ++camera) {
-                const CamAxes a = camAxesFromRows(rows, camera != 0);
-                finite = finite && std::isfinite(a.R.x + a.R.y + a.R.z + a.U.x + a.U.y + a.U.z + a.F.x + a.F.y + a.F.z);
-                worstLen = std::fmax(worstLen, std::fabs(std::sqrt(dot(a.R, a.R)) - 1.0));
-                worstLen = std::fmax(worstLen, std::fabs(std::sqrt(dot(a.F, a.F)) - 1.0));
-                worstOrth = std::fmax(worstOrth, std::fabs(dot(a.F, a.R)));
-                if (camera) {
-                    worstCamR = std::fmax(worstCamR, std::sqrt(dot(a.R - rows[0], a.R - rows[0])) + std::sqrt(dot(a.U - rows[1], a.U - rows[1])));
-                } else {
-                    if (std::sqrt(r.x * r.x + r.z * r.z) >= 0.02) worstRy = std::fmax(worstRy, std::fabs(a.R.y));
-                    worstRight = std::fmax(worstRight, dot(cross(a.R, a.U), a.F) > 0 ? 0.0 : 1.0);
-                    if (std::fabs(fwd.y) < 0.8) { const V3 c = cross(a.U, Y); worstUY = std::fmax(worstUY, std::sqrt(dot(c, c)) / std::sqrt(dot(a.U, a.U))); }
-                }
-                ++n;
-            }
+            const CamAxes a = camAxesFromRows(rows);
+            finite = finite && std::isfinite(a.R.x + a.R.y + a.R.z + a.U.x + a.U.y + a.U.z + a.F.x + a.F.y + a.F.z);
+            worstLen = std::fmax(worstLen, std::fabs(std::sqrt(dot(a.R, a.R)) - 1.0));
+            worstLen = std::fmax(worstLen, std::fabs(std::sqrt(dot(a.F, a.F)) - 1.0));
+            worstOrth = std::fmax(worstOrth, std::fabs(dot(a.F, a.R)));
+            worstCamR = std::fmax(worstCamR, std::sqrt(dot(a.R - rows[0], a.R - rows[0])) + std::sqrt(dot(a.U - rows[1], a.U - rows[1])));
+            worstRight = std::fmax(worstRight, dot(cross(a.R, a.U), a.F) > 0 ? 0.0 : 1.0);
+            ++n;
         }
         char label[240];
-        std::snprintf(label, sizeof label, "G12.axes: %u cameras: finite %d, |R| and |F| off 1 by %.1e, F.R %.1e, stems R.y %.1e, U off the vertical by %.1e (forward more than 36 degrees from it), camera R and U off the rows by %.1e", n, finite ? 1 : 0, worstLen, worstOrth, worstRy, worstUY, worstCamR);
+        std::snprintf(label, sizeof label, "G12.axes: %u cameras: finite %d, |R| and |F| off 1 by %.1e, F.R %.1e, R and U off the camera's rows by %.1e", n, finite ? 1 : 0, worstLen, worstOrth, worstCamR);
         std::printf("%s\n", label);
-        check(finite && worstLen < 1e-5 && worstOrth < 1e-5 && worstRy < 1e-7 && worstUY < 1e-6 && worstCamR < 2e-7 && worstRight == 0.0, label);
+        check(finite && worstLen < 1e-5 && worstOrth < 1e-5 && worstCamR < 2e-7 && worstRight == 0.0, label);
     }
-    // (b) in the shader, with the stems' axes (the dump's camera, pitched 45 degrees): an icon's up edge runs along the grid's vertical in the world, a label's baseline has no y, and
+    // (b) in the shader, with the dump's camera, pitched 45 degrees with no roll: an icon's up edge runs along the camera's up in the world, a label's baseline has no y, and
     // the baselines of labels in five different places, under three different eyes, are parallel. The eye does not enter.
     {
         const V3 rows[3] = {{1, 0, 0}, {0, 0.70710678, 0.70710678}, {0, -0.70710678, 0.70710678}};
-        const CamAxes stems = camAxesFromRows(rows, false);
+        const CamAxes axes = camAxesFromRows(rows);
         const Frame eyes[3] = {frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18}), frameAlong({-0.6, -0.4, 0.5}, {0.0, 1.0, 0.0}), frameAlong({0.1, -0.9, 0.2}, {0.3, 1.0, -0.2})};
         const std::vector<Corner> base = {{{-1, 0, 0}, 0, 0}, {{1, 0, 0}, 0, 0}}, vert = {{{0, -1, 0}, 0, 0}, {{0, 1, 0}, 0, 0}};
         std::vector<V3> dirs;
         double worstY = 0, worstVert = 0, worstPar = 0;
         for (const V3 center : {V3{7, -20, 15}, V3{-9, -20, 12}, V3{14, -28, 20}, V3{-20, -12, 25}, V3{30, -9, -14}})
             for (int e = 0; e < 3; ++e) {
-                const Consts cc = cleanEye(eyes[e], kCam, stems, 0.013, 0.011);
+                const Consts cc = cleanEye(eyes[e], kCam, axes, 0.013, 0.011);
                 const std::vector<V3> b = worldCorners(rig, *w.label, w.ilLabel, cc, mapCameraQ(), center, 1.6f, base);
                 const std::vector<V3> v = worldCorners(rig, *w.icon, w.ilIcon, cc, mapCameraQ(), center, 1.6f, vert);
                 const V3 bd = b[1] - b[0], vd = v[1] - v[0];
                 worstY = std::fmax(worstY, std::fabs(bd.y) / std::sqrt(dot(bd, bd)));
-                const V3 cv = cross(vd, Y);
-                worstVert = std::fmax(worstVert, std::sqrt(dot(cv, cv)) / std::sqrt(dot(vd, vd)));
+                const V3 cv = cross(vd, rows[1]);
+                worstVert =std::fmax(worstVert, std::sqrt(dot(cv, cv)) / std::sqrt(dot(vd, vd)));
                 dirs.push_back(bd * (1.0 / std::sqrt(dot(bd, bd))));
             }
         for (const V3& d : dirs) { const V3 c = cross(d, dirs[0]); worstPar = std::fmax(worstPar, std::sqrt(dot(c, c))); }
         char label[240];
-        std::snprintf(label, sizeof label, "G12.stems: over 5 places and 3 eyes the label baselines have y %.1e of their length and are parallel to %.1e, and the icons' up edge is off the grid's vertical by %.1e", worstY, worstPar, worstVert);
+        std::snprintf(label, sizeof label, "G12.baselines: over 5 places and 3 eyes the label baselines have y %.1e of their length and are parallel to %.1e, and the icons' up edge is off the camera's up by %.1e", worstY, worstPar, worstVert);
         std::printf("%s\n", label);
         check(worstY < 3e-5 && worstPar < 3e-5 && worstVert < 3e-4, label);   // the undo of the projection in float32 is good to about 1e-4 over a 3-unit edge
     }
-    // (c) a camera looking straight down, and one whose right is vertical: nothing is NaN, in either choice
+    // (c) a camera looking straight down, and one whose right is vertical: nothing is NaN
     {
         const V3 top[3] = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
         const V3 sideways[3] = {{0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
         unsigned n = 0;
         bool ok = true;
-        for (const V3* rows : {top, sideways})
-            for (int camera = 0; camera < 2; ++camera) {
-                const CamAxes a = camAxesFromRows(rows, camera != 0);
-                const Frame fr = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});
-                const Consts cc = cleanEye(fr, kCam, a, 0.02, 0.02);
-                bool fin = false;
-                const std::vector<V3> p = worldCorners(rig, *w.icon, w.ilIcon, cc, mapCameraQ(), {7, -20, 15}, 1.6f, {{{1, 0, 0}, 0.3, 0.2}, {{0, 1, 0}, 0, 0}, {{0, 0, 1}, 0, 0}}, &fin);
-                const RingScene rs = ringScene(cleanEye(fr, kRingEye, a, 0.02, 0.02), kRingEye + V3{7, -20, 15}, {{1, 0}, {0, 1}}, 1.0f);
-                ok = ok && fin && allFinite(runRing(rig, *w.ring, w.ilRing, rs)) && std::isfinite(p[0].x + p[1].y + p[2].z);
-                ++n;
-            }
+        for (const V3* rows : {top, sideways}) {
+            const CamAxes a = camAxesFromRows(rows);
+            const Frame fr = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});
+            const Consts cc = cleanEye(fr, kCam, a, 0.02, 0.02);
+            bool fin = false;
+            const std::vector<V3> p = worldCorners(rig, *w.icon, w.ilIcon, cc, mapCameraQ(), {7, -20, 15}, 1.6f, {{{1, 0, 0}, 0.3, 0.2}, {{0, 1, 0}, 0, 0}, {{0, 0, 1}, 0, 0}}, &fin);
+            const RingScene rs = ringScene(cleanEye(fr, kRingEye, a, 0.02, 0.02), kRingEye + V3{7, -20, 15}, {{1, 0}, {0, 1}}, 1.0f);
+            ok = ok && fin && allFinite(runRing(rig, *w.ring, w.ilRing, rs)) && std::isfinite(p[0].x + p[1].y + p[2].z);
+            ++n;
+        }
         char label[160];
-        std::snprintf(label, sizeof label, "G12.degenerate: a top-down camera and a camera whose right is vertical, in both choices (%u cases): icons, labels and rings write no NaN", n);
+        std::snprintf(label, sizeof label, "G12.degenerate: a top-down camera and a camera whose right is vertical (%u cases): icons, labels and rings write no NaN", n);
         std::printf("%s\n", label);
         check(ok, label);
     }
@@ -1007,7 +999,7 @@ inline void runRingTests(Rig& rig, const WorldProgs& w) {
         const double yawM = g.u(-3.1, 3.1), pitchM = g.u(0.3, 1.5);
         const V3 rightM{std::cos(yawM), 0, -std::sin(yawM)}, fwdM = normalize(V3{std::sin(yawM) * std::cos(pitchM), -std::sin(pitchM), std::cos(yawM) * std::cos(pitchM)});
         const V3 rowsM[3] = {rightM, cross(fwdM, rightM), fwdM};
-        const CamAxes ax = camAxesFromRows(rowsM, (scene & 1) != 0);   // MapCam: the rings take R and U as they are
+        const CamAxes ax = camAxesFromRows(rowsM);   // MapCam: the rings take R and U as they are
         Consts cc = cleanEye(fr, E, ax, g.u(-0.03, 0.03), g.u(-0.03, 0.03));
         setRow(cc.cb2[0], g.u(0.5, 2.0), 0, 0, 0);
         RingScene sc;

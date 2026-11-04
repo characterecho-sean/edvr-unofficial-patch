@@ -184,11 +184,6 @@ struct DepthDraw {
 };
 bool depthIssue(ID3D11DeviceContext* ctx, uint64_t ps, const DepthDraw& dd);
 
-// The temporary key experimental.galaxy_map_icon_up (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"): true (camera, the default) spans the world quads on the map camera's own
-// up, false (stems) on the grid's vertical. Read from the ini at each opening of the map and logged then.
-inline std::atomic<bool> g_iconUpCamera{true};
-void readIconUpKey();
-
 // The gate states from the frame tick (a close lets the queries and the answers go at the next probe, and over is false).
 void setGates(bool vrOpen, bool pointerOpen);
 

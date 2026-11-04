@@ -63,7 +63,6 @@ struct State {
     ComPtr<ID3D11Buffer> camBuf;      // MapCam at vertex slot 10: the world quads' axes (R, U, F), the map camera's position and the two eyes' offsets
     bool camWritten = false;
     uint64_t camChanges = 0;          // mapCameraChanges() at the last write
-    bool camCameraUp = false;         // the key choice (g_iconUpCamera) at the last write
     uint64_t eyeGen = 0;              // mapCameraEyes' generation at the last write that carried the eyes
     bool eyesWritten = false;         // the last write carried the eyes (mapPos.w 1)
     bool camBoundSaid = false, camFailedSaid = false, eyesSaid = false;
@@ -119,11 +118,10 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
     // R, U, F at floats 0..11 (w 0), the position at 12..15 (w 1 when the eyes are valid), the two eyes' offsets at 16..19 and 20..23. Before the pose answers the camera's own default axes.
     float cam[24] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     const bool eyesMoved = eyesOk ? (!s.eyesWritten || eyeGen != s.eyeGen) : s.eyesWritten;
-    const bool cameraUp = g_iconUpCamera.load(std::memory_order_relaxed);
-    if (!s.camBuf || !s.camWritten || changes != s.camChanges || eyesMoved || cameraUp != s.camCameraUp) {
+    if (!s.camBuf || !s.camWritten || changes != s.camChanges || eyesMoved) {
         MapCameraPose pose;
         if (mapCameraPose(pose)) {
-            const MapAxes axes = mapCamAxes(pose.rows, cameraUp);
+            const MapAxes axes = mapCamAxes(pose.rows);
             for (int k = 0; k < 3; ++k) {
                 cam[k] = axes.R[k];
                 cam[4 + k] = axes.U[k];
@@ -157,7 +155,6 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
             }
             s.camWritten = true;
             s.camChanges = changes;
-            s.camCameraUp = cameraUp;
             if (eyesOk) {
                 g_counters.eyeGenSteps.fetch_add(s.eyesWritten && eyeGen > s.eyeGen ? eyeGen - s.eyeGen : 1, std::memory_order_relaxed);
                 g_counters.eyesValid.fetch_add(1, std::memory_order_relaxed);
@@ -182,8 +179,8 @@ bool bindMapCam(State& s, ID3D11DeviceContext* ctx) {
         ctx->VSSetConstantBuffers(kCamSlot, 1, &ours);
         if (!s.camBoundSaid) {
             s.camBoundSaid = true;
-            Log::get().note("galaxy map: the map camera's constants are bound at vertex constant slot %u for the icons, labels, rings and stems (slot held %s before; first up axis %.3f %.3f %.3f, %s, eyes %s)", kCamSlot,
-                            held ? "another buffer" : "nothing", cam[4], cam[5], cam[6], cameraUp ? "the camera's up" : "the grid's vertical", eyesOk ? "valid" : "not yet published: the game's eye");
+            Log::get().note("galaxy map: the map camera's constants are bound at vertex constant slot %u for the icons, labels, rings and stems (slot held %s before; first up axis %.3f %.3f %.3f, eyes %s)", kCamSlot,
+                            held ? "another buffer" : "nothing", cam[4], cam[5], cam[6], eyesOk ? "valid" : "not yet published: the game's eye");
         }
     }
     if (held) held->Release();
@@ -244,18 +241,9 @@ void drain(State& s, ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
 
 } // namespace
 
-void readIconUpKey() {
-    const std::string value = Config::get().getString("experimental.galaxy_map_icon_up", "camera");
-    const bool camera = value != "stems";
-    g_iconUpCamera.store(camera, std::memory_order_relaxed);
-    Log::get().note("galaxy map: experimental.galaxy_map_icon_up = %s at this opening: the world quads' up is %s%s", value.c_str(),
-                    camera ? "the camera's up (the game's own planes, with the triangles joining them)" : "the grid's vertical (the stems' direction)",
-                    !camera || value == "camera" ? "" : " (not a value the key takes: camera)");
-}
-
 void setGates(bool vr, bool pointer) {
     const bool wasPointer = g_pointerOpen.exchange(pointer, std::memory_order_relaxed);
-    if (!g_vrOpen.exchange(vr, std::memory_order_relaxed) && vr) readIconUpKey();   // read at each opening of the map, so a change of the ini takes effect at the next one
+    g_vrOpen.store(vr, std::memory_order_relaxed);
     if (wasPointer && !pointer) {
         g_over.store(false, std::memory_order_relaxed);
         if (g_st) g_st->resetPending.store(true, std::memory_order_release);   // the render thread lets the queries go at its next probe

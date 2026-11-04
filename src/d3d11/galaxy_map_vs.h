@@ -18,11 +18,9 @@
 // cb1[277] and cb1[278] are the EYE's right and up axes with the quad's size in their lengths, so the b span turns with the head.
 //
 // EVERY MAP QUAD IS FIXED IN THE WORLD, ON ONE PAIR OF AXES FOR THE FRAME (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"). The axes are R, U and F = normalize(cross(R, U)), written by
-// the CPU into MapCam (galaxy_map_axes.h mapCamAxes) from stage 0's rows of the map camera's pose (right rows[0], up rows[1], forward rows[2]). By default every quad is spanned on rows[0]
-// and rows[1]: the game's own planes, with the triangles joining them. The temporary key experimental.galaxy_map_icon_up = stems spans them on the camera's right with its y taken out, the
-// grid's horizontal, and the grid's vertical scaled by 1/dot(vertical, rows[1]) to keep a quad's height at the map's centre, the direction a stem has, handed over to the camera's up as the
-// camera's forward nears the vertical. That plane stands vertical while the camera looks down: with the camera 45 degrees down, a quad at view tangents (x, y) has 1 + y times its height at
-// the centre and shears by atan(x / (1 + y)). No ray, no eye row and no position enters an axis, so turning the head changes nothing in the world (only moving it does, by parallax) and a camera moved sideways turns no quad. An axis pair from each quad's own ray
+// the CPU into MapCam (galaxy_map_axes.h mapCamAxes) from stage 0's rows of the map camera's pose (right rows[0], up rows[1], forward rows[2]). Every quad is spanned on rows[0] and rows[1]:
+// the game's own planes, with the triangles joining them. The grid's vertical in place of rows[1] was flown and declined: it stands vertical while the camera looks down, so with the camera
+// 45 degrees down a quad at view tangents (x, y) has 1 + y times its height at the centre and shears by atan(x / (1 + y)). No ray, no eye row and no position enters an axis, so turning the head changes nothing in the world (only moving it does, by parallax) and a camera moved sideways turns no quad. An axis pair from each quad's own ray
 // (builds ca707034 to e02c6248) turned every quad about the grid's vertical as the camera moved sideways, 14 degrees per unit at 4 units, and fanned the label baselines from +29 to -17
 // degrees across one image; spanning the quads on the eye's axes (build bf17a80a) locked them to the eye, and so does the game's own b span: the n=12 triangles, whose quaternion is the
 // identity, are spanned by b alone. MapCam reaches the shaders in a 96-byte constant buffer at vertex slot 10 (R, U, F, then the position and the two eyes' offsets, see THE WOBBLE;

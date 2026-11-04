@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course is BUILT as the sixth build and the code has had a second adversarial review, NOT FLOWN. On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course, built as the sixth build 5086b6f3, FLOWN 16:38: the map holds 88 to 90 fps, `xr_end_frame` p50 0.20 to 0.22 ms, 2 render target binds a frame. Sean chose the camera's up, so the key and the grid's-vertical option are removed. On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -17,11 +17,12 @@ Decided (Sean, 2026-11-04, after flying it): panels at the game's depth, the arr
 
 Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0, and no System Map was opened on the flight). The hover pointer block's class ([vis+0x110]) is now of no consequence. System Map and Orrery hover are not read, so fix 3 and the facing icons are Galaxy Map only.
 
-Temporary: `experimental.galaxy_map_icon_up` (`camera`, the default, or `stems`); one flight decides, then it goes. The self-check, the F111 map probe and the stillness bounds are gone.
+Temporary: none left. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone.
 
-Next: Sean flies the sixth build (card below). Then decide on the evidence: the key, the sprite depth (about 0.9 ms, 65 MB), `mapEyeRel` and the stems' swap. Before merge: move this doc's pinned build addresses to the arc's `docs\build-<build>.md` (CODING_STANDARDS). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: Sean's word on whether nearby icons still wobble, which decides `mapEyeRel` and the stems' swap (no dump of it on the sixth flight). The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. Before merge: move this doc's pinned build addresses to the arc's `docs\build-<build>.md` (CODING_STANDARDS). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
+- ruled out: the grid's vertical as the quads' up (key value `stems`), because with the camera 45 degrees down a quad at view tangents (x, y) has 1 + y times its height and shears by atan(x / (1 + y)). Flown 16:41 beside the camera's up; Sean prefers the camera's up.
 - ruled out: B10B032BDFD46700 as a panel, because its n=6 records sit in the UI frame at their own depth: the hover halo round the hovered star (dump 123832862001, record 1258) and the heading text. In the mask, the halo put the arrow at panel depth whenever a star was hovered.
 - ruled out: dropping the stencil write-backs as the whole frame-rate fix, because `restore()` still rebinds the game's D32S8 around every sprite issue (ui_layer.cpp:2217), so the private D16 and the game's depth-stencil still alternate 2,600 to 3,500 times a frame. The benchmark behind that fix had no restore. Flight 14:13: about 60 fps.
 - ruled out: `transfer` in `native timing CPU` as a frame-rate gate, because it is a single frame's sample in each 10 s. Use `xr_end_frame` p50: 0.21 ms on the third build, 5.09 on the fifth.
@@ -214,7 +215,25 @@ Log edvr_gfx_20261104_141340, build e02c6248, dump 141733701001. Sean: "moving t
 
 A dump's census names the layer and the D16 for draws inside a run (`draw_census.cpp`, `object_probe.cpp`), so an `r=` filter stops matching there. No state is harmed; read a dump knowing it.
 
-## Flight card, sixth build (not flown)
+## After the sixth flight
+
+Logs edvr_gfx_20261104_163752 and edvr_openxr_20261104_163753_518_38980, build 5086b6f3, right build confirmed. The map was open 16:40:57 to 16:41:40, 16:41:42 to 16:41:50 and 16:41:53 to 16:42:08, about 66 s. No dump. Sean: "Ran it, I prefer camera". The map was opened once with `stems` (16:41:42, about 8 s) and otherwise with `camera`, as the log's opening lines show; the menu's five flips of the key took effect only at the next opening.
+
+| Reading | Fifth build | Sixth build, map open | Gate |
+|---|---|---|---|
+| Frames per 10 s (`native timing CPU`) | 397 to 618 | 900, 876, 900, 900, 859, 877, 895 (the lows span a close and reopen) | near 900 |
+| `native_frame_cycle_window`, fps | not read | 88.07 and 88.67 over the two 30 s windows holding the map | near 90 |
+| `xr_end_frame` p50 in `native_submit_phases` (the runtime's log, not the gfx log) | 5.09 ms | 0.22, 0.20, 0.22 ms | under 1 ms; 0.21 on the third build |
+| Render target binds for the sprites | 2,600 to 3,500 a frame | 2.0 a frame | about 2 |
+| GPU pass profile, frame busy | not read | 8.97 ms, 10.04 ms in the reference frame with no delay | predicted about 8.9 ms |
+
+So the frame rate is back, and the sprite binds were the cause. MEASURED in the game.
+
+The card's reading of `of others` was wrong. It is 4394 of 4394 runs and 4636 of 4636: every run ends with the game setting other targets, which drops it with no bind back, and that is the clean ending. So "high" is normal when it equals the runs. `read back` and `kept` are 0 in both windows: the game neither read the layer's targets back nor set its own again inside a run.
+
+`app_gpu_timing` went back to commented in the Frontier ini after this flight.
+
+## Flight card, sixth build (flown 16:38)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`. `advanced.app_gpu_timing` is on in the Frontier ini for this flight.
 
