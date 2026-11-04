@@ -162,13 +162,12 @@ inline bool runtimeScopeIncludesVr() {
 // them this function refuses.
 // The list itself is flat_profile_keys.h's, shared with the installer's Flat view. The log.* and advanced.real_dll keys are read by
 // every profile; the rest only by flat. advanced.game_update_check (TEMPORARY, issue 124: docs\design-game-update-signatures-2026-10-25.md)
-// is read by every profile too and is not in the installer's view: a hidden instrument, off by default, removed with its arc. advanced.vehicle_rig_probe (TEMPORARY, issue 186) is the same,
-// except that it is on by default on its branch.
+// is read by every profile too and is not in the installer's view: a hidden instrument, off by default, removed with its arc.
 inline bool runtimeProfileAllowsKey(const char* key) {
     if (runtimeVrProfile()) return true;
     if (!key) return false;
     if (std::strncmp(key, "log.", 4) == 0 || std::strcmp(key, "advanced.real_dll") == 0 ||
-        std::strcmp(key, "advanced.game_update_check") == 0 || std::strcmp(key, "advanced.vehicle_rig_probe") == 0)
+        std::strcmp(key, "advanced.game_update_check") == 0)
         return true;
     return runtimeFlatProfile() && flatProfileReadsKey(key);
 }

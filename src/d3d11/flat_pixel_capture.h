@@ -1,7 +1,7 @@
 #pragma once
 #include "flat_pixel_capture_policy.h"
 #include "flat_capture_directory.h"
-#include "vehicle_rig_probe.h"
+#include "vehicle_rig.h"
 #include "../common/config.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
@@ -300,7 +300,7 @@ public:
         }
         pending_.push_back(std::move(sample));
         Log::get().note("flat pixels: copied frame=%llu resources=%u bytes=%llu sample=%u",static_cast<unsigned long long>(frame.frame),used_,static_cast<unsigned long long>(bytes),policy_.copied);
-        // The vehicle rig probe (TEMPORARY, issue 186): the ship and cockpit rig records' poses at the frame the pool was copied, so a capture's pool records join them by exact bits.
+        // The vehicle rig (issue 186): the ship and cockpit rig records' poses at the frame the pool was copied, so a capture's pool records join them by exact bits.
         if(const auto tap=g_vehicleRigCaptureTap.load(std::memory_order_acquire))tap(frame.frame,frame.camera[5]);
     }
 };

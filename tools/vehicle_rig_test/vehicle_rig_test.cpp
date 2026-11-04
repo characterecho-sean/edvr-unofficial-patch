@@ -1,6 +1,5 @@
-// Test rig for the vehicle rig probe's pure half (src/d3d11/vehicle_rig_core.h, advanced.vehicle_rig_probe, TEMPORARY, issue 186), on plain memory: a fake game address space with
-// fault injection, laid out at the offsets the exe showed (R = *(I+0x2F0), the record array at *(R+0x280), count at *(R+0x298), stride 0x2F0, the module handle array at
-// *(J+0x1D8)). No DLL and no game. `--self-test` is the only mode; it writes nothing.
+// Test rig for the vehicle rig's pure half (src/d3d11/vehicle_rig_core.h, issue 186), on plain memory: a fake game address space with fault injection, laid out at the offsets the exe
+// showed (R = *(I+0x2F0), the record array at *(R+0x280), count at *(R+0x298), stride 0x2F0). No DLL and no game. `--self-test` is the only mode; it writes nothing.
 #include "../../src/d3d11/vehicle_rig_core.h"
 
 #include <chrono>
@@ -73,21 +72,15 @@ Rig buildRig(FakeMem& m, uint64_t at, uint64_t count, const char* name, float sc
     m.putBytes(r.nameStr, name, std::strlen(name) + 1);
     m.put<uint64_t>(r.R + vr::kRigRecords, r.arr);
     m.put<uint64_t>(r.R + vr::kRigCount, count);
-    for (int i = 0; i < 16; ++i) m.put<float>(r.R + vr::kRigWorld + 4 * i, 100.0f + i);
-    // Records: node -> model (centre, radius) ; transform (local 4x4 with a translation, parent = the rig world pointer).
+    // Records: a transform (local 4x4, its scale is what readPose shows beside the pose), a position and a rotation, and a sphere radius that grows with the index.
     const uint64_t pool = r.arr + count * vr::kRecordStride + 0x100;
     for (uint64_t i = 0; i < count; ++i) {
         const uint64_t rec = r.arr + i * vr::kRecordStride;
-        const uint64_t node = pool + i * 0x200, model = node + 0x40, xf = node + 0x100;
-        m.put<uint64_t>(rec + vr::kRecNode, node);
-        m.put<uint64_t>(node + vr::kNodeModel, model);
-        const float c[3] = {1.0f * float(i), 0.0f, 0.0f};
-        m.putBytes(model + vr::kModelCentre, c, 12);
-        m.put<float>(model + vr::kModelRadius, 0.5f);
+        const uint64_t xf = pool + i * 0x200;
         m.put<uint64_t>(rec + vr::kRecXform, xf);
         float L[16] = {scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, 10.0f, 20.0f, 30.0f, 1.0f};
         m.putBytes(xf, L, sizeof(L));
-        m.put<uint64_t>(xf + vr::kXformParent, r.R + vr::kRigWorld);
+        m.put<float>(rec + vr::kRecSphereRadius, 1.0f + float(i));
         const float p[3] = {1.0f, 2.0f, 3.0f};
         m.putBytes(rec + vr::kRecPos, p, 12);
         const uint32_t q[2] = {0x7FFF7FFFu, 0xFFFE7FFFu};   // identity: x=y=z=0, w=1
@@ -180,97 +173,32 @@ void testDescribe() {
     vr::RigRead rr;
     check(vr::readRig(m, a.H, a.E, a.I, kVtable, &rr) == vr::Status::kOk, "describe: reads");
     vr::RigInfo info;
-    vr::describeRig(m, rr, &info);
+    vr::describeRig(m, rr, false, &info);
     check(info.haveName && std::strcmp(info.name, "Cobra ?Mk? V") == 0, "the name is read through **(R+0x20), quotes made safe for the log");
     check(info.haveRoot && near(info.rootSphere[0], 5) && near(info.rootSphere[3], 8), "the root record's sphere is rec+0x270 / +0x280");
-    check(info.haveWorld && near(info.world[12], 112.0f), "the world block is at R+0x30");
-    check(info.spheresRead == 4 && info.spheresSkipped == 0 && info.parentIsRig == 4, "every sphere read, every parent is the rig world");
-    // c = (i,0,0), L translates by (10,20,30): centres 10..13, y=20, z=30, radius 0.5.
-    check(near(info.boxMin[0], 9.5f) && near(info.boxMax[0], 13.5f) && near(info.boxMin[1], 19.5f) && near(info.boxMax[1], 20.5f) && near(info.boxMin[2], 29.5f) &&
-              near(info.boxMax[2], 30.5f),
-          "the node box is c*L +- r");
-    check(near(info.scaleMin, 1.0f) && near(info.scaleMax, 1.0f), "unit transform scale");
-    FakeMem ms(1 << 20);
-    const Rig s = buildRig(ms, kBase + 0x1000, 2, "Scaled", 2.0f);
-    vr::RigRead rs;
-    vr::readRig(ms, s.H, s.E, s.I, kVtable, &rs);
-    vr::describeRig(ms, rs, &info);
-    check(near(info.scaleMin, 2.0f), "a non-1 transform scale is visible");
-    // A fault in a record skips it, never throws.
-    m.faultAt = {a.arr + 2 * vr::kRecordStride + vr::kRecNode};
-    vr::describeRig(m, rr, &info);
-    check(info.spheresRead == 3 && info.spheresSkipped == 1, "a faulting record is skipped and counted");
-}
-
-void testTable() {
-    vr::RoleTable t;
-    check(t.classify(kBase) == vr::kOther, "an empty table classifies everything as other");
-    const uint64_t shipLo = 0x1000, shipHi = shipLo + 5 * 0x2F0, cockLo = 0x9000, cockHi = cockLo + 3 * 0x2F0;
-    vr::RoleTable::Range r[3] = {{shipLo, shipHi, vr::kShip}, {cockLo, cockHi, vr::kCockpit}, {0x20000, 0x20000, vr::kModule}};   // the last is empty (lo == hi)
-    t.publish(r, 3);
-    check(t.classify(shipLo - 1) == vr::kOther, "one byte before the ship array is other");
-    check(t.classify(shipLo) == vr::kShip, "the first byte of the ship array is the ship");
-    check(t.classify(shipLo + 0x2F0) == vr::kShip, "the second record is the ship");
-    check(t.classify(shipHi - 1) == vr::kShip, "the last byte of the ship array is the ship");
-    check(t.classify(shipHi) == vr::kOther, "the array's end is exclusive");
-    check(t.classify(cockLo) == vr::kCockpit && t.classify(cockHi - 1) == vr::kCockpit && t.classify(cockHi) == vr::kOther, "the cockpit boundaries");
-    check(t.classify(0x20000) == vr::kOther, "a zero-length range matches nothing");
-    check(t.classify(0) == vr::kOther && t.classify(UINT64_MAX) == vr::kOther, "the extremes are other");
-    t.publish(r, 0);
-    check(t.classify(shipLo) == vr::kOther, "a teardown publishes an empty table: the old array no longer matches");
-    vr::RoleTable::Range many[vr::kMaxRigs + 3];
-    for (uint32_t i = 0; i < vr::kMaxRigs + 3; ++i) many[i] = {0x100000ull + i * 0x10000ull, 0x100000ull + i * 0x10000ull + 0x100, vr::kModule};
-    t.publish(many, vr::kMaxRigs + 3);
-    check(t.count() == vr::kMaxRigs, "more ranges than slots are clamped, not overrun");
-    check(t.classify(0x100000ull + (vr::kMaxRigs - 1) * 0x10000ull) == vr::kModule && t.classify(0x100000ull + vr::kMaxRigs * 0x10000ull) == vr::kOther, "the clamp keeps the first kMaxRigs");
-
-    vr::Counts c;
-    c.note(vr::kShip);
-    c.note(vr::kShip);
-    c.note(vr::kRaced);
-    c.note(99);
-    check(c.bin[vr::kShip].load() == 2 && c.bin[vr::kRaced].load() == 1 && c.bin[vr::kOther].load() == 1, "counts land in their bins; an unknown bin is other");
-}
-
-// Readers hammer classify while a writer alternates two tables; every answer must be a valid bin, a record that is in neither table is never anything but other or raced, and the
-// stable answers (the same in both tables) are never raced-away wrongly. No fault, no out-of-range bin.
-void testConcurrent() {
-    vr::RoleTable t;
-    vr::RoleTable::Range a[2] = {{0x1000, 0x2000, vr::kShip}, {0x5000, 0x6000, vr::kCockpit}};
-    vr::RoleTable::Range b[3] = {{0x1000, 0x2000, vr::kShip}, {0x8000, 0x9000, vr::kTurret}, {0xA000, 0xB000, vr::kModule}};
-    t.publish(a, 2);
-    std::atomic<bool> stop{false};
-    std::atomic<uint64_t> bad{0}, shipOk{0}, raced{0}, total{0};
-    std::vector<std::thread> readers;
-    for (int i = 0; i < 4; ++i)
-        readers.emplace_back([&] {
-            while (!stop.load(std::memory_order_relaxed)) {
-                const uint32_t s = t.classify(0x1800);   // a ship in both tables
-                const uint32_t x = t.classify(0x5800);   // a cockpit only in A
-                const uint32_t y = t.classify(0x8800);   // a turret only in B
-                const uint32_t o = t.classify(0xF000);   // in neither
-                total.fetch_add(4, std::memory_order_relaxed);
-                if (s >= vr::kBins || x >= vr::kBins || y >= vr::kBins || o >= vr::kBins) bad.fetch_add(1, std::memory_order_relaxed);
-                if (s == vr::kShip) shipOk.fetch_add(1, std::memory_order_relaxed);
-                if (s != vr::kShip && s != vr::kRaced) bad.fetch_add(1, std::memory_order_relaxed);
-                if (x != vr::kCockpit && x != vr::kOther && x != vr::kRaced) bad.fetch_add(1, std::memory_order_relaxed);
-                if (y != vr::kTurret && y != vr::kOther && y != vr::kRaced) bad.fetch_add(1, std::memory_order_relaxed);
-                if (o != vr::kOther && o != vr::kRaced) bad.fetch_add(1, std::memory_order_relaxed);
-                if (s == vr::kRaced) raced.fetch_add(1, std::memory_order_relaxed);
-            }
-        });
-    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-    bool flip = false;
-    while (std::chrono::steady_clock::now() < until) {
-        if (flip) t.publish(a, 2);
-        else t.publish(b, 3);
-        flip = !flip;
-    }
-    stop.store(true);
-    for (auto& th : readers) th.join();
-    check(bad.load() == 0, "concurrent classify: every answer is a valid bin and only miscounts (raced), never garbage");
-    check(shipOk.load() > 0, "concurrent classify: stable answers still come through");
-    std::printf("vehicle_rig_test: concurrent: %llu classifications, %llu raced\n", static_cast<unsigned long long>(total.load()), static_cast<unsigned long long>(raced.load()));
+    check(info.topCount == 0 && info.radiiRead == 0, "without withRadii no record radius is read");
+    // The records' radii are 8 (the root, whose sphere was set above), 2, 3, 4: the two largest are the root and index 3.
+    vr::describeRig(m, rr, true, &info);
+    check(info.radiiRead == 4 && info.radiiSkipped == 0 && info.topCount == 2 && info.topIndex[0] == 0 && near(info.topRadius[0], 8) && info.topIndex[1] == 3 && near(info.topRadius[1], 4),
+          "the two largest record radii and their indices are found");
+    // One record: one radius. No records: none, and no root.
+    FakeMem m1(1 << 20);
+    const Rig one = buildRig(m1, kBase + 0x1000, 1, "One");
+    vr::RigRead r1;
+    vr::readRig(m1, one.H, one.E, one.I, kVtable, &r1);
+    vr::describeRig(m1, r1, true, &info);
+    check(info.topCount == 1 && info.topIndex[0] == 0 && near(info.topRadius[0], 8), "a rig with one record has one largest radius");
+    // A fault in a record's radius skips it, never throws; the order of the remaining two holds.
+    m.faultAt = {a.arr + 3 * vr::kRecordStride + vr::kRecSphereRadius};
+    vr::describeRig(m, rr, true, &info);
+    check(info.radiiRead == 3 && info.radiiSkipped == 1 && info.topCount == 2 && info.topIndex[0] == 0 && info.topIndex[1] == 2 && near(info.topRadius[1], 3),
+          "a faulting record is skipped and counted, and the next largest takes its place");
+    // A non-finite or negative radius is skipped.
+    m.faultAt.clear();
+    m.put<float>(a.arr + 2 * vr::kRecordStride + vr::kRecSphereRadius, -1.0f);
+    m.put<float>(a.arr + 1 * vr::kRecordStride + vr::kRecSphereRadius, std::nanf(""));
+    vr::describeRig(m, rr, true, &info);
+    check(info.radiiRead == 2 && info.radiiSkipped == 2 && info.topIndex[0] == 0 && info.topIndex[1] == 3, "a negative or NaN radius is skipped");
 }
 
 void testPose() {
@@ -318,34 +246,10 @@ void testPose() {
     check(vr::readPose(m, a.arr, &p) && !p.haveScale, "a faulting transform read keeps the pose and drops the scale");
 }
 
-// What the emit tap costs per call on this machine: one classify and one counter increment, against a four-rig table.
-void benchTap() {
-    vr::RoleTable t;
-    vr::RoleTable::Range r[4] = {{0x10000, 0x20000, vr::kShip}, {0x30000, 0x40000, vr::kCockpit}, {0x50000, 0x60000, vr::kTurret}, {0x70000, 0x80000, vr::kModule}};
-    t.publish(r, 4);
-    vr::Counts c;
-    const int n = 20000000;
-    const auto t0 = std::chrono::steady_clock::now();
-    uint64_t rec = 0x10000;
-    for (int i = 0; i < n; ++i) {
-        c.note(t.classify(rec));
-        rec = rec * 6364136223846793005ull + 1442695040888963407ull;
-        rec &= 0xFFFFFull;
-    }
-    const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / n;
-    uint64_t sum = 0;
-    for (auto& b : c.bin) sum += b.load();
-    check(sum == uint64_t(n), "the bench counted every call");
-    std::printf("vehicle_rig_test: emit tap (classify + count, four rigs): %.1f ns per call\n", ns);
-}
-
 int selfTest() {
     testReadRig();
     testDescribe();
-    testTable();
-    testConcurrent();
     testPose();
-    benchTap();
     std::printf("vehicle_rig_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

@@ -58,9 +58,9 @@ const char* kinematicEvalMergeStatus() noexcept;
 using EngineClearObserverFn = void (*)(uintptr_t dictionary) noexcept;
 void kinematicEvalSetClearObserver(EngineClearObserverFn fn) noexcept;
 const char* kinematicEvalClearStatus() noexcept;
-// The vehicle rig probe's tap (vehicle_rig_probe.cpp, advanced.vehicle_rig_probe, TEMPORARY, issue 186): called with the record (param_1) after FUN_144315A20's forward returns, on the
+// The vehicle rig's tap (vehicle_rig.cpp, issue 186): called with the record (param_1) after FUN_144315A20's forward returns, on the
 // producer's job thread, ONLY when the bracket already runs. It never opens the evaluator gate and has no want of its own: the game's evaluator runs exactly when it would without
-// the probe, and with engine motion off the tap is never called. Null = off: one atomic load.
+// the tap, and with engine motion off the tap is never called. Null = off: one atomic load.
 using VehicleRigEmitTapFn = void (*)(uintptr_t record) noexcept;
 void kinematicEvalSetVehicleRigTap(VehicleRigEmitTapFn fn) noexcept;
 // The emit's own want on the shared hook set: validates the executable and

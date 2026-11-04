@@ -60,7 +60,7 @@ std::atomic<bool> emitWanted{false};
 // Engine-record velocity's emit observer (direct producer 0's post-forward).
 alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 alignas(8) std::atomic<EnginePrimaryEmitObserverFn> primaryEmitObserver{nullptr};
-// The vehicle rig probe's tap (kinematic_eval_hook.h): read-only, no want on the gate.
+// The vehicle rig's tap (kinematic_eval_hook.h): read-only, no want on the gate.
 alignas(8) std::atomic<VehicleRigEmitTapFn> vehicleRigTap{nullptr};
 alignas(8) std::atomic<uintptr_t> primaryGate{0};
 std::atomic<uintptr_t> g_primaryReturn{0};

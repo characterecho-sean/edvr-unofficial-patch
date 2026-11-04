@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/d3d11/flat_discovery_policy.h"
 #include "../../src/d3d11/flat_offscreen_fast.h"
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -75,6 +76,19 @@ template<class Check> void run(Check check) {
               fill.find("journalOnFootKnown")==std::string::npos && fill.find("journalOnFoot()")==std::string::npos && fill.find("vframe::useFrame(known,onFoot,true)")!=std::string::npos &&
               sites==2 && runtime.find("journalOnFootKnown()")==std::string::npos && runtime.find("shipRecordTerm")==std::string::npos,
               "vehicle frame gate: both treatment sites ask journalFlatOnFoot through fillVehicleFrame, never journalOnFootKnown (dead in flat)");
+    }
+    // The vehicle frame has no key: advanced.vehicle_rig_probe (never in a release) is gone from every source file, the allow-list included.
+    {
+        size_t files=0,hits=0;
+        std::error_code ec;
+        for(std::filesystem::recursive_directory_iterator it("src",ec),end;!ec && it!=end;it.increment(ec)) {
+            if(!it->is_regular_file(ec))continue;
+            const std::string ext=it->path().extension().string();
+            if(ext!=".cpp" && ext!=".h" && ext!=".hpp" && ext!=".c" && ext!=".inl")continue;
+            ++files;
+            if(read(it->path().string().c_str()).find("advanced.vehicle_rig_probe")!=std::string::npos)++hits;
+        }
+        check(files>100 && hits==0,"vehicle frame: advanced.vehicle_rig_probe appears nowhere under src (the key is removed, not renamed)");
     }
     const auto keyStart=deviceHook.find("if (g_state->censusKey.pressed()) {");
     const auto keyEnd=deviceHook.find("if (g_state->gpuPassKey.pressed())",keyStart);

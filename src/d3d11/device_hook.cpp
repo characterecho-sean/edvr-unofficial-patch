@@ -98,7 +98,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "mem_tick.h"        // memWatchTick: the process memory watch, once per owned Present (one atomic read; its thread does the sampling)
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
-#include "vehicle_rig_probe.h"   // vehicleRigProbeInstall at startup, vehicleRigProbePoll once a second (TEMPORARY, issue 186)
+#include "vehicle_rig.h"   // vehicleRigInstall at startup, vehicleRigPoll once a second (the vehicle frame's rigs, issue 186)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -1713,8 +1713,8 @@ void presentFrameBoundary() {
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             lightGridCachePoll(stampMs());
-            // The vehicle rig probe's 5 s and 30 s lines (TEMPORARY, issue 186).
-            vehicleRigProbePoll(stampMs());
+            // The vehicle rig's 30 s health line (issue 186).
+            vehicleRigPoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
             terrainCullCoverPoll(stampMs());
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
@@ -2994,8 +2994,8 @@ void hookDevice(ID3D11Device* device) {
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
             // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334925 is one log line.
             lightGridCacheInstall();
-            // The vehicle rig probe (vehicle_rig_probe.cpp, advanced.vehicle_rig_probe, TEMPORARY, issue 186): a read-only hook on the camera's SetTarget, both profiles; off installs nothing.
-            vehicleRigProbeInstall();
+            // The vehicle rig (vehicle_rig.cpp, issue 186): a hook on the camera's SetTarget that reads the player vehicle's rigs and supplies the flat profile's vehicle frame, both profiles; no key. A build that is not 334925 is one log line.
+            vehicleRigInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
             // profile passes through per call). A build that is not 334925 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());

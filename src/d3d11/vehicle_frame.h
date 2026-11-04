@@ -18,7 +18,7 @@ struct Pose {
 };
 struct Entry {
     uint32_t stamp = 0;
-    uint32_t generation = 0;   // which rig it was read from (the probe bumps it when the cockpit rig, its handle or its record array changes)
+    uint32_t generation = 0;   // which rig it was read from (vehicle_rig.cpp bumps it when the cockpit rig, its handle or its record array changes)
     Pose pose;
 };
 // Why a resolve had no frame (kOk: it had one).
@@ -91,7 +91,7 @@ private:
 struct Frame {
     Pose now, prev;
 };
-// This frame's pose and last frame's, or why not. `generationNow` is the rig the probe is tracking now: an entry from any other rig is a vehicle change.
+// This frame's pose and last frame's, or why not. `generationNow` is the rig vehicle_rig.cpp is tracking now: an entry from any other rig is a vehicle change.
 inline Why select(const Ring& ring, uint32_t stamp, uint32_t generationNow, Frame* out) {
     Entry now, prev;
     if (!ring.read(stamp, &now)) return Why::kMissing;

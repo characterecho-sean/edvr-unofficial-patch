@@ -258,7 +258,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
         scene_old = unjitter_rows(np.memmap(meta["buffers"]["scene_previous"][0], mode="r", dtype="<f4").reshape((-1, 4)),
                                   ndc_old, first=270)
     # The vehicle frame (debug.w value 32; flat, in a vehicle) is NOT replayed. It is the game's cockpit rig root, its pose at this frame's emit and last frame's, and its
-    # sphere: none of that is in the capture's planes, and the capture JSON does not carry it (the pose lines are in the log, as vehicle_rig_pose, and the 5 s
+    # sphere: none of that is in the capture's planes, and the capture JSON does not carry it (the pose lines are in the log, as vehicle_rig_pose, and the 30 s
     # "flat vehicle frame" line says whether the term ran). A near pixel on the camera term whose captured outcome the camera term does not explain is labelled
     # vehicle_frame_unreplayed (kept) or rejected_near_unreplayed (refused though the camera term could be formed), and is left out of the motion comparison. Only a capture
     # that declares "vehicle_frame": true is read that way; an older one has no such pixels.

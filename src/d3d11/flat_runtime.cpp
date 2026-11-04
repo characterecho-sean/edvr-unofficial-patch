@@ -70,7 +70,7 @@
 #include "exposure_fix.h"
 #include "device_hook.h"
 #include "vehicle_frame.h"
-#include "vehicle_rig_probe.h"
+#include "vehicle_rig.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
@@ -850,7 +850,7 @@ bool flatRuntimeMapOpenFrame() {
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
-// The vehicle frame (vehicle_frame.h, the probe's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
+// The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
 // journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
 // (known and not on foot); the last gate seen is what the 5 s line reports.
 static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
@@ -4832,15 +4832,18 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
         {
-            // The vehicle frame (vehicle_frame.h; the probe's cockpit rig root): every window, zeros included, so a gate that never opens cannot hide.
+            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root): every 30 s (every sixth of these windows), zeros included, so a gate that never opens cannot hide.
             // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
             // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
+            static unsigned vehicleWindows=0;
+            if(++vehicleWindows%6==0) {
             VehicleFrameWindow vw;
             vehicleRigFrameWindow(&vw);
-            Log::get().note("flat vehicle frame 5s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+            Log::get().note("flat vehicle frame 30s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
                 vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,
                 (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
-                !vw.live?" probe=off(advanced.vehicle_rig_probe is off, or this is not build 334925: no frame can exist)":"");
+                !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
+            }
         }
         {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
