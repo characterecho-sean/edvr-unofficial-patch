@@ -659,7 +659,7 @@ static void testShader() {
     // Placement: grime = film + edge x smoothstep(dirtWeight / 0.8); the test's 1 x 1 streak texel is 1, so the patch multiplier is clamped to 1.6.
     auto grimeOf = [](float w) {
         const float t = std::fmin(std::fmax(w / 0.8f, 0.0f), 1.0f);
-        return 0.16f + 0.2f * (t * t * (3.0f - 2.0f * t));
+        return 0.4f + 0.3f * (t * t * (3.0f - 2.0f * t));
     };
     const float albedo = kStreakMax * (kDirtMask * grimeOf(dirtWeight) * 1.6f) * kDirtColour * kDirtStrength;
     const float sun = 1000.0f;
@@ -682,7 +682,7 @@ static void testShader() {
     check(closeTo(d.r, dirtWant, 0.02f) && closeTo(d.g, dirtWant, 0.02f) && closeTo(d.b, dirtWant, 0.02f),
           "dirt under the sun is grey: streak x (0.025 x vertex B) x 0.97, Lambert on the legacy normal over pi, divided by the alpha, scaled by the HDR write scale");
     // Placement (CHOSEN, section 13): the film is everywhere, so a pixel with mask exactly 0 still gets dirt, mask 0 and mask 1e-4 give nearly the same (no step), and the edge
-    // gather at its maximum is at most (0.16 + 0.2) / 0.16 times the film.
+    // gather at its maximum is at most (0.4 + 0.3) / 0.4 times the film.
     {
         Case zeroMask = dirt, tiny = dirt, edgeMax = dirt;
         zeroMask.masks[1] = 0.0f;
@@ -693,7 +693,7 @@ static void testShader() {
         std::printf("film: mask 0 gives %g (wanted %g), mask 1e-4 gives %g, edge at its maximum gives %g (%.3f times the film)\n", z0.r, filmWant, t.r, em.r, em.r / z0.r);
         check(z0.r > 0 && closeTo(z0.r, filmWant, 0.02f), "a pixel with mask exactly 0 still gets the film");
         check(closeTo(t.r, z0.r, 0.01f), "mask 0 and mask 1e-4 give nearly the same result: no step, no kink");
-        check(em.r > z0.r && em.r <= z0.r * (0.16f + 0.2f) / 0.16f * 1.01f && closeTo(em.r, z0.r * 2.25f, 0.02f), "the edge gather at its maximum is no more than (0.16 + 0.2) / 0.16 times the film");
+        check(em.r > z0.r && em.r <= z0.r * (0.4f + 0.3f) / 0.4f * 1.01f && closeTo(em.r, z0.r * 1.75f, 0.02f), "the edge gather at its maximum is no more than (0.4 + 0.3) / 0.4 times the film");
     }
     Case bare = dirt;
     bare.streaks = false;

@@ -191,8 +191,9 @@ static const float kDirtStrength = 4.0;
 // frame (a bright frame against the struts, faceted by the triangles, 37% of the visible pane at exactly 0 on the Vulture). So the grime never ends: a film everywhere on the pane,
 // a small softened gather toward the frame from the vertex mask (no kink where it reaches 0), and patches from the streak texture itself, unrelated to the mesh. In the units of
 // dirtWeight (live's mask over CB2[6].z * CB2[0].x, 0 to 0.8 on the ships measured).
-static const float kGrimeFilm = 0.16;           // everywhere, the main term
-static const float kGrimeEdge = 0.2;            // the vertex mask's gather toward the frame, at most
+// 0.16 and 0.2 kept the old average but halved the brightest areas, and Sean saw clear glass ("crystal clear"). These put the frame area back near the 0.7 he called subtle.
+static const float kGrimeFilm = 0.4;            // everywhere, the main term
+static const float kGrimeEdge = 0.3;            // the vertex mask's gather toward the frame, at most
 static const float kEdgeFull = 0.8;             // dirtWeight at which the gather is full
 static const float kPatchScale = 0.19;          // the patch sample's uv scale: not a simple ratio, so it does not line up with the main repeat
 static const float kPatchMip = 5.0;             // of 10: 16 x 16 texels, stored 0.149 to 0.491

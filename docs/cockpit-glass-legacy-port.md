@@ -43,6 +43,8 @@ get the legacy dirt drawn over them (an overlay, ONE + ONE), the game's ice and 
 next flight; the quality 0-2 ice and condensation shaders (other slot layout, not overlaid); cost.
 Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. That x5 was WRONG (legacy's cube was black, section 12) and is withdrawn: the build is back to one probe sample at scale 1.0 and multiplies the dirt albedo by kDirtStrength = 16 (Sean's choice of visible dirt, section 11). The streak texture is reworked to legacy's character (512 x 512, section 13), and again as diagonal strokes in every band (dbc5ee33), then PAINTED as overlapping brush strokes (section 13), first thin and hairy, now 210 wide soft smears with a faint grain. The dirt mask is continuous (no polygon edges), kDirtStrength is 4 and the streak texture's brightness distribution is legacy's by quantile mapping (section 13); the dirt is placed as a film plus a soft edge gather plus patches, not by the vertex mask alone (section 13). Replay and display measurements: section 12.
 
+15619672 flown: too faint, no visible difference from `odyssey`; film 0.4 and edge 0.3 built, not flown (end of section 13). A dashed bright line under the top strut turned out not to be the glass, it shows with `odyssey` too (section 15). Whether the film and patches read naturally is still Sean's call.
+
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Remove all of it once the flight has passed.
 
@@ -703,7 +705,7 @@ different meshes (legacy 2720 vertices, Odyssey 1208). One capture of Odyssey in
 **Grime placement: film, soft edge, patches (2026-11-03, after the flight of bcb4e91f).** Sean: x4 is "nicely subtle", but the grime "clings to
 the edges of the panel with a hard edge, feels artificial". The vertex mask is the cause: on the Vulture it is a bright frame against the struts,
 faceted by the triangles, with 37% of the visible pane at exactly 0. Sean approved a new placement. The dirt mask is now
-`kLegacyDirtMask x grime x patch` in every variant. `grime = kGrimeFilm (0.16) + kGrimeEdge (0.2) x smoothstep(saturate(dirtWeight / 0.8))`,
+`kLegacyDirtMask x grime x patch` in every variant. `grime = kGrimeFilm (0.16, since raised, see below) + kGrimeEdge (0.2, likewise) x smoothstep(saturate(dirtWeight / 0.8))`,
 in the units of dirtWeight (0 to 0.8 on the ships measured): a film everywhere on the pane (the main term), and a small gather toward the
 frame from the vertex mask with no kink where it reaches 0, at most 0.36 against 0.8 before (the Vulture's visible mean dirtWeight was
 about 0.22, so the overall level stays about where Sean likes it). `patch` samples the streak texture a second time, unrelated to the mesh:
@@ -719,8 +721,41 @@ for the flight. Rig (WARP): dirt under the sun (B 0.72) 0.2637 (wanted 0.2637); 
 probe 0.3167 (0.3167); ice and condensation overlays 0.005272 (0.005274), alpha 0; and a CPU check that the patch multiplier stays
 within 0.4 to 1.6 over mip 5 and averages 1.006, with the shader's constants pinned to the header's.
 
+Flown (15619672): Sean could see no difference from `odyssey`, "crystal clear". Keeping the average level was the wrong
+target. On frame 8848's panes the old mask's mean grime was 0.200 with p90 0.703, and this one's 0.208 with p90 0.352, so
+the areas he had called subtle lost half their brightness. Raised to film 0.4, edge 0.3, at Sean's approval: mean
+0.473, p50 0.401, p90 0.688, max 0.700. x4 and the patches are unchanged. In that replay, with the streak at its mean,
+the mid-pane adds 0.00067 to a sky of 0.00143, up from 0.00027. Rig (WARP): dirt under the sun 0.5342 (wanted 0.5345);
+film 0.3472 (0.3474), mask 1e-4 0.3472, edge at its maximum 0.6074 = 1.750 times the film; hangar 0.1074 (0.1075);
+dirt with a probe 0.6416 (0.6419); ice and condensation overlays 0.01069 (0.01069), alpha 0.
+
+## 15. A second bright line under the top strut (flight 15619672, 2026-11-03)
+
+Sean's screenshot, flat, DLSS, Vulture: a dashed bright line parallel to the strut's straight section, a few rows
+below the white line along its edge, about 111 of 255 on a background of about 8. **Not the glass:** Sean first saw
+it gone with `odyssey`, then saw it with `odyssey` too, and it looks to him like a bug with AA on (not measured).
+Replay of frame 8848 (no DLSS, no streak texture, another camera position), done before that, agrees:
+
+- 111 display levels is a scene value of about 0.08 (that frame's stock scene-to-display mapping).
+- The dirt reaches at most 0.009 with the streak and patch at their tops, and at most 7 display levels near the
+  strut, at each of the flight's sun directions tried (samples 1, 3, 6) and three axis directions. Forcing shadow
+  to 1 changed nothing.
+- The crack branch is the only term with the size (albedo 0.1 x 256 x 0.00390625), but the vertex shader passes
+  `masks.x = (mask + 0.0039) * CB1[55].y`, and CB1[55].y is 0 in all six flight samples and the capture.
+- The canopy draw has depth writes off, so the swap cannot change the depth DLSS sees.
+- The white line along the strut is in the target before the glass draws, and the glass does not cover it there.
+- The glass mesh has a gap 1 to 2 rows tall about 10 rows below the strut at 4K, along the straight section. The
+  film adds about 0.0005 on both sides over a sky of 0.003, and nothing in the gap: a faint dark hairline this
+  film makes visible.
+
+So the line is not this arc's. The hairline at the gap is this film's own and still stands, faint, and has not been
+seen on the glass.
+
 ## Ruled out
 
+- ruled out: the legacy glass causing the second line under the strut, because Sean sees it with `odyssey` too; the
+  dirt and smudge light also reach only about a tenth of its brightness in replay, and the crack amount CB1[55].y
+  is 0 in the flight (section 15).
 - ruled out: rotating the stroke direction by the surface normal so panes differ, because both Odyssey meshes
   measured already run a single texture direction several ways across their panes, through their UV charts
   (section 14).
