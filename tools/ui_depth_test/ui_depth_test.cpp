@@ -48,11 +48,29 @@ void FaultBudget::charge() { --m_remaining; }
 bool Config::getBool(const char*, bool) const { std::abort(); }
 float Config::getFloat(const char*, float) const { std::abort(); }
 std::string Config::getString(const char*, const char*) const { std::abort(); }
-void* bindingGet(BindSlot) { std::abort(); }
+// The binding shadow, faked only while rigfake::on (build 5): the eye-draw memo's miss path, the view memo and the front cache read it, and the checks below drive them
+// with rig values. Off, each aborts as before, so a dependency this rig did not mean to have still fails loudly.
+namespace rigfake {
+bool on = false;
+void* ptr[static_cast<size_t>(BindSlot::Count)] = {};
+uint32_t eyeKey = 1, ptrKey = 1;   // bindingEyeKeyGeneration, bindingEyeKeyPtrGeneration
+unsigned resolves = 0;             // bindingResolve calls
+struct ViewInfo { const void* view; ResourceInfo info; };
+ViewInfo views[64] = {};           // the views bindingResolve knows (a view not listed does not resolve)
+unsigned viewCount = 0;
+}  // namespace rigfake
+void* bindingGet(BindSlot s) { if (!rigfake::on) std::abort(); return rigfake::ptr[static_cast<size_t>(s)]; }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
-uint32_t bindingEyeKeyGeneration() { std::abort(); }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
-uint64_t bindingShaderHash(BindSlot) { std::abort(); }
-bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
+uint32_t bindingEyeKeyGeneration() { if (!rigfake::on) std::abort(); return rigfake::eyeKey; }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
+uint32_t bindingEyeKeyPtrGeneration() { if (!rigfake::on) std::abort(); return rigfake::ptrKey; }   // build 5, item 6: read in the real miss only
+uint64_t bindingShaderHash(BindSlot) { if (!rigfake::on) std::abort(); return 0; }
+bool bindingResolve(void* view, ResourceInfo* out) {
+    if (!rigfake::on) std::abort();
+    ++rigfake::resolves;
+    for (unsigned i = 0; i < rigfake::viewCount; ++i)
+        if (rigfake::views[i].view == view) { *out = rigfake::views[i].info; return true; }
+    return false;
+}
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
@@ -201,22 +219,215 @@ int main(int argc, char** argv) {
         g.mode = Mode::kReissueScene; g.planetPending = g.planetSolarPending = g.worldScreenPending = g.composite = true;
         g.coronaPending = g.coronaMotion = g.wantRebind = g.wantMask = true;
         g.rebindEye = g.drawEye = 1; g.reissueMaskSlot = 3; g.reissueShader = &g_depthShaders[1];
+        detail::g_uiDepthDrawDirty = true;   // build 5, item 2: whoever writes an output sets this (the classifier's miss, uiDepthReissueBegin's coronaMotion)
         check(uiDepthPlanetPending() && uiDepthWorldScreenPending() && uiDepthDrawSampledSurface() && uiDepthWantsReissue(),
               "ui depth draw outputs: the accessors read the fields (control: dirty values are seen)");
         const bool wasOn = detail::g_uiDepthOn;
-        detail::g_uiDepthOn = false;   // the call resets, then declines on this flag
+        detail::g_uiDepthOn = false;   // the inline resets (the flag is set), then declines on this flag
         check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 6, 1, 0, 0, 0}), "ui depth draw outputs: a draw with the pass off declines");
         detail::g_uiDepthOn = wasOn;
         check(g.mode == d0.mode && g.planetPending == d0.planetPending && g.planetSolarPending == d0.planetSolarPending &&
               g.worldScreenPending == d0.worldScreenPending && g.composite == d0.composite && g.coronaPending == d0.coronaPending &&
               g.coronaMotion == d0.coronaMotion && g.wantRebind == d0.wantRebind && g.wantMask == d0.wantMask && g.rebindEye == -1 &&
-              g.drawEye == -1 && g.reissueMaskSlot == 0 && g.reissueShader == nullptr,
-              "ui depth draw outputs: one call leaves every output at its default");
+              g.drawEye == -1 && g.reissueMaskSlot == 0 && g.reissueShader == nullptr && !detail::g_uiDepthDrawDirty,
+              "ui depth draw outputs: one call leaves every output at its default and clears the dirty flag");
         check(!uiDepthPlanetPending() && !uiDepthWorldScreenPending() && !uiDepthDrawSampledSurface() && !uiDepthWantsReissue(),
               "ui depth draw outputs: the ui_depth.h accessors return the reset values after a draw");
         const UiDepthDrawProbe pr = uiDepthDrawProbe();
         check(!pr.coverage && !pr.wantMask && pr.maskSlot == 0 && pr.drawEye == -1, "ui depth draw outputs: the draw probe reads the reset values");
-        check(g_holoDraw.kind == 'X' && g_holoDraw.count == 6 && g_holoDraw.instances == 1, "ui depth draw outputs: the input draw is still copied");
+    }
+    // Build 5, item 2: the eye draw's memo hit is inline (ui_depth.h). Over hit, miss, hit, reissue, hit the accessors return the same values the old out-of-line
+    // call gave: defaults on every call, with g_holoDraw copied only on a miss (its readers need a field only a classify sets).
+    {
+        detail::UiDepthDraw& g = detail::g_uiDepthDraw;
+        rigfake::on = true;
+        detail::g_uiDepthOn = true;
+        detail::g_uiDepthStoodDown = false;
+        rigfake::eyeKey = 10; rigfake::ptrKey = 10;
+        classifiermemo::invalidate(detail::g_eyeMemo);
+        classifiermemo::invalidate(g_eyeMemoPtr);
+        const auto defaults = [&] {
+            return g.mode == Mode::kNone && !g.planetPending && !g.planetSolarPending && !g.worldScreenPending && !g.composite && !g.coronaPending && !g.coronaMotion &&
+                   !g.wantRebind && !g.wantMask && g.rebindEye == -1 && g.drawEye == -1 && g.reissueMaskSlot == 0 && g.reissueShader == nullptr &&
+                   !uiDepthPlanetPending() && !uiDepthWorldScreenPending() && !uiDepthDrawSampledSurface() && !uiDepthWantsReissue();
+        };
+        // 1. Miss: Dsv0 unbound is the classifier's first exit (not a plain decline). The input draw is copied here, on the miss.
+        rigfake::ptr[static_cast<size_t>(BindSlot::Dsv0)] = nullptr;
+        g_holoDraw = HoloDraw{};
+        const UiDepthB5Counts c0 = uiDepthB5Counts();
+        check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 6, 1, 0, 0, 0}), "ui depth inline memo: a first call is a miss and declines");
+        check(g_holoDraw.kind == 'X' && g_holoDraw.count == 6 && g_holoDraw.instances == 1, "ui depth inline memo: the input draw is copied on a miss");
+        check(detail::g_uiDepthDrawDirty && defaults(), "ui depth inline memo: a miss sets the dirty flag before the classifier, and the outputs it left are the defaults here");
+        check(uiDepthB5Counts().eyeMisses == c0.eyeMisses + 1 && uiDepthB5Counts().eyeShadowLookups == c0.eyeShadowLookups + 1,
+              "ui depth inline memo: a miss counts once, and its shadow lookup with it");
+        // 2. Hit: store the plain decline at the current key; the next call hits at once. Nothing is copied or counted; a dirty struct is reset first.
+        classifiermemo::store(detail::g_eyeMemo, classifiermemo::Key{rigfake::eyeKey, detail::g_classifierEpoch}, classifiermemo::Exit::kPlainDecline);
+        g.composite = true; g.mode = Mode::kReissue;   // an output the last draw wrote ...
+        detail::g_uiDepthDrawDirty = true;             // ... and the flag its writer sets
+        g_holoDraw = HoloDraw{'D', 1, 1, 0, 0, 0};
+        const UiDepthB5Counts c1 = uiDepthB5Counts();
+        const unsigned resolves1 = rigfake::resolves;
+        check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 9, 9, 0, 0, 0}), "ui depth inline memo: a call at the stored plain-decline key hits and declines");
+        check(defaults() && !detail::g_uiDepthDrawDirty, "ui depth inline memo: a hit resets a dirty struct and clears the flag");
+        check(g_holoDraw.kind == 'D' && g_holoDraw.count == 1, "ui depth inline memo: a hit does not copy the input draw");
+        check(uiDepthB5Counts().eyeMisses == c1.eyeMisses && rigfake::resolves == resolves1, "ui depth inline memo: a hit counts no miss and calls nothing out of line");
+        // 3. Hit again, clean: the struct is not touched (the flag is the whole contract; a writer that forgets it is what this pins).
+        g.wantMask = true;
+        check(!uiDepthOnEyeDraw(ctx.Get()) && g.wantMask, "ui depth inline memo: with the flag clear a hit leaves the struct alone");
+        g.wantMask = false;
+        // 4. Reissue: uiDepthReissueBegin's coronaMotion write sets the flag; the next hit puts the default back.
+        g.coronaMotion = true; detail::g_uiDepthDrawDirty = true;
+        check(!uiDepthOnEyeDraw(ctx.Get()) && !g.coronaMotion && defaults(), "ui depth inline memo: after a reissue wrote coronaMotion the next hit resets it");
+        // 5. Hit once more; then the pass off and stood down decline before the key is read (the fakes abort once off).
+        check(!uiDepthOnEyeDraw(ctx.Get()) && defaults(), "ui depth inline memo: another hit, same values");
+        rigfake::on = false;
+        detail::g_uiDepthOn = false;
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth inline memo: the pass off declines before bindingEyeKeyGeneration is read");
+        detail::g_uiDepthOn = true; detail::g_uiDepthStoodDown = true;
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth inline memo: stood down declines before bindingEyeKeyGeneration is read");
+        detail::g_uiDepthStoodDown = false; detail::g_uiDepthOn = false;
+        classifiermemo::invalidate(detail::g_eyeMemo);
+        classifiermemo::invalidate(g_eyeMemoPtr);
+    }
+    // Build 5, item 6 (TEMPORARY): the shadow memo keyed on the pointer-only aggregate. A same-pointer re-set moves today's key and not the pointer-only one: the real
+    // memo misses and the shadow hits. The classifier then says whether S2 would have been right.
+    {
+        rigfake::on = true;
+        detail::g_uiDepthOn = true;
+        detail::g_uiDepthStoodDown = false;
+        classifiermemo::invalidate(detail::g_eyeMemo);
+        classifiermemo::invalidate(g_eyeMemoPtr);
+        rigfake::ptr[static_cast<size_t>(BindSlot::Dsv0)] = &rigfake::ptrKey;   // any non-null: the classifier goes on to the family gate (no VS bound, no surface)
+        rigfake::eyeKey = 20; rigfake::ptrKey = 20;
+        const UiDepthB5Counts a = uiDepthB5Counts();
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth shadow memo: a first call misses and the classifier makes a plain decline");
+        check(detail::g_eyeMemo.exit == classifiermemo::Exit::kPlainDecline && g_eyeMemoPtr.exit == classifiermemo::Exit::kPlainDecline,
+              "ui depth shadow memo: both memos store the plain decline (no VS bound, no surface in PS slots 0..3)");
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth shadow memo: the same key hits the real memo");
+        check(uiDepthB5Counts().eyeMisses == a.eyeMisses + 1, "ui depth shadow memo: the hit did not count a miss");
+        rigfake::eyeKey = 21;   // a same-pointer SRV re-set: today's aggregate moves, the pointer-only one does not
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth shadow memo: a same-pointer re-set makes the real memo miss ...");
+        UiDepthB5Counts b = uiDepthB5Counts();
+        check(b.eyeMisses == a.eyeMisses + 2 && b.eyePtrWouldHit == a.eyePtrWouldHit + 1 && b.eyePtrWouldDisagree == a.eyePtrWouldDisagree,
+              "ui depth shadow memo: ... and the shadow hit, with the classifier agreeing (ptr_would_hit)");
+        rigfake::eyeKey = 22; rigfake::ptrKey = 21;   // a pointer change moves both: no shadow hit
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth shadow memo: a pointer change misses both");
+        b = uiDepthB5Counts();
+        check(b.eyeMisses == a.eyeMisses + 3 && b.eyePtrWouldHit == a.eyePtrWouldHit + 1 && b.eyePtrWouldDisagree == a.eyePtrWouldDisagree,
+              "ui depth shadow memo: no shadow hit on a pointer change");
+        rigfake::eyeKey = 23;   // same pointer again, but the classifier's first exit now (Dsv0 unbound) is not a plain decline
+        rigfake::ptr[static_cast<size_t>(BindSlot::Dsv0)] = nullptr;
+        check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth shadow memo: a shadow hit whose classifier does not make a plain decline ...");
+        b = uiDepthB5Counts();
+        check(b.eyePtrWouldDisagree == a.eyePtrWouldDisagree + 1 && b.eyePtrWouldHit == a.eyePtrWouldHit + 1, "ui depth shadow memo: ... is counted as a disagreement");
+        check(b.eyeShadowLookups - a.eyeShadowLookups == b.eyeMisses - a.eyeMisses, "ui depth shadow memo: shadow lookups equal the real misses");
+        rigfake::on = false;
+        detail::g_uiDepthOn = false;
+        classifiermemo::invalidate(detail::g_eyeMemo);
+        classifiermemo::invalidate(g_eyeMemoPtr);
+    }
+    // Build 5, item 3: the front cache of viewIsSurface. Its answer is the view memo's plus the resolve, over fills, puts for other keys that evict, epoch moves and
+    // frame changes; an entry filled on a miss (which puts, and may move the epoch) hits on the next lookup.
+    {
+        rigfake::on = true;
+        detail::g_uiDepthOn = true;
+        detail::g_uiDepthStoodDown = false;
+        static char resA[8], resB[8], resC[8];
+        static char viewA, viewB, viewC;
+        const auto resolveAs = [&](const void* view, void* res, uint32_t w) {
+            rigfake::ViewInfo& v = rigfake::views[rigfake::viewCount++];
+            v.view = view;
+            v.info = ResourceInfo();
+            v.info.isTexture2D = true; v.info.a = w; v.info.b = 64; v.info.fmt = 28; v.info.resource = res;
+        };
+        resolveAs(&viewA, resA, 64);   // a learned surface
+        resolveAs(&viewB, resB, 64);   // not learned
+        resolveAs(&viewC, resC, 64);   // learned, then its address is reused for another shape
+        addSurface(resA, 64, 64, 28, 'V');
+        addSurface(resC, 64, 64, 28, 'V');
+        static const BindSlot kSrv[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+        const auto bindSrv = [&](const void* a, const void* b, const void* c, const void* d) {
+            rigfake::ptr[static_cast<size_t>(kSrv[0])] = const_cast<void*>(a); rigfake::ptr[static_cast<size_t>(kSrv[1])] = const_cast<void*>(b);
+            rigfake::ptr[static_cast<size_t>(kSrv[2])] = const_cast<void*>(c); rigfake::ptr[static_cast<size_t>(kSrv[3])] = const_cast<void*>(d);
+        };
+        // The reference, taken AFTER the front call: the view memo holds the answer by then, so asking it again is a hit and changes no state.
+        const auto reference = [&] {
+            for (int i = 0; i < 4; ++i)
+                if (viewIsSurface(rigfake::ptr[static_cast<size_t>(kSrv[i])])) return i;
+            return -1;
+        };
+        const auto lookup = [&](const char* what, int want) {
+            const int got = uiDepthSampledSurfaceSlot();
+            const int ref = reference();
+            char label[200];
+            std::snprintf(label, sizeof(label), "ui depth front cache: %s -> slot %d (the memo and the resolve say %d)", what, want, ref);
+            check(got == ref && got == want, label);
+        };
+        bindSrv(&viewB, &viewA, nullptr, nullptr);
+        UiDepthB5Counts k0 = uiDepthB5Counts();
+        lookup("a first lookup fills", 1);
+        check(uiDepthB5Counts().frontLookups == k0.frontLookups + 2, "ui depth front cache: the lookups are counted (two views bound)");
+        // The second view's fill put into the memo after the first view's entry was stored (the put sequence is the memo's, not a slot's), so the first view's entry
+        // is stale at once: the next lookup refills it from the view memo (a hit there, no resolve) and hits the second.
+        k0 = uiDepthB5Counts();
+        unsigned resolvesBefore = rigfake::resolves;
+        lookup("the same bindings, same frame: the first view refills from the memo", 1);
+        check(uiDepthB5Counts().frontHits == k0.frontHits + 1 && rigfake::resolves == resolvesBefore,
+              "ui depth front cache: an entry stored before a later view's put refills from the view memo without a resolve");
+        // An entry filled on a miss hits on the next lookup, with no resolve.
+        k0 = uiDepthB5Counts();
+        resolvesBefore = rigfake::resolves;
+        lookup("the same bindings, same frame", 1);
+        check(uiDepthB5Counts().frontHits == k0.frontHits + 2 && rigfake::resolves == resolvesBefore,
+              "ui depth front cache: an entry filled on a miss hits on the next lookup, and a hit resolves nothing");
+        // Puts for other keys that evict memo slots: the front misses (the put sequence moved), the real path answers, and the answers stand.
+        for (unsigned i = 0; i < 2 * kMemoSize; ++i) viewIsSurface(reinterpret_cast<const void*>(0x100000 + 16 * static_cast<uintptr_t>(i)));
+        k0 = uiDepthB5Counts();
+        lookup("after puts for 2*kMemoSize other keys", 1);
+        check(uiDepthB5Counts().frontHits == k0.frontHits, "ui depth front cache: puts for other keys make the next lookup a front miss");
+        // The case the put sequence is for: viewC's memo slot is evicted, and its address now holds another shape. The real path re-resolves, drops the surface and
+        // moves the epoch; a front entry without the put sequence would still answer yes.
+        g_viewMemo.clear();
+        ++g_viewMemoPuts;
+        bindSrv(&viewC, nullptr, nullptr, nullptr);
+        lookup("a learned surface, filled", 0);
+        // kMemoProbe keys with the home slot kMemoProbe-1 places before viewC's: the first fill the empties, the last finds the window full and (equal ages) takes its last
+        // slot, which is viewC's. Real puts through viewIsSurface, each bumping the put sequence.
+        const uint32_t homeC = PtrMemo<kMemoSize>::home(&viewC);
+        const uint32_t target = (homeC + kMemoSize - (kMemoProbe - 1)) & (kMemoSize - 1);
+        for (uintptr_t at = 0x300000, made = 0; made < kMemoProbe; at += 16)
+            if (PtrMemo<kMemoSize>::home(reinterpret_cast<const void*>(at)) == target) { viewIsSurface(reinterpret_cast<const void*>(at)); ++made; }
+        check(g_viewMemo.slots[homeC].key != &viewC, "ui depth front cache: the puts for other keys evicted viewC's memo slot");
+        rigfake::views[2].info.a = 32;   // viewC's resource is now another shape
+        const uint32_t epochBefore = detail::g_classifierEpoch;
+        const uint32_t evictionsBefore = g_evictions;
+        const int got = uiDepthSampledSurfaceSlot();
+        check(got == -1 && g_evictions == evictionsBefore + 1 && detail::g_classifierEpoch != epochBefore,
+              "ui depth front cache: with another key's put since the fill, the real path re-resolves, drops the recycled surface and moves the epoch (the put sequence's reason)");
+        // Epoch and frame moves.
+        bindSrv(&viewB, &viewA, nullptr, nullptr);
+        lookup("refill after the drop", 1);
+        k0 = uiDepthB5Counts();
+        ++detail::g_classifierEpoch;
+        lookup("after the epoch moved", 1);
+        check(uiDepthB5Counts().frontHits == k0.frontHits, "ui depth front cache: an epoch move is a front miss");
+        k0 = uiDepthB5Counts();
+        ++g_frame;
+        lookup("after the frame moved", 1);
+        check(uiDepthB5Counts().frontHits == k0.frontHits, "ui depth front cache: a frame change is a front miss");
+        // A null view is viewIsSurface's own first line: no lookup, no entry.
+        bindSrv(nullptr, nullptr, nullptr, nullptr);
+        k0 = uiDepthB5Counts();
+        lookup("nothing bound", -1);
+        check(uiDepthB5Counts().frontLookups == k0.frontLookups, "ui depth front cache: a null view is not looked up");
+        rigfake::on = false;
+        rigfake::viewCount = 0;
+        detail::g_uiDepthOn = false;
+        for (uint32_t n = 0; n < kMaxSurfaces; ++n) g_surfaces[n] = Surface();
+        g_surfaceCount = 0;
+        g_viewMemo.clear();
+        ++g_viewMemoPuts;
+        ++detail::g_classifierEpoch;
     }
     // Create every actual generated production coverage shader.
     for (DepthShader& entry : g_depthShaders) {

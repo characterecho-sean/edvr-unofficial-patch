@@ -26,6 +26,8 @@ namespace edvr {
 namespace detail {
 std::atomic<bool> g_vrStarGlowWanted{false};
 std::atomic<bool> g_vrStarGlowPending{false};
+VrStarMode g_vrStarMode = VrStarMode::kOff;   // the mode (render thread); the call sites read it through vrStarGlowAfterMayAct()
+bool g_vrStarT0Active = false;                // the first-level draw has H' bound at t0 (render thread); the single storage of the old g_t0.active
 }  // namespace detail
 
 namespace {
@@ -42,7 +44,6 @@ bool g_configRead = false;
 uint32_t g_configGeneration = 0;
 int g_percent = 100;                  // visual.star_glow as the reader gave it: 100, 125, 150, 175, 200, 250, 300, 350 or 400
 bool g_unrecognisedNoted = false;
-VrStarMode g_mode = VrStarMode::kOff;
 int g_windowPercent = 100;            // the setting the window being counted belongs to (valid while ON)
 int g_shownPercent = 100;             // the last setting seen while not off: the line for the setting returning to 100 says what it was
 ULONGLONG g_windowStart = 0;
@@ -101,9 +102,8 @@ Saved g_saved;
 // The game's view of H at t0, held while the first level reads H'.
 struct FirstLevelBind {
     Ptr<ID3D11ShaderResourceView> game;
-    bool active = false;
 };
-FirstLevelBind g_t0;
+FirstLevelBind g_t0;   // whether the first-level draw is live: detail::g_vrStarT0Active
 
 // The once-only lines.
 bool g_feedNoted = false, g_layerFailNoted = false, g_feedFailNoted = false, g_cloneFailNoted = false, g_slotsFullNoted = false;
@@ -149,7 +149,7 @@ void releaseAll() {
     g_target = Target{};
     g_device = nullptr;
     g_t0.game.Reset();
-    g_t0.active = false;
+    detail::g_vrStarT0Active = false;
     releaseSaved();
     detail::g_vrStarGlowPending.store(false, std::memory_order_relaxed);
 }
@@ -439,7 +439,7 @@ void bindFirstLevel(ID3D11DeviceContext* ctx) {
     void* const srv = bindingGet(BindSlot::PsSrv0);
     ResourceInfo info;
     // Who is asking: the star glow's light is waiting in some H, and/or an eye's HUD is. A first level nobody is waiting for is looked at by neither.
-    const bool starAsked = g_mode == VrStarMode::kOn && detail::g_vrStarGlowPending.load(std::memory_order_relaxed);
+    const bool starAsked = detail::g_vrStarMode == VrStarMode::kOn && detail::g_vrStarGlowPending.load(std::memory_order_relaxed);
     const bool hudAsked = g_hudMode == VrHudGlowMode::kOn && uiLayerHudGlowPending();
     if (!srv || !bindingResolve(srv, &info) || !info.isTexture2D) {
         if (starAsked) ++g_win.firstLevelUnknownH;
@@ -505,7 +505,7 @@ void bindFirstLevel(ID3D11DeviceContext* ctx) {
     ID3D11ShaderResourceView* bound = fed;
     vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &bound);
     g_t0.game = game;
-    g_t0.active = true;
+    detail::g_vrStarT0Active = true;
     if (glow.hudIncluded && !g_hudFedNoted) {
         g_hudFedNoted = true;
         char line[640];
@@ -529,7 +529,7 @@ void bindFirstLevel(ID3D11DeviceContext* ctx) {
 // The game's view of H goes back at t0.
 void endFirstLevel(ID3D11DeviceContext* ctx) {
     ID3D11ShaderResourceView* game = g_t0.game.Get();
-    g_t0.active = false;
+    detail::g_vrStarT0Active = false;
     const bool ran = guarded("vrStarGlow.restoreT0", [&] { vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &game); });
     if (!ran) g_budget.charge();
     g_t0.game.Reset();
@@ -609,7 +609,7 @@ void hudResetWindow(ULONGLONG now) {
 void hudStandDown() {
     g_hudMode = VrHudGlowMode::kOff;
     g_hudWin = VrHudGlowWindow{};
-    detail::g_vrStarGlowWanted.store(g_mode == VrStarMode::kOn, std::memory_order_relaxed);
+    detail::g_vrStarGlowWanted.store(detail::g_vrStarMode == VrStarMode::kOn, std::memory_order_relaxed);
 }
 
 // Once a frame, before the star glow's own boundary: reads the mode (the HDR HUD take armed, Elite's Bloom), arms or disarms the hooks, prints the window.
@@ -638,22 +638,22 @@ void hudFrameBoundary() {
         hudLogWindow();
         hudResetWindow(now);
     }
-    detail::g_vrStarGlowWanted.store(g_mode == VrStarMode::kOn || g_hudMode == VrHudGlowMode::kOn, std::memory_order_relaxed);
+    detail::g_vrStarGlowWanted.store(detail::g_vrStarMode == VrStarMode::kOn || g_hudMode == VrHudGlowMode::kOn, std::memory_order_relaxed);
 }
 
 }  // namespace
 
 void vrStarGlowFirstLevel(ID3D11DeviceContext* ctx) {
     if (!ctx || !vrStarIsFirstLevel(bindingShaderHash(BindSlot::Ps))) return;   // the common case while some H is lit: one load, one compare
-    if (g_t0.active) return;
+    if (detail::g_vrStarT0Active) return;
     VrWorldInternalScope internal;
     guardedBudget(g_budget, [&] { bindFirstLevel(ctx); });
 }
 
 bool vrStarGlowAfterDraw(ID3D11DeviceContext* ctx, bool plain) {
     if (!ctx) return false;
-    if (g_t0.active) endFirstLevel(ctx);   // only the first-level draw read H'; the game's view is back before anything else looks
-    if (g_mode != VrStarMode::kOn) return false;   // the HUD's bloom alone is armed: no star pass to classify, no replay
+    if (detail::g_vrStarT0Active) endFirstLevel(ctx);   // only the first-level draw read H'; the game's view is back before anything else looks
+    if (detail::g_vrStarMode != VrStarMode::kOn) return false;   // the HUD's bloom alone is armed: no star pass to classify, no replay
     ++g_win.draws;
     bool replay = false;
     if (!guardedBudget(g_budget, [&] { replay = classify(ctx, plain); })) {
@@ -675,23 +675,23 @@ void vrStarGlowFrameBoundary() {
     // The profile can switch live: a headset session that became a flat one stands down at its next boundary, and a flat one never starts.
     if (runtimeFlatProfile()) {
         hudStandDown();   // the flat profile feeds its own HUD bloom (flat_ui_layer.h); nothing here runs
-        if (g_mode != VrStarMode::kOff) {
+        if (detail::g_vrStarMode != VrStarMode::kOff) {
             standDown();
-            g_mode = VrStarMode::kOff;
+            detail::g_vrStarMode = VrStarMode::kOff;
         }
         return;
     }
     // A spent fault budget (FEATURE-DISABLED in the log) turns the glow off for the session: the hooks go back to their one load.
     if (!g_budget.shouldRun()) {
         hudStandDown();
-        if (g_mode != VrStarMode::kOff) {
+        if (detail::g_vrStarMode != VrStarMode::kOff) {
             standDown();
-            g_mode = VrStarMode::kOff;
+            detail::g_vrStarMode = VrStarMode::kOff;
         }
         return;
     }
     hudFrameBoundary();
-    if (g_mode == VrStarMode::kOn) foldFrame();
+    if (detail::g_vrStarMode == VrStarMode::kOn) foldFrame();
     Config& cfg = Config::get();
     // Live: the settings' generation is read BEFORE the values (config.h), so a swap that lands between costs one more read, never a stale one.
     const uint32_t generation = cfg.generation();
@@ -709,11 +709,11 @@ void vrStarGlowFrameBoundary() {
     const VrStarMode mode = vrStarMode(g_percent, g_percent > 100 ? menuStarGlowBloom() : sgb::Bloom::Unknown);
     const ULONGLONG now = GetTickCount64();
     char line[512];
-    if (mode != g_mode) {
-        const VrStarMode before = g_mode;
+    if (mode != detail::g_vrStarMode) {
+        const VrStarMode before = detail::g_vrStarMode;
         if (before == VrStarMode::kOn) logWindow(g_windowPercent);   // the counts of the state that just ended
         standDown();   // nothing carries over, whichever way the mode moved
-        g_mode = mode;
+        detail::g_vrStarMode = mode;
         if (mode == VrStarMode::kOn) {
             g_win = VrStarWindow{};
             g_windowPercent = g_percent;

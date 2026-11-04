@@ -98,7 +98,7 @@ void engineVelocityRememberPs(ID3D11PixelShader*, uint64_t hash, const void* byt
                               bool linked);
 
 // The per-draw hook (vscreen's draw hooks, owner context, before the real
-// draw). The inline half is nine compares (the shadow's Vs, Ps, Rtv0, Dsv0
+// draw). The inline half is five compares (the shadow's one aggregate over its Vs, Ps, Rtv0, Dsv0
 // and Blend generations; the VsSrv33 and VsCb1 pointers; the eye; and, while
 // the overlay guard holds PS t3, that slot's generation) and the sampling
 // counter: the slow half runs only when the game has rebound a shader, a
@@ -106,6 +106,9 @@ void engineVelocityRememberPs(ID3D11PixelShader*, uint64_t hash, const void* byt
 // or scene constant buffer, or written a watched source, since the last look.
 namespace engine_velocity_detail {
 struct DrawCache {
+    // Build 5, item 4: the shadow's one aggregate generation over the five below (bindingEvKeyGeneration). The inline half compares it in place of the five; they
+    // stay, and are still stored, because the slow half reads them. It starts at 0 and the aggregate never takes 0, so a fresh or reset cache is stale.
+    uint32_t evGen = 0;
     uint32_t vs = 0, ps = 0, rtv = 0, dsv = 0, blend = 0;
     const void* pool = nullptr;    // VS t33's view as the shadow last saw it
     const void* scene = nullptr;   // VS b1's buffer, likewise
@@ -169,9 +172,7 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     using namespace engine_velocity_detail;
     if (!live.load(std::memory_order_relaxed)) return;
     bool slow = false;
-    if (cache.vs != bindingGeneration(BindSlot::Vs) || cache.ps != bindingGeneration(BindSlot::Ps) ||
-        cache.rtv != bindingGeneration(BindSlot::Rtv0) || cache.dsv != bindingGeneration(BindSlot::Dsv0) ||
-        cache.blend != bindingGeneration(BindSlot::Blend) || cache.pool != bindingGet(BindSlot::VsSrv33) ||
+    if (cache.evGen != bindingEvKeyGeneration() || cache.pool != bindingGet(BindSlot::VsSrv33) ||
         cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye ||
         (cache.guarded && cache.srv3 != bindingGeneration(BindSlot::PsSrv3))) {
         beforeDrawSlow(ctx, rtv0Eye);
@@ -430,6 +431,8 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
 bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants, const float (&rows)[6][4]);
 // Frames prepared from nothing since the module went live, for the 5 s line.
 uint64_t engineVelocitySourceFreeFrames();
+// TEMPORARY (build 5, item 6, b5_counts_line.h): beforeDrawSlow entries since the start, for the perf window line.
+uint64_t engineVelocitySlowEntries();
 // The VR world route's two reads of the source's naming (vr_world_route.cpp; docs section 82): is `depth` the source depth
 // screen_motion named in THIS present frame, and the source camera's rows 270..275 (the resolver's camera[6][4]: b1's first
 // 96 bytes from row 270) as the watch last saw them written for that naming. False when nothing was named this frame, the

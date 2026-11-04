@@ -123,8 +123,8 @@ std::atomic<bool> g_shadowsSkipped{false};
 // perf_monitor.cpp reads them (vScreenDrawMaskCounts) and subtracts the last window's.
 std::atomic<uint32_t> g_maskDraws{0};
 std::atomic<uint32_t> g_maskSkips[kMaskSkips];
-// TEMPORARY (build 4, item 7, bind_set_line.h): hookedMap's mapMemo lookups and misses. Plain counters; the memo is the owner's.
-uint32_t g_mapMemoLookups = 0, g_mapMemoMisses = 0;
+// TEMPORARY (build 5, item 6, b5_counts_line.h): the #184 counts and engine velocity's slow-half entries. Plain counters, as build 4's were.
+VScreenB5Counts g_b5vs;
 inline void maskNoteSkip(MaskSkip k) {
     std::atomic<uint32_t>& a = g_maskSkips[static_cast<size_t>(k)];
     a.store(a.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
@@ -1634,6 +1634,10 @@ thread_local bool t_holoDepthThisDraw = false;
 // same take-and-clear the two flags above have, so it is only ever the draw's
 // own.
 thread_local bool t_compositeThisDraw = false;
+// TEMPORARY (build 5, item 6, #184): a draw stamp, bumped first thing in beginPanelOverride (before every return), and the stamp each flag above was set under. A
+// UiDepthScope that consumes a flag set under another stamp is consuming a flag an earlier draw left (b5_counts_line.h).
+thread_local uint32_t t_drawStamp = 0;
+thread_local uint32_t t_uiDepthStamp = 0, t_holoDepthStamp = 0, t_compositeStamp = 0;
 
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo,
@@ -1995,6 +1999,7 @@ inline bool drawPathFast(DrawVerdict v) {
 
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                UINT instances, const DrawArgs& args) {
+    ++t_drawStamp;   // TEMPORARY (build 5, item 6, #184): first thing, before every return
     // F3 (native on foot): the on-foot HUD issuers' stacks. Ahead of everything else, so every game draw of the four VR-path thunks is
     // seen; the EDVR-internal reissues return before this call. One shader-hash load and two compares, the rest only on a match.
     nativeOnFootHudProbe(bindingShaderHash(BindSlot::Vs));
@@ -2536,6 +2541,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
             {kind,count,instances,args.start,args.base,args.startInstance});
         t_compositeThisDraw = uiDepthDrawSampledSurface();
+        t_uiDepthStamp = t_compositeStamp = t_drawStamp;   // TEMPORARY (build 5, item 6)
     }
     // The generic hologram/icon depth pass (ui_depth.h): its own family
     // list, checked independently of the classification above.
@@ -2549,6 +2555,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         } else {
             t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
         }
+        t_holoDepthStamp = t_drawStamp;   // TEMPORARY (build 5, item 6)
     }
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
@@ -3220,7 +3227,7 @@ void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     // Hot: every PS constant-buffer bind. Installed for the flat scope, so a VR launch passes through here.
     if (!runtimeFlatProfile()) {
         // Inactive while VR runs: timed from here to the forward call (cross_profile_cost.h).
-        cross_profile::enterSite(cross_profile::Site::FlatPsConstantBuffers, true).stop();
+        cross_profile::enterSitePlainCount(cross_profile::Site::FlatPsConstantBuffers, true).stop();
         g_state->realPSSetConstantBuffers(self, start, n, bufs);
         return;
     }
@@ -3623,9 +3630,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // A recycled address gives the detector one wrong size for one
         // observe, which it survives.
         State::MapMemo& mm = s->mapMemo[(reinterpret_cast<uintptr_t>(res) >> 6) & 63];
-        ++g_mapMemoLookups;   // TEMPORARY (item 7)
         if (mm.res != res) {
-            ++g_mapMemoMisses;   // TEMPORARY (item 7)
             mm.res = res;
             mm.byteWidth = 0;
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
@@ -4305,7 +4310,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    if (owner && uiLayerIssueBlocked()) return;
+    if (owner && uiLayerIssueBlocked()) {
+        // TEMPORARY (build 5, item 6, #184): the owner return that can leave the flags set for a later draw.
+        ++g_b5vs.blockedReturns;
+        if (t_uiDepthThisDraw) ++g_b5vs.blockedUi;
+        if (t_holoDepthThisDraw) ++g_b5vs.blockedHolo;
+        if (t_compositeThisDraw) ++g_b5vs.blockedComposite;
+        return;
+    }
     // TEMPORARY, the blend probe (blend_probe.h): an eye draw of a collecting capture is offered once its routing is decided. One relaxed
     // load for every draw while no capture runs.
     const bool blendProbing = owner && g_state->rtv0Eye && blendProbeWantsDraws();
@@ -4324,6 +4336,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         bool                 composite;   // this eye draw samples a learned interface surface (the layer's census)
         explicit UiDepthScope(ID3D11DeviceContext* c)
             : ctx(c), on(t_uiDepthThisDraw), holoOn(t_holoDepthThisDraw), composite(t_compositeThisDraw) {
+            // TEMPORARY (build 5, item 6, #184): a flag set under another draw's stamp is a stale consume.
+            ++g_b5vs.scopes;
+            if (on && t_uiDepthStamp != t_drawStamp) ++g_b5vs.staleUi;
+            if (holoOn && t_holoDepthStamp != t_drawStamp) ++g_b5vs.staleHolo;
+            if (composite && t_compositeStamp != t_drawStamp) ++g_b5vs.staleComposite;
             t_uiDepthThisDraw = false;
             t_holoDepthThisDraw = false;
             t_compositeThisDraw = false;
@@ -5298,7 +5315,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (starGlow) starGlowAfterDraw(self, 'D', count, 1, args, v);
+    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'D', count, 1, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
@@ -5380,7 +5397,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (starGlow) starGlowAfterDraw(self, 'I', count, 1, args, v);
+    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'I', count, 1, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
@@ -5470,7 +5487,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
+    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
@@ -5647,7 +5664,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->introCurveThisDraw = false;
         introCurveEndDraw();
     }
-    if (starGlow) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);
+    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
 }
 
@@ -6202,10 +6219,11 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
 
-BindSetCounts vScreenBindSetCounts() {
-    BindSetCounts c = bindingSetCounts();
-    c.mapMemoLookups = g_mapMemoLookups;
-    c.mapMemoMisses = g_mapMemoMisses;
+B5Counts vScreenB5Counts() {
+    B5Counts c;
+    c.ui = uiDepthB5Counts();
+    c.vs = g_b5vs;
+    c.vs.evSlowEntries = engineVelocitySlowEntries();
     return c;
 }
 

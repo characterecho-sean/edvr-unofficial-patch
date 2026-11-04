@@ -68,6 +68,7 @@ DrawCache cache;
 uint64_t familyDraws[kMaxFamilies] = {};
 uint64_t g_stateCalls = 0;
 uint64_t g_guardedFast = 0;
+uint64_t g_slowEntries = 0;   // TEMPORARY (build 5, item 6): beforeDrawSlow entries since the start
 bool g_guardTrustOff = false;   // rig only: true runs the overlay guard's verification Gets on every draw, as before 2026-10-16
 // The flat census drains the two counts once a frame (engineVelocityTakeWrapperCounts): what was
 // already handed over, and the draws the 30 s summary zeroed out of familyDraws before it could.
@@ -3123,6 +3124,8 @@ static int quickFamilyForProfile(uint64_t hash, bool flat) {
 
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;
+    ++g_slowEntries;
+    cache.evGen = bindingEvKeyGeneration();   // build 5, item 4: the inline half's one compare; read with the five below
     cache.vs = bindingGeneration(BindSlot::Vs);
     cache.ps = bindingGeneration(BindSlot::Ps);
     cache.rtv = bindingGeneration(BindSlot::Rtv0);
@@ -3721,3 +3724,8 @@ void engineVelocityNoteSelfMarkingPs(uint64_t psHash) noexcept {
 }
 
 } // namespace edvr
+
+namespace edvr {
+// TEMPORARY (build 5, item 6, b5_counts_line.h): engine velocity's slow-half entries since the start, for the perf window line.
+uint64_t engineVelocitySlowEntries() { return engine_velocity_detail::g_slowEntries; }
+}  // namespace edvr

@@ -17,6 +17,9 @@
 #pragma once
 
 #include <cstdint>
+#include "b5_counts_line.h"   // UiDepthB5Counts (TEMPORARY, build 5)
+#include "binding_shadow.h"   // bindingEyeKeyGeneration: the inline eye-draw memo hit
+#include "classifier_memo.h"
 #include "holo_motion.h"
 
 struct ID3D11DeviceContext;
@@ -82,6 +85,11 @@ extern bool g_holoDepthOn;
 // The hologram pass's classified eye for this draw (-1: none), read by the two reissues that follow the game's draw. Out here so a draw whose
 // vertex shader the may-want byte rejects stores the decline's one write inline (uiDepthHologramSkippedDraw).
 extern int g_holoEye;
+// Build 5, item 2: what the inline uiDepthOnEyeDraw reads (ui_depth.cpp owns them): the classifier's epoch, the eye draws' memo, and whether g_uiDepthDraw holds a
+// non-default field since its last reset (set before the classifier runs and by uiDepthReissueBegin's coronaMotion).
+extern uint32_t g_classifierEpoch;
+extern classifiermemo::Memo g_eyeMemo;
+extern bool g_uiDepthDrawDirty;
 }  // namespace detail
 inline bool uiDepthWantsDraws() {
     return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
@@ -146,7 +154,21 @@ bool uiDepthIsExcluded(uint64_t vsHash);
 // coverage depth; the caller reissues it after the original draw.
 // The plain decline (no family, no composite) is memoised inside (classifier_memo.h), keyed on the bindings and the classifier's
 // own state, so the caller sees the same outputs and counts as before.
-bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
+//
+// Build 5, item 2: the memo hit is inline, in the callee's old order: the outputs reset if the last draw dirtied them, the pass-on test, the key, the memo; only a
+// miss calls out of line. On a hit every output holds its default (only the classifier and uiDepthReissueBegin write another, and each sets the dirty flag), so
+// the old unconditional reset and the copy of `draw` (its readers need a field only a classify sets) are skipped.
+bool uiDepthOnEyeDrawMiss(ID3D11DeviceContext* ctx, const HoloDraw& draw, const classifiermemo::Key& now);
+inline bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {}) {
+    if (detail::g_uiDepthDrawDirty) {
+        detail::g_uiDepthDraw = detail::UiDepthDraw{};
+        detail::g_uiDepthDrawDirty = false;
+    }
+    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;
+    const classifiermemo::Key now{bindingEyeKeyGeneration(), detail::g_classifierEpoch};
+    if (classifiermemo::hit(detail::g_eyeMemo, now)) return false;
+    return uiDepthOnEyeDrawMiss(ctx, draw, now);
+}
 
 // The generic, contribution-based hologram/icon depth pass: a family-
 // agnostic alternative to uiDepthOnEyeDraw's per-family coverage shaders,
@@ -157,6 +179,10 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 // uiDepthOnEyeDraw at the same call site; true means the two reissues
 // below apply after the game's own draw.
 bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx);
+
+// TEMPORARY (build 5, item 6, b5_counts_line.h): the counts since the start that size S2 (the shadow memos keyed on the pointer-only aggregate) and item 3's
+// front cache, for the perf window line.
+UiDepthB5Counts uiDepthB5Counts();
 // Pass (a): the game's own draw again, RTV0 rebound to a per-eye scratch
 // target whose blend mirrors the game's own RT0 blend (so RGB accumulates
 // what the game's blend equation actually adds), VS/PS/inputs unchanged.

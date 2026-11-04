@@ -26,6 +26,7 @@
 #pragma once
 
 #include "ui_layer.h"   // uiLayerHudGlowPending
+#include "vr_star_glow_math.h"   // VrStarMode
 
 #include <atomic>
 #include <cstdint>
@@ -37,6 +38,8 @@ namespace edvr {
 namespace detail {
 extern std::atomic<bool> g_vrStarGlowWanted;    // armed: VR profile, and visual.star_glow above 100 with Elite's Bloom not known to be off, or the HUD's bloom on
 extern std::atomic<bool> g_vrStarGlowPending;   // some H holds star light that its first level has not read this frame
+extern VrStarMode g_vrStarMode;                 // the star glow's mode; render thread only
+extern bool g_vrStarT0Active;                   // the first-level draw reads H' at t0; render thread only
 }  // namespace detail
 
 // True while the glow or the HUD's bloom runs. One relaxed load: the whole price of the feature while it is off.
@@ -58,6 +61,9 @@ inline void vrStarGlowBeforeDraw(ID3D11DeviceContext* ctx) {
 // its replay is bound into S -- the caller issues the draw once more with the game's arguments, then calls vrStarGlowReplayEnd. False: nothing was
 // bound, issue nothing (every refusal is counted).
 bool vrStarGlowAfterDraw(ID3D11DeviceContext* ctx, bool plain);
+// False: vrStarGlowAfterDraw would return false before touching anything (no first-level draw is live and the star pass is not on: the HUD's bloom alone keeps
+// the hooks armed), so the call site skips the call. The two values it reads are the module's own storage.
+inline bool vrStarGlowAfterMayAct() { return detail::g_vrStarT0Active || detail::g_vrStarMode == VrStarMode::kOn; }
 void vrStarGlowReplayEnd(ID3D11DeviceContext* ctx);
 
 }  // namespace edvr

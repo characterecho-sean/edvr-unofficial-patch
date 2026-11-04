@@ -42,8 +42,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "bind_set_line.h"   // TEMPORARY (build 4, item 7): BindSetCounts
-
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -129,6 +127,10 @@ struct BindingSlot {
 extern BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 // The eye draws' aggregate generation (bindingEyeKeyGeneration below), written only by the setters in the .cpp.
 extern uint32_t g_bindingEyeKeyGen;
+// Build 5, item 4: engine velocity's aggregate over Vs, Ps, Rtv0, Dsv0 and Blend (bindingEvKeyGeneration); starts at 1 and never takes 0.
+extern uint32_t g_bindingEvKeyGen;
+// TEMPORARY (build 5, item 6): the eye key without the same-pointer PS SRV re-sets (bindingEyeKeyPtrGeneration).
+extern uint32_t g_bindingEyeKeyPtrGen;
 }  // namespace detail
 
 // The pointer last seen bound to a slot, or nullptr.
@@ -150,6 +152,17 @@ inline uint32_t bindingGeneration(BindSlot slot) {
 inline uint32_t bindingEyeKeyGeneration() {
     return detail::g_bindingEyeKeyGen;
 }
+// ONE generation for engine velocity's five slots (build 5, item 4): it moves exactly when the generation of the vertex shader, the pixel shader, render target 0,
+// the depth view or the blend moves (every set, invalidate and shader set, and every forget-all and frame boundary). It never takes 0, so a reset DrawCache
+// (all zeros) always reads as stale.
+inline uint32_t bindingEvKeyGeneration() {
+    return detail::g_bindingEvKeyGen;
+}
+// TEMPORARY (build 5, item 6): the eye key's pointer-only form. It moves with bindingEyeKeyGeneration except that a PS SRV 0..3 set of the pointer already bound
+// leaves it alone; bindingInvalidate, bindingSetShader, forget-all and the frame boundary always move it. It decides nothing: only the shadow memos read it.
+inline uint32_t bindingEyeKeyPtrGeneration() {
+    return detail::g_bindingEyeKeyPtrGen;
+}
 inline uint8_t bindingVsMayWant() {
     return detail::g_bindingSlots[static_cast<size_t>(BindSlot::Vs)].mayWant;
 }
@@ -158,14 +171,14 @@ uint8_t bindingVsMayWant();
 void* bindingGet(BindSlot slot);
 uint32_t bindingGeneration(BindSlot slot);
 uint32_t bindingEyeKeyGeneration();
+uint32_t bindingEvKeyGeneration();
+uint32_t bindingEyeKeyPtrGeneration();
 #endif
 
 // Record a new binding. Bumps that slot's generation even when the pointer is
 // unchanged: an identical address after a rebind is not evidence of an identical
 // object, which is the bug that shipped as 0.5.2.
 void bindingSet(BindSlot slot, void* ptr);
-// TEMPORARY (build 4, item 7, bind_set_line.h): bindingSet's call counts for the six cached slots since the start, for the perf window line.
-BindSetCounts bindingSetCounts();
 
 // The slot's binding is unknown: the pointer becomes null and the generation moves, so no cached answer and no
 // pointer compare can take it for the old binding. For a slot whose recording was skipped for a while

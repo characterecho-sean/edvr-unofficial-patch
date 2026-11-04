@@ -101,6 +101,14 @@ namespace edvr {
 void* bindingGet(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].ptr; }
 uint32_t bindingGeneration(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].gen; }
 uint64_t bindingShaderHash(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].hash; }
+// Build 5, item 4: the aggregate over the five slots the draw cache follows is the SUM of their fake generations, so every direct bump of one (the tests bump `.gen`
+// by hand) moves it, as the real aggregate moves with the real generations. The real bump sites are tested in scrim_metadata_test, which links binding_shadow.cpp.
+// skin_engine_test includes this file too.
+uint32_t bindingEvKeyGeneration() {
+    using lifecycle_fake::g_slots;
+    return g_slots[static_cast<unsigned>(BindSlot::Vs)].gen + g_slots[static_cast<unsigned>(BindSlot::Ps)].gen + g_slots[static_cast<unsigned>(BindSlot::Rtv0)].gen +
+           g_slots[static_cast<unsigned>(BindSlot::Dsv0)].gen + g_slots[static_cast<unsigned>(BindSlot::Blend)].gen;
+}
 void bindingSetShader(BindSlot s, void* p, uint64_t hash) {
     auto& x = lifecycle_fake::g_slots[static_cast<unsigned>(s)];
     x.ptr = p; x.hash = hash; ++x.gen;

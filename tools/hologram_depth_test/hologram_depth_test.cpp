@@ -76,6 +76,7 @@ uint64_t g_shadowVsHash = 0;
 void* bindingGet(BindSlot s) { if (!g_shadowVsLive) std::abort(); return s == BindSlot::Vs ? static_cast<void*>(&g_shadowVsHash) : nullptr; }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
 uint32_t bindingEyeKeyGeneration() { std::abort(); }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
+uint32_t bindingEyeKeyPtrGeneration() { std::abort(); }   // build 5, item 6: the shadow memo's key, read only in the real miss (after the key above)
 uint64_t bindingShaderHash(BindSlot s) { if (!g_shadowVsLive || s != BindSlot::Vs) std::abort(); return g_shadowVsHash; }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }

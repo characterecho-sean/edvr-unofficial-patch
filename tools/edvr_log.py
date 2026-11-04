@@ -17385,9 +17385,10 @@ def _perf_window_of(line):
 #   marker fix (F87c) Unmap copy: U Unmaps, requested R bytes, copied C bytes in N ranges (J windows joined), whole stream W bytes, faults F, M ms; over S s        build 3
 PERF_MASK_RE = re.compile(r"draw mask: \d+-frame window ending (?P<end>\d+); (?P<draws>\d+) draws through the full path; calls skipped by the vertex shader's may-want byte: (?P<rest>.*)\.$")
 PERF_QUERY_RE = re.compile(r"gpu timing queries: \d+-frame window ending (?P<end>\d+); (?P<per>[\d.]+) EDVR timing-query Ends a frame over \d+ frames \((?P<all>\d+) in all\); by owner a frame: (?P<rest>.*)\.$")
-# TEMPORARY (build 4, item 7; src/d3d11/bind_set_line.h): mapMemo misses and bindingSet re-sets, beside `draw mask:` on the same window. Decides build 5 (S2, mapMemo sizing).
-PERF_BIND_RE = re.compile(r"binding re-sets: \d+-frame window ending (?P<end>\d+); mapMemo lookups (?P<lookups>\d+), misses (?P<misses>\d+); "
-                          r"bindingSet calls/same pointer/null to null: (?P<rest>.*)\.$")
+# TEMPORARY (build 5, item 6; src/d3d11/b5_counts_line.h): the #184 counts, S2's size, the front cache's and engine velocity's slow-half entries, as key=value pairs, beside
+# `draw mask:` on the same window (it replaces build 4's `binding re-sets:` line). Decides build 6.
+PERF_B5_RE = re.compile(r"build 5 counts: \d+-frame window ending (?P<end>\d+); (?P<rest>.*)\.$")
+PERF_B5_PAIR_RE = re.compile(r"(?P<key>[a-z_0-9]+)=(?P<value>\d+)")
 PERF_GATE_RE = re.compile(r"draw gate holders: (?P<n>\d+) of (?P<of>\d+) terms hold the gate open: (?P<names>.*)\.$")
 PERF_COPY_RE = re.compile(r"marker fix \(F87c\) eye (?P<eye>\d): .*?Unmap copy (?P<copies>\d+) copies, (?P<bytes>\d+) bytes, (?P<ms>[\d.]+) ms")
 PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Unmaps, requested (?P<req>\d+) bytes, copied (?P<copied>\d+) bytes in (?P<ranges>\d+) ranges "
@@ -17395,13 +17396,15 @@ PERF_MERGED_RE = re.compile(r"marker fix \(F87c\) Unmap copy: (?P<unmaps>\d+) Un
 
 
 def perf_extra_of(msg):
-    """The build-2, build-3 or build-4 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures), merged (build 3's one line) or bind (build 4's TEMPORARY re-set counters)."""
+    """The build-2, build-3 or build-5 line one log message holds, or None: (kind, dict) for kind mask, query, gate, copy (build 2's per-eye figures), merged (build 3's one line) or b5 (build 5's TEMPORARY counts: the dict has end and every key=value pair as an int)."""
     m = PERF_MASK_RE.search(msg)
     if m:
         return "mask", {"end": int(m.group("end")), "draws": int(m.group("draws")), "rest": m.group("rest")}
-    m = PERF_BIND_RE.search(msg)
+    m = PERF_B5_RE.search(msg)
     if m:
-        return "bind", {"end": int(m.group("end")), "lookups": int(m.group("lookups")), "misses": int(m.group("misses")), "rest": m.group("rest")}
+        d = {pm.group("key"): int(pm.group("value")) for pm in PERF_B5_PAIR_RE.finditer(m.group("rest"))}
+        d["end"] = int(m.group("end"))
+        return "b5", d
     m = PERF_QUERY_RE.search(msg)
     if m:
         return "query", {"end": int(m.group("end")), "per": float(m.group("per")), "all": int(m.group("all")), "rest": m.group("rest")}
@@ -17417,6 +17420,24 @@ def perf_extra_of(msg):
         d["ms"] = float(m.group("ms"))
         return "merged", d
     return None
+
+
+def perf_b5_text(b5):
+    """The build-5 counts of one window, for --perf-windows (TEMPORARY): every pair, then what the totals say. No health rule."""
+    if not b5:
+        return "build 5 counts: NO LINE (a build without the item-6 counts)"
+    keys = [k for k in b5 if k != "end"]
+    text = "build 5 counts: " + " ".join("%s=%d" % (k, b5[k]) for k in keys)
+    notes = []
+    if b5.get("blocked_returns", 0) == 0:
+        notes.append("#184 UNDETERMINED: no blocked owner return in the window, so zero stale consumes proves nothing")
+    if b5.get("eye_shadow_lookups") != b5.get("eye_misses") or b5.get("holo_shadow_lookups") != b5.get("holo_misses"):
+        notes.append("SHADOW LOOKUPS != REAL MISSES: the shadow memo did not run where it should")
+    if b5.get("front_lookups", 0) > 0 and b5.get("front_hits", 0) == 0:
+        notes.append("FRONT CACHE NEVER HIT: item 3 did not run")
+    if b5.get("eye_ptr_would_disagree", 0) or b5.get("holo_ptr_would_disagree", 0):
+        notes.append("a pointer-only key would have changed an answer (S2's exactness question)")
+    return text + ("; " + "; ".join(notes) if notes else "")
 
 
 def perf_windows(text):
@@ -17450,7 +17471,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
     the runtime windows whose span overlaps the window, weighted by the seconds they overlap. since and until: seconds of the day, bounding the window's closing stamp.
     Returns the process exit code: 1 when there is no window to report."""
     wins, rt = [], {}
-    extra = {"mask": {}, "query": {}, "bind": {}}
+    extra = {"mask": {}, "query": {}, "b5": {}}
     gates, copies, merged = [], [], []   # (stamp, parsed) for the gate holders and for the marker fix's copy figures (build 2's per-eye lines, build 3's merged line)
 
     def on_gfx(msg, t):
@@ -17532,9 +17553,7 @@ def print_perf_windows(text, gfx_path=None, rt_text=None, rt_path=None, since=No
         # build 2: what the may-want byte skipped, who issued the timing queries, what held the draw gate, the marker fix's Unmap copy
         mk, qy = extra["mask"].get(w["end"]), extra["query"].get(w["end"])
         parts.append("draw mask: %d draws through the full path, skipped %s" % (mk["draws"], mk["rest"]) if mk else "draw mask: NO LINE (a build without the may-want byte)")
-        bd = extra["bind"].get(w["end"])   # build 4, item 7 (TEMPORARY)
-        parts.append("binding re-sets: mapMemo %d lookups, %d misses; bindingSet calls/same pointer/null to null: %s" % (bd["lookups"], bd["misses"], bd["rest"]) if bd
-                     else "binding re-sets: NO LINE (a build without the item-7 counters)")
+        parts.append(perf_b5_text(extra["b5"].get(w["end"])))   # build 5, item 6 (TEMPORARY)
         parts.append("timing queries a frame: %.3f (%s)" % (qy["per"], qy["rest"]) if qy else "timing queries: NO LINE (a build without the counter)")
         held = [g for t, g in gates if t <= w["close"]]
         parts.append("gate held by %s" % ("%d of %d: %s" % (held[-1]["n"], held[-1]["of"], held[-1]["names"]) if held else "n/a (no `draw gate holders:` line before this window)"))
@@ -24337,8 +24356,9 @@ def self_test_perf_windows():
         fail("a window with none of the build-2 lines should say each is absent:\n%s" % bare)
     mask = ("draw mask: 1800-frame window ending 1800; 14000 draws through the full path; calls skipped by the vertex shader's may-want byte: "
             "ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3.")
-    bind = ("binding re-sets: 1800-frame window ending 1800; mapMemo lookups 52000, misses 310; bindingSet calls/same pointer/null to null: "
-            "rtv0 9000/4200/0, dsv0 9000/4100/12, ps_srv0 40000/9000/700, ps_srv1 40000/8000/20000, ps_srv2 40000/8000/21000, ps_srv3 40000/8000/22000.")
+    b5line = ("build 5 counts: 1800-frame window ending 1800; blocked_returns=3 blocked_ui=1 blocked_holo=2 blocked_composite=0 scopes=30800000 stale_ui=0 stale_holo=1 stale_composite=0; "
+              "eye_misses=420 eye_shadow_lookups=420 eye_ptr_would_hit=300 eye_ptr_would_disagree=0; holo_misses=210 holo_shadow_lookups=210 holo_ptr_would_hit=150 holo_ptr_would_disagree=2; "
+              "view_is_surface_calls=9000 front_lookups=61000000 front_hits=60000000; ev_slow_entries=15000.")
     qry = ("gpu timing queries: 1800-frame window ending 1800; 6.500 EDVR timing-query Ends a frame over 1800 frames (11700 in all); by owner a frame: "
            "other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000.")
     gate = "draw gate holders: 2 of 28 terms hold the gate open: ui_depth, footprint."
@@ -24346,25 +24366,34 @@ def self_test_perf_windows():
            "eye-1 first/last ring -; over 10 s")
     cp1 = cp0.replace("eye 0", "eye 1").replace("600 copies", "300 copies")
     mtext = ("[10:00:00.000] version v0.0.0 (build 00000000)\n[10:00:01.000] " + gate + "\n[10:00:01.500] " + cp0 + "\n[10:00:01.600] " + cp1 + "\n" +
-             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n[10:00:02.003] " + bind + "\n")
+             gwin("10:00:02.000", 1800, "0.500", 4) + "[10:00:02.001] " + mask + "\n[10:00:02.002] " + qry + "\n[10:00:02.003] " + b5line + "\n")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = print_perf_windows(mtext)
     mo = buf.getvalue()
     for want in ("draw mask: 14000 draws through the full path, skipped ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 3",
-                 "binding re-sets: mapMemo 52000 lookups, 310 misses; bindingSet calls/same pointer/null to null: rtv0 9000/4200/0, dsv0 9000/4100/12, ps_srv0 40000/9000/700, "
-                 "ps_srv1 40000/8000/20000, ps_srv2 40000/8000/21000, ps_srv3 40000/8000/22000",
+                 "build 5 counts: blocked_returns=3 blocked_ui=1 blocked_holo=2 blocked_composite=0 scopes=30800000 stale_ui=0 stale_holo=1 stale_composite=0 eye_misses=420 "
+                 "eye_shadow_lookups=420 eye_ptr_would_hit=300 eye_ptr_would_disagree=0 holo_misses=210 holo_shadow_lookups=210 holo_ptr_would_hit=150 holo_ptr_would_disagree=2 "
+                 "view_is_surface_calls=9000 front_lookups=61000000 front_hits=60000000 ev_slow_entries=15000; a pointer-only key would have changed an answer",
                  "timing queries a frame: 6.500 (other 0.500, screen_motion 2.000, weapon_motion 0.000, gpu_census 4.000, particle_copy 0.000, ui_depth 0.000, ui_content 0.000)",
                  "gate held by 2 of 28: ui_depth, footprint", "marker copy (F87c lines in window): eye 0 600 copies 4800000 bytes 120.500 ms, eye 1 300 copies 4800000 bytes 120.500 ms"):
         if want not in mo:
             fail("--perf-windows with the build-2 lines lacks %r:\n%s" % (want, mo))
-    if perf_extra_of("draw mask: nothing like it") is not None or perf_extra_of("binding re-sets: nothing like it") is not None:
-        fail("a line of another instrument parsed as a build-2 or build-4 line")
-    bk, bdict = perf_extra_of(bind) or (None, {})
-    if bk != "bind" or (bdict.get("end"), bdict.get("lookups"), bdict.get("misses")) != (1800, 52000, 310) or not bdict.get("rest", "").startswith("rtv0 9000/4200/0, "):
-        fail("the build-4 binding re-sets line did not parse: %r" % (perf_extra_of(bind),))
-    if "binding re-sets: NO LINE" not in bare:
-        fail("a window without the build-4 line should say it is absent:"+chr(10)+"%s" % bare)
+    if perf_extra_of("draw mask: nothing like it") is not None or perf_extra_of("build 5 counts: nothing like it") is not None:
+        fail("a line of another instrument parsed as a build-2 or build-5 line")
+    if perf_extra_of("binding re-sets: 1800-frame window ending 1800; mapMemo lookups 52000, misses 310; bindingSet calls/same pointer/null to null: rtv0 9000/4200/0.") is not None:
+        fail("build 4's retired binding re-sets line still parses")
+    bk, bdict = perf_extra_of(b5line) or (None, {})
+    if bk != "b5" or (bdict.get("end"), bdict.get("blocked_returns"), bdict.get("stale_holo"), bdict.get("eye_ptr_would_hit"), bdict.get("holo_ptr_would_disagree"),
+                      bdict.get("front_hits"), bdict.get("ev_slow_entries")) != (1800, 3, 1, 300, 2, 60000000, 15000) or len(bdict) != 21:
+        fail("the build-5 counts line did not parse: %r" % (perf_extra_of(b5line),))
+    if "build 5 counts: NO LINE" not in bare:
+        fail("a window without the build-5 line should say it is absent:"+chr(10)+"%s" % bare)
+    # No blocked owner return reads UNDETERMINED; a shadow lookup count that differs from the misses, and a front cache that never hit, are named.
+    quiet = perf_b5_text(perf_extra_of(b5line.replace("blocked_returns=3", "blocked_returns=0").replace("eye_shadow_lookups=420", "eye_shadow_lookups=419").replace("front_hits=60000000", "front_hits=0"))[1])
+    for want in ("#184 UNDETERMINED", "SHADOW LOOKUPS != REAL MISSES", "FRONT CACHE NEVER HIT"):
+        if want not in quiet:
+            fail("perf_b5_text lacks %r for a quiet, drifting window: %s" % (want, quiet))
     # Build 3: the merged copy line and the per-eye text it brings. A build-3 log prints the merged copy; an L2-style (build 2) log keeps the per-eye figures.
     mg = ("marker fix (F87c) Unmap copy: 600 Unmaps, requested 9600000 bytes, copied 7200000 bytes in 1200 ranges (900 windows joined), whole stream 0 bytes, "
           "faults 2, 150.250 ms; over 10 s")
@@ -24392,7 +24421,11 @@ def self_test_perf_windows():
     # The formatters' own text: the fragments the parser reads are held to the sources, so a formatter that drifts fails here.
     srcdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "d3d11")
     for name, frags in (("draw_mask_line.h", ("draw mask: 1800-frame window ending %u; %u draws through the full path; calls skipped by the vertex shader's may-want byte: ",)),
-                        ("bind_set_line.h", ("binding re-sets: 1800-frame window ending %u; mapMemo lookups %u, misses %u; bindingSet calls/same pointer/null to null: ",)),
+                        ("b5_counts_line.h", ("build 5 counts: 1800-frame window ending %u; ",
+                                              "blocked_returns=%llu blocked_ui=%llu blocked_holo=%llu blocked_composite=%llu scopes=%llu stale_ui=%llu stale_holo=%llu stale_composite=%llu; ",
+                                              "eye_misses=%llu eye_shadow_lookups=%llu eye_ptr_would_hit=%llu eye_ptr_would_disagree=%llu; ",
+                                              "holo_misses=%llu holo_shadow_lookups=%llu holo_ptr_would_hit=%llu holo_ptr_would_disagree=%llu; ",
+                                              "view_is_surface_calls=%llu front_lookups=%llu front_hits=%llu; ev_slow_entries=%llu.")),
                         ("gpu_query_count.h", ("gpu timing queries: 1800-frame window ending %u; %.3f EDVR timing-query Ends a frame over %u frames (%llu in all); by owner a frame: ",)),
                         ("draw_gate_holders.h", ("draw gate holders: %u of %u terms hold the gate open: ",)),
                         ("native_on_foot.cpp", ("Unmap copy %llu copies, requested %llu bytes; eye-%d first/last ring %s; over %u s",

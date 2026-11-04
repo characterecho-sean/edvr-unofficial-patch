@@ -627,6 +627,7 @@ void pins() {
     }
     const std::string math = readFile("src\\d3d11\\ui_layer_math.h");
     const std::string depth = readFile("src\\d3d11\\ui_depth.cpp");
+    const std::string depthHdr = readFile("src\\d3d11\\ui_depth.h");   // build 5, item 2: uiDepthOnEyeDraw's entry (reset, on test, memo hit) is inline here
     const std::string vsc = readFile("src\\d3d11\\vscreen.cpp");
     const std::string layer = readFile("src\\d3d11\\ui_layer.cpp");
     check(!math.empty() && !depth.empty() && !vsc.empty() && !layer.empty(), "P0: the four sources are readable from the repo root");
@@ -659,7 +660,8 @@ void pins() {
     // hologram family list does not, because the stand-in's input signature (TEXCOORD4/7/8) is not the new vertex shader's output.
     // Since 2026-10-27 the call is two functions (the memo's wrapper, which resets the outputs and tests the pass, and the classifier it
     // calls after them); the pins read them in that order, as the one body they were before.
-    const std::string onEye = functionBody(depth, "bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {") +
+    // Since build 5 the memo's wrapper is inline in ui_depth.h (the outputs reset when the last draw dirtied them, then the pass test): the pins read it first.
+    const std::string onEye = functionBody(depthHdr, "inline bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {}) {") +
                               functionBody(depth, "static bool classifyEyeDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {");
     const auto depthPlaces = [](const std::string& body) {
         return inOrder(body, {"detail::g_uiDepthDraw = detail::UiDepthDraw{};", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
@@ -667,7 +669,7 @@ void pins() {
                countOf(body, "detail::g_uiDepthDraw.composite=composite;") == 1 && countOf(body, "detail::g_uiDepthDraw=detail::UiDepthDraw{};") == 1;
     };
     check(depthPlaces(onEye),
-          "P2a: uiDepthOnEyeDraw clears the composite flag first (before its early returns) and sets it once, from the composite it classifies by");
+          "P2a: uiDepthOnEyeDraw clears the composite flag first (before its early returns, when the last draw dirtied it) and sets it once, from the composite it classifies by");
     {
         std::string late = onEye, missing = onEye, twice = onEye;
         late = edited(late, "detail::g_uiDepthDraw = detail::UiDepthDraw{};", "");
@@ -726,7 +728,8 @@ void pins() {
     const auto vsPlaces = [&countOnlyReads](const std::string& begin, const std::string& body) {
         return countOnlyReads(body) &&
                inOrder(begin, {"t_uiDepthThisDraw = false;", "t_compositeThisDraw = false;", "if (!drawGateWanted()) {"}) &&
-               has(begin, "if (uiDepthWantsDraws()) { t_uiDepthThisDraw = uiDepthOnEyeDraw(") && has(begin, "t_compositeThisDraw = uiDepthDrawSampledSurface(); }") &&
+               has(begin, "if (uiDepthWantsDraws()) { t_uiDepthThisDraw = uiDepthOnEyeDraw(") &&
+               has(begin, "t_compositeThisDraw = uiDepthDrawSampledSurface(); t_uiDepthStamp = t_compositeStamp = t_drawStamp; }") &&
                countOf(begin, "t_compositeThisDraw=uiDepthDrawSampledSurface();") == 1 &&
                has(body, "composite(t_compositeThisDraw)") && has(body, "t_compositeThisDraw = false;") &&
                inOrder(body, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "uiLayer = uiLayerNoteOther(", "if (compositeCounted) {",
