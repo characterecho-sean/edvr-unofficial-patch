@@ -5,7 +5,6 @@
 // frame boundary starts collecting; each following boundary closes a frame; after the third the answers are polled at every boundary
 // until every query and staging copy has answered or kReadTicksMax boundaries have passed, and the report is written.
 #include "blend_probe.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 #include <d3d11.h>
@@ -652,7 +651,6 @@ void finishCapture() {
     writeReport();
     releaseAll();
     detail::g_blendProbePhase.store(kIdle, std::memory_order_release);
-    blendProbeRecomputeInterest();
 }
 
 }  // namespace
@@ -674,9 +672,7 @@ void blendProbeRequest(const char* trigger) {
         return;
     }
     int expected = kIdle;
-    const bool armedNow = detail::g_blendProbePhase.compare_exchange_strong(expected, kArmed, std::memory_order_acq_rel);
-    blendProbeRecomputeInterest();
-    if (!armedNow) {
+    if (!detail::g_blendProbePhase.compare_exchange_strong(expected, kArmed, std::memory_order_acq_rel)) {
         Log::get().note("blend probe: refused (%s): the capture is %s (trigger %s)", refusalText(Refusal::kBusy), phaseName(expected),
                         trigger ? trigger : "");
         return;
@@ -701,14 +697,12 @@ void blendProbeFrameBoundary(uint32_t gameFrame) noexcept {
             g_gridWhy.clear();
             g_gridNeeded.store(true, std::memory_order_release);
             detail::g_blendProbePhase.store(kCollecting, std::memory_order_release);
-            blendProbeRecomputeInterest();
             Log::get().note("blend probe: collecting %u frames from game frame %u.", kFrames, g_startFrame);
         } else if (p == kCollecting) {
             ++g_cur;
             if (g_cur >= kFrames) {
                 g_gridNeeded.store(false, std::memory_order_release);
                 detail::g_blendProbePhase.store(kReading, std::memory_order_release);
-                blendProbeRecomputeInterest();
                 g_readTicks = 0;
                 pollQueries();
                 pollGrids();
@@ -727,7 +721,6 @@ void blendProbeFrameBoundary(uint32_t gameFrame) noexcept {
         releaseAll();
         g_gridNeeded.store(false, std::memory_order_release);
         detail::g_blendProbePhase.store(kIdle, std::memory_order_release);
-        blendProbeRecomputeInterest();
     }
 }
 
@@ -839,10 +832,4 @@ void blendProbeGridOffer(ID3D11DeviceContext* ctx, const BlendGridIn& in) noexce
     }
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h; TEMPORARY with the blend probe): the interest bit for blendProbeWantsDraws(), recomputed after each write to g_blendProbePhase.
-uint64_t blendProbeInterestBits() { return interestIf(blendProbeWantsDraws(), kInterestBlendProbe); }
-void blendProbeRecomputeInterest() { drawInterestStore(kInterestBlendProbeModule, blendProbeInterestBits()); }
 }  // namespace edvr

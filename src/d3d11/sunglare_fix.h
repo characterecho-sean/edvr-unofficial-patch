@@ -35,9 +35,6 @@ namespace detail {
 extern int  g_sunglareWorld;
 }  // namespace detail
 inline bool sunglareWorldActive() { return detail::g_sunglareWorld != 0; }
-// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
-uint64_t sunglareInterestBits();
-void sunglareRecomputeInterest();
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();

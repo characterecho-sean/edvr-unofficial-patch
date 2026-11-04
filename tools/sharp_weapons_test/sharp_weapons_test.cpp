@@ -470,8 +470,8 @@ static void build2WiringTests() {
     // The UI family check is skipped inside the branch that calls it and never reaches the probe branch after it.
     const std::string fwd = bodyFrom(vscreen, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
     check(countIn(fwd, "uiLayerFamilyOf(g_state, kind, count, instances)") == 1 && hasIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1") &&
-              beforeIn(fwd, "if (owner && interestHas(g_state, kInterestUiLayerLive) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {", "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)") &&
-              beforeIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)", "} else if (owner && interestHas(g_state, kInterestUiQualityLive) && v != DrawVerdict::kQuadSkip) {") &&
+              beforeIn(fwd, "if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {", "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)") &&
+              beforeIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)", "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {") &&
               hasIn(fwd, "compositeCounted = uiDepthScope.composite;"),
           "the family skip sits inside the live branch, on kind 1 only, before the probe branch, with the composite census untouched");
     check(hasIn(x, "vsMaySkip(mayWant, kVsMayScreenUi)") && hasIn(x, "vsMaySkip(mayWant, kVsMayScreenRecognize)") && hasIn(x, "vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion)") &&
@@ -503,7 +503,7 @@ static void build4WiringTests() {
     check(hasIn(vscreen, "if (targetSharpShape(kind, count, instances) && targetSharpWantsDraws() &&") &&
               hasIn(vscreen, "if (holoPatternShape(kind, count, instances) && holoWantsDraws() &&") &&
               hasIn(vscreen, "if (backdropCompositeShape(kind, count, instances) && backdropWantsDraws() &&") &&
-              hasIn(vscreen, "interestHas(s, kInterestScrim) && scrimWashShape(kind, count, instances)"),
+              hasIn(vscreen, "scrimWantsDraws() && scrimWashShape(kind, count, instances)"),
           "item 6: the (X, 6, 1) shapes go before the flag loads, and scrim keeps its own order (its shape is count >= 100)");
     // Item 6: the hash test goes before the guard.
     check(beforeIn(vscreen, "const uint64_t fssVs = bindingShaderHash(BindSlot::Vs);", "guardedBudget(g_panelCbBudget, [&] {") &&
@@ -514,7 +514,7 @@ static void build4WiringTests() {
     const std::string station = readFile("src/d3d11/optimized_station.h");
     check(hasIn(station, "inline bool optimizedStationSunOff() noexcept { return detail::g_sunOff.load(std::memory_order_acquire); }") &&
               hasIn(readFile("src/d3d11/optimized_station.cpp"), "if (!optimizedStationSunOff() || vs != kSunVs || ps != kSunPs) return false;") &&
-              hasIn(vscreen, "if (interestHas(s, kInterestSunOff) && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;"),
+              hasIn(vscreen, "if (optimizedStationSunOff() && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;"),
           "item 1: the sun skip's acquire load is tested before its two hash arguments are read, by the same accessor the callee uses");
     const std::string temporalH = readFile("src/d3d11/temporal_pass.h");
     check(hasIn(temporalH, "inline bool temporalPassRigidDrawMayWant(int eye) { return detail::g_temporalPassWantedFssChrome && eye >= 0 && eye <= 1; }") &&
@@ -1160,7 +1160,7 @@ static bool wiredVscreen(const std::string& t) {
     const size_t first = t.rfind("pureDrawReissue(ReissueCaller::CrispHud, self, kind, count, instances, args);", loop);
     const size_t end = t.find("uiLayerCrispToneEnd(self);", loop);
     return loop != std::string::npos && first != std::string::npos && end != std::string::npos && first < loop && loop < end &&
-           has(t, "} else if (owner && interestHas(g_state, kInterestUiQualityLive) && v != DrawVerdict::kQuadSkip) {");
+           has(t, "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {");
 }
 static bool wiredSnapshot(const std::string& t) {
     const size_t fn = t.find("static bool watches(uint64_t vs) {");

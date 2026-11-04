@@ -31,9 +31,6 @@ constexpr uint64_t kCelestialPatchVs = 0x72BDD292154158ADull;   // the colour pa
 // The draw path's own first test, one load. Live = configured on (fix.temporal_aa in the VR build), not stood down, and the
 // supercruise gate open (below).
 inline bool celestialMotionLive() { return detail::g_celestialLive; }
-// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
-uint64_t celestialMotionInterestBits();
-void celestialMotionRecomputeInterest();
 // The tees' own first test: any VS constant buffer watched. Each tee below is a pointer compare against the watched
 // table and nothing else, on a path the game takes about 1100 times a frame.
 inline bool celestialMotionAnyWatched() { return detail::g_celestialAnyWatched; }

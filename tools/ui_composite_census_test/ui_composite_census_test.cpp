@@ -726,7 +726,7 @@ void pins() {
     };
     const auto vsPlaces = [&countOnlyReads](const std::string& begin, const std::string& body) {
         return countOnlyReads(body) &&
-               has(begin, "DrawCallFlags& flags") && inOrder(begin, {"if (!drawGateWanted()) {", "if (interestHas(s, kInterestUiDepth)) { flags.uiDepth = uiDepthOnEyeDraw("}) &&
+               has(begin, "DrawCallFlags& flags") && inOrder(begin, {"if (!drawGateWanted()) {", "if (uiDepthWantsDraws()) { flags.uiDepth = uiDepthOnEyeDraw("}) &&
                has(begin, "flags.composite = uiDepthDrawSampledSurface();") &&
                countOf(begin, "flags.composite=uiDepthDrawSampledSurface();") == 1 &&
                has(body, "composite(f.composite)") &&

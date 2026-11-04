@@ -251,33 +251,27 @@ int main(int argc, char** argv) {
         // 1. Miss: Dsv0 unbound is the classifier's first exit (not a plain decline). The input draw is copied.
         rigfake::ptr[static_cast<size_t>(BindSlot::Dsv0)] = nullptr;
         g_holoDraw = HoloDraw{};
-        const UiDepthB6Counts c0 = uiDepthB6Counts();
         check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 6, 1, 0, 0, 0}), "ui depth memo: a first call is a miss and declines");
         check(g_holoDraw.kind == 'X' && g_holoDraw.count == 6 && g_holoDraw.instances == 1, "ui depth memo: the input draw is copied on a miss");
         check(defaults(), "ui depth memo: after a miss the outputs are the defaults (the classifier made no plain-decline write here)");
-        check(uiDepthB6Counts().eyeMisses == c0.eyeMisses + 1, "ui depth memo: a miss counts once");
         // 2. Hit: store the plain decline at the current key; the next call hits at once. The outputs are reset and the input draw copied, as build 4 did on every call.
         classifiermemo::store(g_eyeMemo, classifiermemo::Key{rigfake::eyeKey, g_classifierEpoch}, classifiermemo::Exit::kPlainDecline);
         g.composite = true; g.mode = Mode::kReissue;   // an output the last draw wrote ...
         g_holoDraw = HoloDraw{'D', 1, 1, 0, 0, 0};
-        const UiDepthB6Counts c1 = uiDepthB6Counts();
         const unsigned resolves1 = rigfake::resolves;
         check(!uiDepthOnEyeDraw(ctx.Get(), HoloDraw{'X', 9, 9, 0, 0, 0}), "ui depth memo: a call at the stored plain-decline key hits and declines");
         check(defaults(), "ui depth memo: a hit resets the outputs (build 4's unconditional reset)");
         check(g_holoDraw.kind == 'X' && g_holoDraw.count == 9, "ui depth memo: a hit copies the input draw (build 4's order: the reset, g_holoDraw = draw, the gate, the memo)");
-        check(uiDepthB6Counts().eyeMisses == c1.eyeMisses && rigfake::resolves == resolves1, "ui depth memo: a hit counts no miss and resolves nothing");
+        check(rigfake::resolves == resolves1, "ui depth memo: a hit resolves nothing");
         // 3. Reissue: a draw's reissue leaves outputs behind (coronaMotion, a mode); the next call, a hit, puts every default back.
         g.coronaMotion = true; g.mode = Mode::kReissueScene; g.reissueShader = &g_depthShaders[1];
         check(!uiDepthOnEyeDraw(ctx.Get()) && defaults(), "ui depth memo: after a reissue wrote coronaMotion and a mode the next hit resets them");
         check(!uiDepthOnEyeDraw(ctx.Get()) && defaults(), "ui depth memo: another hit, same values");
         // 4. S2 (maintainer-approved, 2026-11-04): a same-pointer PS SRV 0..3 re-set no longer moves the key (binding_shadow.cpp, tested in scrim_metadata_test), so the memo
         // stays valid across it; a pointer change moves the key and the next call misses.
-        const UiDepthB6Counts c2 = uiDepthB6Counts();
         check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth memo S2: a same-pointer re-set leaves the key where it was ...");
-        check(uiDepthB6Counts().eyeMisses == c2.eyeMisses, "ui depth memo S2: ... so the memo is still valid and no miss is counted");
         rigfake::eyeKey = 11;   // a pointer change (or a shader, target or depth view set) moves the key
         check(!uiDepthOnEyeDraw(ctx.Get()), "ui depth memo S2: a pointer change moves the key and the call declines");
-        check(uiDepthB6Counts().eyeMisses == c2.eyeMisses + 1, "ui depth memo S2: ... but it is a miss, run in full");
         // 5. The pass off and stood down decline before the key is read (the fakes abort once off).
         rigfake::on = false;
         detail::g_uiDepthOn = false;
@@ -1489,29 +1483,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
         }
     }
-
-    // Build 6, item 1 (draw_interest.h): the module's interest bits against its expressions. The rig cannot run uiDepthConfigure (it needs a Config), so the writers it can
-    // drive are shutdown (below) and the recompute itself, over every combination of the three flags; the stood-down writer (uiDepthReissueBegin's budget) and the two
-    // configure writers are covered by gate_test's source-text check. The bits outside this module's mask must never be touched.
-    {
-        std::atomic<uint64_t> mask{kInterestAllBits};
-        g_drawInterestPtr = &mask;
-        bool allOk = true;
-        for (unsigned f = 0; f < 8; ++f) {
-            detail::g_uiDepthOn = (f & 1) != 0; detail::g_uiDepthStoodDown = (f & 2) != 0; detail::g_holoDepthOn = (f & 4) != 0;
-            uiDepthRecomputeInterest();
-            allOk = allOk && (((mask >> kInterestUiDepth) & 1u) != 0) == uiDepthWantsDraws() && (((mask >> kInterestHoloDepth) & 1u) != 0) == uiDepthHologramWantsDraws() &&
-                    (mask & ~kInterestUiDepthModule) == (kInterestAllBits & ~kInterestUiDepthModule) && uiDepthInterestBits() == (mask & kInterestUiDepthModule);
-        }
-        check(allOk, "interest mask: the ui depth and hologram depth bits equal uiDepthWantsDraws() and uiDepthHologramWantsDraws() for all 8 flag combinations, other modules' bits untouched");
-        detail::g_uiDepthOn = true; detail::g_uiDepthStoodDown = false; detail::g_holoDepthOn = true;
-        uiDepthRecomputeInterest();
-        check((mask & kInterestUiDepthModule) == kInterestUiDepthModule, "interest mask: both bits are set with the pass on, not stood down, hologram depth on");
-        ctx->ClearState(); uiDepthShutdown();
-        check((mask & kInterestUiDepthModule) == 0 && (mask & ~kInterestUiDepthModule) == (kInterestAllBits & ~kInterestUiDepthModule),
-              "interest mask: uiDepthShutdown (a writer of g_uiDepthOn) clears both bits and touches no other module's");
-        g_drawInterestPtr = nullptr;
-    }
+    ctx->ClearState(); uiDepthShutdown();
     check(gpuTimingShutdown(ctx.Get()),"explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; production UI coverage isolates smoke, preserves depth/alpha/occlusion/state, and handles menus and frame/eye/format changes.\n",checks);
 }

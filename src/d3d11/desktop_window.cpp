@@ -6,7 +6,6 @@
 // (desktopWindowNoteSkippedDraw) is written by the draw hooks, which are the same thread.
 #include "temporal_shader_bytecode.h"
 #include "desktop_window.h"
-#include "draw_interest.h"   // build 6: the interest mask
 #include "desktop_window_cursor.h"
 
 #include <windows.h>
@@ -750,7 +749,6 @@ void restoreWindow(char* out, size_t size) {
 // The activation ends. Said once, with its reason and what became of the window.
 void leave(const char* reason) {
     g_desktopWindowBack.store(nullptr, std::memory_order_relaxed);
-    desktopWindowRecomputeInterest();
     desktopWindowCursorSetActive(false);   // the cursor hooks pass everything through again
     if (!S.active) return;
     S.active = false;
@@ -1067,7 +1065,6 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     S.clientW = clientW;
     S.clientH = clientH;
     g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);   // identity for the draw skip; the reference below is released before the hook returns
-    desktopWindowRecomputeInterest();
     ++S.presentsSinceReshape;
     S.aspect = aspect;
     {   // where SetCursorPos at the client's centre would be, for the cursor line
@@ -1188,7 +1185,6 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
         leave(!need ? (flatProfile ? "the flat profile is active" : "the setting is now game") : "no eye image for 500 ms (3D is off, or no frames arrive)");
     } else {
         g_desktopWindowBack.store(nullptr, std::memory_order_relaxed);
-        desktopWindowRecomputeInterest();
     }
     if (g_holding.load(std::memory_order_relaxed) && (!need || !fresh)) releaseHeld();
     return wasActive || need != 0;
@@ -1210,9 +1206,3 @@ extern "C" HRESULT WINAPI edvrAcquireDesktopWindow(const EdvrNativeDesktopWindow
     table->close = edvr::closeProvider;
     return S_OK;
 }
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for g_desktopWindowBack != null, recomputed after each store to it.
-uint64_t desktopWindowInterestBits() { return interestIf(desktopWindowBackIdentity() != nullptr, kInterestDesktopWindowBack); }
-void desktopWindowRecomputeInterest() { drawInterestStore(kInterestDesktopWindow, desktopWindowInterestBits()); }
-}  // namespace edvr

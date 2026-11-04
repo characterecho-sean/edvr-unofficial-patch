@@ -38,17 +38,17 @@ const char* const kClear = "s->curveThisDraw=false;s->introCurveThisDraw=false;"
 const char* const kSet = "if(kind=='X'&&count==6&&introCurveWants()){s->introCurveThisDraw=introCurveOnComposite(self,kind,count,instances);}";
 const char* const kEnd = "if(g_state->introCurveThisDraw){g_state->introCurveThisDraw=false;introCurveEndDraw();}";
 const char* const kGuard =
-    "if(interestHas(s,kInterestPanelCurve)&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash)){s->curveThisDraw=true;}";
+    "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash)){s->curveThisDraw=true;}";
 const char* const kCandidate = "if((v==DrawVerdict::kIntroPanel||g_state->introCurveThisDraw)&&owner&&panelCurveSurfaceWanted()){";
 const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
     "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
 const char* const kStripCall =
-    "if(stripToward!=0&&!interestHas(g_state,kInterestUiLayerIssueBlocked)){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);";
+    "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
 const char* const kLambda =
-    "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&interestHas(g_state,kInterestUiLayerIssueBlocked)){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
+    "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
     "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}constboolissued=draw(altered);objectProbeCandidateDrawIssued(self,issued);"
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
@@ -193,7 +193,7 @@ const char* const kRawObserved = R"x(    const bool originalIssued=observedDraw(
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
 )x";
 const char* const kRawStripStart = "    float stripGain = 0.0f;\n";
-const char* const kRawGuard = R"x(    if (interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count) &&
+const char* const kRawGuard = R"x(    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
         !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
 )x";
 const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
@@ -240,9 +240,9 @@ void testIntroCurveControls(const std::string& text) {
         {"the recognition is moved a block away from the movie's claim", {{kRawSet, ""}, {kRawCensusLine, std::string(kRawSet) + "\n" + kRawCensusLine}}, "after-movie"},
         // ---- guard
         {"the on-foot recognition claims the intro composite again",
-         {{kRawGuard, "    if (interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count)) {\n"}}, "guard"},
+         {{kRawGuard, "    if (panelCurveWants() && srv0IsPanelSized(s, kind, count)) {\n"}}, "guard"},
         {"the guard is asked before panelCurveWants()",
-         {{kRawGuard, "    if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) && interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count)) {\n"}},
+         {{kRawGuard, "    if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) && panelCurveWants() && srv0IsPanelSized(s, kind, count)) {\n"}},
          "guard"},
         {"the guard names the pixel shader's hash",
          {{"bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash", "bindingShaderHash(BindSlot::Ps) == kIntroCompositeVsHash"}}, "guard"},
@@ -280,8 +280,8 @@ void testIntroCurveControls(const std::string& text) {
         {"the u direction starts true", {{"bool stripReverseU = false;", "bool stripReverseU = true;"}}, "strip-site"},
         // ---- unarmed-text
         {"observedDraw's early return comes before its refusal",
-         {{"        if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) { objectProbeCandidateDrawIssued(self,false); return false; }\n        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n",
-           "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n        if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) { objectProbeCandidateDrawIssued(self,false); return false; }\n"}},
+         {{"        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n",
+           "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n"}},
          "unarmed-text"},
         {"the game's draw is issued a second time", {{"        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n", ""}}, "unarmed-text"},
         {"originalIssued is no longer observedDraw's answer",
@@ -326,8 +326,8 @@ void testIntroCurveControls(const std::string& text) {
          {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
            "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, draw);"}},
          "strip-args"},
-        {"the strip is asked past the refusal", {{"if (stripToward != 0 && !interestHas(g_state, kInterestUiLayerIssueBlocked)) {", "if (stripToward != 0) {"}}, "strip-args"},
-        {"the strip is asked with no direction set", {{"if (stripToward != 0 && !interestHas(g_state, kInterestUiLayerIssueBlocked)) {", "if (!interestHas(g_state, kInterestUiLayerIssueBlocked)) {"}}, "strip-args"},
+        {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},
+        {"the strip is asked with no direction set", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (!uiLayerIssueBlocked()) {"}}, "strip-args"},
         // ---- fallback
         {"the strip counts as issued whatever it returned",
          {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",

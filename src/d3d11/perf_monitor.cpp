@@ -2,7 +2,6 @@
 #include "config_refresh_line.h"
 #include "draw_reissue_line.h"
 #include "draw_mask_line.h"
-#include "build6_counts_line.h"   // TEMPORARY (build 6, item 4)
 #include "gpu_query_count.h"
 #include "cross_profile_cost.h"
 #include "engine_motion_cpu.h"
@@ -1275,13 +1274,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
         char maskLine[320];
         formatDrawMaskWindow(maskLine, sizeof(maskLine), s.frameNo, maskWindow);
         Log::get().note("%s", maskLine);
-        // TEMPORARY (build 6, item 4, build6_counts_line.h): the memo misses and the interest mask's drift check, beside it, written every window.
-        static B6Counts lastB6;
-        const B6Counts b6Now = vScreenB6Counts();
-        char b6Line[320];
-        formatB6Window(b6Line, sizeof(b6Line), s.frameNo, b6Minus(b6Now, lastB6));
-        lastB6 = b6Now;
-        Log::get().note("%s", b6Line);
         const GpuQueryCounts queriesNow = gpuQueryCountsNow();
         GpuQueryCounts queriesWindow;
         for (size_t o = 0; o < kGpuQueryOwners; ++o) queriesWindow.ends[o] = queriesNow.ends[o] - lastQueries.ends[o];

@@ -3,7 +3,6 @@
 // The rules and their geometry are in optimized_station_core.h. The seal, the release and the status lines are here. The engine hooks it uses:
 // store_hook.cpp (the store's record judgement, path A), kinematic_eval_hook.cpp (the producer-B and rig vetoes), vscreen.cpp (the sun pair).
 #include "optimized_station.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -1808,7 +1807,6 @@ void applySetting(bool on, uint32_t frame) noexcept {
         if (!on && g_sun.off) {   // setting off: the sun comes back on (built v14.13)
             g_sun.off = false;
             detail::g_sunOff.store(false, std::memory_order_release);
-            optimizedStationRecomputeInterest();
             Log::get().note("optimized station: sun light inside the hangar back on (setting off; Status docked=%s)",
                             g_dockedNow.load(std::memory_order_acquire) ? "yes" : "no");
         }
@@ -2803,7 +2801,6 @@ void optimizedStationFrameBody(uint32_t frame) {
         const char* why = "";
         if (sealed::sunStep(su, &g_sun, &why)) {
             detail::g_sunOff.store(g_sun.off, std::memory_order_release);
-            optimizedStationRecomputeInterest();
             // Built v14.23: the sun line carries the own pad's r0 and r1 and the Status docked flag.
             const char* dockedText = g_dockedNow.load(std::memory_order_acquire) ? "yes" : "no";
             char r0Text[16];
@@ -2980,10 +2977,4 @@ void optimizedStationFrameBody(uint32_t frame) {
     (void)frame;
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for g_sunOff, recomputed after each store to it.
-uint64_t optimizedStationInterestBits() { return interestIf(optimizedStationSunOff(), kInterestSunOff); }
-void optimizedStationRecomputeInterest() { drawInterestStore(kInterestOptimizedStation, optimizedStationInterestBits()); }
 }  // namespace edvr

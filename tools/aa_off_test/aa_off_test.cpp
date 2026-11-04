@@ -11,8 +11,6 @@
 //          of its key equal the stored key and the stored exit is a plain decline; a moved generation or epoch is a miss.
 //   Cut F: vs_may_want.h (build 2, #152): the byte stored beside the bound vertex shader's hash. A clear bit means the subscriber's own
 //          pure predicate rejects every pixel shader for that vertex shader; hash 0 and the shipped shaders are "may want".
-//   Cut G: draw_interest.h (build 6, item 1): the write-through interest mask. A write does nothing while the pointer is null; a set and a clear touch one bit; a module's store
-//          replaces only its own bits; the bit layout is complete and distinct. The modules' recomputes are tested in their own rigs and by gate_test's source-text check.
 //   Cut H: draw_call_flags.h (build 6, item 3, #184): a draw's own flags and the pure "which second issues for these flags and this verdict" function vscreen.cpp's
 //          forwardWithVerdict calls: a skipped or blocked draw issues nothing, a layered draw issues neither coverage nor hologram, the planet coverage needs only the owner,
 //          and the pending clear is for the draw that set a pending flag alone.
@@ -22,7 +20,6 @@
 #include "../../src/d3d11/classifier_memo.h"
 #include "../../src/d3d11/draw_call_flags.h"
 #include "../../src/d3d11/draw_fast_path.h"
-#include "../../src/d3d11/draw_interest.h"
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
 #include "../../src/d3d11/map_wait.h"
@@ -429,40 +426,6 @@ void testVsMayWant() {
           "may want: a bit set never skips, a bit clear always does");
 }
 
-// Cut G: the interest mask's writer (draw_interest.h).
-void testDrawInterest() {
-    using namespace edvr;
-    check(g_drawInterestPtr == nullptr, "interest: the pointer is null before install, so a write does nothing");
-    drawInterestSet(kInterestUiDepth, true);   // must not crash, must not write anywhere
-    drawInterestStore(kInterestUiDepthModule, kInterestUiDepthModule);
-    std::atomic<uint64_t> mask{0};
-    g_drawInterestPtr = &mask;
-    drawInterestSet(kInterestUiDepth, true);
-    check(mask == interestMask(kInterestUiDepth), "interest: a set raises exactly its bit");
-    drawInterestSet(kInterestHoloDepth, true);
-    drawInterestSet(kInterestUiDepth, false);
-    check(mask == interestMask(kInterestHoloDepth), "interest: a clear drops exactly its bit");
-    drawInterestSet(kInterestUiDepth, false);
-    check(mask == interestMask(kInterestHoloDepth), "interest: clearing a clear bit changes nothing");
-    mask = kInterestAllBits;
-    drawInterestStore(kInterestUiDepthModule, interestIf(true, kInterestUiDepth));
-    check(mask == (kInterestAllBits & ~interestMask(kInterestHoloDepth)), "interest: a module's store replaces only that module's bits (the hologram bit cleared, the rest kept)");
-    drawInterestStore(kInterestUiDepthModule, interestMask(kInterestSunOff));   // a bit outside the module's mask is not written
-    check((mask & interestMask(kInterestUiDepth)) == 0 && (mask & interestMask(kInterestHoloDepth)) == 0 && (mask & interestMask(kInterestSunOff)) != 0,
-          "interest: a store ignores bits outside its module's mask");
-    g_drawInterestPtr = nullptr;
-    const uint64_t kept = mask;
-    drawInterestSet(kInterestSunOff, false);
-    check(mask == kept, "interest: with the pointer cleared again (State deleted) a write does nothing");
-    // The layout: thirty bits, distinct, every one in some module's mask, and the names cover them.
-    check(kInterestBitCount == 30, "interest: the mirrored bits are the thirty sites the design lists");
-    check(interestPopcount(kInterestAllBits) == kInterestBitCount, "interest: the bit enum is dense (popcount of the all-bits mask equals the count)");
-    check(interestPopcount(0xF0F0u) == 8 && interestLowestBit(0x40u) == 6 && interestLowestBit(0) == 64, "interest: popcount and lowest-bit helpers");
-    bool named = true;
-    for (unsigned b = 0; b < kInterestBitCount; ++b) named = named && interestBitName(b)[0] != '?' && interestBitName(b)[0] != 0;
-    check(named && interestBitName(kInterestBitCount)[0] == '?', "interest: every bit has a name for the drift line");
-}
-
 // Cut H: a draw's own flags (draw_call_flags.h).
 void testDrawCallFlags() {
     using namespace edvr;
@@ -524,7 +487,6 @@ int main(int argc, char** argv) {
     testMemoHit();
     testMemoRun();
     testVsMayWant();
-    testDrawInterest();
     testDrawCallFlags();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

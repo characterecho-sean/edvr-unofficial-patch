@@ -1,5 +1,4 @@
 #include "scrim_fix.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -192,7 +191,6 @@ void scrimConfigure(Config& cfg) {
                         "the default, screen.", m.c_str());
     }
     detail::g_scrimOn = dm.washOff;
-    scrimRecomputeInterest();
 
     if (was != detail::g_scrimOn) {
         resetMetadataCaches();
@@ -275,10 +273,4 @@ uint64_t scrimMetadataResolveCallsForTest() { return g_metadataResolveCalls; }
 void scrimMetadataResetResolveCallsForTest() { g_metadataResolveCalls = 0; }
 #endif
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for scrimWantsDraws(), recomputed after each write to g_scrimOn.
-uint64_t scrimInterestBits() { return interestIf(scrimWantsDraws(), kInterestScrim); }
-void scrimRecomputeInterest() { drawInterestStore(kInterestScrimModule, scrimInterestBits()); }
 }  // namespace edvr

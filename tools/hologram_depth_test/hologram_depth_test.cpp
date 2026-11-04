@@ -1858,29 +1858,7 @@ int main() {
     check(g_holoNearLightSeen[0] != 0 && g_holoNearLightSeen[1] != 0,
           "shutdown, setup: both eyes still hold a seen set from the near-light cases");
     g_holoNearLightInputs[0].ran = 3; g_holoNearLightInputs[1].nullT3 = 2;
-
-    // Build 6, item 1 (draw_interest.h): the module's interest bits against its expressions. The rig cannot run uiDepthConfigure (it needs a Config), so the writers it can
-    // drive are shutdown (below) and the recompute itself, over every combination of the three flags; the stood-down writer (uiDepthReissueBegin's budget) and the two
-    // configure writers are covered by gate_test's source-text check. The bits outside this module's mask must never be touched.
-    {
-        std::atomic<uint64_t> mask{kInterestAllBits};
-        g_drawInterestPtr = &mask;
-        bool allOk = true;
-        for (unsigned f = 0; f < 8; ++f) {
-            detail::g_uiDepthOn = (f & 1) != 0; detail::g_uiDepthStoodDown = (f & 2) != 0; detail::g_holoDepthOn = (f & 4) != 0;
-            uiDepthRecomputeInterest();
-            allOk = allOk && (((mask >> kInterestUiDepth) & 1u) != 0) == uiDepthWantsDraws() && (((mask >> kInterestHoloDepth) & 1u) != 0) == uiDepthHologramWantsDraws() &&
-                    (mask & ~kInterestUiDepthModule) == (kInterestAllBits & ~kInterestUiDepthModule) && uiDepthInterestBits() == (mask & kInterestUiDepthModule);
-        }
-        check(allOk, "interest mask: the ui depth and hologram depth bits equal uiDepthWantsDraws() and uiDepthHologramWantsDraws() for all 8 flag combinations, other modules' bits untouched");
-        detail::g_uiDepthOn = true; detail::g_uiDepthStoodDown = false; detail::g_holoDepthOn = true;
-        uiDepthRecomputeInterest();
-        check((mask & kInterestUiDepthModule) == kInterestUiDepthModule, "interest mask: both bits are set with the pass on, not stood down, hologram depth on");
-        ctx->ClearState(); uiDepthShutdown();
-        check((mask & kInterestUiDepthModule) == 0 && (mask & ~kInterestUiDepthModule) == (kInterestAllBits & ~kInterestUiDepthModule),
-              "interest mask: uiDepthShutdown (a writer of g_uiDepthOn) clears both bits and touches no other module's");
-        g_drawInterestPtr = nullptr;
-    }
+    ctx->ClearState(); uiDepthShutdown();
     check(g_holoNearLightSeen[0] == 0 && g_holoNearLightSeen[1] == 0,
           "shutdown: the near-light seen sets of both eyes are re-armed");
     check(g_holoNearLightInputs[0].ran == 0 && g_holoNearLightInputs[1].nullT3 == 0,

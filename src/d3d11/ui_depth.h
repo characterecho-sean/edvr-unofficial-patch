@@ -18,7 +18,6 @@
 
 #include <cstdint>
 #include "holo_motion.h"
-#include "build6_counts_line.h"   // UiDepthB6Counts (TEMPORARY, build 6)
 
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -114,9 +113,6 @@ inline bool uiDepthHologramWantsDraws() {
 // What uiDepthHologramOnEyeDraw leaves behind on a plain decline: its first line, g_holoEye = -1 (its other declines store nothing more).
 // Called instead of it for a draw the may-want byte (vs_may_want.h, kVsMayHoloDepth) says it would decline.
 inline void uiDepthHologramSkippedDraw() { detail::g_holoEye = -1; }
-// Build 6, item 1 (draw_interest.h): the module's interest bits (the two draw-path bools above) as their expressions give them now, and the write of them.
-uint64_t uiDepthInterestBits();
-void uiDepthRecomputeInterest();
 
 // Every draw that did NOT land in an eye texture: learn the target as a UI
 // surface when the bound vertex shader is one of the GUI renderer's
@@ -169,8 +165,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 // below apply after the game's own draw.
 bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx);
 
-// TEMPORARY (build 6, item 4, build6_counts_line.h): the eye and hologram memo misses since the start, for the perf window line.
-UiDepthB6Counts uiDepthB6Counts();
 // Pass (a): the game's own draw again, RTV0 rebound to a per-eye scratch
 // target whose blend mirrors the game's own RT0 blend (so RGB accumulates
 // what the game's blend equation actually adds), VS/PS/inputs unchanged.

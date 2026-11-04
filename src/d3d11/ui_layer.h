@@ -365,10 +365,6 @@ inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 // hand). Every case is counted and each shader pair named once.
 inline bool uiLayerWatching() { return detail::g_uiLayerWatching; }
 inline bool uiLayerSeedDiagnostics() { return detail::g_uiSeedDiagnostics; }
-// Build 6, item 1 (draw_interest.h): the module's interest bits (crisp-on, fence, seed diagnostics, live, quality-live, watching, crisp-pending) as their expressions give them now,
-// and the write of them.
-uint64_t uiLayerInterestBits();
-void uiLayerRecomputeInterest();
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
                       bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind);
 // Completes CPU-only observation after the forwarding/substitution decision.

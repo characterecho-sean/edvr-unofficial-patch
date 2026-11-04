@@ -1673,14 +1673,9 @@ int journalWorkerChecks() {
 }  // namespace
 
 
-// Build 6 (VR draw path CPU; docs\vr-draw-path-cpu-2026-11-01.md, "Build 6"): source-text checks on the interest mask, the draw's own flags and the removed build-5 forms.
-//
-// The interest mask (draw_interest.h) mirrors module-scope flags, and a bit is exact only if the module recomputes it after EVERY write to one of its flags, before its next
-// D3D call or return. No rig can run most of those writers (seven mirrored modules have no rig at all), so this reads each module and, for each writer of a mirrored flag, the
-// alias and reference-parameter writers included (depth_probe.cpp's g_wanted, native_on_foot.cpp's g_b3Counting, particle_fix.cpp's g_hideWitchspaceStars and applyDustKey's
-// `hidden`), requires the module's recompute call after it in the same function with no D3D call (`->`) in between. The count of writers is pinned too: a writer added without
-// a recompute changes the count and fails here.
-int interestSourceChecks(const std::string& root) {
+// Build 6 (VR draw path CPU; docs\vr-draw-path-cpu-2026-11-01.md, "Build 6" and "Closing build"): source-text checks on the draw's own flags, the removed build-5 forms and the
+// interest mask's absence (the closing build took S1 out: no source file names it).
+int drawPathSourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const std::string& what) {
         ++g_checks;
@@ -1698,90 +1693,31 @@ int interestSourceChecks(const std::string& root) {
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++n;
         return n;
     };
-    struct Writer { const char* file; const char* pattern; int count; const char* call; };
-    static const Writer kWriters[] = {
-        {"optimized_station.cpp", "detail::g_sunOff.store(", 2, "optimizedStationRecomputeInterest();"},
-        {"desktop_window.cpp", "g_desktopWindowBack.store(", 3, "desktopWindowRecomputeInterest();"},
-        {"native_on_foot.cpp", "g_nativeOnFootLabelPendingValid.store(", 4, "nativeOnFootRecomputeInterest();"},
-        {"native_on_foot.cpp", "g_nativeOnFootCoatPackLive.store(", 1, "nativeOnFootRecomputeInterest();"},
-        {"native_on_foot.cpp", "g_nativeOnFootSpawnLive.store(", 2, "nativeOnFootRecomputeInterest();"},
-        {"native_on_foot.cpp", "g_b3Counting.store(", 4, "nativeOnFootRecomputeInterest();"},
-        {"flat_temporal.cpp", "detail::g_flatTemporalCapturing.store(", 5, "flatTemporalRecomputeInterest();"},
-        {"particle_fix.cpp", "g_hideWitchspaceStars = true;", 1, "particleRecomputeInterest();"},
-        {"particle_fix.cpp", "g_hideWitchspaceStars = false;", 1, "particleRecomputeInterest();"},
-        {"particle_fix.cpp", "hidden = ", 2, "particleRecomputeInterest();"},
-        {"particle_fix.cpp", "detail::g_particleMode = Mode::", 2, "particleRecomputeInterest();"},
-        {"quad_probe.cpp", "detail::g_quadProbeTaken = ", 4, "quadProbeRecomputeInterest();"},
-        {"quad_probe.cpp", "detail::g_quadProbeArmed = ", 1, "quadProbeRecomputeInterest();"},
-        {"depth_probe.cpp", "g_wanted = (", 1, "depthProbeRecomputeInterest();"},
-        {"depth_probe.cpp", "g_wanted = true;", 1, "depthProbeRecomputeInterest();"},
-        {"depth_probe.cpp", "g_wanted = wantedBefore;", 1, "depthProbeRecomputeInterest();"},
-        {"sunglare_fix.cpp", "detail::g_sunglareWorld = ", 1, "sunglareRecomputeInterest();"},
-        {"draw_census.cpp", "detail::g_drawCensusPending = ", 6, "drawCensusRecomputeInterest();"},
-        {"draw_census.cpp", "detail::g_drawCensusFramesLeft = ", 1, "drawCensusRecomputeInterest();"},
-        {"draw_census.cpp", "--detail::g_drawCensusFramesLeft", 1, "drawCensusRecomputeInterest();"},
-        {"object_probe.cpp", "detail::g_objectProbeLedgerOn = ", 4, "objectProbeRecomputeInterest();"},
-        {"object_probe.cpp", "detail::g_objectProbeOn = ", 2, "objectProbeRecomputeInterest();"},
-        {"remlok_fix.cpp", "detail::g_remlokMode = Mode::", 4, "remlokRecomputeInterest();"},
-        {"scrim_fix.cpp", "detail::g_scrimOn = ", 1, "scrimRecomputeInterest();"},
-        {"fss_panel.cpp", "detail::g_fssPanelEnabled = ", 1, "fssPanelRecomputeInterest();"},
-        {"panel_curve.cpp", "detail::g_panelCurveStoodDown = true;", 3, "panelCurveRecomputeInterest();"},
-        {"panel_curve.cpp", "detail::g_panelCurveCurvature = ", 1, "panelCurveRecomputeInterest();"},
-        {"panel_curve.cpp", "detail::g_panelCurveSegments = ", 1, "panelCurveRecomputeInterest();"},
-        {"blend_probe.cpp", "detail::g_blendProbePhase.store(", 4, "blendProbeRecomputeInterest();"},
-        {"blend_probe.cpp", "detail::g_blendProbePhase.compare_exchange_strong(", 1, "blendProbeRecomputeInterest();"},
-        {"celestial_motion.cpp", "detail::g_celestialLive = ", 1, "celestialMotionRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiLayerIssueBlocked = ", 3, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiLayerWatching = ", 4, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiLayerCrispPending = ", 7, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiSeedDiagnostics = ", 2, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiQualityLive = ", 1, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiLayerLive = ", 1, "uiLayerRecomputeInterest();"},
-        {"ui_layer.cpp", "detail::g_uiLayerCrispOn = ", 1, "uiLayerRecomputeInterest();"},
-        {"ui_depth.cpp", "detail::g_uiDepthOn = ", 2, "uiDepthRecomputeInterest();"},
-        {"ui_depth.cpp", "detail::g_uiDepthStoodDown = true;", 1, "uiDepthRecomputeInterest();"},
-        {"ui_depth.cpp", "detail::g_holoDepthOn = ", 1, "uiDepthRecomputeInterest();"},
-    };
-    for (const Writer& w : kWriters) {
-        const std::string text = load(w.file);
-        const std::string where = std::string(w.file) + " `" + w.pattern + "`";
-        if (text.empty()) { verify(false, "could not read src\\d3d11\\" + std::string(w.file)); continue; }
-        verify(countOf(text, w.pattern) == w.count, where + ": the writers of the flag are the " + std::to_string(w.count) + " this check knows (a new writer needs its recompute and a row here)");
-        const std::string call(w.call);
-        for (size_t at = text.find(w.pattern); at != std::string::npos; at = text.find(w.pattern, at + 1)) {
-            const size_t rec = text.find(call, at);
-            bool ok = rec != std::string::npos;
-            if (ok) {
-                const std::string span = text.substr(at, rec - at);
-                ok = span.find("\n}\n") == std::string::npos && span.find("->") == std::string::npos;
-            }
-            verify(ok, where + ": a write is followed by " + call + " in the same function with no D3D call between");
+    // The interest mask is gone: no file under src names it, its header, its recompute functions or its pointer. Raw text, comments included.
+    {
+        static const wchar_t* const kDirs[] = {L"common", L"d3d11", L"installer", L"openvr\\compat", L"openxr"};
+        static const char* const kBanned[] = {"interestHas", "draw_interest.h", "RecomputeInterest", "g_drawInterestPtr"};
+        std::string hits;
+        for (const wchar_t* d : kDirs) {
+            const std::wstring dir = std::wstring(root.begin(), root.end()) + L"\\src\\" + d + L"\\";
+            WIN32_FIND_DATAW fd{};
+            HANDLE find = FindFirstFileW((dir + L"*").c_str(), &fd);
+            if (find == INVALID_HANDLE_VALUE) continue;
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const std::string text = readWholeFile(dir + fd.cFileName);
+                for (const char* b : kBanned)
+                    if (text.find(b) != std::string::npos) { hits += " "; for (wchar_t c : dir) hits += static_cast<char>(c); for (const wchar_t* c = fd.cFileName; *c; ++c) hits += static_cast<char>(*c); hits += std::string(":") + b; }
+            } while (FindNextFileW(find, &fd));
+            FindClose(find);
         }
+        verify(hits.empty(), "no interestHas, draw_interest.h, RecomputeInterest or g_drawInterestPtr anywhere in src (closing build):" + hits);
     }
 
-    // vscreen.cpp: the pointer follows the State, the mask is never held in a local, and the draw's own flags replaced the thread_locals.
+    // vscreen.cpp: the draw's own flags replaced the thread_locals.
     const std::string vs = load("vscreen.cpp");
     verify(!vs.empty(), "could not read src\\d3d11\\vscreen.cpp");
     {
-        verify(countOf(vs, "g_drawInterestPtr = &g_state->interest;") == 1, "vscreen.cpp points g_drawInterestPtr at State::interest once, after `new State`");
-        const size_t made = vs.find("g_state = new State();");
-        const size_t pointed = vs.find("g_drawInterestPtr = &g_state->interest;");
-        verify(made != std::string::npos && pointed != std::string::npos && pointed > made && pointed - made < 120, "the pointer is set right after `new State`");
-        int deletes = 0;
-        bool allCleared = true;
-        for (size_t at = vs.find("delete g_state;"); at != std::string::npos; at = vs.find("delete g_state;", at + 1)) {
-            ++deletes;
-            const size_t from = at > 160 ? at - 160 : 0;
-            allCleared = allCleared && vs.substr(from, at - from).find("g_drawInterestPtr = nullptr;") != std::string::npos;
-        }
-        verify(deletes == 2 && allCleared, "g_drawInterestPtr is cleared before BOTH deletes of g_state");
-        verify(vs.find("std::atomic<uint64_t> interest{0};") != std::string::npos, "DrawHot carries the 64-bit mask");
-        const std::string noSpace = withoutSpaces(vs);
-        // A copy of the mask into anything (`= g_state->interest;`, `= s->interest;`) is the held local the fence forbids; the only reads are the bit tests.
-        const bool heldLocal = noSpace.find("=g_state->interest;") != std::string::npos || noSpace.find("=s->interest;") != std::string::npos ||
-                               noSpace.find("{g_state->interest}") != std::string::npos || noSpace.find("{s->interest}") != std::string::npos ||
-                               noSpace.find("=g_state->interest.load(") != std::string::npos || countOf(noSpace, "=s->interest.load(") > 1;   // the drift check holds one, by design
-        verify(!heldLocal, "no local copy of the mask is held across a call: every site reads State::interest where it stands");
         verify(vs.find("thread_local bool t_uiDepthThisDraw") == std::string::npos && vs.find("thread_local bool t_holoDepthThisDraw") == std::string::npos &&
                    vs.find("thread_local bool t_compositeThisDraw") == std::string::npos,
                "the three thread_local per-draw flags are gone (#184)");
@@ -1819,8 +1755,8 @@ int interestSourceChecks(const std::string& root) {
         const std::string body = fn == std::string::npos ? std::string() : depth.substr(fn, 1400);
         const std::string flat = withoutSpaces(body);
         verify(flat.find("detail::g_uiDepthDraw=detail::UiDepthDraw{};g_holoDraw=draw;if(!detail::g_uiDepthOn||detail::g_uiDepthStoodDown)returnfalse;") != std::string::npos &&
-                   flat.find("classifiermemo::hit(g_eyeMemo,now))returnfalse;++g_b6.eyeMisses;") != std::string::npos,
-               "uiDepthOnEyeDraw is build 4's body: the reset, g_holoDraw = draw, the gate, the memo, and the miss counted after the memo-hit test");
+                   flat.find("classifiermemo::hit(g_eyeMemo,now))returnfalse;") != std::string::npos,
+               "uiDepthOnEyeDraw is build 4's body: the reset, g_holoDraw = draw, the gate, the memo");
         const std::string binding = load("binding_shadow.cpp");
         verify(withoutSpaces(binding).find("constbooleyeKeyMoves=!(srv&&s.ptr==ptr);s.ptr=ptr;++s.gen;noteEyeKeySlot(slot,eyeKeyMoves);") != std::string::npos,
                "S2: bindingSet bumps the slot's own generation on every set and the eye key only when a PS SRV 0..3 pointer changed");
@@ -1852,7 +1788,7 @@ int main(int argc, char** argv) {
     g_bad += periodicWorkChecks();
     g_bad += loggedNotesChecks();
     g_bad += boundarySourceChecks(dir);
-    g_bad += interestSourceChecks(dir);
+    g_bad += drawPathSourceChecks(dir);
     edvr::g_clockForTest = nullptr;
     // Last, and with the real clock the worker reads: it configures the watcher
     // and leaves it off, which the fixtures above never see.

@@ -127,7 +127,7 @@ W_BEGIN = "    if (v != DrawVerdict::kNone) forwardVerdictBegin(self, v);\n"
 W_OBSERVED = ("    const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict\n"
               "                                               ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));\n")
 W_STRIP_START = "    float stripGain = 0.0f;\n"
-W_GUARD = ("    if (interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count) &&\n"
+W_GUARD = ("    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&\n"
            "        !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {\n")
 W_GATE = "    if (introCurveWants()) m |= gateHolderBit(GateHolder::IntroCurve);"
 W_DIM = ("            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {\n"
@@ -136,7 +136,7 @@ W_DIM_CALL = "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU,
 W_REVERSE_DECL = "    bool stripReverseU = false;\n"
 W_MOVIE_ARMED = "            if (introPanelStripArmed()) {\n"
 W_MOVIE_REVERSE = "                stripReverseU = introPanelStripReverseU();\n"
-W_REFUSAL = ("        if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) { objectProbeCandidateDrawIssued(self,false); return false; }\n"
+W_REFUSAL = ("        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n"
              "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n")
 W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {"
 W_STRIP_CALL = "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);"
@@ -296,9 +296,9 @@ MUTANTS = [
            "the recognition sits above the movie's claim: the movie's own draws reach the recogniser and their stock pairs are learned (and logged) as flat"),
     wiring("iw-recognition-away-from-the-movie", "after-movie", [(W_SET, ""), (W_CENSUS_LINE, W_SET + "\n" + W_CENSUS_LINE)],
            "the recognition sits a block below the movie's claim, no longer right after it"),
-    wiring("iw-guard-gone", "guard", [(W_GUARD, "    if (interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count)) {\n")], "the on-foot recognition claims the intro composite again"),
+    wiring("iw-guard-gone", "guard", [(W_GUARD, "    if (panelCurveWants() && srv0IsPanelSized(s, kind, count)) {\n")], "the on-foot recognition claims the intro composite again"),
     wiring("iw-guard-before-the-gate", "guard",
-           [(W_GUARD, "    if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) && interestHas(s, kInterestPanelCurve) && srv0IsPanelSized(s, kind, count)) {\n")],
+           [(W_GUARD, "    if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) && panelCurveWants() && srv0IsPanelSized(s, kind, count)) {\n")],
            "the guard is read before panelCurveWants(): curvature 0 reads something new"),
     wiring("iw-gate-unlisted", "gate", [(W_GATE, "    if (false) m |= gateHolderBit(GateHolder::IntroCurve);")],
            "the draw gate does not list the recogniser"),
@@ -316,7 +316,7 @@ MUTANTS = [
     wiring("iw-site-reverse-starts-true", "strip-site", [(W_REVERSE_DECL, "    bool stripReverseU = true;\n")], "an unarmed draw's u direction starts as against x"),
     wiring("iw-unarmed-early-return-first", "unarmed-text",
            [(W_REFUSAL, "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n"
-                        "        if (owner && interestHas(g_state, kInterestUiLayerIssueBlocked)) { objectProbeCandidateDrawIssued(self,false); return false; }\n")],
+                        "        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n")],
            "observedDraw answers for the strip before its own refusal"),
     wiring("iw-unarmed-no-early-return", "unarmed-text", [("        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n", "")],
            "the game's own draw is issued a second time over the strip"),
@@ -351,7 +351,7 @@ MUTANTS = [
            "the strip's main call passes a constant u direction"),
     wiring("iw-args-no-draw-function", "strip-args", [(W_STRIP_CALL, "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, nullptr);")],
            "the strip is drawn through no draw function"),
-    wiring("iw-args-past-the-refusal", "strip-args", [("if (stripToward != 0 && !interestHas(g_state, kInterestUiLayerIssueBlocked)) {", "if (stripToward != 0) {")],
+    wiring("iw-args-past-the-refusal", "strip-args", [("if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {")],
            "the strip is asked past observedDraw's own refusal"),
     wiring("iw-fallback-always-issued", "fallback",
            [(W_STRIP_CALL, "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);\n            stripIssued = true;")],

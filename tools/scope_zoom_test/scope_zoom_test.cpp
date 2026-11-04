@@ -158,7 +158,7 @@ static bool wiredB3Halves(const std::string& frame, const std::string& host, con
            has(temporal, "edvr::terrainCullCoverNoteFrusta(s->announced);") && has(temporal, "const float outer=-s->announced[0][0], inner=s->announced[0][1];") &&
            has(temporal, "const bool zoomMoved=s->history[eye].valid&&edvr::scopezoom::b3ResetEdge(s->history[eye].zoomed,zoomedHere);") && has(temporal, "separationMoved||zoomMoved;") &&
            has(temporal, "const bool zoomedHere=eye==0&&s->zoomedNow;") && has(temporal, "hst.zoomed=zoomedHere;") &&
-           has(stereo, "share.band[2]=leftStripBlack;") && has(stereo, "share.band[3]=leftZoomed?1.f:0.f;") && has(vscreen, "if (interestHas(s, kInterestNativeB3Counting)) nativeOnFootB3NoteEyeDraw();");
+           has(stereo, "share.band[2]=leftStripBlack;") && has(stereo, "share.band[3]=leftZoomed?1.f:0.f;") && has(vscreen, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();");
 }
 static bool wiredIni(const std::string& ini) {
     const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = on"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
@@ -247,7 +247,7 @@ static void wiringTests() {
             check(has(client, sentAt) && has(client, "return zoomed ? static_cast<uint32_t>(sizeof(EdvrNativeTemporalFrame)) : EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM;"), "B3: a frame with no zoom is sent at the size from before B3");
             check(!has(replaced(client, sentAt, "EdvrNativeTemporalFrame frame{sizeof(frame), EDVR_NATIVE_TEMPORAL_VERSION_1};"), sentAt), "control: a client that always sends the whole struct is not the wiring");
         }
-        check(!wiredB3Halves(frameCpp, host, tcpp, stereo, replaced(vs, "if (interestHas(s, kInterestNativeB3Counting)) nativeOnFootB3NoteEyeDraw();", ""), system), "control: draws that are not counted are not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, stereo, replaced(vs, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();", ""), system), "control: draws that are not counted are not the wiring");
         check(!wiredB3Halves(frameCpp, host, tcpp, stereo, vs, replaced(system, "(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye])", "s.geometry.raw[eye]")), "control: a raw getter that follows the zoom (the HUD would grow) is not the wiring");
     }
     {

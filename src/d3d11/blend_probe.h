@@ -36,9 +36,6 @@ constexpr int kBlendProbeCollecting = 2;
 inline bool blendProbeWantsDraws() noexcept {
     return detail::g_blendProbePhase.load(std::memory_order_relaxed) == detail::kBlendProbeCollecting;
 }
-// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
-uint64_t blendProbeInterestBits();
-void blendProbeRecomputeInterest();
 
 // What the draw path knows about one eye draw by the time its routing is decided (vscreen.cpp fills it).
 struct BlendDrawInfo {

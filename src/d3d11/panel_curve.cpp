@@ -1,5 +1,4 @@
 ﻿#include "panel_curve.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -277,7 +276,6 @@ bool stripCurrent() {
 void standDownAfterFault(ID3D11DeviceContext* ctx, const char* what) {
     detail::g_panelCurveStoodDown = true;
     detail::g_panelCurveReady = false;
-    panelCurveRecomputeInterest();   // build 6: before the restore below makes hooked calls
     // And put the game's state back, which is the whole reason the saved
     // state is not a set of locals. Under its own guard: if the context is
     // far enough gone that restoring faults too, there is nothing further
@@ -462,7 +460,6 @@ bool learnSize(ID3D11DeviceContext* ctx) {
                     "advanced.panel_curvature_z_gain to supply one by hand.",
                     sz[0], sz[1]);
                 detail::g_panelCurveStoodDown = true;
-                panelCurveRecomputeInterest();
             }
         }
         g_sizePending = false;
@@ -493,7 +490,6 @@ bool learnSize(ID3D11DeviceContext* ctx) {
                 "model units. Standing down. advanced.panel_curvature_z_gain "
                 "supplies one by hand if this build binds it elsewhere.");
             detail::g_panelCurveStoodDown = true;
-            panelCurveRecomputeInterest();
         }
         return false;
     }
@@ -741,7 +737,6 @@ void panelCurveConfigure(Config& cfg) {
     g_sWanted = c > 0.0f && !g_sStoodDown;   // the surface strip follows the live curvature, and nothing else of the screen's
     detail::g_panelCurveSegments = cfg.getIntInRange("advanced.panel_curvature_segments",
                                    kDefaultSegments, kMinSegments, kMaxSegments);
-    panelCurveRecomputeInterest();   // build 6: both writes (curvature, segments) are done; no hooked call lies between them
     // Which way the bend goes. 1 is toward the viewer and is correct on the
     // build this was measured against; -1 is the escape hatch if a game
     // update ever flips the handedness of the panel's transform. See
@@ -961,10 +956,4 @@ void panelCurveShutdown() {
     detail::g_panelCurveGain = 0.0f;
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for panelCurveWants(), recomputed after each write to the stand-down flag, the curvature or the segment count.
-uint64_t panelCurveInterestBits() { return interestIf(panelCurveWants(), kInterestPanelCurve); }
-void panelCurveRecomputeInterest() { drawInterestStore(kInterestPanelCurveModule, panelCurveInterestBits()); }
 }  // namespace edvr

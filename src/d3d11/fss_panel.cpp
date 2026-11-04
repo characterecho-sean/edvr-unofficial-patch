@@ -1,5 +1,4 @@
 #include "fss_panel.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <cstdio>    // _snprintf_s: the macro value for the compile
 
@@ -124,7 +123,6 @@ void fssPanelConfigure(Config& cfg) {
     // Within a percent of stock there is nothing worth swapping a shader
     // pair for.
     detail::g_fssPanelEnabled = f < 0.99f || f > 1.01f;
-    fssPanelRecomputeInterest();
 
     if (detail::g_fssPanelEnabled != was || (detail::g_fssPanelEnabled && g_factor != wasFactor)) {
         Log::get().note(
@@ -201,10 +199,4 @@ void fssPanelEnd(ID3D11DeviceContext* ctx) {
 
 void fssPanelShutdown() { releaseShaders(); }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for fssPanelWantsDraws(), recomputed after each write to g_fssPanelEnabled.
-uint64_t fssPanelInterestBits() { return interestIf(fssPanelWantsDraws(), kInterestFssPanel); }
-void fssPanelRecomputeInterest() { drawInterestStore(kInterestFssPanelModule, fssPanelInterestBits()); }
 }  // namespace edvr

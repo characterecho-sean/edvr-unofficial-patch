@@ -1,5 +1,4 @@
 #include "native_on_foot.h"
-#include "draw_interest.h"   // build 6: the interest mask
 #include "native_preview_camera.h"
 
 #include <windows.h>
@@ -30306,7 +30305,6 @@ void labFocusNdc(int e, uint32_t frame, uint32_t key, const double T[2], const d
 // fixDecide's untagged return: is this draw one of the label's? Recorded into the frame's cell; completed at the issue.
 void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r, const CbShadow* sh, ID3D11Buffer* b0Plain, const float* oHud) {
     g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();   // build 6: mid-draw, before the read at vscreen's issue
     if (!(r.ps == nofoot::f87::kLabelPs && r.vs == nofoot::f87::kLabelVs && r.kind == 'X' && r.instances == 1 && r.cpuHave && r.pool && (e == 0 || e == 1))) return;
     LabRec* lr = labRecFind(r.pool, r.cpuRec, frame);
     LabFrame& lf = g_labFrame[frame % kLabFrames];
@@ -30355,7 +30353,6 @@ void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r
         d.oHudOk = true;
     }
     g_nativeOnFootLabelPendingValid.store(true, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     g_labPending.serial = g_drawSerial;
     g_labPending.d = &d;
     g_labPending.b0 = b0Plain;
@@ -30547,7 +30544,6 @@ void labOnData(int slot, const uint8_t* data) {
 void labelIssue(ID3D11DeviceContext* ctx, bool layered) {
     if (!g_nativeOnFootLabelPendingValid.load(std::memory_order_relaxed) || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
     g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     LabDraw& d = *g_labPending.d;
     d.issued = true;
     d.layered = layered;
@@ -35250,7 +35246,6 @@ void coatPackTick(uint64_t now) {
     CoatPackState& s = g_coatPack;
     const bool armed = nofoot::f157::coatArmed(nativeOnFootActive(), nofoot::f144::gearBackPromoted(nativeOnFootGearBack()));
     g_nativeOnFootCoatPackLive.store(armed, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     if (!armed) {
         if (s.windowMs) coatPackLine(s);
         s.windowMs = 0;
@@ -35344,7 +35339,6 @@ void spawnTick(uint64_t now) {
     const nofoot::f158::WindowRules::Step step = s.rules.step(nativeOnFootActive(), nofoot::f144::gearBackPromoted(nativeOnFootGearBack()), now);
     if (step.closed != nofoot::f158::Ended::kNone) {
         g_nativeOnFootSpawnLive.store(false, std::memory_order_relaxed);
-        nativeOnFootRecomputeInterest();
         spawnWrite(s.window, step);
         s.recording = false;
     }
@@ -35355,7 +35349,6 @@ void spawnTick(uint64_t now) {
             g_spawnBusy.clear(std::memory_order_release);
             s.recording = true;
             g_nativeOnFootSpawnLive.store(true, std::memory_order_relaxed);
-            nativeOnFootRecomputeInterest();
         }
     }
 }
@@ -35951,7 +35944,6 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_iconRing.release();   // F66f
     f44::g_labRing.release();    // F87p
     g_nativeOnFootLabelPendingValid.store(false, std::memory_order_relaxed);   // first: the render thread stops reading the struct before it is reset
-    nativeOnFootRecomputeInterest();
     f44::g_labPending = f44::LabPending{};
     for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
     f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
@@ -36469,7 +36461,6 @@ void beginB3Press(State& s) noexcept {
 void endB3Press(State& s) noexcept {
     B3State& b = g_b3s;
     g_b3Counting.store(false, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     if (!b.pressKey || s.press > kPressLineCap) return;
     sz::B3Press p = b.p;
     sz::B3Press door;
@@ -36512,12 +36503,10 @@ void endB3Press(State& s) noexcept {
 // Outside the sights, or not armed: no window is held, and the strip comes back (it is still published until it has).
 void b3Idle(double dt, uint64_t nowMs) noexcept {
     g_b3Counting.store(false, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);
 }
 void b3Off(uint64_t nowMs) noexcept {
     g_b3Counting.store(false, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);
 }
 // The tick's B3 step, in the sights. out is the frame record the lens's doors read; verdict is the lens's gate (qualifies: S and the right eye's rows are fresh, g holds both eyes' rows).
@@ -36576,7 +36565,6 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
     const uint32_t io = zoomedNow ? 0u : 1u;
     const bool counting = asked && sightsFull;
     g_b3Counting.store(counting, std::memory_order_relaxed);
-    nativeOnFootRecomputeInterest();
     const uint32_t d0 = g_b3EyeDraws[0].exchange(0, std::memory_order_relaxed), d1 = g_b3EyeDraws[1].exchange(0, std::memory_order_relaxed);
     if (counting) {
         b.p.draws[0][io] += d0;
@@ -37102,13 +37090,3 @@ extern "C" HRESULT WINAPI edvrNoteNativeEyeShare(const EdvrNativeEyeShareReport*
                           100.0 * r->coverageWhole, r->hiddenTriangles ? "used" : "none", r->hiddenTriangles);
     return S_OK;
 }
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bits for nativeOnFootSpawnLive() || nativeOnFootCoatPackLive() (F157's per-draw countsMatch test stays behind the bit in vscreen),
-// nativeOnFootB3Counting() (written through the g_b3Counting alias) and nativeOnFootLabelPending(), recomputed after each store to one of the four atomics.
-uint64_t nativeOnFootInterestBits() {
-    return interestIf(nativeOnFootSpawnLive() || nativeOnFootCoatPackLive(), kInterestNativeFootBody) | interestIf(nativeOnFootB3Counting(), kInterestNativeB3Counting) |
-           interestIf(nativeOnFootLabelPending(), kInterestLabelPending);
-}
-void nativeOnFootRecomputeInterest() { drawInterestStore(kInterestNativeOnFoot, nativeOnFootInterestBits()); }
-}  // namespace edvr

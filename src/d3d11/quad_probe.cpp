@@ -1,5 +1,4 @@
 #include "quad_probe.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -267,7 +266,6 @@ void quadProbeConfigure(Config& cfg) {
                   n != g_wantN || atLeastWanted != g_wantAtLeast ||
                   skip != g_wantSkip || atMs != g_wantAtMs)) {
         detail::g_quadProbeTaken = false;
-        quadProbeRecomputeInterest();
         g_skipLeft = skip;
         g_lastSkipFrame = 0;
     }
@@ -293,7 +291,6 @@ void quadProbeConfigure(Config& cfg) {
                         skip, when);
     }
     detail::g_quadProbeArmed = armed;
-    quadProbeRecomputeInterest();
 }
 
 void quadProbeRequest() {
@@ -305,7 +302,6 @@ void quadProbeRequest() {
     const bool again = detail::g_quadProbeTaken;
     dropCapture();
     detail::g_quadProbeTaken = false;
-    quadProbeRecomputeInterest();
     // quadProbeWants() has just gone from false to true, inside a frame whose
     // gate was sampled before the key was pressed (draw_gate.h).
     drawGateArm();
@@ -471,7 +467,6 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                 failOnce("the staging buffers could not be created");
                 dropCapture();
                 detail::g_quadProbeTaken = true;   // do not retry into the same failure
-                quadProbeRecomputeInterest();
             }
             dev->Release();
         }
@@ -491,7 +486,6 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
     if (g_windowOpen && g_frame > g_windowFrame) {
         g_windowOpen = false;
         detail::g_quadProbeTaken = true;   // one window per session, whatever it yields
-        quadProbeRecomputeInterest();
         g_pendingFrame = g_occCount ? g_frame + kSettleFrames : 0;
         if (!g_pendingFrame) dropCapture();
     }
@@ -713,10 +707,4 @@ void quadProbeShutdown() {
     dropCapture();
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for quadProbeWants(), recomputed after each write to g_quadProbeArmed or g_quadProbeTaken.
-uint64_t quadProbeInterestBits() { return interestIf(quadProbeWants(), kInterestQuadProbe); }
-void quadProbeRecomputeInterest() { drawInterestStore(kInterestQuadProbeModule, quadProbeInterestBits()); }
 }  // namespace edvr

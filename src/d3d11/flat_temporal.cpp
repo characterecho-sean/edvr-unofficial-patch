@@ -1,5 +1,4 @@
 #include "flat_temporal.h"
-#include "draw_interest.h"   // build 6: the interest mask
 #include "flat_temporal_model.h"
 #include "flat_mono_frame.h"
 #include "flat_standdown.h"
@@ -854,7 +853,6 @@ void finishDiscovery(uint64_t frame) {
     report(frame, "final");
     detail::g_flatTemporalManual.store(false, std::memory_order_release);
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-    flatTemporalRecomputeInterest();
     Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
 }
 
@@ -863,7 +861,6 @@ void finishDiscovery(uint64_t frame) {
 void flatTemporalStart(ID3D11Device* device) {
     if (!runtimeFlatProfile() || !device) return;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-    flatTemporalRecomputeInterest();
     detail::g_flatTemporalManual.store(false, std::memory_order_release);
     detail::g_flatTemporalOwnerThread.store(0, std::memory_order_release);
     detail::g_flatTemporalForeignCalls.store(0, std::memory_order_release);
@@ -886,7 +883,6 @@ void flatTemporalArm(bool full) {
     if (flatTemporalCapturing()) report(0, "rearmed");
     ID3D11Device* device = g.device;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-    flatTemporalRecomputeInterest();
     flatTemporalStart(device);
     detail::g_flatTemporalManual.store(true, std::memory_order_release);
     g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);
@@ -927,7 +923,6 @@ void flatTemporalStop() {
     // Teardown can run under the loader lock on another thread. Set only
     // atomics; the static collector has no resources to release or free.
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-    flatTemporalRecomputeInterest();   // build 6: a no-op once vscreen has cleared the interest pointer
     detail::g_flatTemporalManual.store(false, std::memory_order_release);
     g_passiveRearmAvailable.store(false, std::memory_order_release);
     g_waitingForPresent.store(false, std::memory_order_release);
@@ -949,7 +944,6 @@ void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags)
         Log::get().note("flat temporal: first owned Present on thread %lu; warmup draws before this boundary were not observed; discovery now active limit=%llu-ms/%u-useful-frames",
                         static_cast<unsigned long>(thread), static_cast<unsigned long long>(g.captureBudget.milliseconds), g.captureBudget.usefulFrames);
         detail::g_flatTemporalCapturing.store(true, std::memory_order_release);
-        flatTemporalRecomputeInterest();
     }
     // The deadline closes even a paused/no-draw window. The ordinary observer
     // gate below would otherwise leave the collection armed indefinitely.
@@ -1317,10 +1311,4 @@ bool flatTemporalCopyConstants(ID3D11Buffer* buffer, uint32_t offset, uint32_t b
     if (offset > cb->copied || bytes > cb->copied - offset) return false;
     std::memcpy(out, cb->bytes + offset, bytes); return true;
 }
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for g_flatTemporalCapturing (its stored first test; flatTemporalCapturingSlow stays behind it), recomputed after each store to it.
-uint64_t flatTemporalInterestBits() { return interestIf(detail::g_flatTemporalCapturing.load(std::memory_order_relaxed), kInterestFlatTemporal); }
-void flatTemporalRecomputeInterest() { drawInterestStore(kInterestFlatTemporalModule, flatTemporalInterestBits()); }
 }  // namespace edvr

@@ -1,6 +1,5 @@
 #include "temporal_shader_bytecode.h"
 #include "particle_fix.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -952,7 +951,6 @@ void particleConfigure(Config& cfg) {
             Log::get().note("particle billboard: stock.");
         }
     }
-    particleRecomputeInterest();   // build 6: the starfield switch (through its alias), both dust switches (through the lambda's reference) and the mode are all written above
 }
 
 bool particleWantsDraws() {
@@ -991,14 +989,4 @@ void particleShutdown() {
     g_copyGpu.reset();
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bits for particleSteady(), witchspaceStarsHidden() and spaceDustHidden(), recomputed at the end of particleConfigure, the only
-// writer of g_particleMode, g_particleHideStars (written through the g_hideWitchspaceStars alias) and the two dust flags (written through applyDustKey's reference parameter).
-uint64_t particleInterestBits() {
-    return interestIf(particleSteady(), kInterestParticleSteady) | interestIf(witchspaceStarsHidden(), kInterestParticleHideStars) |
-           interestIf(spaceDustHidden(), kInterestParticleDust);
-}
-void particleRecomputeInterest() { drawInterestStore(kInterestParticle, particleInterestBits()); }
 }  // namespace edvr

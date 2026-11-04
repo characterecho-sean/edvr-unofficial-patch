@@ -475,9 +475,6 @@ void nativeOnFootLabelIssue(ID3D11DeviceContext* ctx, bool layered);
 // so the draws that name no label (nearly all of them) do not leave the translation unit.
 inline std::atomic<bool> g_nativeOnFootLabelPendingValid{false};
 inline bool nativeOnFootLabelPending() { return g_nativeOnFootLabelPendingValid.load(std::memory_order_relaxed); }
-// Build 6, item 1 (draw_interest.h): the module's interest bits (the F157/F158 body bit, B3 counting, the F87p label) as their expressions give them now, and the write of them.
-uint64_t nativeOnFootInterestBits();
-void nativeOnFootRecomputeInterest();
 struct NativeOnFootPoseStamp {
     bool valid = false, writePresent = false, matricesValid = false, sourceFresh = false;
     uint32_t renderFrame = 0, fpFrame = 0, fpSequence = 0, gGameFrame = 0, itemSerial = 0, rigGeneration = 0;

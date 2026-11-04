@@ -1,7 +1,6 @@
 #include "temporal_shader_bytecode.h"
 #include "fixed_shader_source.h"
 #include "ui_depth.h"
-#include "draw_interest.h"   // build 6: the interest mask
 #include "native_on_foot.h"   // F27: nativeEyeOrderFlipped, the native eye order
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
@@ -338,7 +337,6 @@ bool     g_ringNoted = false;
 // No config key: a fix that always helps. Each write site carries the bump beside it. Flown 2026-10-27 at a settlement pad: 91% of
 // eye draws hit, and about 5M hits checked against a full run of the classifier never differed (classifier_memo.h).
 uint32_t g_classifierEpoch = 1;
-UiDepthB6Counts g_b6;   // TEMPORARY (build 6, item 4): the memo misses uiDepthB6Counts() reads
 
 // The two memos: the key and the exit of the last full run of each classifier (classifier_memo.h), each classifier's own.
 classifiermemo::Memo g_eyeMemo, g_holoMemo;
@@ -2252,7 +2250,6 @@ void holoDepthConfigure() {
     const bool changed = on != detail::g_holoDepthOn || famCount != g_holoFamilyCount ||
                          memcmp(fam, g_holoFamilies, famCount * sizeof(uint64_t)) != 0;
     detail::g_holoDepthOn = on;
-    uiDepthRecomputeInterest();
     g_holoFamilyCount = famCount;
     memcpy(g_holoFamilies, fam, famCount * sizeof(uint64_t));
     ++g_classifierEpoch;   // after the list's writes, so a call that read the old list stores a key already out of date
@@ -2467,7 +2464,6 @@ void uiDepthConfigure(Config& cfg) {
 
     const bool was = detail::g_uiDepthOn;
     detail::g_uiDepthOn = g_keyOn && g_passOn;
-    uiDepthRecomputeInterest();
     ++g_classifierEpoch;   // the direct and exclude lists, g_smokeOn and g_trained are all written above
     if (detail::g_uiDepthOn && !was) {
         g_announced = false;
@@ -2903,7 +2899,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // leaves the stored key out of date, and the next call runs in full, which is the safe direction.
     const classifiermemo::Key now{bindingEyeKeyGeneration(), g_classifierEpoch};
     if (classifiermemo::hit(g_eyeMemo, now)) return false;
-    ++g_b6.eyeMisses;   // TEMPORARY (build 6, item 4): counted in the real miss, after the memo-hit test
     classifiermemo::Exit exit = classifiermemo::Exit::kOther;
     const bool ret = classifyEyeDraw(ctx, &exit);
     classifiermemo::store(g_eyeMemo, now, exit);
@@ -3493,7 +3488,6 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     });
     if (!ran && !g_budget.shouldRun() && !detail::g_uiDepthStoodDown) {
         detail::g_uiDepthStoodDown = true;
-        uiDepthRecomputeInterest();   // build 6: mid-draw (uiDepthReissueBegin), before the End below makes hooked calls
         Log::get().note("ui depth: STANDING DOWN for the session -- the depth pass "
                         "faulted repeatedly. The interface draws as the game issues it.");
     }
@@ -3626,7 +3620,6 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     // draw. The key is read before the classifier runs, as there.
     const classifiermemo::Key now{bindingEyeKeyGeneration(), g_classifierEpoch};
     if (classifiermemo::hit(g_holoMemo, now)) return false;
-    ++g_b6.holoMisses;   // TEMPORARY (build 6, item 4): counted in the real miss, after the memo-hit test
     classifiermemo::Exit exit = classifiermemo::Exit::kOther;
     const bool ret = classifyHologramDraw(ctx, &exit);
     classifiermemo::store(g_holoMemo, now, exit);
@@ -4605,7 +4598,6 @@ void uiDepthShutdown() {
     for (uint32_t i = 0; i < kExhausted; ++i) g_exhausted[i] = Exhausted();
     g_familyLoggedCount = 0;
     detail::g_uiDepthOn = false;
-    uiDepthRecomputeInterest();
     detail::g_uiDepthDraw.planetPending=detail::g_uiDepthDraw.planetSolarPending=g_planetNoted=g_solarNoted=false;g_planetCoverage=PlanetCoverage{};
     detail::g_uiDepthDraw.worldScreenPending = false;
     g_worldScreenPs.Reset();
@@ -4625,18 +4617,4 @@ void uiDepthShutdown() {
     g_worldScreenWindow.reset();
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// TEMPORARY (build 6, item 4): the counts the perf window prints.
-UiDepthB6Counts uiDepthB6Counts() { return g_b6; }
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bits for uiDepthWantsDraws() (g_uiDepthOn && !g_uiDepthStoodDown) and uiDepthHologramWantsDraws() (g_holoDepthOn && that),
-// recomputed after each write to g_uiDepthOn, g_uiDepthStoodDown or g_holoDepthOn.
-uint64_t uiDepthInterestBits() {
-    return interestIf(uiDepthWantsDraws(), kInterestUiDepth) | interestIf(uiDepthHologramWantsDraws(), kInterestHoloDepth);
-}
-void uiDepthRecomputeInterest() { drawInterestStore(kInterestUiDepthModule, uiDepthInterestBits()); }
 }  // namespace edvr

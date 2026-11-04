@@ -1,5 +1,4 @@
 #include "draw_census.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <cstdio>   // _snprintf_s: the sampled-slot list is built before logging
 #include <cstdlib>  // _strtoui64: the CB watch's shader hash from config
@@ -743,7 +742,6 @@ void drawCensusRequest() {
         return;
     }
     detail::g_drawCensusPending = true;
-    drawCensusRecomputeInterest();
     // The hotkey lands inside a frame, after that frame's gate sample. The
     // census counts frames from here, so a gate that stayed false until the
     // next boundary would hand it an empty frame 1 (draw_gate.h).
@@ -759,7 +757,6 @@ void drawCensusFlatRequest() {
         return;
     }
     detail::g_drawCensusPending = true;
-    drawCensusRecomputeInterest();
     g_flatRequest = true;
     g_flatFrames = kFlatCensusFrames;
     g_flatLines = kFlatCensusLines;
@@ -776,7 +773,6 @@ void drawCensusAutoRequest() {
     // write a line per draw.
     if (drawCensusArmed()) return;
     detail::g_drawCensusPending = true;
-    drawCensusRecomputeInterest();   // build 6: mid-draw (from the ladder's census auto arm)
     g_forceOffscreen = true;
     drawGateArm();   // the trigger is a draw, so this is mid-frame (draw_gate.h)
     // The caller logs WHY (the size that tripped it); this side owns only the
@@ -792,7 +788,6 @@ void drawCensusAutoRequestForCapture(const wchar_t* captureId) {
     detail::g_drawCensusCaptureIdPending=true;
     const bool alreadyPending=detail::g_drawCensusPending;
     detail::g_drawCensusPending = true;
-    drawCensusRecomputeInterest();
     g_forceOffscreen = true;
     drawGateArm();
     Log::get().note("DC eye capture link: capture_id=%ls census=%u state=%s",captureId?captureId:L"",g_censusNo+1,alreadyPending?"pending_linked":"new_request");
@@ -1586,7 +1581,6 @@ static void runCensusSchedule(uint32_t frameNo) {
         if (elapsed < g_scheduleMs[i]) continue;
         g_scheduleFired |= (1u << i);
         detail::g_drawCensusPending = true;
-        drawCensusRecomputeInterest();
         g_forceOffscreen = true;
         drawGateArm();   // draw_gate.h: this tick is not the gate's sample
         Log::get().note(
@@ -1665,13 +1659,10 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_unseenThisFrame = 0;
         g_seq = 0;
         ++g_frameOrdinal;
-        const bool censusDone = --detail::g_drawCensusFramesLeft == 0;
-        drawCensusRecomputeInterest();   // build 6: before finish() makes any call
-        if (censusDone) finish();
+        if (--detail::g_drawCensusFramesLeft == 0) finish();
     }
     if (detail::g_drawCensusPending) {
         detail::g_drawCensusPending = false;
-        drawCensusRecomputeInterest();
         ++g_censusNo;
         // Latched here, not read per draw: a census must record one
         // configuration throughout, and the draw path is the last place that
@@ -1690,7 +1681,6 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
                 static_cast<int>(kMaxLinesCeiling)));
         }
         detail::g_drawCensusFramesLeft = g_framesWanted;
-        drawCensusRecomputeInterest();
         detail::g_drawCensusCaptureIdActive=detail::g_drawCensusCaptureIdPending;
         detail::g_drawCensusCaptureIdPending=false;
         g_frameOrdinal = 0;
@@ -1750,10 +1740,4 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
     }
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for drawCensusArmed(), recomputed after each write to g_drawCensusPending or g_drawCensusFramesLeft.
-uint64_t drawCensusInterestBits() { return interestIf(drawCensusArmed(), kInterestDrawCensus); }
-void drawCensusRecomputeInterest() { drawInterestStore(kInterestDrawCensusModule, drawCensusInterestBits()); }
 }  // namespace edvr

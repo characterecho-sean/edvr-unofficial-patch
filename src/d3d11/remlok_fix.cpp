@@ -1,6 +1,5 @@
 #include "temporal_shader_bytecode.h"   // F121: kVisorAxisVsBytecode, the visor's axis-centred vertex shader
 #include "remlok_fix.h"
-#include "draw_interest.h"   // build 6: the interest mask
 
 #include <windows.h>
 
@@ -165,7 +164,6 @@ void remlokConfigure(Config& cfg) {
         Log::get().note("remlok_lines \"%s\" is not stock, outer or hide; "
                         "running stock.", m.c_str());
     }
-    remlokRecomputeInterest();
 
     float keep = cfg.getFloat("advanced.remlok_keep_fraction", 0.55f);
     // Under half and the two eyes' kept regions no longer meet in the
@@ -1115,10 +1113,4 @@ void remlokShutdown() {
     }
 }
 
-}  // namespace edvr
-
-namespace edvr {
-// Build 6, item 1 (draw_interest.h): the interest bit for remlokWantsDraws(), recomputed after the writes to g_remlokMode in remlokConfigure.
-uint64_t remlokInterestBits() { return interestIf(remlokWantsDraws(), kInterestRemlok); }
-void remlokRecomputeInterest() { drawInterestStore(kInterestRemlokModule, remlokInterestBits()); }
 }  // namespace edvr

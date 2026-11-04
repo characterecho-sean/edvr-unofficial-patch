@@ -61,9 +61,6 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // The caller establishes that the target is an eye. Record the original
 // shader in an active ledger, without probing its unrelated instance pool.
 inline bool objectProbeLedgerActive() { return detail::g_objectProbeLedgerOn; }
-// Build 6, item 1 (draw_interest.h): the module's interest bits as their expressions give them now, and the write of them.
-uint64_t objectProbeInterestBits();
-void objectProbeRecomputeInterest();
 // One compute Dispatch, before it is forwarded, while an eye run's ledger is armed (the skin ledger,
 // skin_ledger.h: the palette chain's inputs). Ask objectProbeLedgerActive() first; this returns at its first line
 // when unarmed or outside the run's 20 frames. `foreign` marks a deferred context.

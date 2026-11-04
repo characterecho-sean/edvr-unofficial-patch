@@ -19,9 +19,6 @@ extern std::atomic<bool> g_sunOff;   // the sun skip is on (optimized_station.cp
 // The sun skip's own first test, inline for the draw path: optimizedStationSkipsDraw returns false at once while it is false, so a caller tests this before
 // building the call's two hash arguments. The same acquire load.
 inline bool optimizedStationSunOff() noexcept { return detail::g_sunOff.load(std::memory_order_acquire); }
-// Build 6, item 1 (draw_interest.h): the module's interest bit as its expression gives it now, and the write of it.
-uint64_t optimizedStationInterestBits();
-void optimizedStationRecomputeInterest();
 // The draw path asks: true skips the draw (the sun pair, while the sun skip is on).
 bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept;
 // Built 2026-10-21: how the flat draw path carried out a skipped sun draw (the VR path never issues it and does not report). kNotIssued: the real draw call was
