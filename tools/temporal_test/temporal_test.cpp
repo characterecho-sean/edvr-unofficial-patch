@@ -111,6 +111,12 @@ int main() {
           "no focus, station services, the Full System Scanner and anything past the orrery are not maps");
     check(!edvr::temporalMapOpen(false, 6) && !edvr::temporalMapOpen(false, 0),
           "a focus the journal cannot state is never a map, whatever the stale value");
+    // A map keeps its history only while the game's camera follows the head. The rest figures are the Frontier dump's (diffDeg 0.012 to 0.050, move 0.0002 to 0.0122).
+    check(edvr::temporalMapCameraStill(0.0f, 0.0) && edvr::temporalMapCameraStill(0.050f, 0.0122) && edvr::temporalMapCameraStill(0.15f, 0.05),
+          "a camera at rest against the head, to the bounds, is still");
+    check(!edvr::temporalMapCameraStill(0.16f, 0.0) && !edvr::temporalMapCameraStill(0.0f, 0.051) && !edvr::temporalMapCameraStill(2.0f, 3.0),
+          "a camera that turned or moved past the bounds against the head is not");
+    check(edvr::temporalMapStillBits().load() == 0u, "no word from the pass is no kept frame");
     check(edvr::temporalEngineFor("XeSS") == edvr::TemporalEngine::Intel &&
           edvr::temporalExternalEngine("xess") && edvr::temporalEngineFor("dlss") == edvr::TemporalEngine::Nvidia,
           "xess maps to the Intel engine, an external one, in VR");

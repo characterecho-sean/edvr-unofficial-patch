@@ -886,6 +886,12 @@ uint64_t g_dlResets = 0, g_dlResetsAsked = 0;
 // hold or a healed frame, a withheld jump the camera came back from, one
 // left unjudged, a pose without a delta.
 uint64_t g_dlResetsHeld = 0, g_dlResetsReturned = 0, g_dlResetsUnjudged = 0, g_dlResetsNoDelta = 0;
+// A map open (flags bit 8): eye-frames whose history was kept because the game's camera followed the head, and eye-frames reset because it did not (or
+// the rows were not in hand), with the largest camera-against-head angle (degrees) and rows translation seen on each side; written once by
+// temporalPassLogMap() when the channel closes. Render thread only.
+uint64_t g_mapKept = 0, g_mapReset = 0;
+float g_mapStillMaxDeg = 0.0f, g_mapMovedMaxDeg = 0.0f;
+double g_mapStillMaxMove = 0.0, g_mapMovedMaxMove = 0.0;
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120) return;
@@ -3832,6 +3838,44 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         g_chooseSubmit.w = static_cast<uint16_t>(std::min<uint32_t>(w, 0xFFFFu));   // the region, as the "first trained frame" line names it: 2016x2016 per eye
         g_chooseSubmit.h = static_cast<uint16_t>(std::min<uint32_t>(h, 0xFFFFu));
         chooseCameraRows();
+        // A map is open (flags bit 8, native_temporal's treat()): its screens write no depth, so the only motion this pass has is the head's, and the history is
+        // right only while the game's camera moves as the head does. The rows' delta against the head's (the world path's own comparison, below) says: a map
+        // the user pans, orbits or zooms resets the history here, and every map frame says which in temporalMapStillBits() (native_temporal's begin() jitters
+        // the next frame only after a kept one).
+        if ((flags & kTemporalFlagMapKeep) != 0) {
+            bool still = false;
+            float mapDiffDeg = 0.0f;
+            double mapMove = 0.0;
+            if (g_curValid && g_prevValid && deltaHead) {
+                float wd[9], tv[3], cm[3], ht[9], diff[9];
+                temporalWorldFromRows(g_prevRows, g_curRows, wd, tv, cm);
+                temporalTranspose3(deltaHead, ht);
+                temporalMul3(wd, ht, diff);
+                mapDiffDeg = temporalRotationAngleDeg(diff);
+                mapMove = sqrt(static_cast<double>(cm[0]) * cm[0] + static_cast<double>(cm[1]) * cm[1] + static_cast<double>(cm[2]) * cm[2]);
+                still = temporalMapCameraStill(mapDiffDeg, mapMove);
+                if (still) {
+                    if (mapDiffDeg > g_mapStillMaxDeg) g_mapStillMaxDeg = mapDiffDeg;
+                    if (mapMove > g_mapStillMaxMove) g_mapStillMaxMove = mapMove;
+                } else {
+                    if (mapDiffDeg > g_mapMovedMaxDeg) g_mapMovedMaxDeg = mapDiffDeg;
+                    if (mapMove > g_mapMovedMaxMove) g_mapMovedMaxMove = mapMove;
+                }
+            }
+            if (still) {
+                ++g_mapKept;
+            } else {
+                ++g_mapReset;
+                flags |= 1u;
+                trace.events |= 1u;
+                e.haveHistory = false;
+                e.dlHaveHistory = false;
+                e.zPrevValid = false;
+            }
+            const unsigned bit = eye == 0 ? 1u : 2u;
+            if (still) temporalMapStillBits().fetch_or(bit, std::memory_order_relaxed);
+            else temporalMapStillBits().fetch_and(~bit, std::memory_order_relaxed);
+        }
         // The rotation delta for this frame's motion source. The depth
         // motion is the head's rotation with its translation term, and
         // falls back to the rotation alone until the depth is in hand.
@@ -6234,6 +6278,18 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     memcpy(e.eyeOff, eyeOffset, sizeof(e.eyeOff));
     e.headNoted = true;
     e.headNotedFrame = g_rowsFrame;
+}
+
+void temporalPassLogMap() {
+    if (g_mapKept == 0 && g_mapReset == 0) return;
+    Log::get().note("temporal aa map: %llu eye-frames kept their history (the camera followed the head: at most %.3f deg and %.4f off it), %llu reset it "
+                    "(the camera moved against the head: up to %.3f deg and %.4f; bounds %.2f deg and %.2f).",
+                    static_cast<unsigned long long>(g_mapKept), static_cast<double>(g_mapStillMaxDeg), g_mapStillMaxMove,
+                    static_cast<unsigned long long>(g_mapReset), static_cast<double>(g_mapMovedMaxDeg), g_mapMovedMaxMove,
+                    static_cast<double>(kMapStillDiffDeg), kMapStillMove);
+    g_mapKept = g_mapReset = 0;
+    g_mapStillMaxDeg = g_mapMovedMaxDeg = 0.0f;
+    g_mapStillMaxMove = g_mapMovedMaxMove = 0.0;
 }
 
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],

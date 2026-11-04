@@ -318,7 +318,7 @@ void testWiringDoor() {
     check(!temporalText.empty(), "src/d3d11/native_temporal.cpp is readable from the working directory");
     std::string missing;
     const std::string begin = bodyOf(temporalText, "HRESULT WINAPI begin(void* p,", "native_temporal begin()");
-    check(has(begin, "s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!s->mapOpen&&!edvr::vrWorldRouteOwnsNextFrame())for(inte=0;e<2;++e)"),
+    check(has(begin, "s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&mapJitterOk&&!edvr::vrWorldRouteOwnsNextFrame())for(inte=0;e<2;++e)"),
           "begin(): the eye shift is advertised only while no map is open and the route does not own the next frame (the gate gains one lock-free read)");
     check(countOf(afterui::squeeze(temporalText), "vrWorldRouteOwnsNextFrame()") == 1, "...and that is the only place native_temporal asks");
     const std::string treat = bodyOf(temporalText, "HRESULT WINAPI treat(void* p,uint64_t seq,", "native_temporal treat()");

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstring>
 #include <cmath>
 #include <string>
@@ -41,9 +42,26 @@ inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
 // ---- A map is open (VR) -----------------------------------------------------------------------------------------------------
 // Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. Their lines, grid, stars and text write no depth, so the
 // temporal pass has no motion source for them and accumulates a ghost (the flat profile's finding, docs\design-flat-temporal-aa-2026-09-23.md,
-// 2026-10-10). While one is open the VR pass runs with no jitter and no history. The Full System Scanner (9) is not here: in VR its own
-// latch (fss_reveal) owns that screen. `known` is false when the journal cannot say (the field is absent: on foot, in a menu).
+// 2026-10-10). The head's delta is the only motion the pass has for them, so the history is right while the game's camera moves as the head does
+// and wrong the moment the map itself pans, orbits or zooms. While one is open the VR pass keeps its jitter and history while the camera
+// follows the head (temporalMapCameraStill), and resets the history, with no jitter, on any frame it does not. No history at all (the first
+// cut, 2026-11-03) left each frame a single un-antialiased upscale, and the head's tremor, about a pixel a frame, made every thin stroke shimmer
+// (the three eye dumps of 2026-11-04). The Full System Scanner (9) is not here: in VR its own latch (fss_reveal) owns that screen.
+// `known` is false when the journal cannot say (the field is absent: on foot, in a menu).
 inline bool temporalMapOpen(bool known, unsigned focus) { return known && focus >= 6u && focus <= 8u; }
+
+// The camera follows the head: the angle between the game's rows' delta and the head's delta (the pass's own comparison, diffDeg), and the length of the
+// rows' translation (move). At rest on Frontier (eye dump 193401951001, the Galaxy Map, 16 frames, 2026-11-03): diffDeg 0.012 to 0.050, move 0.0002 to 0.0122
+// (float32's step at the map camera's 69018 units is 0.0078, so the translation is the position's own rounding). The bounds are about three times
+// the largest of those; a map the user pans, orbits or zooms passes them in a frame.
+inline constexpr float kMapStillDiffDeg = 0.15f;
+inline constexpr double kMapStillMove = 0.05;
+inline bool temporalMapCameraStill(float diffDeg, double move) { return diffDeg <= kMapStillDiffDeg && move <= kMapStillMove; }
+
+// The pass's verdict on the last map frame, one bit per eye (set: that eye's history was kept, the camera followed the head). native_temporal's begin()
+// reads both bits to decide whether the next frame is jittered; the flags bit 8 (kTemporalFlagMapKeep) on edvrTemporalAa hands the pass the decision.
+inline std::atomic<unsigned>& temporalMapStillBits() { static std::atomic<unsigned> bits{0}; return bits; }
+inline constexpr unsigned kTemporalFlagMapKeep = 256u;
 
 inline constexpr float kTemporalShipMetres = 10.0f;
 

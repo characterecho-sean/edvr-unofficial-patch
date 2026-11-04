@@ -6258,7 +6258,8 @@ void f111RefreshGates() {
     // instruments (F111's hooks and F114b's owner transform hook) run while one is open, so the log names the pointer's NDC, its direction, the sprite and the OS cursor for the map. NOTHING that
     // writes opens here: F154's placement hook (the lever's undo), the observer and the legacy update stay on foot's.
     uint32_t mapFocus = 0;
-    const bool mapProbe = !open && !runtimeFlatProfile() && temporalMapOpen(journalGuiFocus(&mapFocus), mapFocus);
+    const bool mapFocusKnown = !open && !runtimeFlatProfile() && journalGuiFocus(&mapFocus);   // its own statement: C++ does not order a call's arguments, and MSVC read mapFocus (0) before this call wrote it (the 2026-11-04 flight: the probe never opened)
+    const bool mapProbe = temporalMapOpen(mapFocusKnown, mapFocus);
     static bool s_mapProbeWas = false;   // frame thread only: the edge is said (so "no panel pointer lines" is told from "the observers never opened")
     static uint32_t s_mapProbeNotes = 0;
     if (mapProbe != s_mapProbeWas && s_mapProbeNotes < 16) {
