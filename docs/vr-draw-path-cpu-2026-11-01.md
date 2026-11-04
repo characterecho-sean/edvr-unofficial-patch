@@ -3206,3 +3206,33 @@ text above differ, the table wins.
 | N9 | "Within build 5's range" contradicts build 5's lesson; `interestFrom` cannot be tested against accessors in a pure-header rig; the 1-in-1024 check misses fault-path writers. | Taken. On-screen checks use the arc's spread (`ui depth totals:` 3.8-14.0 a frame), not one build's windows. Each module's rig asserts the mask equals its expressions after every writer, through `g_drawInterestPtr` pointed at a local. The drift check's limit is stated; the fault-path writers (`ui_layer.cpp:1867`) are covered by that rig. |
 
 Re-review asked for on these dispositions.
+
+**Re-review (Opus, 2026-11-04): one blocking point, taken.** Notes outside the
+repo: `b6-rereview.md`. It supersedes N7's disposition and adds to N1 and N9:
+- **N7, amended (BLOCKING).** Clearing the module's pending flags on every
+  return of `forwardWithVerdict` would clear them for foreign-context draws
+  too: all four thunks call it whoever owns the context (`:5308`, `:5390`,
+  `:5479`, `:5571`), and `owner` is worked out inside (`:4312`). A worker's
+  draw landing between the owner's `uiDepthOnEyeDraw` (`:2541`) and its Begins
+  (`:4720`, `:4726`) would make `uiDepthPlanetBegin` and
+  `uiDepthWorldScreenBegin` decline, since they decide on the module's own
+  copy (`ui_depth.cpp:2985`, `:3097-3099`, checked). The rule is now: a return
+  of `forwardWithVerdict` clears the module's pending flags only when this
+  draw's own `flags.planetPending` or `flags.worldScreenPending` is set, which
+  only the owner's eye draw that set them can be. Begin already clears them on
+  entry, so this covers exactly the early returns and the `layered` case.
+- **N1, added:** item 4's seam gets an `edvr_log.py --self-test` fixture for
+  the `build 6 counts:` line, drift figures included.
+- **N9, amended:** seven mirrored modules have no rig (`particle_fix.cpp` and
+  `sunglare_fix.cpp`, `build.bat:727`; `quad_probe.cpp`, `:709`;
+  `draw_census.cpp`, `:683`; `remlok_fix.cpp`, `:700`; `fss_panel.cpp`, `:694`;
+  `desktop_window.cpp`, `:663`). No new rigs for them: they rely on the
+  source-text writer check and the drift line. The rigs that exist
+  (`ui_depth_test`, `hologram_depth_test`, `ui_quality_test`,
+  `particle_capture_test`, `screen_motion_test`) assert the mask after their
+  module's writers. The fence writer (`ui_layer.cpp:1867`) gets a named
+  `ui_quality_test` case that forces the hologram restore to fail and asserts
+  the bit, or, if that rig cannot reach it, the source-text check alone, and
+  the spec says which.
+- The spec is written from the table, as amended here, not from the item text
+  above it.
