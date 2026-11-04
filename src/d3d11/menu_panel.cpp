@@ -446,11 +446,15 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             ops.push_back(h);
         }
         // Information rows carry long values, so the split sits further
-        // left for them than for a setting's label and value; a note has
-        // the whole width.
-        const int split = l.style == kMenuNote   ? cardW - pad
-                          : l.style == kMenuInfo ? cardW * 26 / 100
-                                                 : cardW * 6 / 10;
+        // left for them than for a setting's label and value; a note and a
+        // heading have no value on the right and take the whole line. A
+        // heading that kept a setting's split was ellipsised where the label
+        // column ended -- the Debug tab's "For bug reports. Both are off
+        // unless you turn them on." read as "Both are off unl..." -- with
+        // half the card sitting empty beside the cut.
+        const int split = l.style == kMenuNote || l.style == kMenuHeading ? cardW - pad
+                          : l.style == kMenuInfo                          ? cardW * 26 / 100
+                                                                          : cardW * 6 / 10;
         Op left;
         left.text = true;
         left.str = widen(l.left);
