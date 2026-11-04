@@ -44,8 +44,8 @@
   design (Opus)"):** A3 and the draw path, all keyless: inlined first tests,
   a hot `State` block, the map bounce gated on its own `open_` test, shape
   and hash before flag, the hologram pass by VS bit, counters for build 5,
-  own time in the analyzer. Expected 0.33-0.53 ms. Item 3 dropped (#184).
-  Next: re-review.
+  own time in the analyzer. Expected 0.34-0.51 ms. Item 3 dropped (#184).
+  Temporary: item 7's counter line. Next: re-review 2.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -1678,11 +1678,13 @@ themselves.
    nothing before it. Three need more than a copy of the test:
    - `optimizedStationSkipsDraw` (`:2087`) evaluates two pure hash loads as
      its arguments, so the inline `g_sunOff` test goes before them;
-     `g_sunOff` needs a header accessor.
+     `g_sunOff` needs a header accessor, and the inline test is the same
+     acquire load.
    - `gpuFrameCommandIfLive` makes two independent tests: the cut is a
      forced inline, not its first test.
    - `uiLayerTargetKind`'s test reads `g_tc`, file-local to `ui_layer.cpp`;
-     it needs an inline accessor in the header.
+     it needs an inline accessor in the header, exposing either its
+     `TargetCache` type or its `gen` and `kind`.
    - Antigravity's review (checked): `gpuFrameCommandMightAct`
      (`gpu_frame_timing.h:44-46`) tests the thread-local
      `g_gpuFrameInternal` before the relaxed `g_gpuFrameCommandLive` load;
@@ -1726,8 +1728,13 @@ themselves.
    profile and across a switch (both reviews). About 0.05 ms. Mechanism:
    `open_` is private and the bounce sits behind a function-local static, so
    `FlatMapBounce` gains an inline `anyOpen()` (the same acquire load as its
-   first tests) and `flat_runtime.cpp` publishes a global pointer to it at
-   construction; a null pointer reads as nothing open. Moving the
+   first tests) and `flat_runtime.cpp` publishes a pointer to it, a
+   `std::atomic` stored with release inside the static initialiser and
+   loaded with acquire, since `hookedMap` and `hookedUnmap` reach it from
+   any thread. A null pointer reads as nothing open, which is exact even
+   though construction is lazy: `open_` rises only in `install`, which goes
+   through `mapBounce()` and so constructs it first. The object is never
+   freed, so the pointer never dangles (re-review, proven). Moving the
    `flatcpu::Scope` changes what the flat profile's own CPU report counts for
    `BeginUnmap`: it no longer times the early return.
 5. **`uiDepthOnEyeDraw`'s per-draw outputs in one struct**, reset as a
@@ -1746,7 +1753,8 @@ themselves.
    - `targetSharpWantsDraws() && targetSharpOnEyeDraw` (`:2685`): the callee
      tests the same (X, 6, 1) shape right after its flag
      (`target_sharp.cpp:317-318`); an inline `targetSharpShape` goes first
-     (Antigravity).
+     (Antigravity). Its constants move from `target_sharp.cpp:32-34` to the
+     header with it, so the shape has one definition.
    - `vscreen.cpp:1994-2000`: the two-hash VS test moves before
      `guardedBudget` (Antigravity). `bindingShaderHash` is a shadow read, and
      a spent budget skips the lambda either way (`guard.h:133-138`).
@@ -1780,20 +1788,41 @@ themselves.
 9. **The hologram pass skipped by the VS byte** (Antigravity, checked).
    `classifyHologramDraw`'s two first declines read only the vertex
    shader's hash, the exclusion list and the family lists
-   (`ui_depth.cpp:3598-3607`). A `kVsMayHoloDepth` bit in `vs_may_want.h`,
-   set when the hash is in `kHoloWorldMarkers` or `g_holoFamilies` and not
-   excluded, lets `vscreen.cpp:2513` skip the call. The skip must keep the
-   callee's one unconditional store, `g_holoEye = -1` (`:3628`), which
-   `uiDepthHologramContributionBegin` reads (`:3651`), and set
-   `t_holoDepthThisDraw` false as the call would. The bit must be a
-   superset: if `g_holoFamilies` or the exclusions can change after a VS's
-   byte is computed, the byte is recomputed then, or the bit is set for
-   every VS while they are unsettled. A skipped call stores nothing in
-   `g_holoMemo`; its key moves with the VS binding, so no later draw can hit
-   a stale entry (the memo's comment, `:3586-3589`). Own 0.06 ms
-   (`uiDepthHologramOnEyeDraw`); expected 0.03-0.05.
+   (`ui_depth.cpp:3598-3607`). Revised after the re-review: the VS byte is
+   cached per shader and never invalidated (`vs_may_want.h:6-7`,
+   `vscreen.cpp:3314-3318`), so it may hold only fixed shader-hash terms.
+   The runtime list `g_holoFamilies` is always `kHoloPanel` plus
+   `kHoloFamiliesBuiltIn` (`holoBuildFamilyList`, `ui_depth.cpp:2227-2259`,
+   checked), and empty before `holoDepthConfigure` runs, when the
+   classifier declines every draw anyway.
+   - A `kVsMayHoloDepth` bit (0x10) is set when the hash is in
+     `kHoloWorldMarkers`, is `kHoloPanel`, or is in `kHoloFamiliesBuiltIn`:
+     the constexpr lists only, a superset of the runtime list at every
+     moment. No exclusion term (`kNullPsMesh` is in neither list), so the
+     bit never clears for a listed hash.
+   - `kVsMayWantAll` becomes 0x1F, so hash 0 keeps the call: `boundVsHash`
+     can still find such a shader's real hash through `VSGetShader`
+     (`ui_depth.cpp:815-829`).
+   - `kHoloPanel` moves from `ui_depth.cpp:77` to `holo_families.h`, and the
+     header comment in `vs_may_want.h` drops UI depth from its "not in it"
+     list for the hologram pass.
+   - The skip, at `vscreen.cpp:2513`, keeps the callee's one store on a
+     decline, `g_holoEye = -1` (`ui_depth.cpp:3628`), which
+     `uiDepthHologramContributionBegin` reads (`:3651`): `g_holoEye`
+     becomes `detail::g_holoEye` with an inline setter (an out-of-line one
+     would cost the call the item removes). It sets `t_holoDepthThisDraw`
+     false, as the call returns on a decline, so #184's behaviour is
+     unchanged.
+   - A skipped call stores nothing in `g_holoMemo`. Its key repeats only
+     while the VS pointer, and so the byte, is unchanged, so a stored entry
+     came from a draw whose bit was set and no skipped draw can hit a stale
+     one (re-review, proven).
+   - Counted: a `MaskSkip::HoloDepth` count on the `draw mask:` line, as
+     build 2's byte skips are (`vscreen.cpp:5585-5588`), so the log shows
+     item 9 ran.
+   Own 0.06 ms (`uiDepthHologramOnEyeDraw`); expected 0.03-0.05.
 
-Expected total: 0.33-0.53 ms a frame of EDVR's own time (items 1, 2, 4, 5,
+Expected total: 0.34-0.51 ms a frame of EDVR's own time (items 1, 2, 4, 5,
 6 and 9), nearly all in the draw path.
 
 ### Left for build 5, each needing evidence first
@@ -1834,14 +1863,16 @@ Expected total: 0.33-0.53 ms a frame of EDVR's own time (items 1, 2, 4, 5,
 - Item 7: `edvr_log.py` parses the new line (fixture, self-test).
 - Item 8: the analyzer's tests gain an own/below case, and its own total
   equals `callerSamplesTopFrameInEdvr`.
-- Item 9: for every VS hash in either list, excluded or not, the bit agrees
-  with `classifyHologramDraw`'s first two declines; a skipped draw leaves
-  `g_holoEye` at -1.
+- Item 9: a clear bit implies `classifyHologramDraw` declines, over every
+  hash in the three lists, hash 0 and random hashes, with the runtime list
+  both empty and configured; `kVsMayWantAll` includes the bit; a skipped
+  draw leaves `g_holoEye` at -1.
 
 ### What the log shows if the new code never ran
 
 - Item 7: no new counter line.
-- Items 1, 2, 4, 5, 6, 9: nothing in the log; the profile shows it. With
+- Item 9: `draw mask:` carries no hologram-depth skip count, or 0.
+- Items 1, 2, 4, 5, 6: nothing in the log; the profile shows it. With
   item 8, the per-line own time of the changed lines falls, and the
   out-of-line callees of items 1 and 9 drop out of the own list. Today's
   lines are 1994, 2087, 2109, 2513, 2591, 2678, 2685, 2708, 4342-4345, 4361,
@@ -1864,13 +1895,17 @@ No census.
   hook, so a subtree figure loses them (Opus review). Per draw, because the
   scene and draw count move between flights; `draw mask:` counts all four
   draw thunks, which is fine for a ratio between builds. Build 3's
-  per-window spread gives a standard error of about 0.07 ms, so 0.2 ms is
-  about three of them.
+  per-window spread gives a standard error of about 0.07 ms a flight, so
+  about 0.10 ms for the difference between two flights: 0.2 ms is about two
+  of them (re-review). That is the within-flight spread only; the spread
+  between flights of the same build is not known. Item 4's part scales
+  with Map/Unmap calls, not draws, so own time a frame is reported too.
 - **Nothing changed on screen:** within flight-to-flight spread against
   build 3, `ui depth totals:` (`ui_depth.cpp:4507`), `ui quality:
   composites left in the scene:` (`ui_scene_composites.h:137`) and `vscreen
-  footprint:`; `--health` with no new NEVER APPLIED. The rest is the rig's
-  (test seams).
+  footprint:`; `--health` with no new NEVER APPLIED. Tolerance: each
+  count per full-path draw within the min-max range of build 3's own
+  windows of that line after arrival. The rest is the rig's (test seams).
 - **Nothing else rose:** no EDVR function's own time up more than 0.1 ms,
   comparing each item-1 and item-9 caller together with its former callees,
   since their tests move into the caller by design.
@@ -2022,3 +2057,18 @@ second table.
 | `g_surfaceCount != 0` gate | Exact, no saving in the concourse; with build 5's front cache |
 | Item 3 agreed | Superseded by Opus finding 1 |
 | B1: `census_skip*` cannot target the 512x512 pass | Recorded for B1 |
+
+**Re-review (Opus, fresh context, against `b2b0ee41`).** Changes required,
+one blocking finding; the first review's blocking findings 1, 2 and 7
+resolved. Notes outside the repo: `b4-rereview.md`.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | BLOCKING: item 9's "recompute the byte" has no mechanism; the byte is never invalidated; hash 0 must keep the call | Checked (`vs_may_want.h:6-7`, `:25`; `ui_depth.cpp:2227-2259`). Bit from the constexpr lists only, `kVsMayWantAll` 0x1F, test seam rewritten |
+| 2 | Item 9 otherwise exact; `g_holoEye` is file-local | Inline setter on `detail::g_holoEye` |
+| 3 | Item 4 exact; the pointer is crossed by any thread | `std::atomic`, release store, acquire load |
+| 4 | Item 6 exact; target-sharp constants live in the .cpp | Moved to the header |
+| 5 | Item 1 additions exact; `g_sunOff` is an acquire load; `g_tc` is a struct | Stated |
+| 6 | Sum is 0.34-0.51; 0.2 ms is about two SEs of a difference; item 4 scales with maps; no tolerance | All fixed in the text |
+| 7 | The item 7 line is missing from Status | Added |
+| 8 | Optional: count item 9's skips on `draw mask:` | Taken; also its never-ran signature |
