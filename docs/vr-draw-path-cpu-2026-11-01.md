@@ -45,7 +45,7 @@
   a hot `State` block, the map bounce gated on its own `open_` test, shape
   and hash before flag, the hologram pass by VS bit, counters for build 5,
   own time in the analyzer. Expected 0.34-0.51 ms. Item 3 dropped (#184).
-  Temporary: item 7's counter line. Approved on re-review 2. Next: spec, build.
+  Temporary: item 7's line. Spec #185; `c86670bd` installed. Next: flight.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
