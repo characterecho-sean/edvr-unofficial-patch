@@ -853,7 +853,7 @@ bool flatRuntimeMapOpenFrame() {
 // term can see: a walking step near it reaches the upscaler quantised.
 // The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
 // journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
-// (known and not on foot); the last gate seen is what the 5 s line reports.
+// (known and not on foot); the last gate seen is what the 30 s line reports.
 static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
 static void fillVehicleFrame(FlatMonoResolveFrame& f) {
     bool onFoot=false;
@@ -4835,16 +4835,18 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
         {
-            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root), zeros included, so a gate that never opens cannot hide.
+            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root): every 30 s (every sixth of these windows), zeros included, so a gate that never opens cannot hide.
             // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
             // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
-            // TEMPORARY (issue 186, the frame across the countdown and the tunnel): every 5 s, back to 30 s before merging.
+            static unsigned vehicleWindows=0;
+            if(++vehicleWindows%6==0) {
             VehicleFrameWindow vw;
             vehicleRigFrameWindow(&vw);
-            Log::get().note("flat vehicle frame 5s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+            Log::get().note("flat vehicle frame 30s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
                 vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,(unsigned long long)vw.fromOlder,
                 (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
                 !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
+            }
         }
         {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
@@ -7278,7 +7280,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.jitterCycle=s.phase.phaseCount;
     // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
     f.refusalView = s.refusalView ? 1u : 0u;
-    f.refusalCensus = s.refusalCensusFrames > 0 || s.refusalView;   // with the view on, the colours on screen are counted in the log too
+    f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
                       std::memory_order_release);
@@ -7715,7 +7717,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
     f.refusalView = s.refusalView ? 1u : 0u;
-    f.refusalCensus = s.refusalCensusFrames > 0 || s.refusalView;   // with the view on, the colours on screen are counted in the log too
+    f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
         f.untrustedCameraCoverage=s.untrusted.view();

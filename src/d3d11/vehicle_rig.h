@@ -24,7 +24,7 @@ struct VehicleFrameRead {
     float sphere[4] = {};   // centre xyz, radius, in the root's own frame
 };
 vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out);
-// The counts since the last call (they restart), for the flat runtime's 5 s line; the tracked rig's name and root sphere radius.
+// The counts since the last call (they restart), for the flat runtime's 30 s line; the newest ready rig's name and root sphere radius.
 // fromOlder: of `with`, the frames that came from a rig older than the one the camera target names now (the countdown and the tunnel, vframe::kRecentRigs).
 struct VehicleFrameWindow {
     uint64_t asked = 0, with = 0, fromOlder = 0, missing = 0, notAdjacent = 0, changed = 0;

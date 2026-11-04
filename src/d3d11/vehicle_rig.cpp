@@ -167,10 +167,11 @@ struct RigMemo {
 RigMemo g_memo[vr::kRigs];
 
 // ---- the vehicle frame: the recent cockpit rigs, each with its root, pose ring and sphere ---------------------------------------------------------------------------------------
-// vframe::kRecentRigs says why more than one. Slots are a circle, g_cockpitNewest the newest; a new rig takes the oldest's slot.
+// vframe::kRecentRigs says why more than one.
 struct CockpitRig {
     vframe::Ring ring;
     std::atomic<uint64_t> root{0};            // the root record's address (the first element of the rig's array); 0: not ready
+    std::atomic<uint64_t> order{0};           // larger: the camera target named it more recently
     std::atomic<uint32_t> gen{0};             // moved whenever this slot's rig, its handle or its record array changes (0: never used)
     std::atomic<uint32_t> sphereBits[4] = {}; // the root's sphere in its own frame: centre xyz, radius, as float bits
     std::atomic<uint64_t> nameWords[6] = {};  // the rig's name, 48 bytes
@@ -181,7 +182,7 @@ struct CockpitRig {
     int64_t unreadAt = 0;
 };
 CockpitRig g_cockpits[vframe::kRecentRigs];
-std::atomic<uint32_t> g_cockpitNewest{0};
+uint64_t g_cockpitOrder = 0;                  // refresh-owned
 std::atomic<uint32_t> g_cockpitGenNext{0};
 std::atomic<uint64_t> g_frameAsked{0}, g_frameWith{0}, g_frameFromOlder{0}, g_frameMissing{0}, g_frameNotAdjacent{0}, g_frameChanged{0};
 
@@ -249,19 +250,45 @@ void trackCockpit(CockpitRig& c, const vr::RigRead& rr) noexcept {
     publishCockpit(c, rr.lo, info.rootSphere, info.haveName ? info.name : "ShipCockpit");
 }
 
-// The rig the target names joins the recent list, taking the oldest's slot; a rig already there stays where it is.
+// The rig the target names is the newest in the list: one already there moves up, a new one takes an empty slot or the oldest's.
 void adoptCockpit(const Slot& s) noexcept {
-    for (const CockpitRig& c : g_cockpits)
-        if (c.I == s.I && c.h == s.h && c.E == s.E) return;
-    const uint32_t slot = (g_cockpitNewest.load(std::memory_order_relaxed) + 1) % vframe::kRecentRigs;
-    CockpitRig& c = g_cockpits[slot];
+    CockpitRig* oldest = &g_cockpits[0];
+    for (CockpitRig& c : g_cockpits) {
+        if (c.I == s.I && c.h == s.h && c.E == s.E) {
+            if (c.order.load(std::memory_order_relaxed) != g_cockpitOrder) c.order.store(++g_cockpitOrder, std::memory_order_release);
+            return;
+        }
+        if (oldest->I && (!c.I || c.order.load(std::memory_order_relaxed) < oldest->order.load(std::memory_order_relaxed))) oldest = &c;
+    }
+    CockpitRig& c = *oldest;
     retireCockpit(c);
     c.h = s.h;
     c.E = s.E;
     c.I = s.I;
     c.key = 0;
     c.unreadKey = 0;
-    g_cockpitNewest.store(slot, std::memory_order_release);
+    c.order.store(++g_cockpitOrder, std::memory_order_release);
+}
+
+// The rigs with a root, newest first; the generation before the root, as the tap reads them.
+uint32_t recentCockpits(CockpitRig** rigs, uint32_t* gens) noexcept {
+    uint64_t orders[vframe::kRecentRigs] = {};
+    uint32_t n = 0;
+    for (CockpitRig& c : g_cockpits) {
+        const uint32_t gen = c.gen.load(std::memory_order_acquire);
+        if (!c.root.load(std::memory_order_acquire)) continue;
+        const uint64_t order = c.order.load(std::memory_order_acquire);
+        uint32_t at = n++;
+        for (; at > 0 && orders[at - 1] < order; --at) {
+            orders[at] = orders[at - 1];
+            rigs[at] = rigs[at - 1];
+            gens[at] = gens[at - 1];
+        }
+        orders[at] = order;
+        rigs[at] = &c;
+        gens[at] = gen;
+    }
+    return n;
 }
 
 // Every recent rig is re-read: one that is ready keeps its root current, one that is not has no root, and one that is gone for good leaves the list.
@@ -578,21 +605,11 @@ vframe::Why vehicleRigFrameTake(uint32_t stamp, VehicleFrameRead* out) {
     g_frameAsked.fetch_add(1, std::memory_order_relaxed);
     vframe::Why why = vframe::Why::kMissing;
     if (g_live.load(std::memory_order_acquire)) {
-        // Newest first, the ones with a root; the generation before the root, as the tap reads them.
-        const vframe::Ring* rings[vframe::kRecentRigs] = {};
-        uint32_t gens[vframe::kRecentRigs] = {};
         CockpitRig* rigs[vframe::kRecentRigs] = {};
-        uint32_t n = 0;
-        const uint32_t newest = g_cockpitNewest.load(std::memory_order_acquire);
-        for (uint32_t i = 0; i < vframe::kRecentRigs; ++i) {
-            CockpitRig& c = g_cockpits[(newest + vframe::kRecentRigs - i) % vframe::kRecentRigs];
-            const uint32_t gen = c.gen.load(std::memory_order_acquire);
-            if (!c.root.load(std::memory_order_acquire)) continue;
-            rings[n] = &c.ring;
-            gens[n] = gen;
-            rigs[n] = &c;
-            ++n;
-        }
+        uint32_t gens[vframe::kRecentRigs] = {};
+        const uint32_t n = recentCockpits(rigs, gens);
+        const vframe::Ring* rings[vframe::kRecentRigs] = {};
+        for (uint32_t i = 0; i < n; ++i) rings[i] = &rigs[i]->ring;
         uint32_t chosen = 0;
         why = vframe::selectRecent(rings, gens, n, stamp, &out->frame, &chosen);
         if (why == vframe::Why::kOk) {
@@ -624,10 +641,10 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out) {
     out->fromOlder = g_frameFromOlder.exchange(0, std::memory_order_relaxed);
     out->live = g_live.load(std::memory_order_acquire);
     // The newest rig that has a root.
-    const uint32_t newest = g_cockpitNewest.load(std::memory_order_acquire);
-    for (uint32_t i = 0; i < vframe::kRecentRigs; ++i) {
-        const CockpitRig& c = g_cockpits[(newest + vframe::kRecentRigs - i) % vframe::kRecentRigs];
-        if (!c.root.load(std::memory_order_relaxed)) continue;
+    CockpitRig* rigs[vframe::kRecentRigs] = {};
+    uint32_t gens[vframe::kRecentRigs] = {};
+    if (recentCockpits(rigs, gens)) {
+        const CockpitRig& c = *rigs[0];
         uint64_t w[6];
         for (int k = 0; k < 6; ++k) w[k] = c.nameWords[k].load(std::memory_order_relaxed);
         std::memcpy(out->name, w, 48);
@@ -635,7 +652,6 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out) {
         const uint32_t b = c.sphereBits[3].load(std::memory_order_relaxed);
         std::memcpy(&out->sphereRadius, &b, 4);
         out->rigKnown = true;
-        break;
     }
 }
 
