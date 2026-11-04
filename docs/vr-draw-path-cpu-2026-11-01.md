@@ -43,9 +43,9 @@
   #184 undetermined (no blocked return), as expected.
 - **Build 6 ("Build 6: one interest mask"):** S1 as a write-through mask; S2
   and #184 with the pending flags (both approved 2026-11-04); build 5's items
-  2-3 removed. Argon agreed; Opus approved on re-review. Spec #191;
-  `d5135e52` built (the mask is atomic: teardown writes off-thread). Next:
-  flight.
+  2-3 removed. Argon agreed; Opus approved on re-review. Spec #191,
+  `d5135e52`. Flown 2026-11-04: S2 cut eye-memo misses 45% (about 0.08 ms);
+  S1 saved nothing (ruled out); total unchanged at 283 ns a draw.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -3266,3 +3266,56 @@ on the committed tree.
 - **Environment:** a profile-symbols build needs `EDVR_TRACE_EVENT_DIR` set
   to the Build Tools' `Common7\IDE\PrivateAssemblies`; `cpu_profile.py
   --build-analyzer` looks only under `C:\Program Files`.
+
+## Flight 2026-11-04 (build 6)
+
+Build `d5135e52` (log `edvr_gfx_20261104_113631.log`, `--expect-build HEAD`
+matches), the L2 spot, standing still, DLAA, one 100 s capture. `--health`
+exits 0: no NEVER APPLIED. Notes outside the repo: `profile-b6\cmp6.py`.
+One full on-foot log window, 11:39:12-11:40:15: 17,450 full-path draws a frame
+(build 5: 16,308), spanning profile windows 3-14.
+
+**The total did not move.** Own time per full-path draw 283.5 ns (SE 3.2, 13
+windows) in build 5, 283.3 ns (SE 2.5, 12 windows) in build 6; without
+Map/Unmap 246.2 and 246.0. The difference is under a tenth of its standard
+error.
+
+**Per item**, ns per full-path draw:
+- **S2: passed.** Eye-memo misses per full-path draw 0.175 to 0.097 (-45%;
+  1,683 a frame, against 2,859), expected about 40%. `viewIsSurface` with its
+  callers 9.81 to 6.71, the binding shadow 5.62 to 3.89: about 0.08 ms a frame.
+- **S1, the interest mask: failed, it saved nothing.** The drift check ran
+  30,666 times in the window with 0 mismatches and 14 of the 30 bits set, so it
+  ran and was exact. But each flag test it replaced cost the same as the bit
+  test that replaced it, line for line in `forwardWithVerdict` (matched by
+  source text): `uiLayerIssueBlocked()` 1.48 and 1.26 to 1.41 and 1.41,
+  `celestialMotionLive()` 1.32 to 1.07, `nativeOnFootLabelPending()` 1.10 to
+  1.61, `uiLayerLive()` 0.94 to 2.52. `beginPanelOverride` with
+  `uiDepthOnEyeDraw` 44.4 to 43.7, which is item 5's undo and nothing more.
+- **`forwardWithVerdict` and the thunk lambdas rose** 56.5 to 65.1 (+0.15 ms),
+  most of it on lines with no new work: 6.7 on `drawReissuesFor` (four
+  compares of a stack struct) and +4.1 on an unchanged `screenMotionLive()`
+  test in the thunk. That is where samples land after the game's draw returns,
+  not a cost of those lines; it offsets S2's saving and item 3's TLS removal.
+- **Item 3 (#184):** fixed by construction; no counter, as planned.
+- **Item 5:** as expected, neutral.
+
+**Nothing changed on screen.** Composites left in the scene: 0 in every
+window. `ui depth totals:` wrote 14.0 interface draws a frame (left alone
+32.7), the top of the arc's spread, where builds 1 and 2 sat for minutes.
+GPU timing queries 76.0 a frame (build 5: 75.2, build 4: 74.8).
+
+**Why S1 failed.** Build 5's items 2 and 3 were read as cold loads; S1 was
+built on that reading. It is wrong: at 17,000 draws a frame every flag's cache
+line stays resident, so a flag test is one L1 load, and so is a bit test (a
+relaxed atomic load of `interest` after a load of `g_state`, which the
+compiler cannot merge across sites). The per-line costs in build 5 that
+looked like stalls are where the sampler charges the instructions after a
+call into the driver, and they move when the code around them moves.
+
+- ruled out: a write-through interest mask as a cut (S1), because the flags it
+  replaced were already L1-resident; each bit test costs what the flag test
+  did.
+- ruled out: reading a per-line own-time peak just after a forwarded D3D call
+  as that line's cost; it moves with layout (build 5 `:4751`, build 6
+  `:4694`).
