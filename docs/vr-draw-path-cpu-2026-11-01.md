@@ -34,17 +34,18 @@
   against 13,480). Ruled out: item 4's map-bounce calls as a cost (under 0.02
   ms). Item 7: PS SRV re-sets 53-63% of sets, RTV0/DSV0 6-7%; `mapMemo` misses
   17%.
-- **Build 5 (designed 2026-11-03, "Build 5: the per-draw calls that decline at
-  once"; consensus reached 2026-11-04):** star glow's call gated inline,
-  `uiDepthOnEyeDraw`'s memo hit inline, a `viewIsSurface` front cache, one
-  engine-velocity generation; temporary counts for #184 (all three flags) and
-  S2 (would-hit and would-disagree); the cross-profile probe's count without
-  a locked add. Expected 0.22-0.36 ms. Argon agreed; Opus asked for four
-  rig and counter fixes, taken, and approved on re-review. Spec #187;
-  `85006708` installed. Next: flight.
+- **Build 5 (#187, `85006708`; "Build 5: the per-draw calls that decline at
+  once"):** star glow gated inline, `uiDepthOnEyeDraw` inline, a
+  `viewIsSurface` front cache, one engine-velocity generation, a plain probe
+  count; temporary counts for #184 and S2. Argon and Opus (re-review) agreed.
+- **Build 5 flown (2026-11-04, "Flight 2026-11-04 (build 5)"):** passed, 0.34
+  ms a frame (304 to 283 ns a draw). Star glow, engine velocity and the plain
+  count saved; ruled out: items 2 and 3 as cuts (each moved a cold load, which
+  was the cost). S2 cleared: 40% of eye-memo misses, 0 disagreements in 8.1M.
+  #184 undetermined (no blocked return), as expected.
 - **Build 6 (draft 2026-11-04, "Build 6: one interest mask"):** S1 as a
-  write-through mask, S2 if build 5's counts allow, #184 (asked), the
-  temporary lines retired.
+  write-through mask, S2, #184 (asked), the temporary lines retired. Next:
+  the maintainer's answers, then Argon and Opus review.
 - **Confirmed (item 1):** with AA off and the key off, every world draw is held
   as not scene depth, the tee never goes fast and F113 reports `none` 100%. Key
   on: fast path 36-46%, F113 scene meshes 94%.
@@ -2639,6 +2640,92 @@ Item 7 re-sized from build 4's own log: `psConstantBuffers=2598726/78.97`
 over 805 frames, about 3,230 PS constant-buffer binds a frame, so the 0.096
 ms is about 30 ns a call, of which the locked add is part. Expected
 0.03-0.06 ms; the build's total 0.22-0.36.
+
+## Flight 2026-11-04 (build 5)
+
+Build `85006708` (log `edvr_gfx_20261104_092014.log`, `--expect-build HEAD`
+matches), the L2 spot, standing still, DLAA, one 100 s capture (20 windows of 5
+s). Notes outside the repo: `profile-b5\cmp5.py`, `dig5.py`.
+
+**Draw count.** One full on-foot log window, 09:23:05-09:24:06: 16,308
+full-path draws a frame (build 4: 17,148). It spans profile windows 3-15, which
+are the ones used per draw. Windows 16-20 have no closed log window; their own
+time a frame (4.37-4.98 ms) is in the same range as 3-15's (4.37-5.10).
+
+**The cut: passed, 0.34 ms a frame.** EDVR's own time in R1:
+
+| | Build 4 (w7-20) | Build 5 (w3-15) |
+|---|---|---|
+| Own, ms a frame | 5.215 | 4.622 |
+| Own per full-path draw | 304.1 ns | 283.4 ns |
+| Without Map/Unmap own | 267.3 ns | 246.2 ns |
+| At build 5's draw count (16,308), without Map/Unmap | | cut **0.34 ms** (0.36 at build 4's count) |
+
+Expected 0.22-0.36 ms. Map and Unmap own fell 0.631 to 0.606 ms a frame.
+
+**Per item**, ns per full-path draw (ms a frame at 16,308), each caller grouped
+with its callees:
+- **Item 1, star glow: passed.** `starGlowAfterDraw` 7.25 and
+  `vrStarGlowAfterDraw` 2.38 to 0, 0.157 ms. The draw-thunk lambdas (renamed
+  by the compiler, grouped by file) fell 59.1 to 51.4 ns, 0.125 ms, mostly the
+  call they no longer make.
+- **Item 2, `uiDepthOnEyeDraw` inline: no saving.** Build 4's cost in the
+  callee sat on one line, `ui_depth.cpp:2895` (4.99 ns, the load of
+  `g_uiDepthOn`); inlined, the same load lands in `beginPanelOverride`, which
+  rose 35.9 to 42.0 ns. Callee, miss path and caller: 42.4 to 44.4 ns (+0.03
+  ms).
+- **Item 3, the `viewIsSurface` front cache: no saving.** It hit 64% of 10,312
+  lookups a frame, yet `viewIsSurface` 6.43 became `viewIsSurfaceFront` 6.23,
+  with its callers 9.56 to 9.81 ns. The cost is at the miss's memo lookup
+  (`ui_depth.cpp:904`, 4.29 ns): 3,746 misses a frame at about 19 ns each,
+  against about 10 ns a call before. The calls the cache took were the cheap,
+  cache-hot repeats; the cost was the cold ones, which still miss.
+- **Item 4, engine velocity: passed.** `engineVelocityBeforeDraw` 8.59 to 5.55
+  ns (0.05 ms), its compare line 4.32 to 2.74.
+- **Item 7, the plain count: passed, small.** `hookedPSSetConstantBuffers`
+  6.46 to 5.65 ns (0.013 ms; expected 0.03-0.06).
+
+**Nothing else rose more than 0.1 ms**, grouped as above. New in the profile:
+a `std::unordered_map` lookup keyed on pixel shaders, 0.057 ms, mostly under
+`hookedUnmap` through `uiDepthMotionResourceWrittenImpl`. It is an inlining
+change, not new work: build 4's engine-velocity hash (0.058) left the profile,
+and Map and Unmap's own time fell.
+
+**Nothing changed on screen.**
+- Composites left in the scene: 0 in every window.
+- `ui depth totals:` wrote depth for 9.0 interface draws a frame (left alone
+  36.9), outside build 4's 5.9-6.6. It is the scene, not the build: at this
+  spot, standing still, every flight in the arc has ranged from 3.8 to 14.0
+  a frame (build 3: 6.0), and the share written (20%) is
+  within build 4's 17-26%. Build 4's two windows set too narrow a range for the
+  criterion; future flights judge against the arc's spread.
+- `--health`: one NEVER APPLIED, prompt label draws (F87p). It is not new: all
+  six earlier logs since `e1606a23` in which a prompt's focus key was set
+  drew 0 label groups; build 4's flight never set one.
+
+**Item 6: the counts for build 6** (window ending 19800, a frame):
+- **S2: cleared to build.** The eye memo missed 2,859 times a frame. The
+  pointer-only key would have hit on 1,133 of those (40%), with 0
+  disagreements; over the flight, 0 in 8,089,837 eye and 11,199 hologram shadow lookups. Shadow
+  lookups equal real misses in every window. The hologram memo: 3 misses a
+  frame, 0 would-hits, so S2 does nothing there.
+- **#184: undetermined**, as expected: 0 blocked owner returns in 29,354,697
+  scope constructions.
+- `viewIsSurface` calls 3,746, front-cache lookups 10,312 (hits 6,566),
+  engine velocity's slow half 1,710.
+
+**What items 2 and 3 say about build 6.** Both moved work without removing a
+cold load, and the cold load was the cost. That is S1's premise: what an
+unclaimed draw pays for is the cache lines it touches, not the instructions.
+S2 attacks the other half of item 3: it removes whole classifier runs, and
+with them the cold `viewIsSurface` misses inside.
+
+- ruled out: inlining `uiDepthOnEyeDraw`'s fast path as a cut, because its
+  cost is the first load of the ui-depth state, which moved with it into
+  `beginPanelOverride`.
+- ruled out: a per-slot front cache for `viewIsSurface` as a cut, because it
+  takes only the cache-hot repeat lookups; the cost is in the misses, which it
+  cannot avoid.
 
 ## Build 6: one interest mask, S2 by its counts, #184, and the arc's temporary lines retired (designed 2026-11-04, draft)
 
