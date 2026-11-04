@@ -21,6 +21,7 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <thread>
@@ -196,13 +197,18 @@ inline void ringAndGateTests() {
         Ring ring;
         std::atomic<bool> stop{false};
         std::thread writer([&] { for (uint32_t i = 1; !stop.load(); ++i) { Pose p; for (int k = 0; k < 3; ++k) p.pos[k] = i; p.quat[0] = p.quat[1] = i; ring.record(100, 1, p); } });
+        // The count starts at the writer's first entry and the loop is bounded by time, not reads: on a loaded build machine the writer can start after a fixed number of reads has gone by.
         bool mixed = false; uint64_t got = 0;
-        for (int i = 0; i < 200000; ++i) {
-            Entry e;
-            if (ring.read(100, &e)) { ++got; mixed = mixed || e.pose.pos[0] != e.pose.pos[1] || e.pose.pos[1] != e.pose.pos[2] || e.pose.pos[2] != e.pose.quat[0] || e.pose.quat[0] != e.pose.quat[1]; }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (got < 20000 && std::chrono::steady_clock::now() < deadline) {
+            for (int i = 0; i < 1024; ++i) {
+                Entry e;
+                if (ring.read(100, &e)) { ++got; mixed = mixed || e.pose.pos[0] != e.pose.pos[1] || e.pose.pos[1] != e.pose.pos[2] || e.pose.pos[2] != e.pose.quat[0] || e.pose.quat[0] != e.pose.quat[1]; }
+            }
         }
         stop = true; writer.join();
-        check(!mixed && got > 0, "vehicle ring: a read that overlaps a write is refused, never mixed");
+        check(!mixed, "vehicle ring: a read that overlaps a write is refused, never mixed");
+        check(got > 0, "vehicle ring: the stress read at least one whole entry, so it tested something");
     }
     check(gate(false, false) == Gate::kNoStatus && gate(false, true) == Gate::kNoStatus, "vehicle gate: an unknown status is off(no-status), whatever the flag says");
     check(gate(true, true) == Gate::kOnFoot && gate(true, false) == Gate::kOn, "vehicle gate: on foot is off(on-foot), in a vehicle on");
