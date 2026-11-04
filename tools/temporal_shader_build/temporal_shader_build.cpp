@@ -119,6 +119,7 @@ struct LegacyContract {
 #include "fixed_desktop_window_variants.h"
 #include "fixed_scope_zoom_variants.h"
 #include "fixed_srv_turret_variants.h"
+#include "fixed_galaxy_map_variants.h"
 #include "../../src/d3d11/srv_turret_math.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
@@ -349,6 +350,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), scopeZoom.begin(), scopeZoom.end());
     const auto srvTurret = srvTurretHudVariants();
     variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());
+    const auto galaxyMap = galaxyMapVariants();
+    variants.insert(variants.end(), galaxyMap.begin(), galaxyMap.end());
     return variants;
 }
 
@@ -634,8 +637,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 90 && coreLegacy.size() + 43 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's eleven geometry shaders are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 95 && coreLegacy.size() + 48 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes the SRV turret HUD's eleven geometry shaders and the VR Galaxy Map's five (three transcribed vertex shaders, the probe's vertex and pixel shader) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1260,6 +1263,62 @@ static void selfTest() {
                           sceneBind.BindCount == 1 && sceneBuffer && SUCCEEDED(sceneBuffer->GetDesc(&sceneDesc)) && sceneDesc.Size == 16u * stm::kSceneRows,
                           "...signature H's GameVS is the draw's vertex constants at b1, 280 registers, so rows 277 to 279 are in range");
                 }
+            }
+        }
+    }
+
+    // The VR Galaxy Map's replacement shaders (src/d3d11/galaxy_map_vs.h): new, held to their own contract -- the symbol, source name, entry, profile and flags, the
+    // text each compiles, the stage, and the resources the DXBC reflects (the game's own b0, b1 (and b2 for the uv form) at the sizes the originals declare, the record
+    // buffer at t33 with its 336-byte stride and the bones at t38 with 48 where the original reads them). The probe's pair reads the record at t33 and the mask at t0.
+    {
+        struct MapShader { const char* symbol; const char* sourceName; const char* source; const char* profile; UINT b0, b1, b2; bool bones; };
+        const MapShader maps[5] = {
+            {"kMapIconFacingVsBytecode", "map_icon_facing_vs", edvr::kMapIconFacingVS, "vs_5_0", 12, 279, 0, true},
+            {"kMapIconUvFacingVsBytecode", "map_icon_uv_facing_vs", edvr::kMapIconUvFacingVS, "vs_5_0", 12, 279, 2, true},
+            {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, true},
+            {"kMapProbeVsBytecode", "map_probe_vs", edvr::kMapProbeVS, "vs_5_0", 8, 276, 0, false},
+            {"kMapProbePsBytecode", "map_probe_ps", edvr::kMapProbePS, "ps_5_0", 0, 0, 0, false},
+        };
+        for (size_t i = 0; i < 5; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 43 + i];
+            check(!std::strcmp(shader.symbol, maps[i].symbol) && !std::strcmp(shader.sourceName, maps[i].sourceName) && !std::strcmp(shader.entry, "main") &&
+                  !std::strcmp(shader.profile, maps[i].profile) && shader.alternate == maps[i].source && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each Galaxy Map shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each Galaxy Map shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+                const unsigned want = maps[i].profile[0] == 'v' ? D3D11_SHVER_VERTEX_SHADER : D3D11_SHVER_PIXEL_SHADER;
+                bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == want && D3D11_SHVER_GET_MAJOR(desc.Version) == 5;
+                UINT expected = 0;
+                struct Cb { const char* name; UINT slot, rows; };
+                const Cb cbs[] = {{"CB0", 0, maps[i].b0}, {"CB1", 1, maps[i].b1}, {"CB2", 2, maps[i].b2}};
+                for (const Cb& c : cbs) {
+                    if (!c.rows) continue;
+                    ++expected;
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    D3D11_SHADER_BUFFER_DESC bd{};
+                    ID3D11ShaderReflectionConstantBuffer* cb = ok ? reflection->GetConstantBufferByName(c.name) : nullptr;
+                    ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName(c.name, &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == c.slot && cb &&
+                         SUCCEEDED(cb->GetDesc(&bd)) && bd.Size == c.rows * 16;
+                }
+                if (i < 4) {
+                    ++expected;
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("T33", &bind)) && bind.Type == D3D_SIT_STRUCTURED && bind.BindPoint == 33;
+                } else {
+                    ++expected;
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("Mask", &bind)) && bind.Type == D3D_SIT_TEXTURE && bind.BindPoint == 0;
+                }
+                if (maps[i].bones) {
+                    ++expected;
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("T38", &bind)) && bind.Type == D3D_SIT_STRUCTURED && bind.BindPoint == 38;
+                }
+                check(ok && desc.BoundResources == expected, "each Galaxy Map shader binds the game's b0/b1 (and b2) at the originals' sizes, the records at t33 and the bones at t38, or the probe's t33 and mask at t0, and nothing else");
             }
         }
     }

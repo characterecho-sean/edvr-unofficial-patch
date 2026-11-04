@@ -17,8 +17,6 @@ constexpr float kFarDistance = 100000.0f;
 // The arrow's drawn position, measured in the UI frame: |P| = 1.03. Anything outside this band is not the arrow.
 constexpr float kArrowMin = 0.1f;
 constexpr float kArrowMax = 10.0f;
-// A call to the projector with a point this close to the camera is a second test of the pointer (a click), not a star.
-constexpr float kNearCamera = 10.0f;
 
 enum class Why : uint8_t { kOk, kBadPose, kBadArrow };
 
@@ -41,25 +39,9 @@ inline Why farPoint(const float rows[3][3], const float position[3], const float
     return Why::kOk;
 }
 
-// rel in the map's axes: a = rel . rows[0], b = rel . rows[1], c = rel . rows[2].
+// rel in the map's axes: a = rel . rows[0], b = rel . rows[1], c = rel . rows[2] (the rig checks the far point's direction with it).
 inline void inMapAxes(const float rows[3][3], const float rel[3], float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = rel[0] * rows[i][0] + rel[1] * rows[i][1] + rel[2] * rows[i][2];
-}
-
-// num / den, or NaN when den is too small to carry a ratio.
-inline float ratio(float num, float den) {
-    return std::fabs(den) < 1e-4f ? std::nanf("") : num / den;
-}
-
-// Is `point` within `limit` of the camera's position?
-inline bool nearCamera(const float point[3], const float position[3], float limit) {
-    float s = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        if (!finite(point[i]) || !finite(position[i])) return false;
-        const float d = point[i] - position[i];
-        s += d * d;
-    }
-    return s < limit * limit;
 }
 
 // ---- the generated code ------------------------------------------------------------------------------------------------------------------------------

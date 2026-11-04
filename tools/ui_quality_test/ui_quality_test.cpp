@@ -93,6 +93,7 @@
 #include "../../src/d3d11/ui_layer_math.h"
 #include "../../src/d3d11/map_camera_core.h"       // the VR map camera's publisher and the open hold
 #include "../../src/d3d11/galaxy_map_pointer_core.h" // the Galaxy Map hover's far point and the two relays' bytes
+#include "../../src/d3d11/galaxy_map_ui.h"           // the Galaxy Map's panel mask and probe: the hashes and the two blend states
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
 #include "../../src/d3d11/ui_sizing_math.h"
@@ -2996,8 +2997,7 @@ void testSupercruiseLines() {
         bool direction = true;
         for (int i = 0; i < 3; ++i) direction = direction && std::fabs(axes[i] / edvr::mappointer::kFarDistance - arrow[i] / arrowLength) < 2e-3f;
         check(direction, "GP3: in the map's axes the far point has the arrow's direction (rel . row i = 100000 * P_i / |P|)");
-        check(std::fabs(edvr::mappointer::ratio(axes[0], arrow[0]) - edvr::mappointer::kFarDistance / arrowLength) < 500.0f && std::isnan(edvr::mappointer::ratio(1.0f, 0.0f)),
-              "GP4: the check's ratio is the gain 100000 / |P| on an axis, and NaN where the arrow's component is zero");
+        check(std::fabs(axes[0] / arrow[0] - edvr::mappointer::kFarDistance / arrowLength) < 500.0f, "GP4: on an axis the far point is the arrow scaled by 100000 / |P|");
         const float tiny[3] = {0.01f, 0.0f, 0.02f}, large[3] = {10.0f, 10.0f, 10.0f}, nonFinite[3] = {std::nanf(""), 0.0f, 1.0f};
         float sink[4];
         check(edvr::mappointer::farPoint(rows, position, tiny, 1.0f, sink) == edvr::mappointer::Why::kBadArrow && edvr::mappointer::farPoint(rows, position, large, 1.0f, sink) == edvr::mappointer::Why::kBadArrow &&
@@ -3009,10 +3009,6 @@ void testSupercruiseLines() {
         const float badPosition[3] = {position[0], std::numeric_limits<float>::infinity(), position[2]};
         check(edvr::mappointer::farPoint(badRows, position, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose && edvr::mappointer::farPoint(rows, badPosition, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose,
               "GP6: a non-finite pose is refused");
-        const float nearPoint[3] = {position[0] + 1.0f, position[1] - 2.0f, position[2] + 3.0f}, starAt[3] = {position[0] + 60.0f, position[1], position[2]};
-        check(edvr::mappointer::nearCamera(nearPoint, position, edvr::mappointer::kNearCamera) && !edvr::mappointer::nearCamera(starAt, position, edvr::mappointer::kNearCamera) &&
-                  !edvr::mappointer::nearCamera(nonFinite, position, edvr::mappointer::kNearCamera),
-              "GP7: a point within 10 units of the camera is a second test of the pointer; a star's distance, 60, is not");
         uint8_t gate[edvr::mappointer::kGateRelayBytes];
         std::memset(gate, 0xCC, sizeof(gate));
         int cell = 0, callback = 0;
@@ -3043,12 +3039,55 @@ void testSupercruiseLines() {
         };
         const std::string hook = slurp("src/d3d11/device_hook.cpp"), screen = slurp("src/d3d11/vscreen.cpp"), pointer = slurp("src/d3d11/galaxy_map_pointer.cpp");
         check(hook.find("tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });") != std::string::npos, "GP10: the map camera's tick runs mapPointerFrame right after mapCameraFrame");
-        const size_t rollFree = screen.find("} rollFreeScope{self};"), mapScope = screen.find("} mapUiDepthScope{self};"), skip = screen.find("if (v == DrawVerdict::kSkip) {", rollFree);
-        check(rollFree != std::string::npos && mapScope > rollFree && mapScope < skip && screen.find("v != DrawVerdict::kSkip && mapUiDepthOpen()") != std::string::npos,
-              "GP11: forwardWithVerdict declares the map's UI depth scope after the roll-free scope (so it restores first) and binds only on a draw that is not skipped");
+        const size_t rollFree = screen.find("} rollFreeScope{self};"), swapScope = screen.find("} mapSwapScope{self};"), skip = screen.find("if (v == DrawVerdict::kSkip) {", rollFree);
+        check(rollFree != std::string::npos && swapScope > rollFree && swapScope < skip && screen.find("v != DrawVerdict::kSkip && mapui::vrOpen()") != std::string::npos &&
+                  screen.find("~MapSwapScope() { if (on) mapui::swapEnd(ctx); }") != std::string::npos,
+              "GP11: forwardWithVerdict declares the map's shader swap scope after the roll-free scope (so it restores first), swaps only on a draw that is not skipped, and puts the game's shader back on every way out");
         check(pointer.find("gameRvasFound(kRvas") != std::string::npos && pointer.find("gamePinMatches(kProjectRva") != std::string::npos && pointer.find("gamePinMatches(kCursorRva") != std::string::npos && pointer.find("gamePinMatches(kPointerReturnRva") != std::string::npos && pointer.find("armed.store(true") != std::string::npos &&
                   pointer.find("_ReturnAddress()") != std::string::npos,
               "GP12: the pointer resolves its addresses through the signature table, pins their bytes, arms once both hooks are in, and reads the caller's return address");
+        // Part 3 of the 11-04 build: the self-check is retired, and the copy route with it.
+        check(pointer.find("logCheck") == std::string::npos && pointer.find("selfCheckDue") == std::string::npos && pointer.find("noteOtherCaller") == std::string::npos &&
+                  pointer.find("otherReturn") == std::string::npos && pointer.find("kNearCamera") == std::string::npos,
+              "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
+        check(pointer.find("if (caller != s.pointerReturn) return original(k, in, idx, out);") != std::string::npos,
+              "GP14: any caller but the pointer's goes straight to the original projector");
+        std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);
+        check(!copyRoute.good() && screen.find("map_ui_depth.h") == std::string::npos && screen.find("mapuidepth") == std::string::npos && pointer.find("mapuidepth") == std::string::npos &&
+                  pointer.find("map_ui_depth.h") == std::string::npos,
+              "GP15: the constant-buffer copy route (map_ui_depth.h) and its scope are gone: the panels run as the game made them");
+        check(pointer.find("draws swapped: icons C31238") != std::string::npos && pointer.find("panel draws issued into the mask") != std::string::npos &&
+                  pointer.find("probes made") != std::string::npos && pointer.find("answered") != std::string::npos && pointer.find("frames over a panel") != std::string::npos,
+              "GP16: the 30 s line says the swaps per shader, the mask issues, the probes made and answered, the frames over and not over, and the declines");
+        // The second issues: the mask and the probe sit after the layer's own, write-back included, behind the one relaxed load.
+        const size_t second = screen.find("void uiLayerSecondIssues("), writeBack = screen.find("uiLayerWriteBackEnd(self);", second), mapCall = screen.find("if (mapui::pointerOpen()) mapSecondIssues(self, kind, count, instances, args, census);", second);
+        check(second != std::string::npos && writeBack != std::string::npos && mapCall > writeBack && mapCall < screen.find("// Issue 140", second) &&
+                  screen.find("uiLayerMapMaskBegin(self, &issue)") != std::string::npos && screen.find("uiLayerMapProbeBegin(self, &issue)") != std::string::npos &&
+                  screen.find("pureDrawReissue(d.self, d.kind, 1, d.instances, *d.args);") != std::string::npos,
+              "GP17: the second-issue path issues the panel into the mask and, for the arrow, one point (index count 1, the draw's own start index, base vertex and start instance) after the layer's own issues");
+        // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
+        const std::string layer = slurp("src/d3d11/ui_layer.cpp");
+        check(layer.find("makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)") != std::string::npos && layer.find("if (e.maskSeq != seq) {") != std::string::npos &&
+                  layer.find("const bool mapIssue = which >= 2;") != std::string::npos && layer.find("const bool needsDs = !mapIssue &&") != std::string::npos &&
+                  layer.find("if (!mapui::pointerOpen() && (g_eye[0].maskTex || g_eye[1].maskTex)) {") != std::string::npos &&
+                  layer.find("g_draw.vsHash != mapui::kVsArrow") != std::string::npos && layer.find("!mapui::isPanelVs(g_draw.vsHash)") != std::string::npos,
+              "GP18: the layer makes the mask A8_UNORM at (e.w, e.h), clears it by the frame sequence, binds no depth for the map's issues, lets the mask go at the frame boundary once the map is shut, and names the panel and arrow shaders by the game's hash");
+        // The shader swap is raw (the binding shadow keeps naming the game's), a failed creation leaves the game's, and the probe restores its state after a fault.
+        const std::string ui = slurp("src/d3d11/galaxy_map_ui.cpp");
+        check(ui.find("vScreenVSSetShaderRaw(ctx, ours, nullptr, 0);") != std::string::npos && ui.find("if (!ours) return false;") != std::string::npos &&
+                  ui.find("guarded(\"galaxy map probe restore\"") != std::string::npos && ui.find("ctx->IASetPrimitiveTopology(topology);") != std::string::npos &&
+                  ui.find("vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &srv0);") != std::string::npos && ui.find("D3D11_ASYNC_GETDATA_DONOTFLUSH") != std::string::npos &&
+                  ui.find("noteUnavailable(\"the occlusion query\")") != std::string::npos && ui.find("GetData(", ui.find("GetData(") + 1) == std::string::npos,
+              "GP19: the swap is through the raw setter, a failed creation leaves the game's shader, the probe puts topology, shaders and t0 back after a fault and never waits on its query");
+        check(edvr::mapui::isPanelVs(0xC4B4B334B26E81A9ull) && edvr::mapui::isPanelVs(0xB10B032BDFD46700ull) && edvr::mapui::isPanelVs(0x5DAD41AA66757CE3ull) && !edvr::mapui::isPanelVs(edvr::mapui::kVsArrow) &&
+                  edvr::mapui::panelIndex(0x5DAD41AA66757CE3ull) == 2 && edvr::mapui::panelIndex(edvr::mapui::kVsArrow) == -1,
+              "GP20: the three panel shaders are the mask's, the arrow's is not");
+        const D3D11_BLEND_DESC maskBlend = edvr::mapui::maskBlendDesc(), probeBlend = edvr::mapui::probeBlendDesc();
+        const D3D11_RENDER_TARGET_BLEND_DESC& mb = maskBlend.RenderTarget[0];
+        check(mb.BlendEnable && mb.SrcBlend == D3D11_BLEND_ONE && mb.DestBlend == D3D11_BLEND_ZERO && mb.BlendOp == D3D11_BLEND_OP_ADD && mb.SrcBlendAlpha == D3D11_BLEND_ONE &&
+                  mb.DestBlendAlpha == D3D11_BLEND_INV_SRC_ALPHA && mb.BlendOpAlpha == D3D11_BLEND_OP_ADD && mb.RenderTargetWriteMask == D3D11_COLOR_WRITE_ENABLE_ALPHA &&
+                  !probeBlend.RenderTarget[0].BlendEnable && probeBlend.RenderTarget[0].RenderTargetWriteMask == 0,
+              "GP21: the mask accumulates the panels' alpha (source alpha ONE, destination alpha INV_SRC_ALPHA, add, colour ONE/ZERO, write mask ALPHA) and the probe writes nothing (write mask 0)");
     }
 
     UiDsState normalDs;  // depth tested, no write; no stencil

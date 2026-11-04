@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): all four reported symptoms have a named cause; fixes 1, 2 and 3 are BUILT on branch `claude/galaxy-map-motion-cursor-e864cb`, full build green, NOT FLOWN, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Two reports from that flight, both BUILT on branch `claude/galaxy-map-motion-cursor-e864cb`, full build green, NOT FLOWN, not merged: panels back at the game's depth with the arrow choosing its depth by a panel mask; icons and labels facing the eye (see "After the first flight").
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -13,15 +13,19 @@ Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log 
 | Cursor does not select stars | Arrow is at about 1 m on the panel shell; the hover uses a different point, about 1.83 times the arrow's angle | Arrow MEASURED; hover gain INFERRED, fits better than gain 1 | Hover from the arrow's direction, far away; arrow and panels at star depth |
 | Moving the headset changes the system | The hover point and the arrow are near, the stars are at infinity. The head's move between dumps carried the eyes 6.7 cm (about 0.065 tan at 1 m); labelled stars near the pointer are 0.02 to 0.05 tan apart | Geometry MEASURED; that this is the mechanism is INFERRED (K's camera OPEN) | Same fix; it does not depend on K's camera |
 
-Decided (Sean, 2026-11-04): panels at star depth.
+Decided (Sean, 2026-11-04, after flying it): panels at the game's depth, the arrow on a panel at the panel's depth and off it at star depth. This replaces the first decision (panels at star depth), which clipped through the map in stereo.
 
-Open, the flight's log answers the first three: who writes K's matrices and which camera they are (the `map pointer check` lines print them); whether a click re-tests the star (candidate: vis+0x2C0 copied from +0x2B0; the fix logs any other caller of K's projection); whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0). Not answered by it: the hover pointer block's class ([vis+0x110]), now only of interest for the gain; System Map and Orrery hover (not read, so fix 3 is Galaxy Map only).
+Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0, and no System Map was opened on the flight). The hover pointer block's class ([vis+0x110]) is now of no consequence. System Map and Orrery hover are not read, so fix 3 and the facing icons are Galaxy Map only.
 
-Temporary to remove when this closes: the `map pointer check` lines and their second K call. The F111 map probe and the stillness bounds are gone. No new keys.
+Temporary: none left. The self-check, the F111 map probe and the stillness bounds are gone. No new keys.
 
-Next: the flight (card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: the flight (card below, the second card). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
+- ruled out: panels at star depth, because they clip through the map's content in stereo (flight of 09:50, Sean).
+- ruled out: K's camera following the head, because the self-check printed its view rows equal to the head-free map camera's, with projection 0.939 on both axes.
+- ruled out: a second test of the pointer at click time, because the only other near caller of K was +0x3ADE868, the stars' own call in 0x3ADE6F0, and selection worked.
+- ruled out: a stencil from the panels' geometry, because the shell meshes (C4B4B3, 5DAD41, n=360) take their shape from a mask texture's alpha. The 8-bit layer's own alpha will not do either: the map's overlays reach it through the coverage pass.
 - ruled out: the left eye missing panels and the arrow in play, because it is the dump's first frame only. At each run's start the log says `eye unknown` for the interface and cursor draws and counts one swap (5400 of 5400 eyes matched in the window before); frames 1 to 15 have the UI in both eyes. The overview images are taken from frame 0, so do not read a left-eye overview for the UI. Eye dumps lose frame 0's left UI: a small bug in the dump's arming, not looked into.
 - ruled out: the arrow being head-locked, because its record's direction stays within 0.01 degrees while the head yaws 8.7 degrees in dump 061416462001.
 - ruled out: the rho lever (M1) on the map, because the panel's pick owner is the upright 0x4526E40.
@@ -122,7 +126,31 @@ A self-check runs in the hook for the first ten seconds of each opening, once a 
 - System Map and Orrery get fixes 1 and 2, not 3, until their hover is read (CursorCircle, OrreryCursor).
 - On foot: the VR map has no GuiFocus; stage 0's name may open the gate there, unproven.
 
-## Flight card (one flight, VR, cockpit, Galaxy Map open)
+## After the first flight
+
+Log edvr_gfx_20261104_095046, build ca707034, dump 095453560001, whose 16 frames caught the head turning from yaw -15 to +9. Render 2254x2255, output 4508x4510. The head rows of the dump's first frames do not line up with their images, so measurements use frames 6 to 15.
+
+**Icons and labels twist with the head.** Fix 1 fixed the triangles, not these. A record of an n=6 icon or a label carries a quaternion the CPU writes facing the head-free camera: rotate(q, ex) = -baseRight, rotate(q, ey) = +baseUp, rotate(q, ez) = -baseForward (544 records of 726 in the dump). Each quad is therefore a plane fixed in the world. Predicting each icon's top edge from that, at its own place in the image, against the measured edge: 0.5 to 0.9 degrees rms, with the mean edge measured going from -1.6 to -3.0 degrees as the head turned. In flat the map camera is the eye, so they face it.
+
+The fix transcribes C31238331D8AC3D4 and 12382D2EA45E9632 (src\d3d11\galaxy_map_vs.h) and, for a record in the map's world whose quad is not flat on the galactic plane and not the identity quaternion, spans the quad on the eye's axes taken from the view-projection rows, with the signs that reproduce the game's when the eye is the camera. The quads on the galactic plane stay on it. Checked against the game's own bytecode on WARP through stream output: 4000 vertices each with both position encodings and bones, worst difference 0.000 for every record left as the game draws it. The rig tools\galaxy_map_vs_test pins the rest. They now match the triangles: upright in the eye, whatever the head does.
+
+**The panels and the arrow.** The panels run as the game made them. The arrow draws at the panel's depth when its tip is on a panel and at star depth when it is not, by a transcription of 4EF6DDB075A927FA that takes the eye's origin out of a negative-scale record (the arrow alone has one; that shader also draws other sprites).
+
+Deciding it needs the panels' coverage, which no signal gives (see Fix 3). Each eye has a mask, A8_UNORM at the layer's size, 40 MB for both eyes at this size, made at the first panel draw and let go when the map shuts. Every panel draw the layer took is issued once more into it with an accumulating alpha blend. At the arrow's draw, one more issue draws a single point at the arrow's record position, in the game's own depth so that it is compared on the panels' shell in that eye, through a pixel shader that discards under alpha 0.1, inside an occlusion query. The dump shows that position is exactly the arrow's tip. The answer is read at a later probe without waiting, so it arrives a frame or two late; either eye saying "on a panel" means on a panel. If the mask or query cannot be made, the arrow stays the game's.
+
+The hover is unchanged: it follows the arrow's direction over panels too.
+
+## Flight card, second build (VR, cockpit, Galaxy Map open)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
+
+1. Yaw and pitch the head with the mouse still. Expect: orange icons and labels stay upright and undistorted across the view. The "10 : 88 : -100" labels and discs stay flat on the plane. Insert dump.
+2. Move the arrow from the map onto a panel and back, slowly. Expect: the panels sit at their original depth with no clipping through the map; the arrow on a panel at the panel's depth, and off it over the map's icons, with one jump in depth at the edge.
+3. Click a star near a panel's edge, then a side tab and the search box. Pan and orbit fast: icons must not pop.
+
+Log: `galaxy map: the arrow's tip is on/off a panel` at each edge; the 30 s `map pointer:` line: draws swapped per shader, panel draws issued into the mask, probes made and answered, frames over and not over; `maskLate` at 0 (a panel draw after the arrow's probe would make the mask incomplete); `draw hook CPU` for the cost. If these are missing, the code never ran.
+
+## Flight card, first build (flown 09:50)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 
@@ -140,6 +168,14 @@ Log:
 If the arrow lands on a star but another is selected, read the `map pointer check` lines first, then the other-callers line.
 
 ## Journal
+
+### 2026-11-04, flight 3 (ca707034), the first build of the design
+
+Sean: "the map is now crisp and doesn't smear under movement, you can select systems properly and still use the UI." Then: "The UI panel, now clips through the 3d space in depth"; "Yawing the head still causes the icons on the map to twist with the yaw."
+
+Log: the hook armed, `GalaxyMapView` named, 13177 map publishes of which 2329 moved the map; `temporal aa map: 21606 eye-frames kept their history, 4852 reset it`; the pointer's call ran 1700 to 2250 times in each 30 s, all replaced, none passed through; b2 is 272 bytes, so the narrower tone admission was not needed but costs nothing. `draw hook CPU` 1.09 to 1.21 ms per sampled frame.
+
+The self-check, first second: the game's point in the map's axes (-0.926, 0.954, 0.584) against P (-0.708, 0.471, 0.584): ratios 1.31, 2.03, 1.00. So the near pointer was anisotropic, not the 1.83 inferred from the fit, and the far point never rested on it.
 
 ### 2026-11-04, the build
 

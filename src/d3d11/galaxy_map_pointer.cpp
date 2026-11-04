@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -16,11 +17,9 @@
 #include "../common/runtime_profile.h"
 #include "flat_stationary_camera_capture.h"
 #include "galaxy_map_pointer_core.h"
-#include "map_ui_depth.h"
+#include "galaxy_map_ui.h"
 
 namespace edvr {
-
-std::atomic<bool> g_mapUiDepthOpen{false};
 
 namespace {
 
@@ -40,19 +39,8 @@ constexpr uint8_t kPointerReturn[4] = {0x84, 0xC0, 0x0F, 0x84};   // at the retu
 // The cursor object's scene object is the pointer at +0x10; its position is three floats at +0x40 of that, in the UI frame (the arrow's drawn position).
 constexpr uintptr_t kCursorSceneOffset = 0x10;
 constexpr uintptr_t kScenePositionOffset = 0x40;
-// The projector's fields the self-check reads: its half extents at +0x80, the camera object at +8 whose projection rows are at +0x420 and view rows at
-// +0x460 (0x40 a row set, indexed by the call's idx).
-constexpr uintptr_t kProjectExtentsOffset = 0x80;
-constexpr uintptr_t kProjectCameraOffset = 8;
-constexpr uintptr_t kCameraProjectionOffset = 0x420;
-constexpr uintptr_t kCameraViewOffset = 0x460;
-constexpr uintptr_t kCameraSetStride = 0x40;
-constexpr int kCameraSets = 8;
 
-constexpr uint64_t kCheckWindowMs = 10000;   // the self-check: the first ten seconds of each opening,
-constexpr uint64_t kCheckPeriodMs = 1000;    // once a second
 constexpr uint64_t kLineMs = 30000;
-constexpr unsigned kMaxOtherCallers = 8;
 constexpr unsigned kMaxTries = 30;
 
 using Project = uint64_t (*)(void*, const float*, int, float*);
@@ -77,17 +65,10 @@ struct State {
     uintptr_t base = 0;
     std::atomic<bool> armed{false};
 
-    // The windows: set by the frame thread at an opening, read by the projector detour.
-    std::atomic<uint64_t> openedMs{0};
-    std::atomic<uint64_t> lastCheckMs{0};
-
     // Counters, since the last 30 s line.
     std::atomic<uint64_t> pointerCalls{0};
     std::atomic<uint64_t> replaced{0};
     std::atomic<uint64_t> passed[kPassCount] = {};
-    std::atomic<uint64_t> otherCalls{0};
-    std::atomic<uint32_t> otherSeen{0};
-    uintptr_t otherReturn[kMaxOtherCallers] = {};
 
     // Frame thread only.
     unsigned tries = 0;
@@ -98,7 +79,6 @@ struct State {
     bool openedInWindow = false;
     uint64_t lastLineMs = 0;
     bool cursorSaid = false;
-    bool boundSaid = false;
     const char* why = "";
 };
 
@@ -138,48 +118,6 @@ uint64_t pass(State& s, Project original, Pass why, void* k, const float* in, in
     return original(k, in, idx, out);
 }
 
-// The self-check, one line per second in the window: what the game passed against what the arrow's direction gives, with no model assumed, and the
-// matrices K projects with.
-void logCheck(void* k, int idx, const float* game, const MapCameraPose& pose, const float* arrow, const float* gameView, uint64_t gameRet,
-              const float* oursView, uint64_t oursRet) noexcept {
-    float rel[3];
-    for (int i = 0; i < 3; ++i) rel[i] = game[i] - pose.position[i];
-    float axes[3];
-    inMapAxes(pose.rows, rel, axes);
-    const float relLength = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
-    const float arrowLength = std::sqrt(arrow[0] * arrow[0] + arrow[1] * arrow[1] + arrow[2] * arrow[2]);
-    float extents[4] = {};
-    const bool extentsRead = readMem(reinterpret_cast<uintptr_t>(k) + kProjectExtentsOffset, extents, sizeof(extents));
-    Log::get().note("map pointer check: the game's point is %.3f %.3f %.3f from the camera (length %.3f), in the map's axes a %.4f b %.4f c %.4f; the arrow P is %.4f %.4f %.4f "
-                    "(length %.4f); a/Px %.3f b/Py %.3f c/Pz %.3f; the game's input projects to %.2f %.2f %.2f %.2f (returned %llu), ours to %.2f %.2f %.2f %.2f "
-                    "(returned %llu); projector extents %s%.3f %.3f %.3f %.3f; idx %d",
-                    rel[0], rel[1], rel[2], relLength, axes[0], axes[1], axes[2], arrow[0], arrow[1], arrow[2], arrowLength, ratio(axes[0], arrow[0]), ratio(axes[1], arrow[1]),
-                    ratio(axes[2], arrow[2]), gameView[0], gameView[1], gameView[2], gameView[3], static_cast<unsigned long long>(gameRet & 0xFF), oursView[0], oursView[1],
-                    oursView[2], oursView[3], static_cast<unsigned long long>(oursRet & 0xFF), extentsRead ? "" : "(unreadable) ", extents[0], extents[1], extents[2], extents[3], idx);
-    float projection[16] = {}, view[16] = {};
-    uintptr_t camera = 0;
-    bool read = idx >= 0 && idx < kCameraSets && readMem(reinterpret_cast<uintptr_t>(k) + kProjectCameraOffset, &camera, sizeof(camera)) && camera;
-    read = read && readMem(camera + kCameraProjectionOffset + static_cast<uintptr_t>(idx) * kCameraSetStride, projection, sizeof(projection)) &&
-           readMem(camera + kCameraViewOffset + static_cast<uintptr_t>(idx) * kCameraSetStride, view, sizeof(view));
-    if (!read) {
-        Log::get().note("map pointer check: the projector's matrices for idx %d were not readable (camera object %p)", idx, reinterpret_cast<void*>(camera));
-        return;
-    }
-    Log::get().note("map pointer check: idx %d projection rows (%.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g) "
-                    "view rows (%.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g)",
-                    idx, projection[0], projection[1], projection[2], projection[3], projection[4], projection[5], projection[6], projection[7], projection[8], projection[9],
-                    projection[10], projection[11], projection[12], projection[13], projection[14], projection[15], view[0], view[1], view[2], view[3], view[4], view[5], view[6],
-                    view[7], view[8], view[9], view[10], view[11], view[12], view[13], view[14], view[15]);
-}
-
-bool selfCheckDue(State& s) noexcept {
-    const uint64_t now = GetTickCount64();
-    if (now - s.openedMs.load(std::memory_order_acquire) >= kCheckWindowMs) return false;
-    uint64_t last = s.lastCheckMs.load(std::memory_order_acquire);
-    if (last && now - last < kCheckPeriodMs) return false;
-    return s.lastCheckMs.compare_exchange_strong(last, now, std::memory_order_acq_rel);
-}
-
 uint64_t pointerCall(State& s, Project original, void* k, const float* in, int idx, float* out) noexcept {
     s.pointerCalls.fetch_add(1, std::memory_order_relaxed);
     MapCameraPose pose;
@@ -195,35 +133,9 @@ uint64_t pointerCall(State& s, Project original, void* k, const float* in, int i
     if (!readMem(reinterpret_cast<uintptr_t>(in), game, sizeof(game))) return pass(s, original, kBadInput, k, in, idx, out);
     alignas(16) float farIn[4];
     if (farPoint(pose.rows, pose.position, arrow, game[3], farIn) != Why::kOk) return pass(s, original, kBadArrow, k, in, idx, out);
-    const bool check = selfCheckDue(s);
-    float gameView[4] = {};
-    uint64_t gameRet = 0;
-    if (check) gameRet = original(k, in, idx, gameView);
     const uint64_t ret = original(k, farIn, idx, out);
     s.replaced.fetch_add(1, std::memory_order_relaxed);
-    if (check) {
-        float oursView[4] = {};
-        readMem(reinterpret_cast<uintptr_t>(out), oursView, sizeof(oursView));
-        logCheck(k, idx, game, pose, arrow, gameView, gameRet, oursView, ret);
-    }
     return ret;
-}
-
-// A call from anywhere else with a point near the camera is a second test of the pointer (a click): its return address is said once.
-void noteOtherCaller(State& s, uintptr_t caller, const float* in) noexcept {
-    s.otherCalls.fetch_add(1, std::memory_order_relaxed);
-    float p[3];
-    if (!readMem(reinterpret_cast<uintptr_t>(in), p, sizeof(p))) return;
-    MapCameraPose pose;
-    if (!mapCameraPose(pose) || !nearCamera(p, pose.position, kNearCamera)) return;
-    const uint32_t seen = s.otherSeen.load(std::memory_order_acquire);
-    for (uint32_t i = 0; i < seen && i < kMaxOtherCallers; ++i)
-        if (s.otherReturn[i] == caller) return;
-    const uint32_t slot = s.otherSeen.fetch_add(1, std::memory_order_acq_rel);
-    if (slot >= kMaxOtherCallers) return;
-    s.otherReturn[slot] = caller;
-    Log::get().note("map pointer: another caller of the projector passed a point %.2f %.2f %.2f from the camera: return address +0x%llX (a second test of the pointer?)",
-                    p[0] - pose.position[0], p[1] - pose.position[1], p[2] - pose.position[2], static_cast<unsigned long long>(caller - s.base));
 }
 
 // Reached through the relay's jump, so _ReturnAddress() is the game's caller.
@@ -231,10 +143,7 @@ __declspec(noinline) uint64_t projectDetour(void* k, const float* in, int idx, f
     const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     State& s = *g_s;
     const auto original = reinterpret_cast<Project>(s.forward.load(std::memory_order_acquire));
-    if (caller != s.pointerReturn) {
-        noteOtherCaller(s, caller, in);
-        return original(k, in, idx, out);
-    }
+    if (caller != s.pointerReturn) return original(k, in, idx, out);   // the stars' own calls and any other: the game's, untouched
     return pointerCall(s, original, k, in, idx, out);
 }
 
@@ -299,39 +208,46 @@ bool tryInstall(State& s, bool& transient) {
 
 void closeGate(State& s) noexcept {
     s.gate.store(0, std::memory_order_release);
-    g_mapUiDepthOpen.store(false, std::memory_order_release);
+    mapui::setGates(false, false);
     s.open = false;
 }
 
 void thirtySecondLine(State& s, uint64_t now) {
-    using namespace mapuidepth;
-    uint64_t bound[4], declined[kDeclineCount], boundTotal = 0, declinedTotal = 0;
-    for (int i = 0; i < 4; ++i) { bound[i] = g_mapUiDepth.counters.bound[i].exchange(0, std::memory_order_relaxed); boundTotal += bound[i]; }
-    for (uint32_t i = 0; i < kDeclineCount; ++i) { declined[i] = g_mapUiDepth.counters.declined[i].exchange(0, std::memory_order_relaxed); declinedTotal += declined[i]; }
+    using namespace mapui;
+    uint64_t swapped[kSwapCount], swappedTotal = 0, maskIssued[3], maskTotal = 0;
+    for (uint32_t i = 0; i < kSwapCount; ++i) { swapped[i] = g_counters.swapped[i].exchange(0, std::memory_order_relaxed); swappedTotal += swapped[i]; }
+    for (int i = 0; i < 3; ++i) { maskIssued[i] = g_counters.maskIssued[i].exchange(0, std::memory_order_relaxed); maskTotal += maskIssued[i]; }
+    const uint64_t arrowKept = g_counters.arrowKept.exchange(0, std::memory_order_relaxed), maskLate = g_counters.maskLate.exchange(0, std::memory_order_relaxed);
+    const uint64_t probes = g_counters.probes.exchange(0, std::memory_order_relaxed), answered = g_counters.answered.exchange(0, std::memory_order_relaxed);
+    const uint64_t framesOver = g_counters.framesOver.exchange(0, std::memory_order_relaxed), framesClear = g_counters.framesClear.exchange(0, std::memory_order_relaxed);
+    const uint64_t ringFull = g_counters.ringFull.exchange(0, std::memory_order_relaxed), perFrameFull = g_counters.perFrameFull.exchange(0, std::memory_order_relaxed);
+    const uint64_t probeFaults = g_counters.probeFaults.exchange(0, std::memory_order_relaxed), unavailable = g_counters.maskUnavailable.exchange(0, std::memory_order_relaxed);
     const uint64_t calls = s.pointerCalls.exchange(0, std::memory_order_relaxed);
     const uint64_t replaced = s.replaced.exchange(0, std::memory_order_relaxed);
     uint64_t passed[kPassCount], passedTotal = 0;
     for (uint32_t i = 0; i < kPassCount; ++i) { passed[i] = s.passed[i].exchange(0, std::memory_order_relaxed); passedTotal += passed[i]; }
-    const uint64_t others = s.otherCalls.exchange(0, std::memory_order_relaxed);
     const bool wasOpen = s.openedInWindow;
     s.openedInWindow = s.open;
     s.lastLineMs = now;
-    if (!wasOpen && !calls && !others && !boundTotal && !declinedTotal) return;
+    const uint64_t declinesTotal = ringFull + perFrameFull + probeFaults + unavailable + maskLate;
+    if (!wasOpen && !calls && !swappedTotal && !maskTotal && !probes && !answered && !declinesTotal) return;
     char reasons[256] = "";
     size_t n = 0;
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
-    char declines[256] = "";
-    n = 0;
-    for (uint32_t i = 0; i < kDeclineCount && n + 40 < sizeof(declines); ++i)
-        if (declined[i]) n += static_cast<size_t>(std::snprintf(declines + n, sizeof(declines) - n, "%s%s %llu", n ? ", " : "", declineName(i), static_cast<unsigned long long>(declined[i])));
     Log::get().note("map pointer: Galaxy Map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
-                    "%llu other projector calls; cursor object %s; panels and arrow at star depth: %llu draws bound (C4B4B3 %llu, B10B03 %llu, 5DAD41 %llu, arrow 4EF6DD %llu), %llu declined%s%s%s",
+                    "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu); "
+                    "panel draws issued into the mask: C4B4B3 %llu, B10B03 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
+                    "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu)",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
-                    static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "", static_cast<unsigned long long>(others),
-                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(boundTotal), static_cast<unsigned long long>(bound[0]),
-                    static_cast<unsigned long long>(bound[1]), static_cast<unsigned long long>(bound[2]), static_cast<unsigned long long>(bound[3]),
-                    static_cast<unsigned long long>(declinedTotal), declinedTotal ? " (" : "", declines, declinedTotal ? ")" : "");
+                    static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
+                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapIconA]),
+                    static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
+                    static_cast<unsigned long long>(maskIssued[0]), static_cast<unsigned long long>(maskIssued[1]), static_cast<unsigned long long>(maskIssued[2]),
+                    static_cast<unsigned long long>(probes), static_cast<unsigned long long>(answered), static_cast<unsigned long long>(framesOver),
+                    static_cast<unsigned long long>(framesClear), over() ? "yes" : "no", static_cast<unsigned long long>(declinesTotal), static_cast<unsigned long long>(ringFull),
+                    static_cast<unsigned long long>(perFrameFull), static_cast<unsigned long long>(probeFaults), static_cast<unsigned long long>(unavailable),
+                    static_cast<unsigned long long>(maskLate));
 }
 
 } // namespace
@@ -358,7 +274,9 @@ void mapPointerFrame() noexcept {
     }
     State& s = *g_s;
     const uint64_t now = GetTickCount64();
+    const bool open = mapCameraGalaxyOpen();
     if (!s.armed.load(std::memory_order_acquire)) {
+        mapui::setGates(open, false);   // the icons face the eye whether or not the pointer's hooks can be had
         if (s.stood) return;
         if (s.tries && now - s.lastTryMs < 1000) return;
         s.lastTryMs = now;
@@ -367,7 +285,7 @@ void mapPointerFrame() noexcept {
         if (!tryInstall(s, transient)) {
             if (!transient || s.tries >= kMaxTries) {
                 s.stood = true;
-                Log::get().note("map pointer: stands down after %u tries (%s): the hover and the panels' depth stay as the game made them%s", s.tries, s.why,
+                Log::get().note("map pointer: stands down after %u tries (%s): the hover, the arrow's depth and the panel mask stay as the game made them (the icons still face the eye)%s", s.tries, s.why,
                                 s.cursor.hook.installed() ? "; the cursor capture stays in as a harmless store of one register" : "");
             }
             return;
@@ -375,38 +293,24 @@ void mapPointerFrame() noexcept {
         s.armed.store(true, std::memory_order_release);
         s.lastLineMs = now;
         Log::get().note("map pointer: armed (VR profile): the cursor object capture is in at +0x%llX and the projector relay at +0x%llX, gate closed until the Galaxy Map opens; "
-                        "the pointer's call returns to +0x%llX",
+                        "the pointer's call (the only one replaced) returns to +0x%llX",
                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.cursor.hook.target()) - s.base),
                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.project.hook.target()) - s.base), static_cast<unsigned long long>(s.pointerReturn - s.base));
     }
-    const bool open = mapCameraGalaxyOpen();
     if (open != s.open) {
-        if (open) {
-            s.lastCheckMs.store(0, std::memory_order_release);
-            s.openedMs.store(now, std::memory_order_release);
-            s.openedInWindow = true;
-        }
+        if (open) s.openedInWindow = true;
         s.open = open;
         if (s.edgeNotes < 16) {
             ++s.edgeNotes;
-            Log::get().note("map pointer: the Galaxy Map %s: hover from the arrow's direction and panels and arrow at star depth are %s", open ? "opened" : "closed", open ? "on" : "off");
+            Log::get().note("map pointer: the Galaxy Map %s: the hover reads the arrow's direction, the icons and labels face the eye, the arrow is at star depth off the panels and the game's on them, and the panel mask is %s",
+                            open ? "opened" : "closed", open ? "kept" : "let go");
         }
     }
     s.gate.store(open ? 1 : 0, std::memory_order_release);
-    g_mapUiDepthOpen.store(open, std::memory_order_release);
+    mapui::setGates(open, open);
     if (!s.cursorSaid && s.cursorObject.load(std::memory_order_acquire)) {
         s.cursorSaid = true;
         Log::get().note("map pointer: the cursor update ran: its object is at %p", reinterpret_cast<void*>(s.cursorObject.load(std::memory_order_acquire)));
-    }
-    if (!s.boundSaid) {
-        using namespace mapuidepth;
-        for (int i = 0; i < 4; ++i)
-            if (g_mapUiDepth.counters.bound[i].load(std::memory_order_relaxed)) {
-                s.boundSaid = true;
-                Log::get().note("map pointer: the first panel or arrow draw was bound with the eye origin zeroed (row 275 of the scene block at VS slot 1), vertex shader %s",
-                                i == 0 ? "C4B4B334B26E81A9" : i == 1 ? "B10B032BDFD46700" : i == 2 ? "5DAD41AA66757CE3" : "4EF6DDB075A927FA");
-                break;
-            }
     }
     if (now - s.lastLineMs >= kLineMs) thirtySecondLine(s, now);
 }

@@ -659,7 +659,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" "src\d3d11\galaxy_map_pointer.cpp" ^
+    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" "src\d3d11\galaxy_map_pointer.cpp" "src\d3d11\galaxy_map_ui.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" "src\d3d11\vr_star_glow.cpp" ^
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -3859,6 +3859,23 @@ if not exist "%OBJ%\billboardfacing" mkdir "%OBJ%\billboardfacing"
 if errorlevel 1 ( echo [edvr] ERROR: billboard facing test build failed & exit /b 1 )
 "%OBJ%\billboardfacing\billboard_facing_test.exe" --dry-run || exit /b 1
 "%OBJ%\billboardfacing\billboard_facing_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_galaxy_map_vs_test
+echo [edvr] === galaxy_map_vs_test.exe ===
+REM The VR Galaxy Map's replacement shaders (src\d3d11\galaxy_map_vs.h; docs\galaxy-map-vr-2026-11-03.md Fix 3) on a WARP device with the D3D debug layer, through
+REM stream output: the icons' two transcriptions against the formula on every class of record (the UI frame's, the galactic plane, the identity quaternion, the map's
+REM facing records, both position encodings, a bone-indexed record), the faces case against the game's own maths with the eye equal to the map camera, the arrow
+REM transcription for both signs of the scale, and the probe on the GPU (the occlusion query, the mask blend, write mask 0). The comparison with the game's own bytecode
+REM is made by hand with a one-off program that includes the test (the bytecode is not in the repository).
+if not exist "%OBJ%\galaxymapvs" mkdir "%OBJ%\galaxymapvs"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\galaxymapvs\\" /Fe"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" ^
+    "tools\galaxy_map_vs_test\galaxy_map_vs_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: galaxy map vs test build failed & exit /b 1 )
+"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" --dry-run || exit /b 1
+"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_visor_axis_test

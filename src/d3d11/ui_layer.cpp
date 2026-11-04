@@ -13,6 +13,7 @@
 // owner, which may open a frame -- is only read, under native_temporal's own
 // lock, through nativeTemporalDrawJitter.
 #include "ui_layer.h"
+#include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
 #include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
@@ -390,6 +391,14 @@ struct Eye {
     Ptr<ID3D11ShaderResourceView> mSrv;
     uint32_t mW = 0, mH = 0;
     uint64_t mSeq = 0;
+
+    // The Galaxy Map's panel mask (galaxy_map_ui.h): the panels' alpha alone, A8_UNORM at the 8-bit layer's size (e.w, e.h), made at the first panel draw of a Galaxy Map,
+    // cleared at the first panel draw (or the arrow's probe) of each eye-frame and released at the frame boundary once the map is shut.
+    Ptr<ID3D11Texture2D> maskTex;
+    Ptr<ID3D11RenderTargetView> maskRtv;
+    Ptr<ID3D11ShaderResourceView> maskSrv;
+    uint32_t maskW = 0, maskH = 0;
+    uint64_t maskSeq = 0;
 
     // The 8-bit layer's depth-stencil target, for UI that TESTS depth or
     // stencil.
@@ -1473,6 +1482,57 @@ bool ensureMult(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     return true;
 }
 
+// The Galaxy Map's panel mask (galaxy_map_ui.h): A8_UNORM at the 8-bit layer's size, made at the first panel draw of a map. The memory is the cost of the mask, said
+// when it is made (40 MB for both eyes at 4508x4510) and let go at the frame boundary once the map is shut.
+bool ensureMapMask(ID3D11DeviceContext* ctx, Eye& e, int eye) {
+    if (e.maskTex && e.maskW == e.w && e.maskH == e.h) return true;
+    const bool resized = e.maskTex != nullptr;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    e.maskW = e.maskH = 0;
+    e.maskSeq = 0;
+    if (!dev || !e.w || !makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)) {
+        e.maskTex.Reset();
+        e.maskRtv.Reset();
+        e.maskSrv.Reset();
+        return false;
+    }
+    e.maskW = e.w;
+    e.maskH = e.h;
+    Log::get().note("galaxy map: %s eye's panel mask %s at %ux%u (A8_UNORM, %.1f MB): the panels' alpha, which says where the arrow's tip is on a panel; let go when the map shuts.",
+                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", e.w, e.h, uiLayerMB(uiLayerBytes(e.w, e.h, 1)));
+    return true;
+}
+
+// The mask for this eye-frame: made if need be and cleared at the frame's first use (the layer's own frame sequence).
+bool prepareMapMask(ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
+    if (eye < 0 || eye > 1) return false;
+    Eye& e = g_eye[eye];
+    bool ok = false;
+    guarded("uiLayer.mapMask", [&] {
+        if (!ensureMapMask(ctx, e, eye)) return;
+        if (e.maskSeq != seq) {
+            const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            vScreenClearRenderTargetViewRaw(ctx, e.maskRtv.Get(), zero);
+            e.maskSeq = seq;
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+// The two blend states of the Galaxy Map's issues (galaxy_map_ui.h): [0] the mask's accumulating alpha, [1] the probe's write mask 0.
+Ptr<ID3D11BlendState> g_mapBlend[2];
+ID3D11BlendState* mapBlend(ID3D11DeviceContext* ctx, int which) {
+    Ptr<ID3D11BlendState>& b = g_mapBlend[which - 2];
+    if (b) return b.Get();
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    const D3D11_BLEND_DESC d = which == 2 ? mapui::maskBlendDesc() : mapui::probeBlendDesc();
+    if (!dev || FAILED(dev->CreateBlendState(&d, &b))) b.Reset();
+    return b.Get();
+}
+
 void releaseLayerDs(LayerDs& l) {
     l.tex.Reset();
     l.dsv.Reset();
@@ -1492,7 +1552,7 @@ void releaseLayerDs(LayerDs& l) {
 bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
-        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
+        any = any || e.tex || e.mTex || e.maskTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
               e.hdrTex || e.hdrDs.tex || e.wTex || e.smaa.ready();
         e.smaa.releaseTargets();
         e.coverage.reset();
@@ -1510,6 +1570,11 @@ bool releaseLayers() {
         e.mSrv.Reset();
         e.mW = e.mH = 0;
         e.mSeq = 0;
+        e.maskTex.Reset();
+        e.maskRtv.Reset();
+        e.maskSrv.Reset();
+        e.maskW = e.maskH = 0;
+        e.maskSeq = 0;
         releaseLayerDs(e.ds);
         e.hdrTex.Reset();
         e.hdrRtv.Reset();
@@ -2201,8 +2266,10 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     const bool wl = g_draw.weapons && which == 0;
     // The shield ripple: the 820E draw (g_draw.ripple, with g_draw.hdr) goes into the eye's displacement layer D, tested against the same seeded depth.
     const bool rp = g_draw.ripple && which == 0;
+    // The Galaxy Map's own issues (which 2: into the panel mask, which 3: the arrow's probe into the layer with nothing written) take their own blend and test no depth.
+    const bool mapIssue = which >= 2;
     ID3D11RenderTargetView* target =
-        which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
+        which == 2 ? e.maskRtv.Get() : which == 3 ? e.rtv.Get() : which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
     if (!target) return false;
     LayerDs& lds = g_draw.hdr ? e.hdrDs : e.ds;
     const uint32_t layerW = rp ? e.dW : (wl ? e.wW : (g_draw.hdr ? e.hdrW : e.w));
@@ -2216,10 +2283,11 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     UiBlendRt game, conv;
     ID3D11BlendState* layerBlend = nullptr;
     const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);
-    const bool converted = shape == g_draw.shape &&
-                           (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv));
-    if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
-    if (!converted || !(layerBlend || (layerBlend = cachedBlend(ctx, conv)))) {
+    const bool converted = mapIssue || (shape == g_draw.shape &&
+                           (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv)));
+    if (mapIssue) layerBlend = mapBlend(ctx, which);
+    else if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
+    if (!converted || !(layerBlend || (!mapIssue && (layerBlend = cachedBlend(ctx, conv))))) {
         if (bs) bs->Release();
         ++g_win.refusedAtIssue;
         if (g_draw.family == UiLayerFamily::kAfterUi) ++g_win.afterRefused;
@@ -2425,7 +2493,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // would refuse to bind beside it (review P3-5).
     const bool seededNow = lds.dsv && lds.w == layerW && lds.h == layerH &&
                            lds.seq == g_draw.seq && lds.source && lds.source == gameDs;
-    const bool needsDs = g_draw.ds.tests() || (g_draw.ds.writes() && seededNow);
+    const bool needsDs = !mapIssue && (g_draw.ds.tests() || (g_draw.ds.writes() && seededNow));
     if (needsDs) {
         const bool stale = !seededNow;
         const uint8_t wantMask = g_draw.ds.stencilTest ? g_draw.stencilRead : 0;
@@ -2523,8 +2591,10 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     }
     // An original read-only view can mask its effect, while this private view
     // is writable. Preserve the raw state's potential without another query.
-    g_privateDepthGuard.note(g_draw.seq, g_draw.rawDepthWritePotential);
-    if (g_draw.rawDepthWritePotential && !g_draw.counted) ++g_win.privateDepthPotentialBegins;
+    if (!mapIssue) {
+        g_privateDepthGuard.note(g_draw.seq, g_draw.rawDepthWritePotential);
+        if (g_draw.rawDepthWritePotential && !g_draw.counted) ++g_win.privateDepthPotentialBegins;
+    }
     g_draw.active = true;
     // A multiply's second issue -- the game's draw again, into the
     // transmittance -- is the layer's own work: timed to uiLayerEnd. The
@@ -4625,6 +4695,30 @@ void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
     if (g_draw.wbDsv) g_draw.wbDsv->Release();
     g_draw.wbDsv = nullptr;
     g_draw.wbActive = false;
+}
+
+// The Galaxy Map's second issues (galaxy_map_ui.h): the decided draw is one the layer took, in the layer's bracket for this issue (closed by uiLayerEnd).
+UiMapBegin uiLayerMapMaskBegin(ID3D11DeviceContext* ctx, UiMapIssue* out) {
+    if (!mapui::pointerOpen() || !ctx || !out || !g_draw.decided || g_draw.hdr || !g_draw.counted || g_draw.active || !mapui::isPanelVs(g_draw.vsHash)) return UiMapBegin::kNotMine;
+    if (!prepareMapMask(ctx, g_draw.eye, g_draw.seq)) return UiMapBegin::kNoMask;
+    if (!beginGuarded(ctx, 2)) return UiMapBegin::kNotMine;
+    out->mask = g_eye[g_draw.eye].maskSrv.Get();
+    out->vs = g_draw.vsHash;
+    out->eye = g_draw.eye;
+    out->seq = g_draw.seq;
+    return UiMapBegin::kBound;
+}
+
+UiMapBegin uiLayerMapProbeBegin(ID3D11DeviceContext* ctx, UiMapIssue* out) {
+    if (!mapui::pointerOpen() || !ctx || !out || !g_draw.decided || g_draw.hdr || !g_draw.counted || g_draw.active || g_draw.vsHash != mapui::kVsArrow) return UiMapBegin::kNotMine;
+    // A frame with no panel draw in this eye has a mask not cleared yet: the probe clears it, so it reads clear rather than last frame's.
+    if (!prepareMapMask(ctx, g_draw.eye, g_draw.seq)) return UiMapBegin::kNoMask;
+    if (!beginGuarded(ctx, 3)) return UiMapBegin::kNotMine;
+    out->mask = g_eye[g_draw.eye].maskSrv.Get();
+    out->vs = g_draw.vsHash;
+    out->eye = g_draw.eye;
+    out->seq = g_draw.seq;
+    return UiMapBegin::kBound;
 }
 
 // ------------------------------------- the crisp-HUD half of fix.ui_quality: the tonemap re-issue
@@ -7116,6 +7210,17 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     settleIssueFence(ctx);
+    // The Galaxy Map's panel mask (40 MB for both eyes at 4508x4510) is let go once the map is shut.
+    if (!mapui::pointerOpen() && (g_eye[0].maskTex || g_eye[1].maskTex)) {
+        for (Eye& e : g_eye) {
+            e.maskTex.Reset();
+            e.maskRtv.Reset();
+            e.maskSrv.Reset();
+            e.maskW = e.maskH = 0;
+            e.maskSeq = 0;
+        }
+        Log::get().note("galaxy map: the panel masks are let go: the map is shut");
+    }
     // The shield ripple's idle clock (D released after kShieldRippleIdleFrames).
     rippleIdleTick();
     // The flat profile's back-off (flatBackOff) lifts itself here.

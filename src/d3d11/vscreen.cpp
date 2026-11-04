@@ -98,8 +98,7 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
-#include "galaxy_map_pointer.h"   // mapUiDepthOpen: the Galaxy Map is open and its pointer hooks are armed
-#include "map_ui_depth.h"          // the map's panels and arrow at the stars' depth
+#include "galaxy_map_ui.h"         // the Galaxy Map's icons facing the eye, its arrow at the stars' depth, the panel mask and the arrow's probe
 #include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
@@ -4191,6 +4190,42 @@ bool uiLayerVerdictForwards(DrawVerdict v) {
     }
 }
 
+// The Galaxy Map's probe issues its one point through this: the arrow's draw as a single index, with the same start index, base vertex and start instance, below every hook.
+struct MapPointDraw {
+    ID3D11DeviceContext* self;
+    char                 kind;
+    UINT                 instances;
+    const DrawArgs*      args;
+};
+void mapPointDraw(void* user) {
+    const MapPointDraw& d = *static_cast<const MapPointDraw*>(user);
+    pureDrawReissue(d.self, d.kind, 1, d.instances, *d.args);
+}
+
+// The VR Galaxy Map's two second issues (galaxy_map_ui.h): a panel draw once more into the eye's panel mask, and after the arrow's draw one point at its tip inside an occlusion query. The panels
+// are drawn before the arrow in each eye (the census: C4B4B3, B10B03, 5DAD41, then 4EF6DD), so the mask is complete when the probe runs; galaxy_map_ui.h counts a panel draw that arrives
+// after the eye's probe of the same frame. Both are no-ops for any other draw.
+void mapSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args, GpuCensusScope& census) {
+    UiMapIssue issue;
+    const UiMapBegin mask = uiLayerMapMaskBegin(self, &issue);
+    if (mask == UiMapBegin::kBound) {
+        census.markIssued();
+        pureDrawReissue(self, kind, count, instances, args);
+        uiLayerEnd(self);
+        mapui::noteMaskIssue(issue.vs, issue.eye, issue.seq);
+        return;
+    }
+    const UiMapBegin probe = mask == UiMapBegin::kNoMask ? mask : uiLayerMapProbeBegin(self, &issue);
+    if (probe == UiMapBegin::kBound) {
+        census.markIssued();
+        MapPointDraw point{self, kind, instances, &args};
+        mapui::probeIssue(self, issue.eye, issue.seq, issue.mask, mapui::ProbeDraw{&mapPointDraw, &point});
+        uiLayerEnd(self);
+    } else if (probe == UiMapBegin::kNoMask) {
+        mapui::noteUnavailable("the panel mask");
+    }
+}
+
 // A layered draw's second issues (ui_layer.h), each the game's draw exactly
 // as it was issued, while the verdict's own state is still bound: a multiply
 // once more into the layer's per-channel transmittance, and a depth or
@@ -4210,6 +4245,7 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
         pureDrawReissue(self, kind, count, instances, args);
         uiLayerWriteBackEnd(self);
     }
+    if (mapui::pointerOpen()) mapSecondIssues(self, kind, count, instances, args, census);
 }
 
 // Issue 140 (experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by eleven shader
@@ -4320,16 +4356,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
     } rollFreeScope{self};
     if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
-    // The Galaxy Map's panels and arrow at the stars' depth (map_ui_depth.h, docs/galaxy-map-vr-2026-11-03.md Fix 3): while the map is open, a draw of one of its four UI vertex shaders
-    // gets a copy of whatever is bound at VERTEX slot 1 here, with the eye origin (row 275) zeroed, for this draw and every re-issue of it; put back on every way out. It copies what is
-    // bound at this point, so it composes with the roll-free block above (never one of these shaders) and with the panel distance fix (VS slot 0 only); declared after the roll-free scope,
-    // so it restores first. Off the map this is one relaxed load.
-    struct MapUiDepthScope {
+    // The Galaxy Map's replacement vertex shaders (galaxy_map_ui.h, docs/galaxy-map-vr-2026-11-03.md Fix 3): while the map is open in VR, the icons' and labels' shaders face the eye and the arrow's
+    // is at the stars' depth when its tip is off the panels. The shader goes in for this draw and every re-issue of it (raw, so the binding shadow still names the game's) and the game's comes
+    // back on every way out. Declared after the roll-free scope, so it restores first. Off the map this is one relaxed load.
+    struct MapSwapScope {
         ID3D11DeviceContext* ctx;
         bool                 on = false;
-        ~MapUiDepthScope() { if (on) mapuidepth::g_mapUiDepth.restore(ctx); }
-    } mapUiDepthScope{self};
-    if (owner && v != DrawVerdict::kSkip && mapUiDepthOpen()) mapUiDepthScope.on = mapuidepth::g_mapUiDepth.begin(self, bindingShaderHash(BindSlot::Vs));
+        ~MapSwapScope() { if (on) mapui::swapEnd(ctx); }
+    } mapSwapScope{self};
+    if (owner && v != DrawVerdict::kSkip && mapui::vrOpen()) mapSwapScope.on = mapui::swapBegin(self, bindingShaderHash(BindSlot::Vs));
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
