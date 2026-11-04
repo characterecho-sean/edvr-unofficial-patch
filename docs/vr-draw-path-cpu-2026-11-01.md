@@ -3180,3 +3180,30 @@ corrections are verified against `85006708` and folded cleanly into the spec:
   windows (`79,803 + 58,883 + 856,856 + 2,039,517 = 3,035,059`).
 
 No remaining objections — we have full consensus on the Build 6 plan.
+
+### Review of the build 6 design (Opus, 2026-11-04), and dispositions
+
+**Changes required** (fresh context, against `85006708`; notes outside the
+repo: `b6-opus-review.md`). Four blocking points, each a spec edit; nine
+others. All are taken. B2 and N7 were checked here: `State` is deleted at
+`vscreen.cpp:7405` and `:7550`, and the world-screen re-issue at `:4726` is
+skipped when `layered`, leaving the flag set. Where this table and the item
+text above differ, the table wins.
+
+| # | Finding | Disposition |
+|---|---|---|
+| B1 | BLOCKING. The fence `g_uiLayerIssueBlocked` rises mid-draw (`ui_layer.cpp:1867`) and `forwardWithVerdict` reads it again later in the same call (`:4405`, `:4667`). A mask copied into a local at the draw's top would issue after the fence. | Taken. Every site reads `g_state->interest` where it stands; no local copy, no load hoisted across a call. R2's `interest &` is shorthand for that read. |
+| B2 | BLOCKING. `State` is deleted at `:7405` and `:7550`; R1 named one. | Taken. `g_drawInterestPtr` is cleared before both deletes. |
+| B3 | BLOCKING. "No drift line" is what success and a dead check both look like; the two functions' own time falls from items 3 and 5 alone. | Taken. The drift check prints a positive line every window: checks run, mismatches, the mask's popcount. Item 1 is judged with callers grouped with callees, net of items 3 and 5: their expected deltas are build 5's inline cost (35.9 to 42.0 ns in `beginPanelOverride`) and about 11 TLS accesses. |
+| B4 | BLOCKING. S2 is not exact by construction (the doc says so); only items 3 and 5 had a yes. | **The maintainer said yes on 2026-11-04.** S2 is an approved behaviour change resting on build 5's 0 disagreements in 8.1M lookups and the frame bound. The reviewer's note goes in the record: `Rtv0` and `Dsv0` are eye-key slots (`binding_shadow.cpp:34-36`, `:130`), so a view unbound by binding its resource as a target still moves the key, which narrows the window. |
+| N1 | Item 3 deletes what build 5's counts line reads (`:4315-4318`, `:4339-4343`, `:1639-1640`, `:2002`, `:2544`, `:2558`). | Taken. Build 5's line goes in build 6; a TEMPORARY "build 6 counts:" line replaces it, carrying eye and hologram memo misses (counted in the reverted miss path) and B3's drift figures. The never-ran signature names the three flags; `t_drawClockOrdinal` (`:5166`) and `t_markerTeeClockOrdinal` (`:4855`) stay. |
+| N2 | Rigs that pin the old forms: `sharp_weapons_test.cpp:571-572`, `ui_composite_census_test.cpp:630`, `:664`, `:729-756`, `ui_depth_test.cpp:222-279`, `:391`, `:429`, `hologram_depth_test.cpp:79`. | Taken: listed in the spec's test seams. |
+| N3 | The ladder is not render-thread only: `particleRollFreeClear` (`:2009`) runs before the foreign return (`:2107`), and `~RollFreeScope` (`:4363`) runs for foreign contexts (`:413`). | Taken as wording. The `particleSteady` bit's read on a foreign thread races exactly as the flag's read does today (`particle_fix.h:135`); nothing changes. The doc says so. |
+| N4 | The rule must be "recompute before the next D3D call or return": `depth_probe.cpp:1447-1482` writes `g_wanted` and makes hooked calls before restoring it. Missing mid-draw writers: `native_on_foot.cpp:30307`, `:30355`. The source check must know the alias writers. Stale anchor: the stood-down write is `ui_depth.cpp:3534`. | Taken, all. |
+| N5 | Site 5 includes the per-draw `countsMatch` test (`:2129`). | Taken: like site 12, the bit is the stored part (`SpawnLive \|\| CoatPackLive`); the per-draw test stays behind it. |
+| N6 | A bit saves a line only while its feature is off; `particle_billboard` defaults to steady (`particle_fix.cpp:923`), and ui depth and hologram depth are on at L2. | Taken. The spec counts the bits clear at L2 and re-derives the estimate; 0.05-0.15 ms is a guide, the per-function criteria decide. |
+| N7 | R4 covers only the `:4313` return; the pending flags also survive `:4667`, the kSkip return at `:4374`, and `layered` at `:4726` (a normal path, not a fault). | Taken, within the approved change: every return of `forwardWithVerdict` after the flags are filled leaves the module's pending flags clear, and the `layered` case is listed as a real leak this closes. |
+| N8 | Stale anchors: the thunk call pairs are `:5294/5308`, `:5377/5390`, `:5457/5479`, `:5543/5571`; item 5's "`ui_layer.cpp` log caller" does not exist, the callers are `ui_depth.cpp:2459`, `:2697`. | Taken. |
+| N9 | "Within build 5's range" contradicts build 5's lesson; `interestFrom` cannot be tested against accessors in a pure-header rig; the 1-in-1024 check misses fault-path writers. | Taken. On-screen checks use the arc's spread (`ui depth totals:` 3.8-14.0 a frame), not one build's windows. Each module's rig asserts the mask equals its expressions after every writer, through `g_drawInterestPtr` pointed at a local. The drift check's limit is stated; the fault-path writers (`ui_layer.cpp:1867`) are covered by that rig. |
+
+Re-review asked for on these dispositions.
