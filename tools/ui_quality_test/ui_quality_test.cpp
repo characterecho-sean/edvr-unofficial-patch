@@ -92,6 +92,7 @@
 #include "../../src/d3d11/ui_layer_seed_census.h"
 #include "../../src/d3d11/ui_layer_math.h"
 #include "../../src/d3d11/map_camera_core.h"       // the VR map camera's publisher and the open hold
+#include "../../src/d3d11/galaxy_map_pointer_core.h" // the Galaxy Map hover's far point and the two relays' bytes
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
 #include "../../src/d3d11/ui_sizing_math.h"
@@ -2977,6 +2978,77 @@ void testSupercruiseLines() {
         fourth[3] = 123.0f;   // lanes outside the rows and the position are not the map's pose
         pub.observe("GalaxyMapView", fourth);
         check(pub.changes() == 5, "MC14: a fourth lane is not part of the pose");
+    }
+
+    // The Galaxy Map hover's far point and the relays' bytes (src\d3d11\galaxy_map_pointer_core.h, docs\galaxy-map-vr-2026-11-03.md Fix 3).
+    {
+        const float rows[3][3] = {{1, 0, 0}, {0, 0.7071f, 0.7071f}, {0, -0.7071f, 0.7071f}};
+        const float position[3] = {49996.656f, 41092.668f, 23990.863f};
+        const float arrow[3] = {-0.336f, 0.338f, 0.916f};
+        float farPt[4] = {};
+        check(edvr::mappointer::farPoint(rows, position, arrow, 1.0f, farPt) == edvr::mappointer::Why::kOk && farPt[3] == 1.0f, "GP1: the arrow of the 11-04 dumps gives a far point and keeps the game's fourth lane");
+        float rel[3] = {farPt[0] - position[0], farPt[1] - position[1], farPt[2] - position[2]};
+        const float relLength = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+        check(std::fabs(relLength - edvr::mappointer::kFarDistance) < 10.0f, "GP2: the far point is 100000 units from the camera");
+        float axes[3];
+        edvr::mappointer::inMapAxes(rows, rel, axes);
+        const float arrowLength = std::sqrt(arrow[0] * arrow[0] + arrow[1] * arrow[1] + arrow[2] * arrow[2]);
+        bool direction = true;
+        for (int i = 0; i < 3; ++i) direction = direction && std::fabs(axes[i] / edvr::mappointer::kFarDistance - arrow[i] / arrowLength) < 2e-3f;
+        check(direction, "GP3: in the map's axes the far point has the arrow's direction (rel . row i = 100000 * P_i / |P|)");
+        check(std::fabs(edvr::mappointer::ratio(axes[0], arrow[0]) - edvr::mappointer::kFarDistance / arrowLength) < 500.0f && std::isnan(edvr::mappointer::ratio(1.0f, 0.0f)),
+              "GP4: the check's ratio is the gain 100000 / |P| on an axis, and NaN where the arrow's component is zero");
+        const float tiny[3] = {0.01f, 0.0f, 0.02f}, large[3] = {10.0f, 10.0f, 10.0f}, nonFinite[3] = {std::nanf(""), 0.0f, 1.0f};
+        float sink[4];
+        check(edvr::mappointer::farPoint(rows, position, tiny, 1.0f, sink) == edvr::mappointer::Why::kBadArrow && edvr::mappointer::farPoint(rows, position, large, 1.0f, sink) == edvr::mappointer::Why::kBadArrow &&
+                  edvr::mappointer::farPoint(rows, position, nonFinite, 1.0f, sink) == edvr::mappointer::Why::kBadArrow,
+              "GP5: an arrow shorter than 0.1, longer than 10 or not finite is refused");
+        float badRows[3][3];
+        std::memcpy(badRows, rows, sizeof(badRows));
+        badRows[1][2] = std::nanf("");
+        const float badPosition[3] = {position[0], std::numeric_limits<float>::infinity(), position[2]};
+        check(edvr::mappointer::farPoint(badRows, position, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose && edvr::mappointer::farPoint(rows, badPosition, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose,
+              "GP6: a non-finite pose is refused");
+        const float nearPoint[3] = {position[0] + 1.0f, position[1] - 2.0f, position[2] + 3.0f}, starAt[3] = {position[0] + 60.0f, position[1], position[2]};
+        check(edvr::mappointer::nearCamera(nearPoint, position, edvr::mappointer::kNearCamera) && !edvr::mappointer::nearCamera(starAt, position, edvr::mappointer::kNearCamera) &&
+                  !edvr::mappointer::nearCamera(nonFinite, position, edvr::mappointer::kNearCamera),
+              "GP7: a point within 10 units of the camera is a second test of the pointer; a star's distance, 60, is not");
+        uint8_t gate[edvr::mappointer::kGateRelayBytes];
+        std::memset(gate, 0xCC, sizeof(gate));
+        int cell = 0, callback = 0;
+        edvr::mappointer::buildGateRelay(gate, &cell, &callback);
+        uint64_t gateAddress = 0, callbackAddress = 0, trampolineCell = 1;
+        std::memcpy(&gateAddress, gate + 2, 8);
+        std::memcpy(&callbackAddress, gate + 22, 8);
+        std::memcpy(&trampolineCell, gate + edvr::mappointer::kGateRelayTrampolineAt, 8);
+        const uint8_t zero4[4] = {};
+        const bool gateBytes = gate[0] == 0x48 && gate[1] == 0xB8 && gate[10] == 0x48 && gate[11] == 0x83 && gate[12] == 0x38 && gate[13] == 0x00 && gate[14] == 0x74 && gate[15] == 0x0E &&
+                               gate[16] == 0xFF && gate[17] == 0x25 && gate[30] == 0xFF && gate[31] == 0x25 && gateAddress == reinterpret_cast<uintptr_t>(&cell) &&
+                               callbackAddress == reinterpret_cast<uintptr_t>(&callback) && trampolineCell == 0 && std::memcmp(gate + 18, zero4, 4) == 0 && std::memcmp(gate + 32, zero4, 4) == 0 &&
+                               edvr::mappointer::kGateRelayTrampolineAt == 36 && edvr::mappointer::kGateRelayBytes == 44;
+        check(gateBytes, "GP8: the gate relay is mov rax,gate; cmp [rax],0; je +14 over the callback jump; jmp [callback]; jmp [trampoline, cell at 36]; both jumps rip+0");
+        uint8_t stub[edvr::mappointer::kCaptureStubBytes];
+        std::memset(stub, 0xCC, sizeof(stub));
+        int slot = 0;
+        edvr::mappointer::buildCaptureStub(stub, &slot);
+        uint64_t slotAddress = 0;
+        std::memcpy(&slotAddress, stub + 2, 8);
+        check(stub[0] == 0x48 && stub[1] == 0xB8 && slotAddress == reinterpret_cast<uintptr_t>(&slot) && stub[10] == 0x48 && stub[11] == 0x89 && stub[12] == 0x08 && stub[13] == 0xFF && stub[14] == 0x25 &&
+                  std::memcmp(stub + 15, zero4, 4) == 0 && edvr::mappointer::kCaptureStubTrampolineAt == 19 && edvr::mappointer::kCaptureStubBytes == 27,
+              "GP9: the capture stub is mov rax,slot; mov [rax],rcx; jmp [rip+0] over the trampoline cell at 19: no argument register touched");
+        // The wiring, read as text (this rig runs from the repository root): the pointer ticks right after the map camera, and the draw path declares its scope after the roll-free one.
+        auto slurp = [](const char* path) {
+            std::ifstream f(path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        };
+        const std::string hook = slurp("src/d3d11/device_hook.cpp"), screen = slurp("src/d3d11/vscreen.cpp"), pointer = slurp("src/d3d11/galaxy_map_pointer.cpp");
+        check(hook.find("tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });") != std::string::npos, "GP10: the map camera's tick runs mapPointerFrame right after mapCameraFrame");
+        const size_t rollFree = screen.find("} rollFreeScope{self};"), mapScope = screen.find("} mapUiDepthScope{self};"), skip = screen.find("if (v == DrawVerdict::kSkip) {", rollFree);
+        check(rollFree != std::string::npos && mapScope > rollFree && mapScope < skip && screen.find("v != DrawVerdict::kSkip && mapUiDepthOpen()") != std::string::npos,
+              "GP11: forwardWithVerdict declares the map's UI depth scope after the roll-free scope (so it restores first) and binds only on a draw that is not skipped");
+        check(pointer.find("gameRvasFound(kRvas") != std::string::npos && pointer.find("gamePinMatches(kProjectRva") != std::string::npos && pointer.find("gamePinMatches(kCursorRva") != std::string::npos && pointer.find("gamePinMatches(kPointerReturnRva") != std::string::npos && pointer.find("armed.store(true") != std::string::npos &&
+                  pointer.find("_ReturnAddress()") != std::string::npos,
+              "GP12: the pointer resolves its addresses through the signature table, pins their bytes, arms once both hooks are in, and reads the caller's return address");
     }
 
     UiDsState normalDs;  // depth tested, no write; no stencil

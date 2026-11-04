@@ -1043,7 +1043,7 @@ inline UiLayerFamily uiLayerMapFamilyOf(uint64_t vs, uint64_t ps) {
 }
 
 struct UiFamilyFacts {
-    int targetKind = 0;          // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
+    int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
     uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
     bool excluded = false;        // ui_depth's exclude list
     bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite

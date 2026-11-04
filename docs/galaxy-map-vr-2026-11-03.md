@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): all four reported symptoms have a named cause; the design below is NOT BUILT. Branch `claude/galaxy-map-motion-cursor-e864cb` holds fix 2 of the motion gate and the pointer probe (7c1544a0), both flown. Nothing is merged.
+State (2026-11-04): all four reported symptoms have a named cause; fixes 1, 2 and 3 are BUILT on branch `claude/galaxy-map-motion-cursor-e864cb`, full build green, NOT FLOWN, not merged.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -13,13 +13,13 @@ Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log 
 | Cursor does not select stars | Arrow is at about 1 m on the panel shell; the hover uses a different point, about 1.83 times the arrow's angle | Arrow MEASURED; hover gain INFERRED, fits better than gain 1 | Hover from the arrow's direction, far away; arrow and panels at star depth |
 | Moving the headset changes the system | The hover point and the arrow are near, the stars are at infinity. The head's move between dumps carried the eyes 6.7 cm (about 0.065 tan at 1 m); labelled stars near the pointer are 0.02 to 0.05 tan apart | Geometry MEASURED; that this is the mechanism is INFERRED (K's camera OPEN) | Same fix; it does not depend on K's camera |
 
-Decision needed: panels at star depth (recommended; see "Fix 3") or kept at about 1.2 m. Kept means an over-panel test, for which the game offers no signal found so far.
+Decided (Sean, 2026-11-04): panels at star depth.
 
-Open, none blocks the build: who writes K's matrices (0x2894A50 reads W+0x420 and W+0x460); the hover pointer block's class ([vis+0x110]); whether a click re-tests the star (candidate: vis+0x2C0 copied from +0x2B0; the fix logs any other caller of K's projection); System Map and Orrery hover (not read, so fix 3 is Galaxy Map only).
+Open, the flight's log answers the first three: who writes K's matrices and which camera they are (the `map pointer check` lines print them); whether a click re-tests the star (candidate: vis+0x2C0 copied from +0x2B0; the fix logs any other caller of K's projection); whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0). Not answered by it: the hover pointer block's class ([vis+0x110]), now only of interest for the gain; System Map and Orrery hover (not read, so fix 3 is Galaxy Map only).
 
-Temporary to remove when this closes: the F111 map probe (native_on_foot.cpp f111RefreshGates), `temporalMapCameraStill` and its two bounds. No new keys.
+Temporary to remove when this closes: the `map pointer check` lines and their second K call. The F111 map probe and the stillness bounds are gone. No new keys.
 
-Next: build fixes 1, 2 and 3 in that order, one flight (card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: the flight (card below). RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: the left eye missing panels and the arrow in play, because it is the dump's first frame only. At each run's start the log says `eye unknown` for the interface and cursor draws and counts one swap (5400 of 5400 eyes matched in the window before); frames 1 to 15 have the UI in both eyes. The overview images are taken from frame 0, so do not read a left-eye overview for the UI. Eye dumps lose frame 0's left UI: a small bug in the dump's arming, not looked into.
@@ -88,10 +88,12 @@ Tests: the rollfree rig's table, plus a basis check that names the map case so t
 Take row 4 of the table into the HDR layer while a map is open, and let DLSS keep only what has no edges to smear.
 
 - **Families.** flat_ui_layer_math.h names kMapCanvas and kMapSprite (including ps 964221955A9E77E7) and the path exists: begin, issue, tone re-issue, composite. VR gets the same pairs behind the same gate, plus a new family for the rings (94EA99 ps 65DAC5) and stems (3028E7 ps 6C28D5), which flat leaves in its scene. Flat's rule does not change.
-- **Tone.** Add 6F4B7B60C6C15BBF with 5EC48683F6C86A42 to the map's UI-layer tone table: the scene is t0, as in flat's map tone. Like flat's, it stays out of the shared registry (flat_ui_layer_math.h, "THE MAP FRAMES' TONEMAP").
+- **Tone.** VR admits a tone by the identity of the HDR target it samples (uiLayerCrispNoteEyeDraw), so no table entry is needed: the census shows the tone 6F4B7B60C6C15BBF with 5EC48683F6C86A42 reads at t0 the texture the overlays draw into. Its pixel shader combines scene and bloom as `cb2[1].w >= 0 ? lerp(scene, bloom, w) : scene + bloom`, and the re-issue zeroes t1, so with w at or above zero the layer would be dimmed by 1 - w. w is not known, so the re-issue for this shader binds a copy of b2 with cb2[1].w = -1, the additive branch, and a zero bloom leaves T(L) exactly.
 - **Order.** Row 4 is contiguous and after the bloom, and the panels land on top after the re-issue, so the picture's order holds.
 - **History.** Stars, dust and sky stay in DLSS with jitter and history at rest, which is what fix 2 of the gate gave them. A reset is decided by stage 0's pose changing: any change between frames, no threshold. This replaces `temporalMapCameraStill` and its 0.15 degree and 0.05 bounds. Those are the slow-move smear: position noise at rest peaks at 0.016, the bound was three times that, and the flight's kept frames reached 0.049.
-- **Gate.** The same hook gives the stage name, so `GalaxyMapView` opens the Galaxy Map's gate on its first frame instead of up to 0.5 s later. GuiFocus still gates 7 and 8 until a dump names their stages. RE also found IsInGalaxyMap (0x3B36E70, 0x3B85110) if the hook proves unsuitable. The hook on 0x2874290 exists for the dump's capture; the fix keeps it installed and reads only stage 0, and publishes the pose across threads (the capture saw the source on one thread and the camera refreshes on another).
+- **Gate.** The same hook gives the stage name, so `GalaxyMapView` opens the Galaxy Map's gate on its first frame instead of up to 0.5 s later. `SystemMapView` sits beside it in the exe's rdata (0x518E278) and publishes the same way, unproven as the System Map's stage until the log names it; GuiFocus 6 to 8 still opens the gate on its own, with no history since nothing publishes. RE also found IsInGalaxyMap (0x3B36E70, 0x3B85110) if the hook proves unsuitable. The hook on 0x2874290 existed for the dump's capture; in VR it now stays installed, reads only stage 0, and publishes the pose across threads (map_camera_core.h). The look after a change resets as well, because a frame's draws can be one publish behind.
+- **If the tone is ever missed.** A map frame whose tone never published has no icons, since they left the scene. After 30 such frames in a row the whole HDR path stands down with a back-off, cockpit HUD included. The census says this will not happen; `lost HUD layer` lines would show it.
+- **Light through the tone.** Rings and stems are additive, so they go through the tone as T(L) added after T(scene), not T(scene + L), like the space dust. Icons and labels classify as over, with no blend path of their own.
 - **Cost.** 360 to 450 redirected draws per eye against about 6 today, plus stencil write-backs. Map frames have room (7.4 ms wait in the flight's timing line). Read `draw hook CPU` in the flight; if it matters, bracket the contiguous run with one target switch rather than per-draw state.
 
 This also ends the at-rest text shimmer for good: text is drawn at output resolution with no jitter, and owes DLSS nothing.
@@ -100,17 +102,17 @@ This also ends the at-rest text shimmer for good: text is drawn at output resolu
 
 The map is at infinity; the panels and arrow sit about 1 m away in a frame only the UI uses. Make everything in the map share the stars' depth, and make the hover read the arrow.
 
-**(a) Panels and arrow at star depth.** All four UI vertex shaders (C4B4B3, B10B03, 5DAD41, 4EF6DD) subtract cb1[275], the eye's origin in the UI frame, and their clip rows are camera-relative. While the Galaxy Map is open, bind VS slot 1 with row 275 = (0,0,0), through roll-free's existing copy route (billboard_rollfree.h, patch row generalised). Rows 270 to 273 keep the head's rotation.
+**(a) Panels and arrow at star depth.** All four UI vertex shaders (C4B4B3, B10B03, 5DAD41, 4EF6DD) subtract cb1[275].xyz, the eye's origin in the UI frame, use it nowhere else, and their clip rows are camera-relative. While the Galaxy Map is open and (b) is armed, VS slot 1 holds a copy of the bound block with row 275's xyz zeroed (map_ui_depth.h: the partial copy route of billboard_rollfree.h, made at each such draw, with no write tee). The rest of the block keeps the head's rotation.
 
 Each eye then sees the UI from the frame's origin. Disparity goes to zero, head translation stops mattering, and the arrow's direction is exactly the direction the pick ray used, so panel clicks land where the arrow is drawn. Only the pixel's depth changes; the pick mesh, Flash and the game's arrow stay as they are.
 
 Cost of this choice: the panels lose their stereo depth and read at the stars' distance. The map's content is already there, so nothing needs re-converging. The alternative keeps panels at 1.2 m and moves only the arrow, which then doubles over a panel unless an over-panel test switches it. RE found no such signal: controller +0x100 is mesh-level, reads the same over empty shell and a button, and 0x455A720 only pushes into the movie. That leaves Scaleform's cursor event (untraced) or reading the layer's alpha back under the arrow.
 
-**(b) Hover from the arrow.** Hook K's projection (0x28948F0, prologue `48 89 5C 24 08`, 5 bytes) and act only on return address 0x3B91EE9, the pointer's call in 0x3B91D80. Replace the input point with `position + 100000 * (R * normalize(P))`, R and position from stage 0, P the sprite position (ui_mgr+0x530, controller+0x140).
+**(b) Hover from the arrow.** Hook K's projection (0x28948F0, prologue `48 89 5C 24 08`, 5 bytes) and act only on return address 0x3B91EE9, the pointer's call in 0x3B91D80. Replace the input point with `position + 100000 * (R * normalize(P))`, R and position from stage 0, P the arrow's drawn position: three floats at +0x40 of the scene object [MC+0x10], MC being rcx at the cursor's update 0x474A740, recorded by a stub of generated code that touches no argument register. The drawn position rather than the controller's +0x140, because that is what the eye sees: with row 275 zeroed the arrow appears exactly along it. The dumps check the convention: dump 3's arrow tan (0.516, -0.032) lands 0.015 from a star record.
 
-At that distance K's result depends only on direction, so the hovered star is the one behind the arrow whatever K's camera is, and a far point removes the head's parallax. Star calls (0x3ADE6F0) pass untouched. Hook chosen over a patch inside 0x3B91D80 (0x3B91EDF) because it leaves the function's bytes alone and returns the game's own viewport units.
+At that distance K's result depends only on direction, so the hovered star is the one behind the arrow whatever K's camera is, and a far point removes the head's parallax. Star calls (0x3ADE6F0) pass untouched. Hook chosen over a patch inside 0x3B91D80 (0x3B91EDF) because it leaves the function's bytes alone and returns the game's own viewport units. K's relay is gated, so K pays nothing on any other screen.
 
-A self-check runs in the hook. It computes what the model says the game passed, `position + R * diag(g, g, 1) * P` with g from the two cameras' projections, compares it with the game's point, and logs the residual once a second for the first ten seconds. That line settles the pointer block's identity and the 1.83 with no extra flight. Any other return address reaching K with a point near the camera is logged once with its RVA: that is how a second test at click time shows itself.
+A self-check runs in the hook for the first ten seconds of each opening, once a second. It prints the game's point in the map's axes, P, the ratios a/Px, b/Py and c/Pz (which give the gain and the distance with no model), the viewport point from each input, K's half extents, and W's view and projection rows. That settles the pointer block's reading, the 1.83 and K's camera with no extra flight. Any other return address reaching K with a point within 10 units of the camera is logged once with its RVA: that is how a second test at click time shows itself.
 
 **What each symptom becomes.** The arrow stays on a star whatever the head does; the star it covers is the one selected; moving the headset changes neither.
 
@@ -128,11 +130,20 @@ Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-bu
 2. Pan, orbit and zoom, fast then slowly to a stop. Expect: labels, icons, rings and stems crisp with no trail. Stars may soften while moving.
 3. Hold the arrow on three separated stars and click each. Expect: that star is selected. Click a side tab and the search box to check panels.
 
-Log: `billboard roll-free` no longer names the three shaders; `ui quality: layer` shows map families at 720 to 900 a frame and `composites left in the scene` no longer lists 12382D2E; the new map pointer line gives the residual and g; `draw hook CPU` for the cost.
+Log:
+- `billboard roll-free` no longer names the three shaders.
+- `map camera:` says the watch is on and names each stage 0; `temporal aa map:` keeps most eye-frames at rest and resets while the map moves.
+- `ui quality: layer` shows `map canvas`, `map sprite` and `map rings and stems`; `composites left in the scene` no longer lists 12382D2E; `crisp hud: the map tonemap` says the b2 copy is on; no `lost HUD layer` lines.
+- `map pointer: armed`, then the 30 s `map pointer:` line: pointer calls replaced against passed through, and draws bound at star depth. If these are missing, the code never ran.
+- `draw hook CPU` for the cost.
 
-If the arrow lands on a star but another is selected, read the pointer line's residual first, then the other-callers line.
+If the arrow lands on a star but another is selected, read the `map pointer check` lines first, then the other-callers line.
 
 ## Journal
+
+### 2026-11-04, the build
+
+Sean: "Let's build it", with panels at star depth. Changes against the first draft of this design, each found reading the code before building: the tone needs no table (VR admits by identity) but does need the bloom blend forced additive; P comes from the drawn scene object, not the controller; `SystemMapView` found in the exe. K's stores are `movups`, checked by disassembly, so the self-check's scratch output needs no alignment.
 
 ### 2026-11-04, flight 2 (7c1544a0), the reports this design answers
 

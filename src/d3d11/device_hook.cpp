@@ -46,6 +46,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "native_on_foot.h"  // nativeOnFootFrameBoundary (the render-mode setter hook, flight F0)
 #include "flat_stationary_camera_capture.h"  // mapCameraFrame (the VR map camera's publisher)
+#include "galaxy_map_pointer.h"                // mapPointerFrame (the VR Galaxy Map's hover and panel depth)
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "store_hook.h"
 #include "flat_world_witness.h"
@@ -1636,7 +1637,8 @@ void presentFrameBoundary() {
     tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
     // The VR map camera (flat_stationary_camera_capture.h): its watch on the renderer hook, installed and read here once a frame, on the render thread that installs the other hooks. Flat only stands it down.
-    tkMapCamera.run([] { mapCameraFrame(); });
+    // The Galaxy Map's pointer (galaxy_map_pointer.h) follows in the same tick: it reads the open state mapCameraFrame just decided.
+    tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });
     // Native on foot, after the journal's tick it reads (on foot, gameplay). The avatar hooks' boundary runs first: it acts on the want and the body
     // the previous frame's nativeOnFootFrameBoundary published (native_on_foot_hooks.h), which keeps their one-frame order.
     tkNativeOnFoot.run([] {

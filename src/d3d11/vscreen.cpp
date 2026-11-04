@@ -98,6 +98,8 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
+#include "galaxy_map_pointer.h"   // mapUiDepthOpen: the Galaxy Map is open and its pointer hooks are armed
+#include "map_ui_depth.h"          // the map's panels and arrow at the stars' depth
 #include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
@@ -4318,6 +4320,16 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
     } rollFreeScope{self};
     if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
+    // The Galaxy Map's panels and arrow at the stars' depth (map_ui_depth.h, docs/galaxy-map-vr-2026-11-03.md Fix 3): while the map is open, a draw of one of its four UI vertex shaders
+    // gets a copy of whatever is bound at VERTEX slot 1 here, with the eye origin (row 275) zeroed, for this draw and every re-issue of it; put back on every way out. It copies what is
+    // bound at this point, so it composes with the roll-free block above (never one of these shaders) and with the panel distance fix (VS slot 0 only); declared after the roll-free scope,
+    // so it restores first. Off the map this is one relaxed load.
+    struct MapUiDepthScope {
+        ID3D11DeviceContext* ctx;
+        bool                 on = false;
+        ~MapUiDepthScope() { if (on) mapuidepth::g_mapUiDepth.restore(ctx); }
+    } mapUiDepthScope{self};
+    if (owner && v != DrawVerdict::kSkip && mapUiDepthOpen()) mapUiDepthScope.on = mapuidepth::g_mapUiDepth.begin(self, bindingShaderHash(BindSlot::Vs));
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
