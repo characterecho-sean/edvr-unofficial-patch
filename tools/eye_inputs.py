@@ -24,7 +24,7 @@ previous-minus-current motion XY, source depth Z, validity W (1 valid,
 ScreenMotion is RGBA16_FLOAT: previous-minus-current raster motion XY,
 source reversed Z, validity (0 outside, 1 valid, 2 source disocclusion,
 3 source UI requiring current reconstruction).
-SkinE (F2, the second skin; VR only) is RGBA16_FLOAT at the eye's depth size: the skinned characters' exact previous-minus-current position in
+SkinE (F2, the second skin; VR only) is RGBA32_FLOAT (RGBA16_FLOAT in dumps before 2026-11-05) at the eye's depth size: the skinned characters' exact previous-minus-current position in
 CENTIMETRES (xyz), computed by the game's own skinning chain from last frame's palette and pose, and validity W (1 valid, 0 none: no history for that
 character this frame, or no skinned pixel). Where W is 0 xyz is exactly 0. analysis/npc_blur/f2/h1_skin_e.py checks a capture against that contract.
 UI-flags bit 32 means this map was supplied to temporal reconstruction.
@@ -91,7 +91,7 @@ def read(path):
     import numpy as np
     meta, data = _load(path)
     fmt, w, h = meta['format'], meta['width'], meta['height']
-    if fmt == 2:  # Per-frame decision capture: physical motion XY, prior depth Z, flags W.
+    if fmt == 2:  # Per-frame decision capture: physical motion XY, prior depth Z, flags W. Or SkinE.
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 4)
     elif fmt == 10:  # ScreenMotion: raster motion XY, source Z, validity (1/2/3).
         image = np.frombuffer(data, '<f2', offset=44).reshape(h, w, 4).astype('float32')

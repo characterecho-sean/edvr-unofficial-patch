@@ -7,7 +7,7 @@
 //   L1  arming: configure arms the second skin (the hook asked once, its gate opened), and before any frame nothing is bound
 //   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels
 //   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes
-//   L4  the character moves: E = 100 x (previous - current position) in centimetres
+//   L4  the character moves: E = 100 x (previous - current position) in centimetres, exact at a moving ship's travel too (half float's step there is 0.5 cm)
 //   L5  the job table changes shape: no history for that frame, then the next frame has it again
 //   L6  what the draw binds and what is put back: target 7 and the three views while the patched pair draws, the blend state's mask for target 7
 //       (all four channels for the pair that exports E, none for a skinned family's other pixel shader and for a rigid family), and nothing left
@@ -55,15 +55,6 @@ namespace sjw = skin_join_world;
 
 constexpr uint64_t kPairVs = 0xD99AFDC250D19A3Full, kPairPs = 0xE86271E464CCDC1Dull;    // a skinned family and its E-exporting pixel shader
 constexpr uint64_t kPlainVs = 0x61AE8EB05FDC18DDull, kPlainPs = 0xFC43E42710010343ull;  // another skinned family, a pixel shader that exports no E
-
-inline float halfToFloat(uint16_t v) {
-    const uint32_t sign = (v >> 15) & 1u, exp = (v >> 10) & 31u, mant = v & 1023u;
-    float out;
-    if (exp == 0) out = std::ldexp(float(mant), -24);
-    else if (exp == 31) out = mant ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
-    else out = std::ldexp(float(mant + 1024u), int(exp) - 25);
-    return sign ? -out : out;
-}
 
 // What the draw bound, read from the context between the engine's call and the game's draw.
 struct Seen {
@@ -476,7 +467,7 @@ struct Fixture {
         res.As(&tex);
         D3D11_TEXTURE2D_DESC d{};
         tex->GetDesc(&d);
-        h.check(d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT, "L: target 7 is R16G16B16A16_FLOAT");
+        h.check(d.Format == DXGI_FORMAT_R32G32B32A32_FLOAT, "L: target 7 is R32G32B32A32_FLOAT");
         d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
         ComPtr<ID3D11Texture2D> staging;
         h.check(SUCCEEDED(dev->CreateTexture2D(&d, nullptr, &staging)), "L: a staging texture for target 7");
@@ -486,8 +477,8 @@ struct Fixture {
         out.w = d.Width;
         out.e.resize(size_t(d.Width) * d.Height * 4);
         for (UINT y = 0; y < d.Height; ++y) {
-            const uint16_t* row = reinterpret_cast<const uint16_t*>(static_cast<const BYTE*>(m.pData) + y * m.RowPitch);
-            for (UINT x = 0; x < d.Width * 4; ++x) out.e[size_t(y) * d.Width * 4 + x] = halfToFloat(row[x]);
+            const float* row = reinterpret_cast<const float*>(static_cast<const BYTE*>(m.pData) + y * m.RowPitch);
+            for (UINT x = 0; x < d.Width * 4; ++x) out.e[size_t(y) * d.Width * 4 + x] = row[x];
         }
         ctx->Unmap(staging.Get(), 0);
     }
@@ -590,10 +581,25 @@ inline void run(const lt::Harness& h) {
         const Judged a = judge(moved0, expect), b = judge(moved1, expect);
         if (a.worst > 0.1) std::fprintf(stderr, "  L4: worst deviation %.4f cm from (%.2f %.2f %.2f)\n", a.worst, expect[0], expect[1], expect[2]);
         h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L4.a a moving character is valid in both eyes");
-        h.check(a.worst <= 0.1 && b.worst <= 0.1, "L4.b E = 100 x (previous - current position), within half-float rounding");
+        h.check(a.worst <= 0.1 && b.worst <= 0.1, "L4.b E = 100 x (previous - current position)");
         h.check(std::fabs(expect[0]) > 10.0, "L4.c (and the move was large enough to tell from zero)");
     }
     f.frame([&] {});   // the move is over: steady again
+
+    // A character aboard a moving ship: the fixture's camera travels with the record, so this is the Holo-Me case (8.9 m in one frame, measured). E must
+    // stay exact: half float's step at 703 cm is 0.5 cm, which would put this y out by 0.12 cm, and the head's own motion is smaller than that.
+    was = f.state;
+    f.state.pos[0] += 2.8398f; f.state.pos[1] -= 7.0262f; f.state.pos[2] += 4.6061f;
+    Fixture::Eye travelled0, travelled1;
+    f.frame([&] { travelled0 = f.read(0); travelled1 = f.read(1); });
+    {
+        const float expect[3] = {100.0f * (was.pos[0] - f.state.pos[0]), 100.0f * (was.pos[1] - f.state.pos[1]), 100.0f * (was.pos[2] - f.state.pos[2])};
+        const Judged a = judge(travelled0, expect), b = judge(travelled1, expect);
+        if (a.worst > 0.02) std::fprintf(stderr, "  L4: worst deviation %.4f cm from (%.2f %.2f %.2f)\n", a.worst, expect[0], expect[1], expect[2]);
+        h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L4.d a character travelling with the camera is valid in both eyes");
+        h.check(a.worst <= 0.02 && b.worst <= 0.02, "L4.e E holds a ship's travel exactly, under half float's step there");
+    }
+    f.frame([&] {});
 
     // L5: the job table changes shape (the character gains a bone: its job count differs from last frame's)
     f.setWorld(4);
@@ -1140,7 +1146,7 @@ inline void run(const lt::Harness& h) {
     const Judged st13 = judge(steady13, zero);
     h.check(steady13.views && steady13.given && st13.drawn > 20 && st13.valid == st13.drawn && st13.worst == 0.0 && st13.outside == 0.0,
             "L13.b a steady source frame: the screen shader's views carry the source's target 7, valid 1 at every drawn pixel, E exactly zero, zero outside the drawn pixels");
-    h.check(lt::logged("skin join: on-foot source target 7 created 64x40 R16G16B16A16_FLOAT", mark13),
+    h.check(lt::logged("skin join: on-foot source target 7 created 64x40 R32G32B32A32_FLOAT", mark13),
             "L13.c the log says the source's target 7 was created, at the source depth's size");
     f.sourceFrame([&] {});
     {

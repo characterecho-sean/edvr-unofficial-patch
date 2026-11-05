@@ -8,7 +8,8 @@ import struct
 import tempfile
 
 COUNT, STRIDE, SAMPLE_BYTES = 16, 2, 20
-FORMATS = (10, 34, 16)  # R16G16B16A16_FLOAT, R16G16_FLOAT, R32G32_FLOAT
+FORMATS = (2, 34, 16)  # R32G32B32A32_FLOAT, R16G16_FLOAT, R32G32_FLOAT: the source textures; E's samples are half-float words either way
+OLD_SKIN_FORMAT = 10  # dumps from before target 7 went to 32 bits: R16G16B16A16_FLOAT, the same samples
 STATUSES = {'not_reached', 'staged', 'missing_input', 'source_shape', 'source_format',
             'dimensions_changed', 'budget', 'shader_unavailable', 'source_bound_output',
             'scratch_create_failed', 'stage_create_failed', 'capture_fault', 'join_mismatch',
@@ -22,7 +23,7 @@ def read(path):
         raise ValueError('Invalid jump lattice header')
     version, count, stride, sample_bytes, skin, motion, slots = struct.unpack_from('<7I', data, 8)
     budget = struct.unpack_from('<Q', data, 36)[0]
-    if (version, count, stride, sample_bytes) != (1, COUNT, STRIDE, SAMPLE_BYTES) or (skin, motion, slots) != FORMATS:
+    if (version, count, stride, sample_bytes) != (1, COUNT, STRIDE, SAMPLE_BYTES) or (motion, slots) != FORMATS[1:] or skin not in (FORMATS[0], OLD_SKIN_FORMAT):
         raise ValueError('Unsupported jump lattice layout or formats')
     if budget != 320 * 1024 * 1024:
         raise ValueError('Unexpected run budget')

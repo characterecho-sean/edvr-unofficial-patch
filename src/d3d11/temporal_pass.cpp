@@ -1824,6 +1824,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         case DXGI_FORMAT_R8G8B8A8_TYPELESS:case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:bytes=4;break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:bytes=8;break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:bytes=16;break;   // SkinE, target 7
         case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:bytes=2;break;
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_TYPELESS:
         case DXGI_FORMAT_D32_FLOAT:case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:

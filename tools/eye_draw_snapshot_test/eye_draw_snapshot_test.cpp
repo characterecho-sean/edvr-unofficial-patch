@@ -179,11 +179,11 @@ int wmain(int argc, wchar_t** argv) {
         auto source=[&](DXGI_FORMAT format,const void* data,UINT pitch,ComPtr<ID3D11ShaderResourceView>& view){
             D3D11_TEXTURE2D_DESC desc{};desc.Width=5;desc.Height=3;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.Format=format;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
             D3D11_SUBRESOURCE_DATA initial{data,pitch,0};ComPtr<ID3D11Texture2D> texture;hr(dev->CreateTexture2D(&desc,&initial,&texture));hr(dev->CreateShaderResourceView(texture.Get(),nullptr,&view));};
-        uint16_t skin[5*3*4],motion[5*3*2];float slots[5*3*2];
-        for(unsigned i=0;i<15;++i){skin[i*4]=0x3c00;skin[i*4+1]=0x4000;skin[i*4+2]=0x4200;skin[i*4+3]=0x3c00;motion[i*2]=0x3800;motion[i*2+1]=0xb800;slots[i*2]=float(i);slots[i*2+1]=float(i)+0.25f;}
-        skin[14*4]=0x4b40;skin[14*4+1]=0x4b80;motion[14*2]=0x4300;motion[14*2+1]=0xc700;
+        float skin[5*3*4];uint16_t motion[5*3*2];float slots[5*3*2];
+        for(unsigned i=0;i<15;++i){skin[i*4]=1.0f;skin[i*4+1]=2.0f;skin[i*4+2]=3.0f;skin[i*4+3]=1.0f;motion[i*2]=0x3800;motion[i*2+1]=0xb800;slots[i*2]=float(i);slots[i*2+1]=float(i)+0.25f;}
+        skin[14*4]=14.5f;skin[14*4+1]=15.0f;motion[14*2]=0x4300;motion[14*2+1]=0xc700;   // E as half-float words 0x4b40, 0x4b80
         uint32_t slotBits[2]={0x7fc12345u,0x80000000u};std::memcpy(slots+((2*5+4)*2),slotBits,sizeof(slotBits));
-        ComPtr<ID3D11ShaderResourceView> skinView,motionView,slotView;source(DXGI_FORMAT_R16G16B16A16_FLOAT,skin,sizeof(uint16_t)*5*4,skinView);source(DXGI_FORMAT_R16G16_FLOAT,motion,sizeof(uint16_t)*5*2,motionView);source(DXGI_FORMAT_R32G32_FLOAT,slots,sizeof(float)*5*2,slotView);
+        ComPtr<ID3D11ShaderResourceView> skinView,motionView,slotView;source(DXGI_FORMAT_R32G32B32A32_FLOAT,skin,sizeof(float)*5*4,skinView);source(DXGI_FORMAT_R16G16_FLOAT,motion,sizeof(uint16_t)*5*2,motionView);source(DXGI_FORMAT_R32G32_FLOAT,slots,sizeof(float)*5*2,slotView);
         edvr::eye_jump_lattice::Run run;run.arm();
         ID3D11ShaderResourceView* originalSrv=slotView.Get();ctx->CSSetShaderResources(0,1,&originalSrv);ctx->CSSetShader(nullptr,nullptr,0);
         bool allRows=true;for(uint32_t i=0;i<edvr::eye_jump_lattice::Count;++i)

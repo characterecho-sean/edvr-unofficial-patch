@@ -8,7 +8,7 @@
 namespace edvr { namespace eye_jump_lattice {
 constexpr uint32_t Count=16, Stride=2;
 constexpr uint64_t Budget=320ull*1024*1024;
-constexpr DXGI_FORMAT SkinFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr DXGI_FORMAT SkinFormat=DXGI_FORMAT_R32G32B32A32_FLOAT;
 constexpr DXGI_FORMAT MotionFormat=DXGI_FORMAT_R16G16_FLOAT;
 constexpr DXGI_FORMAT SlotFormat=DXGI_FORMAT_R32G32_FLOAT;
 constexpr DXGI_FORMAT PackedSkinFormat=DXGI_FORMAT_R32G32_UINT;
