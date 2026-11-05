@@ -33,6 +33,7 @@
 #include "../common/vr_supersample_notice.h"
 #include "../common/vscreen_fit.h"
 #include "aa_compare.h"     // aaCompareNoteMenuEdit(): an F8 pick of the AA mode ends an AA comparison
+#include "cockpit_glass_core.h"   // parseLook, dirtRowDim: the Legacy glass dirt row dims unless visual.cockpit_glass is legacy
 #include "device_hook.h"
 #include "elite_binds.h"
 #include "flat_elite_settings.h"
@@ -521,6 +522,21 @@ static_assert(sgb::kStockPercent == kStarGlowStock, "the hint's threshold is the
 bool isStarGlowRow(const MenuRowDef& d) {
     return strcmp(d.section, "visual") == 0 && strcmp(d.key, "star_glow") == 0;
 }
+
+// visual.cockpit_glass_dirt (the Legacy glass dirt row, both menus' Visual page, directly under Cockpit glass). Only the legacy canopy shader draws that dirt, so with
+// visual.cockpit_glass = odyssey the row stays on the page, dimmed, and stops responding to steps, typing and reset, the way the Sharpening row does with the anti-aliasing
+// off. The look is read as the glass reads it (parseLook: anything but "legacy" is odyssey), live, every time the page is drawn or the row is touched.
+bool isCockpitGlassDirtRow(const MenuRowDef& d) {
+    return strcmp(d.section, "visual") == 0 && strcmp(d.key, "cockpit_glass_dirt") == 0;
+}
+
+bool cockpitGlassDirtRowDisabled() {
+    return cockpit_glass::dirtRowDim(cockpit_glass::parseLook(Config::get().getString("visual.cockpit_glass", "odyssey").c_str(), nullptr));
+}
+
+const char* cockpitGlassDirtHint() { return "Needs Cockpit glass set to Legacy: choose it above to use this."; }
+
+const char* cockpitGlassDirtRefusal() { return "Legacy glass dirt is inactive: set Cockpit glass to Legacy above first."; }
 
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
 // this is not a headset row despite living beside one in the ini. The height
@@ -2522,9 +2538,11 @@ void buildContent(MenuContent& c) {
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
+            const bool glassDirtRow = isCockpitGlassDirtRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
-                             (hudAaRow && hudAntiAliasingRowDisabled());
+                             (hudAaRow && hudAntiAliasingRowDisabled()) ||
+                             (glassDirtRow && cockpitGlassDirtRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             if (dlssRow) {
@@ -2595,6 +2613,8 @@ void buildContent(MenuContent& c) {
                                   : kMenuRow;
             if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
+            else if (hi && dim && glassDirtRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", cockpitGlassDirtHint());
             else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
@@ -3093,6 +3113,11 @@ void stepRow(int defIndex, int dir, int mult) {
         g_s.contentDirty = true;
         return;
     }
+    if (isCockpitGlassDirtRow(d) && cockpitGlassDirtRowDisabled()) {
+        g_s.lastWrite = cockpitGlassDirtRefusal();
+        g_s.contentDirty = true;
+        return;
+    }
     if (isOpenxrRenderScaleRow(d)) {
         // A width for the worn headset, stepped by 100 px on the grid of
         // round hundreds (steppedResolution); the generated row is Text,
@@ -3493,6 +3518,11 @@ void beginEdit(int entryIndex, int defIndex) {
     // neither (stepRow says why).
     if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {
         s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
+        s.contentDirty = true;
+        return;
+    }
+    if (isCockpitGlassDirtRow(kMenuRows[defIndex]) && cockpitGlassDirtRowDisabled()) {
+        s.lastWrite = cockpitGlassDirtRefusal();
         s.contentDirty = true;
         return;
     }
@@ -3953,6 +3983,9 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                         } else {
                             applyResolutionChange(def, v, 0);
                         }
+                    } else if (isCockpitGlassDirtRow(d) && cockpitGlassDirtRowDisabled()) {
+                        s.lastWrite = cockpitGlassDirtRefusal();
+                        s.contentDirty = true;
                     } else {
                         applyChange(def, d.shipped);
                     }

@@ -35,6 +35,7 @@ constexpr UINT kStreakSlot = 12;
 bool g_configRead = false;
 uint32_t g_configGeneration = 0;
 bool g_on = false;
+int g_dirtPercent = kDirtPercentDefault;   // visual.cockpit_glass_dirt, read with the look at the frame boundary
 std::string g_unrecognisedSaid;   // the last unrecognised value the log has named, so a typo is said once and not every config change
 
 // Everything made on one device is kept as raw pointers on purpose, never released at exit (a static destructor that releases a D3D object during shutdown is the kind of
@@ -44,6 +45,9 @@ ID3D11PixelShader* g_ps = nullptr;                    // the intact replacement
 ID3D11PixelShader* g_overlayPs[2] = {nullptr, nullptr};   // ice, condensation
 ID3D11BlendState* g_overlayBlend = nullptr;           // colour ONE + ONE, RGB written, alpha untouched
 ID3D11ShaderResourceView* g_streakSrv = nullptr;
+ID3D11Buffer* g_levelCb = nullptr;                    // the dirt level, one register (16 bytes) at b13
+float g_levelUploaded = -1.0f;                        // the level g_levelCb holds; a different one is uploaded at the next bind
+bool g_levelRefused = false;
 Replacement g_state = Replacement::NotTried;
 bool g_overlayRefused[2] = {false, false};
 bool g_blendRefused = false;
@@ -65,8 +69,10 @@ uint32_t g_binds = 0;      // canopy binds handed the replacement, this window
 uint32_t g_seen = 0;       // canopy binds the game made, this window
 uint32_t g_overlays = 0;   // ice or condensation draws drawn over with the legacy dirt, this window
 
-// What was at t12 before the intact replacement's bind put the streaks there; given back at the next pixel-shader bind of another shader, or at the frame boundary.
+// What was at t12 and b13 before the intact replacement's bind put the streaks and the dirt level there; given back at the next pixel-shader bind of another shader, or at the
+// frame boundary.
 ID3D11ShaderResourceView* g_t12Prev = nullptr;
+ID3D11Buffer* g_b13Prev = nullptr;
 bool g_t12Bound = false;
 
 // The overlay's own save of the game's state across the one reissued draw.
@@ -75,6 +81,7 @@ ID3D11BlendState* g_savedBlend = nullptr;
 float g_savedFactor[4] = {1, 1, 1, 1};
 UINT g_savedMask = 0xFFFFFFFFu;
 ID3D11ShaderResourceView* g_savedT12 = nullptr;
+ID3D11Buffer* g_savedB13 = nullptr;
 
 template <class T>
 void releaseGuarded(T*& p, const char* site) {
@@ -180,13 +187,17 @@ void dropDeviceObjects() {
     for (auto& p : g_overlayPs) releaseGuarded(p, "cockpitGlass.overlay.release");
     releaseGuarded(g_overlayBlend, "cockpitGlass.blend.release");
     releaseGuarded(g_streakSrv, "cockpitGlass.streaks.release");
+    releaseGuarded(g_levelCb, "cockpitGlass.level.release");
     releaseGuarded(g_t12Prev, "cockpitGlass.t12.release");
+    releaseGuarded(g_b13Prev, "cockpitGlass.b13.release");
     g_t12Bound = false;
     g_state = Replacement::NotTried;
     g_overlayRefused[0] = g_overlayRefused[1] = false;
     g_blendRefused = false;
     g_streakRefused = false;
     g_streakLogged = false;
+    g_levelRefused = false;
+    g_levelUploaded = -1.0f;
 }
 
 // The device the objects were made on is this context's, or they are made again.
@@ -220,24 +231,69 @@ ID3D11PixelShader* replacementFor(ID3D11DeviceContext* ctx) {
     return g_ps;
 }
 
-void bindStreaks(ID3D11DeviceContext* ctx) {
+// The dirt level's block for this device, made the first time it is wanted and brought up to date with visual.cockpit_glass_dirt when the player has moved it (an upload
+// only on a change). Null when the device refused it; the shaders then read an unbound b13, which is no dirt, never the game's own glass.
+ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
+    const float level = dirtLevelOf(g_dirtPercent);
+    if (g_levelCb) {
+        if (level != g_levelUploaded) {
+            const float v[4] = {level, 0, 0, 0};
+            guarded("cockpitGlass.level.update", [&] { vScreenUpdateSubresourceRaw(ctx, g_levelCb, 0, nullptr, v, 0, 0); });
+            g_levelUploaded = level;
+        }
+        return g_levelCb;
+    }
+    if (g_levelRefused) return nullptr;
+    ID3D11Device* dev = nullptr;
+    guarded("cockpitGlass.level.create", [&] {
+        ctx->GetDevice(&dev);
+        if (!dev) return;
+        const float v[4] = {level, 0, 0, 0};
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof v;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const D3D11_SUBRESOURCE_DATA init{v, 0, 0};
+        dev->CreateBuffer(&bd, &init, &g_levelCb);
+    });
+    if (dev) guarded("cockpitGlass.level.device.release", [&] { dev->Release(); });
+    if (!g_levelCb) {
+        g_levelRefused = true;
+        Log::get().note("cockpit glass: the dirt level block was refused by the device; the legacy glass draws without dirt");
+        return nullptr;
+    }
+    g_levelUploaded = level;
+    return g_levelCb;
+}
+
+// The shaders' two inputs of EDVR's own: the streak texture at t12 and the dirt level at b13. Both are put back by restoreGlassInputs.
+void bindGlassInputs(ID3D11DeviceContext* ctx) {
     ID3D11ShaderResourceView* srv = streakSrv(ctx);   // null while the worker runs: an unbound slot reads 0, no dirt
-    guarded("cockpitGlass.streaks.bind", [&] {
+    ID3D11Buffer* level = levelBuffer(ctx);           // null if refused: bound as such, so b13 never holds a block of the game's
+    guarded("cockpitGlass.inputs.bind", [&] {
         if (!g_t12Bound) {
             ctx->PSGetShaderResources(kStreakSlot, 1, &g_t12Prev);
+            ctx->PSGetConstantBuffers(kLevelSlot, 1, &g_b13Prev);
             g_t12Bound = true;
         }
         vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &srv);
+        vScreenPSSetConstantBuffersRaw(ctx, kLevelSlot, 1, &level);
     });
 }
 
-void restoreStreaks(ID3D11DeviceContext* ctx) {
+void restoreGlassInputs(ID3D11DeviceContext* ctx) {
     if (!g_t12Bound) return;
     g_t12Bound = false;
     ID3D11ShaderResourceView* prev = g_t12Prev;
+    ID3D11Buffer* prevB13 = g_b13Prev;
     g_t12Prev = nullptr;
-    guarded("cockpitGlass.streaks.restore", [&] { vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &prev); });
+    g_b13Prev = nullptr;
+    guarded("cockpitGlass.inputs.restore", [&] {
+        vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &prev);
+        vScreenPSSetConstantBuffersRaw(ctx, kLevelSlot, 1, &prevB13);
+    });
     if (prev) guarded("cockpitGlass.streaks.prev.release", [&] { prev->Release(); });
+    if (prevB13) guarded("cockpitGlass.b13.prev.release", [&] { prevB13->Release(); });
 }
 
 ID3D11PixelShader* overlayShaderFor(ID3D11DeviceContext* ctx, Overlay which) {
@@ -303,15 +359,15 @@ void logWindow(ULONGLONG now) {
 }  // namespace
 
 ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, uint64_t hash) {
-    if (hash != kReplacedPsHash) {   // every other bind: this compare, the streaks' hand-back if they are still bound, and out
-        if (g_t12Bound) restoreStreaks(ctx);
+    if (hash != kReplacedPsHash) {   // every other bind: this compare, the streaks' and the level's hand-back if they are still bound, and out
+        if (g_t12Bound) restoreGlassInputs(ctx);
         return ps;
     }
     ++g_seen;
     ID3D11PixelShader* replacement = replacementFor(ctx);
     if (!swapWanted(Look::Legacy, replacement != nullptr, hash)) return ps;
     ++g_binds;
-    bindStreaks(ctx);
+    bindGlassInputs(ctx);
     return replacement;
 }
 
@@ -325,16 +381,19 @@ bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx) {
     ID3D11BlendState* blend = ps ? overlayBlend(ctx) : nullptr;
     if (!ps || !blend) return false;
     ID3D11ShaderResourceView* srv = streakSrv(ctx);
+    ID3D11Buffer* level = levelBuffer(ctx);
     bool saved = false;
     const bool ran = guarded("cockpitGlass.overlay.begin", [&] {
         ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
         ctx->OMGetBlendState(&g_savedBlend, g_savedFactor, &g_savedMask);
         ctx->PSGetShaderResources(kStreakSlot, 1, &g_savedT12);
+        ctx->PSGetConstantBuffers(kLevelSlot, 1, &g_savedB13);
         saved = true;
         const float one[4] = {1, 1, 1, 1};
         vScreenPSSetShaderRaw(ctx, ps, nullptr, 0);
         vScreenOMSetBlendStateRaw(ctx, blend, one, 0xFFFFFFFFu);
         vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &srv);
+        vScreenPSSetConstantBuffersRaw(ctx, kLevelSlot, 1, &level);
     });
     if (!ran) {
         if (saved) cockpitGlassOverlayEnd(ctx);
@@ -349,10 +408,12 @@ void cockpitGlassOverlayEnd(ID3D11DeviceContext* ctx) {
         vScreenPSSetShaderRaw(ctx, g_savedPs, nullptr, 0);
         vScreenOMSetBlendStateRaw(ctx, g_savedBlend, g_savedFactor, g_savedMask);
         vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &g_savedT12);
+        vScreenPSSetConstantBuffersRaw(ctx, kLevelSlot, 1, &g_savedB13);
     });
     releaseGuarded(g_savedPs, "cockpitGlass.overlay.ps.release");
     releaseGuarded(g_savedBlend, "cockpitGlass.overlay.blend.release");
     releaseGuarded(g_savedT12, "cockpitGlass.overlay.t12.release");
+    releaseGuarded(g_savedB13, "cockpitGlass.overlay.b13.release");
 }
 
 void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
@@ -368,6 +429,13 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
             g_unrecognisedSaid = v;
             Log::get().note("cockpit glass: visual.cockpit_glass = \"%s\" is not odyssey or legacy; it is read as odyssey (the game as it ships)", v.c_str());
         }
+        // The dirt level (visual.cockpit_glass_dirt), read whatever the look is: it takes effect at the next bind, and is said when it moves while `legacy` is on.
+        const int dirtPercent = cfg.getIntInRange("visual.cockpit_glass_dirt", kDirtPercentDefault, kDirtPercentMin, kDirtPercentMax);
+        if (dirtPercent != g_dirtPercent) {
+            g_dirtPercent = dirtPercent;
+            if (on && g_on)
+                Log::get().note("cockpit glass: dirt level %d%% (visual.cockpit_glass_dirt), from the next canopy bind", dirtPercent);
+        }
         if (on != g_on) {
             const ULONGLONG now = GetTickCount64();
             if (on) {
@@ -375,12 +443,13 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
                 if (g_state == Replacement::Refused) g_state = Replacement::NotTried;   // a new try for a new switch-on
                 startStreaks();
                 Log::get().note("cockpit glass: legacy on (visual.cockpit_glass = legacy): the game's intact quality-3 canopy pixel shader %016llX is "
-                                "replaced at bind time, and the ice and condensation draws get the legacy dirt drawn over them; a window line every 30 s "
+                                "replaced at bind time, and the ice and condensation draws get the legacy dirt drawn over them, at a dirt level of %d%% "
+                                "(visual.cockpit_glass_dirt); a window line every 30 s "
                                 "counts the binds, and binds=0 with canopy-seen above 0 means the replacement did not take",
-                                static_cast<unsigned long long>(kReplacedPsHash));
+                                static_cast<unsigned long long>(kReplacedPsHash), g_dirtPercent);
             } else {
                 logWindow(now);
-                if (ctx) restoreStreaks(ctx);
+                if (ctx) restoreGlassInputs(ctx);
                 Log::get().note("cockpit glass: legacy off (visual.cockpit_glass = %s): the canopy is drawn by the game's own shader from its next bind",
                                 v.c_str());
             }
@@ -389,7 +458,7 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
         }
     }
     if (!g_on) return;
-    if (ctx) restoreStreaks(ctx);   // the frame is over: whatever was at t12 is back
+    if (ctx) restoreGlassInputs(ctx);   // the frame is over: whatever was at t12 and b13 is back
     const ULONGLONG now = GetTickCount64();
     if (windowDue(now, g_windowStart, kWindowMs)) {
         logWindow(now);

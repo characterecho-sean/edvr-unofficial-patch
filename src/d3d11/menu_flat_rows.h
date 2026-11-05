@@ -62,6 +62,8 @@ inline constexpr FlatPageRow kFlatVisualRows[] = {
     {"visual", "star_glow",   FlatRowRead::Allowlist},
     // Cockpit glass (2026-11-03): odyssey (the game's) or the Horizons 3.8 look, both profiles; its `menu visual` token is the page VR's menu builds too.
     {"visual", "cockpit_glass", FlatRowRead::Allowlist},
+    // Legacy glass dirt (2026-11-05): how much dirt the legacy look draws, in percent. Dimmed unless cockpit_glass is legacy (menu.cpp cockpitGlassDirtRowDisabled).
+    {"visual", "cockpit_glass_dirt", FlatRowRead::Allowlist},
     {"fix", "particle_billboard", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatVisualRowCount = sizeof(kFlatVisualRows) / sizeof(kFlatVisualRows[0]);

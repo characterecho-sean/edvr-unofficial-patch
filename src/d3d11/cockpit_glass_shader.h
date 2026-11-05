@@ -14,6 +14,7 @@
 // links with it, and reads only what the game has already bound for that draw:
 //   b1  the frame block (333 registers; this reads 56, 90, 227-228, 245, 253, 261, 277-279, 291-326)
 //   b2  the material block (18 registers)
+//   b13 EDVR's own one register, the dirt level (cockpit_glass.cpp binds it with the streaks and puts back what was there)
 //   t0  per-cluster probe lists (raw), t1 the directional light (raw: colour at +0, view-space direction at +16, stride 48),
 //   t2  the light and probe records (raw), t3 the probe cube array, t5 the moment shadow map
 //   the crack normal and alpha: t6 (intact) or t7 (ice, condensation); the blemish map: t9 (intact) or t11 (ice, condensation)
@@ -34,6 +35,8 @@ namespace edvr {
 constexpr char kCockpitGlassLegacyPsHlsl[] = R"HLSL(
 cbuffer Frame : register(b1) { float4 cb1[327]; }
 cbuffer Material : register(b2) { float4 cb2[18]; }
+// EDVR's own, bound by the swap: x is the dirt level (visual.cockpit_glass_dirt / 100, 1 = the look as shipped). Unbound it reads 0, which is no dirt.
+cbuffer Level : register(b13) { float4 dirtLevel; }
 ByteAddressBuffer ClusterLists : register(t0);
 ByteAddressBuffer SunLight : register(t1);
 ByteAddressBuffer ProbeRecords : register(t2);
@@ -185,7 +188,7 @@ static const float kCrackGloss = 450.0;        // and its exponent (cb0[38].z)
 static const float kStreakMax = 0.09;
 // CHOSEN, not measured: the dirt albedo is multiplied by this. Sean found 16 too much for a clean windshield, and then 8 "probably still too intense", with too much brightness in
 // the dirt texture compared to legacy; section 12 of the doc measures about 4 to 6 times as matching legacy on the display. Dirt albedo only: the smudge and crack glare and the
-// crack colour are not scaled.
+// crack colour are not scaled. The player's visual.cockpit_glass_dirt scales it again, live, through the Level block (b13): 100 % is this value.
 static const float kDirtStrength = 4.0;
 // CHOSEN placement, not measured (Sean approved it, 2026-11-03): where the dirt sits. Legacy's dirt mask covered most of the pane, and the game's vertex mask reads as frost at the
 // frame (a bright frame against the struts, faceted by the triangles, 37% of the visible pane at exactly 0 on the Vulture). So the grime never ends: a film everywhere on the pane,
@@ -323,7 +326,7 @@ float4 main(PsIn i) : SV_Target {
     float gloss = lerp(kImperfectionGloss, kCrackGloss, crackA);
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
     // The dirt is grey (R = G = B): the streak texture times the mask times the colour scale.
-    float3 albedo = lerp((streak * dirtMask * kLegacyDirtColour * kDirtStrength).xxx, cb2[8].yzw * cb1[56].y, crackA);
+    float3 albedo = lerp((streak * dirtMask * kLegacyDirtColour * kDirtStrength * dirtLevel.x).xxx, cb2[8].yzw * cb1[56].y, crackA);
     float3 ambient = probeAmbient(pv, nIn, i.position.xy);
     // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
     float3 direct = shadow * kInvPi * lightColour;

@@ -57,6 +57,21 @@ inline bool swapWanted(Look look, bool haveReplacement, uint64_t boundHash) {
     return look == Look::Legacy && haveReplacement && boundHash == kReplacedPsHash;
 }
 
+// visual.cockpit_glass_dirt: how much dirt the legacy glass shows, in percent of the look as shipped (100 is the shader's own dirt strength, 0 a clean pane). It is read
+// only while `legacy` is on; with `odyssey` the game draws its own dirt and the key does nothing, which is why the menus dim its row then (dirtRowDim).
+constexpr int kDirtPercentDefault = 100;
+constexpr int kDirtPercentMin = 0;
+constexpr int kDirtPercentMax = 300;
+// The shader's dirt level (cbuffer Level, x) for a percent, held to the key's range so a bad file value cannot push the dirt past what the menu offers.
+inline float dirtLevelOf(int percent) {
+    const int p = percent < kDirtPercentMin ? kDirtPercentMin : (percent > kDirtPercentMax ? kDirtPercentMax : percent);
+    return static_cast<float>(p) / 100.0f;
+}
+// The pixel-shader constant-buffer slot the level lives in (b13, the last of D3D11's fourteen): the game's canopy shaders bind b1 and b2.
+constexpr unsigned kLevelSlot = 13;
+// Whether the Legacy glass dirt row is dimmed (and ignores steps and typing): the dirt is only drawn by the legacy shader.
+inline bool dirtRowDim(Look look) { return look != Look::Legacy; }
+
 // A window line is due once the interval has passed since the last.
 inline bool windowDue(uint64_t now, uint64_t last, uint64_t interval) { return now - last >= interval; }
 

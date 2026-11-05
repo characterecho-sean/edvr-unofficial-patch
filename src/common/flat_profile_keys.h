@@ -38,6 +38,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The canopy glass (visual.cockpit_glass, cockpit_glass.h): odyssey | legacy, read live at the frame boundary, in both profiles. The Visual tab's row.
         // Unlisted, getString answers "off" here, which the reader takes for odyssey, and the row could never turn the legacy look on.
         std::strcmp(key, "visual.cockpit_glass") == 0 ||
+        // The legacy glass's dirt level (visual.cockpit_glass_dirt, cockpit_glass.cpp): percent, 0 to 300, read live with the look, in both profiles. The row under it.
+        // Unlisted, getIntInRange answers 0 here whatever the file says, which is a clean pane, and the row could never raise it.
+        std::strcmp(key, "visual.cockpit_glass_dirt") == 0 ||
         // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
         // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
         // running stock", so the row could never turn the fix on.
