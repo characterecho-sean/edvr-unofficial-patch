@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State:** two separate defects, both measured, and together they fit Sean's
-  report. Both fixes are built on this branch, with main merged first (`4289884c`)
-  on Sean's word, and go on Frontier for the flight below. Not flown yet. No ini
-  edited.
+- **State: fixed by Sean's eye and merged to main on his word.** Two separate
+  defects, both measured. Flown on `ae4e29b8` (Frontier, log
+  `edvr_gfx_20261105_134508`): Sean, "Fixed". That flight took no eye dump, so the
+  numbers after the fix are not measured, and the cockpit and on-foot checks below
+  were not reported. No ini edited.
 - **Reports (Sean, 2026-11-05):** "just found my head flicking in Holo-Me"; after
   the test flight, "definitely flickers more when the ship is flying. Though the
   helmet frame still seems to at rest".
@@ -25,9 +26,10 @@
   wrong, and that error tracks the head's motion in the same frames (r = 0.985,
   slope 0.93). The same class as the NPC hair of 2026-11-01.
 - **Scope:** defect 1 needs a fast-moving frame: of 133 log windows with joined
-  pixels in the Frontier and Epic logs, six had a median |E| of 100 cm or more
-  (before this test), five of them aboard a ship. Defect 2 reaches any draw of this
-  pair in VR while the character animates; only Holo-Me is measured.
+  pixels in the Frontier and Epic logs (the compose appears to count them only in a
+  window holding an eye dump), six had a median |E| of 100 cm or more (before this
+  test), five of them aboard a ship. Defect 2 reaches any draw of this pair in VR
+  while the character animates; only Holo-Me is measured.
 - **Ruled out:** see "Ruled out" below (DoF, the flat fix, the switch fix, jitter, a
   flick in the game's pose).
 - **Open:** the visor glint (real, in the game's own image, not what Sean named);
@@ -37,7 +39,9 @@
   pair `01DA82F8`/`2C3ADCD2` is keyed as a VR-only skinned family. Keyed alone it
   would spread the rounding to the suit, so the two go together. No key. Full build
   green; the real pair passes the clone test and the corpus identity test.
-- **Next flight:** on that build, see "The fix's flight".
+- **Next flight:** none owed. The next time Holo-Me is open, an INSERT in each state
+  gives the numbers in "The fix's flight", and the cockpit and an NPC on foot are worth
+  a look for the regression.
 - **Temporary keys:** none added. Frontier's `census_offscreen = 1` belongs to the
   lobby DoF work and was left alone.
 - **Issues:** none filed yet.
@@ -278,3 +282,20 @@ Sean's report and the two dumps as above. Median |E| over `SkinE`: 0.018 cm stop
 closed first. F7 was not pressed (no `aa compare` line), and the dumps did not need it.
 One jump of 0.60 input px at frame 11 of the stopped dump (179 pairs) cannot be rounding
 with E this small; a real boundary between meshes is likely, and it was not located.
+
+### 2026-11-05 flight 13:45:08 (`ae4e29b8`), the fix
+
+Sean: "Fixed", by eye. `--expect-build ae4e29b8` matches. No eye dump, so the error
+tables were not repeated and the base-0 question is still open on paper: the suit's
+records were not read, only the result seen.
+
+- Both eyes' target 7: `R32G32B32A32_FLOAT`, 65.1 MB each.
+- `engine motion: family vs_01DA82F8D0EA0C99: live; substituted 5260 binds, 13150
+  draws; patched [ps_2C3ADCD2FCD47298]` at 13:50:08, 6616 and 16540 at 13:50:38. No
+  stand-down, refusal or `takes no second skin` line for it.
+- `binds writing E` goes from about 5,100 a window to 17,156 and 21,212 once the pair
+  draws.
+- GPU census, eye target 7 clear: 0.005 to 0.008 ms a frame, with one window at 0.016,
+  against 0.003 to 0.004 before. EDVR's total shows no separate step from this.
+- The compose's `joined` is 0 in every window of this flight, as in other windows
+  without an eye dump, so it says nothing here.
