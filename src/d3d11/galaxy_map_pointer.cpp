@@ -282,7 +282,7 @@ void thirtySecondLine(State& s, uint64_t now) {
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point (the System Map's held and answered unchanged %llu), %llu passed through%s%s%s; "
-                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), arrow's depth %.2f units (0: at infinity), cut-outs behind its bodies %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
+                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), arrow's depth %.2f units (0: at infinity), cut-outs behind its bodies %llu, reticule lifted %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
                     "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
@@ -290,7 +290,7 @@ void thirtySecondLine(State& s, uint64_t now) {
                     static_cast<unsigned long long>(s.heldCalls.exchange(0, std::memory_order_relaxed)),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
                     s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(), static_cast<double>(arrowDepth()),
-                    static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapIconA]),
+                    static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapReticule]), static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
                     static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(swapped[kSwapStem]), static_cast<unsigned long long>(noPose),
                     static_cast<unsigned long long>(camWrites), static_cast<unsigned long long>(eyesValid), static_cast<unsigned long long>(eyeGenSteps),
@@ -334,7 +334,16 @@ void mapPointerFrame() noexcept {
     mapui::setSystemOpen(system);
     if (system) {
         MapCameraPose pose;
-        if (mapCameraPose(pose)) mapui::updateArrowDepth(pose.position);
+        if (mapCameraPose(pose)) {
+            // The arrow's ray in the map's axes, as pointerCall reads it. The camera's forward until the cursor is known.
+            float ray[3] = {pose.rows[2][0], pose.rows[2][1], pose.rows[2][2]};
+            const uintptr_t cursor = s.cursorObject.load(std::memory_order_acquire);
+            uintptr_t scene = 0;
+            float arrow[3], d[3];
+            if (cursor && readMem(cursor + kCursorSceneOffset, &scene, sizeof(scene)) && scene && readMem(scene + kScenePositionOffset, arrow, sizeof(arrow)) && arrowDirection(arrow, d))
+                for (int k = 0; k < 3; ++k) ray[k] = d[0] * pose.rows[0][k] + d[1] * pose.rows[1][k] + d[2] * pose.rows[2][k];
+            mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);
+        }
     }
     if (galaxy) ++s.galaxyFrames;
     if (!s.armed.load(std::memory_order_acquire)) {

@@ -2,6 +2,7 @@
 #include "galaxy_map_ui.h"
 #include "galaxy_map_axes.h"        // mapCamAxes: the one pair of axes the world quads are spanned on
 #include "galaxy_map_vs.h"          // kMapBodies: the marker shader's table
+#include "../common/temporal_mode.h"  // temporalMapCloseView
 
 #include <windows.h>
 
@@ -95,17 +96,16 @@ State& st() {
     return *g_st;
 }
 
-const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode, kMapRingVsBytecode, kMapStemVsBytecode, kMapMarkerVsBytecode};
-const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode), sizeof(kMapRingVsBytecode), sizeof(kMapStemVsBytecode), sizeof(kMapMarkerVsBytecode)};
-const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs", "map_ring_vs", "map_stem_vs", "map_marker_vs"};
-const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)", "94EA991C3A03DBD9 (rings)", "3028E7C6E0E097F9 (stems)", "12382D2EA45E9632 (the System Map's markers)"};
+const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode, kMapRingVsBytecode, kMapStemVsBytecode, kMapMarkerVsBytecode, kMapReticuleVsBytecode};
+const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode), sizeof(kMapRingVsBytecode), sizeof(kMapStemVsBytecode), sizeof(kMapMarkerVsBytecode), sizeof(kMapReticuleVsBytecode)};
+const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs", "map_ring_vs", "map_stem_vs", "map_marker_vs", "map_reticule_vs"};
+const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)", "94EA991C3A03DBD9 (rings)", "3028E7C6E0E097F9 (stems)", "12382D2EA45E9632 (the System Map's markers)", "C31238331D8AC3D4 (the System Map's reticule)"};
 
-// The bodies' table (galaxy_map_ui.h, THE BODIES): xyz the centre, w the marker's scale, a zero w ends it. Written behind a try-lock from whichever thread unmaps the constants; a busy writer drops that one row, and the game writes it again next frame.
+// The bodies' table (galaxy_map_ui.h, THE BODIES; its rows, galaxy_map_vs.h kMapBodyRows): xyz the centre, w the marker's scale, a zero w ends it. Written behind a try-lock from whichever thread unmaps the constants; a busy writer drops that one row, and the game writes it again next frame.
 constexpr uint32_t kBodySlot = 11;
 struct BodyTable {
     std::atomic<bool> busy{false};
-    float rows[kMapBodies + 1][4] = {};   // the last row is the arrow's: x the inverse of its depth
-    float radius[kMapBodies] = {};
+    float rows[kMapBodyRows][4] = {};
     uint32_t n = 0;
     uint32_t oldest = 0;   // full: the next row to give up. A system can have more bodies than rows; those in view write their constants each frame, before their sprites
     float depth = 0.0f;
@@ -119,7 +119,7 @@ thread_local const float* t_bodyData = nullptr;
 bool bindBodies(State& s, ID3D11DeviceContext* ctx) {
     const uint64_t generation = g_bodies.generation.load(std::memory_order_acquire);
     if (!s.bodyBuf || s.bodyWritten != generation) {
-        float copy[kMapBodies + 1][4];
+        float copy[kMapBodyRows][4];
         while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
         std::memcpy(copy, g_bodies.rows, sizeof(copy));
         g_bodies.busy.store(false, std::memory_order_release);
@@ -345,16 +345,17 @@ void bodyConstantsUnmapped(ID3D11Resource* res) {
         at = g_bodies.oldest;
         g_bodies.oldest = (g_bodies.oldest + 1) % kMapBodies;
     }
+    float& radiusSlot = g_bodies.rows[kMapRadiusRow + at / 4][at % 4];
     bool changed = false;
-    if (isNew || g_bodies.rows[at][3] != k) {
+    if (isNew || g_bodies.rows[at][3] != k || radiusSlot != radius[0]) {
         g_bodies.rows[at][0] = centre[1];
         g_bodies.rows[at][1] = centre[2];
         g_bodies.rows[at][2] = centre[3];
         g_bodies.rows[at][3] = k;
+        radiusSlot = radius[0];
         if (isNew && g_bodies.n < kMapBodies) ++g_bodies.n;
         changed = true;
     }
-    g_bodies.radius[at] = radius[0];
     g_bodies.busy.store(false, std::memory_order_release);
     if (changed) g_bodies.generation.fetch_add(1, std::memory_order_release);
 }
@@ -368,28 +369,32 @@ void setSystemOpen(bool system) {
         // Open: a new system's bodies start a new table. Shut: the arrow's depth goes back to infinity for the Galaxy Map.
         while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
         std::memset(g_bodies.rows, 0, sizeof(g_bodies.rows));
-        std::memset(g_bodies.radius, 0, sizeof(g_bodies.radius));
         g_bodies.n = 0;
         g_bodies.oldest = 0;
         g_bodies.depth = 0.0f;
         g_bodies.busy.store(false, std::memory_order_release);
         g_bodies.generation.fetch_add(1, std::memory_order_release);
+        temporalMapCloseView().store(false, std::memory_order_relaxed);
     }
 }
 
-void updateArrowDepth(const float cameraPosition[3]) {
+void updateArrowDepth(const float cameraPosition[3], const float ray[3], const float forward[3]) {
     if (g_bodies.busy.exchange(true, std::memory_order_acquire)) return;   // a writer is in: next frame's will do
-    float depth = 0.0f;
-    for (uint32_t i = 0; i < g_bodies.n; ++i) {
-        const float dx = g_bodies.rows[i][0] - cameraPosition[0], dy = g_bodies.rows[i][1] - cameraPosition[1], dz = g_bodies.rows[i][2] - cameraPosition[2];
-        const float d = arrowDepthOf(std::sqrt(dx * dx + dy * dy + dz * dz), g_bodies.radius[i]);
-        if (depth == 0.0f || d < depth) depth = d;
-    }
-    const float inverse = depth > 0.0f ? 1.0f / depth : 0.0f;
-    const bool changed = g_bodies.rows[kMapBodies][0] != inverse;
-    g_bodies.rows[kMapBodies][0] = inverse;
-    g_bodies.depth = depth;
+    const float distance = rayBodyDistance(cameraPosition, ray, g_bodies.rows, g_bodies.n);
+    float* arrowRow = g_bodies.rows[kMapArrowRow];
+    float* cameraRow = g_bodies.rows[kMapCameraRow];
+    // No body in front of the camera has no depth to give: the arrow keeps the last one.
+    const float inverse = distance > 0.0f ? arrowDepthStep(arrowRow[0], arrowInverseDepth(distance)) : arrowRow[0];
+    const bool changed = arrowRow[0] != inverse || cameraRow[0] != cameraPosition[0] || cameraRow[1] != cameraPosition[1] || cameraRow[2] != cameraPosition[2] || cameraRow[3] != 1.0f;
+    arrowRow[0] = inverse;
+    cameraRow[0] = cameraPosition[0];
+    cameraRow[1] = cameraPosition[1];
+    cameraRow[2] = cameraPosition[2];
+    cameraRow[3] = 1.0f;
+    g_bodies.depth = inverse > 0.0f ? 1.0f / inverse : 0.0f;
+    const bool closeView = bodyFillsView(cameraPosition, forward, g_bodies.rows, g_bodies.n);
     g_bodies.busy.store(false, std::memory_order_release);
+    temporalMapCloseView().store(closeView, std::memory_order_relaxed);
     if (changed) g_bodies.generation.fetch_add(1, std::memory_order_release);
 }
 
@@ -422,7 +427,7 @@ void noteUnavailable(const char* what) {
 
 bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     uint32_t which;
-    if (vs == kVsIconA) which = kSwapIconA;
+    if (vs == kVsIconA) which = systemOpen() ? kSwapReticule : kSwapIconA;
     else if (vs == kVsIconB) which = systemOpen() ? kSwapMarker : kSwapIconB;
     else if (vs == kVsArrow) which = kSwapArrow;
     else if (vs == kVsRing) which = kSwapRing;
@@ -437,7 +442,7 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
             g_counters.arrowKept.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-    } else if (which != kSwapMarker && !vrOpen()) {
+    } else if (which != kSwapMarker && which != kSwapReticule && !vrOpen()) {
         return false;
     }
     FlatComputeInternalScope internal;
@@ -452,7 +457,7 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     }
     ID3D11VertexShader* ours = s.swapVs[which].Get();
     if (!ours) return false;
-    if (which == kSwapMarker || which == kSwapArrow) {
+    if (which == kSwapMarker || which == kSwapArrow || which == kSwapReticule) {
         if (!bindBodies(s, ctx)) return false;
         if (which == kSwapMarker && !s.markerAtlasSaid) {
             s.markerAtlasSaid = true;

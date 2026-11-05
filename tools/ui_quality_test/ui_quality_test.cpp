@@ -3129,8 +3129,12 @@ void testSupercruiseLines() {
             const size_t unmapTee = screen.find("mapui::bodyConstantsUnmapped(res);"), realUnmap = screen.find("s->realUnmap(self, res, sub);", unmapTee);
             check(layerText.find("if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;") != std::string::npos && cutout != std::string::npos && blend != std::string::npos && cutout < blend &&
                       layerText.find("which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq") != std::string::npos && unmapTee != std::string::npos && realUnmap != std::string::npos &&
-                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position);") != std::string::npos && pointer.find("const bool system = !galaxy && mapCameraAnyOpen();") != std::string::npos,
+                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = !galaxy && mapCameraAnyOpen();") != std::string::npos,
                   "GP17c: the System Map's grid takes no test in the layer, the bodies are cut out once an eye-frame before the first draw after them, the plane's icons are told from the grid by their count, and the markers' constants are read before the real Unmap");
+            const std::string passText = slurp("src/d3d11/temporal_pass.cpp");
+            check(passText.find("const bool still = temporalMapKeeps(mapCameraAnyOpen(), moved, mapRows);") != std::string::npos && passText.find("if (mapRows) p.split[0] = temporalSplitMetres(kTemporalShipMetres, true, false);") != std::string::npos &&
+                      mapUi.find("temporalMapCloseView().store(false, std::memory_order_relaxed);") != std::string::npos,
+                  "GP17d: the close view's history stays through a move only with the split that puts its body on the camera's rows, and the close view ends with the map");
         }
         // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
         const std::string layer = slurp("src/d3d11/ui_layer.cpp");
@@ -3187,7 +3191,7 @@ void testSupercruiseLines() {
                   layer.find("vScreenSetRenderTargetsRaw(ctx, mapDepthIssue ? 0 : 1") == std::string::npos && layer.find("if (!target) return false;") != std::string::npos &&
                   pointer.find("stencil write-backs of the map's sprites and canvases declined") != std::string::npos && pointer.find("stems 3028E7") != std::string::npos &&
                   pointer.find("NO write carried the eyes") != std::string::npos && pointer.find("with the two eyes' offsets, which changed") != std::string::npos &&
-                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 6 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
+                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 7 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
               "GP25: the write-back is declined for the map's sprites and canvases while the map is open in VR and before anything is bound, the depth issue keeps the layer's target under write mask 0, and the 30 s line counts the declined write-backs, the stems swapped and the eyes");
         // The run of sprites (map_run_core.h, docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): every way into a draw or an output-merger call ends or settles it.
         auto count = [](const std::string& hay, const char* needle) {

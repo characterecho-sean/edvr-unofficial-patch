@@ -113,6 +113,10 @@ int main() {
           "a focus the journal cannot state is never a map, whatever the stale value");
     check(edvr::temporalMapOpen(true, false, 0) && edvr::temporalMapOpen(true, true, 0) && edvr::temporalMapOpen(true, true, 9) && !edvr::temporalMapOpen(false, false, 0),
           "a map view named by the camera source opens the gate whatever the journal says (or does not)");
+    // The System Map's close view keeps its history through a move, on the camera's rows; everything else resets on one, and a map with no view named never keeps.
+    check(edvr::temporalMapKeeps(true, false, false) && edvr::temporalMapKeeps(true, false, true) && edvr::temporalMapKeeps(true, true, true) && !edvr::temporalMapKeeps(true, true, false) &&
+              !edvr::temporalMapKeeps(false, false, true) && !edvr::temporalMapKeeps(false, true, true),
+          "a named map keeps at rest, and through a move only where the rows move its scene");
     // The map camera moving (docs\galaxy-map-vr-2026-11-03.md, Fix 2): rest keeps, one change resets twice, the first look resets, no threshold.
     {
         edvr::TemporalMapMotion m;

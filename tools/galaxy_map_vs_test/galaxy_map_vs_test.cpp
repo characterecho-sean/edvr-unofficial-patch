@@ -1849,11 +1849,121 @@ inline void runMarkerTests(Rig& rig, const Prog& marker, ID3D11InputLayout* il) 
     std::snprintf(text, sizeof text, "G13.scale: at a known body each corner is k times as far from the quad's centre, within %.2e, and the uv is unchanged, within %.2e", worstScale, worstUv);
     check(worstScale < 1e-3 && worstUv == 0.0, text);
     using edvr::mapui::markerScale;
-    check(edvr::mapui::arrowDepthOf(3.197f, 0.421f) > 2.77f && edvr::mapui::arrowDepthOf(3.197f, 0.421f) < 2.78f && edvr::mapui::arrowDepthOf(0.3f, 0.421f) == edvr::mapui::kArrowDepthMin, "G5c: the arrow's depth is the distance to the body's surface, with a floor inside it");
     check(markerScale(0.43f) == 1.0f && markerScale(0.0f) == 1.0f && markerScale(100.0f) == edvr::mapui::kMarkerScaleMax, "G13.rule: a moon's marker stays the game's, no radius means no scale, and the scale has a ceiling");
     const float ring = 0.56f * markerScale(0.886f), arc = 0.687f * markerScale(0.79f);
     std::snprintf(text, sizeof text, "G13.rule: on the two planets measured in flat the ring is %.3f against 1.14 and the arc %.3f against 1.424, and the arc clears the planet's limb", ring, arc);
     check(std::fabs(ring - 1.14f) < 0.03f && arc > 0.79f * 1.3f && arc < 1.424f, text);
+}
+
+// G5c: the arrow's depth on the System Map (galaxy_map_ui.h rayBodyDistance, bodyFillsView).
+inline void runArrowDepthTests() {
+    using namespace edvr::mapui;
+    float t[edvr::kMapBodyRows][4] = {};
+    auto body = [&t](uint32_t i, float x, float y, float z, float radius) {
+        t[i][0] = x; t[i][1] = y; t[i][2] = z; t[i][3] = 1.0f;
+        t[edvr::kMapRadiusRow + i / 4][i % 4] = radius;
+    };
+    // Dump 103332590001: the body under the arrow, and a nearer one behind the camera, which the nearest-of-all rule took.
+    const float cam[3] = {43.95063f, -0.46464f, -17.41097f}, ray[3] = {-0.50656f, 0.19858f, -0.83902f}, forward[3] = {-0.49961f, 0.1936f, -0.84434f};
+    body(0, 42.7516f, 0.0f, -19.4374f, 0.41845f);
+    body(1, 45.3723f, 0.0f, -16.8189f, 0.8f);
+    const float there = rayBodyDistance(cam, ray, t, 2);
+    check(there > 1.97f && there < 1.98f, "G5c.dump: the arrow's distance is the shell under it, not the nearer body behind the camera");
+    check(bodyFillsView(cam, forward, t, 1), "G5c.close: 0.42 at 2.4 in front is the close view");
+    const float awayFrom[3] = {-forward[0], -forward[1], -forward[2]};
+    check(!bodyFillsView(cam, awayFrom, t, 1), "G5c.close: a body behind the camera is not");
+    std::memset(t, 0, sizeof(t));
+    const float origin[3] = {0.0f, 0.0f, 0.0f};
+    const float ahead[3] = {0.0f, 0.0f, 1.0f};
+    body(0, 0.0f, 0.0f, 12.25f, 0.44f);
+    check(!bodyFillsView(origin, ahead, t, 1), "G5c.close: 0.44 at 12.25, the far view measured, is not");
+    std::memset(t, 0, sizeof(t));
+    body(0, 0.0f, 0.0f, -5.0f, 1.0f);
+    check(rayBodyDistance(origin, ahead, t, 1) == 0.0f && arrowInverseDepth(0.0f) == 0.0f, "G5c.behind: no body in front gives no depth");
+    // The limb: the hit's distance and the pass's meet there, so leaving a body has no step.
+    std::memset(t, 0, sizeof(t));
+    body(0, 0.0f, 0.0f, 5.0f, 1.0f);
+    const auto grazing = [&](float off) {
+        const float s = off / 5.0f;
+        const float u[3] = {s, 0.0f, std::sqrt(1.0f - s * s)};
+        return rayBodyDistance(origin, u, t, 1);
+    };
+    const float shell = edvr::kMapBodyShell;
+    check(std::fabs(grazing(shell - 1e-4f) - grazing(shell + 1e-4f)) < 0.03f, "G5c.limb: the distance has no step as the arrow leaves a body");
+    // Passing: the body closest in angle, not closest in space.
+    std::memset(t, 0, sizeof(t));
+    body(0, 0.0f, 3.0f, 2.0f, 0.5f);
+    body(1, 4.0f, 0.0f, 40.0f, 1.0f);
+    check(rayBodyDistance(origin, ahead, t, 2) == 40.0f, "G5c.passing: empty space takes the depth of the body nearest in angle");
+    // Inside the shell, and the row's value.
+    std::memset(t, 0, sizeof(t));
+    body(0, 0.0f, 0.0f, 0.5f, 1.0f);
+    check(rayBodyDistance(origin, ahead, t, 1) == edvr::kMapArrowMin, "G5c.inside: never nearer than the floor");
+    check(std::fabs(arrowInverseDepth(2.0f) - 0.54f) < 1e-5f && std::fabs(arrowInverseDepth(0.1f) - 4.04f) < 1e-5f, "G5c.row: 1 / distance and the float, with the floor");
+    // The step: straight to the first depth, and exactly onto a target in a short time.
+    check(arrowDepthStep(0.0f, 0.5f) == 0.5f && arrowDepthStep(0.5f, 0.0f) == 0.0f, "G5c.ease: no easing from or to no depth");
+    float eased = 0.54f;
+    int steps = 0;
+    while (eased != 0.1f && steps < 64) { eased = arrowDepthStep(eased, 0.1f); ++steps; }
+    check(eased == 0.1f && steps > 4 && steps < 40, "G5c.ease: a step in depth settles exactly, over some frames");
+}
+
+// G14: the System Map's reticule (galaxy_map_vs.h kMapReticuleVS). With no camera, or no body at the record's position, the shader is the game's maths; at a known body the eye term is scaled by F = |rel| * (1 / (|rel| - shell) + float), so the quad keeps its place and size from the camera and takes the arrow's height in stereo.
+inline void runReticuleTests(Rig& rig, const Prog& reticule, ID3D11InputLayout* il) {
+    const Frame fr = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});
+    const Consts cc = cleanEye(fr, kCam, axesOf(fr), 0.02, 0.02);
+    std::vector<Corner> quad;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.3 * sx, 0.2 * sy});
+    Scene sc = iconScene(cc, mapCameraQ(), V3{1.6, -1.7, 3.3}, 0.88f, quad);
+    const float* W = sc.recs[0].p;
+    const float* eye = sc.c.cb1[275];
+    const float cameraAt[3] = {eye[0] - 0.03f, eye[1] + 0.02f, eye[2] - 0.01f};
+    const float radius = 0.4f;
+    auto runWith = [&](const float (&table)[edvr::kMapBodyRows][4]) {
+        ComPtr<ID3D11Buffer> bodies = makeBuf(rig, table, sizeof(table), D3D11_BIND_CONSTANT_BUFFER);
+        rig.ctx->VSSetConstantBuffers(11, 1, bodies.GetAddressOf());
+        return run(rig, reticule, il, sc);
+    };
+    static float none[edvr::kMapBodyRows][4], noCamera[edvr::kMapBodyRows][4], elsewhere[edvr::kMapBodyRows][4], found[edvr::kMapBodyRows][4];
+    auto fill = [&](float (&t)[edvr::kMapBodyRows][4], bool camera, float dx) {
+        std::memset(t, 0, sizeof(t));
+        t[1][0] = W[0] + dx; t[1][1] = W[1]; t[1][2] = W[2]; t[1][3] = 1.0f;
+        t[0][0] = W[0] + 7.0f; t[0][1] = W[1]; t[0][2] = W[2]; t[0][3] = 1.0f;
+        t[edvr::kMapRadiusRow][1] = radius;
+        t[edvr::kMapCameraRow][0] = cameraAt[0]; t[edvr::kMapCameraRow][1] = cameraAt[1]; t[edvr::kMapCameraRow][2] = cameraAt[2]; t[edvr::kMapCameraRow][3] = camera ? 1.0f : 0.0f;
+    };
+    std::memset(none, 0, sizeof(none));
+    fill(noCamera, false, 0.0f);
+    fill(elsewhere, true, 1.0f);
+    fill(found, true, 0.0f);
+    const std::vector<float> base = runWith(none), noCam = runWith(noCamera), other = runWith(elsewhere), lifted = runWith(found);
+    check(base == noCam && base == other, "G14.table: no camera, or a record at no known body, gives the same bits as an empty table");
+    const double rel[3] = {static_cast<double>(W[0]) - cameraAt[0], static_cast<double>(W[1]) - cameraAt[1], static_cast<double>(W[2]) - cameraAt[2]};
+    const double dist = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+    const double F = dist * (1.0 / (dist - radius * edvr::kMapBodyShell) + edvr::kMapArrowFloat);
+    const double off[3] = {(static_cast<double>(eye[0]) - cameraAt[0]) * (1.0 - F), (static_cast<double>(eye[1]) - cameraAt[1]) * (1.0 - F), (static_cast<double>(eye[2]) - cameraAt[2]) * (1.0 - F)};
+    double add[4] = {0, 0, 0, 0};
+    for (int r = 0; r < 3; ++r) {
+        const double pp = off[0] * sc.c.cb0[9 + r][0] + off[1] * sc.c.cb0[9 + r][1] + off[2] * sc.c.cb0[9 + r][2];
+        for (int c = 0; c < 4; ++c) add[c] += pp * sc.c.cb1[270 + r][c];
+    }
+    double worstGame = 0.0, worstLift = 0.0, worstUv = 0.0;
+    const size_t stride = static_cast<size_t>(reticule.outFloats), pos = static_cast<size_t>(reticule.posAt), uv = static_cast<size_t>(reticule.uvAt);
+    for (size_t i = 0; i < quad.size(); ++i) {
+        double want[4];
+        gameIconClip(sc, i, want);
+        for (int c = 0; c < 4; ++c) {
+            worstGame = (std::max)(worstGame, std::fabs(want[c] - base[i * stride + pos + c]));
+            worstLift = (std::max)(worstLift, std::fabs(base[i * stride + pos + c] + add[c] - lifted[i * stride + pos + c]));
+        }
+        for (int c = 0; c < 2; ++c) worstUv = (std::max)(worstUv, std::fabs(static_cast<double>(base[i * stride + uv + c]) - lifted[i * stride + uv + c]));
+    }
+    char text[200];
+    std::snprintf(text, sizeof text, "G14.game: with an empty table the clip position is the game's maths, within %.2e", worstGame);
+    check(worstGame < 2e-2, text);
+    std::snprintf(text, sizeof text, "G14.lift: at a known body only the eye term changes, by (eye - camera) * (1 - F), within %.2e, and the uv is unchanged, within %.2e", worstLift, worstUv);
+    check(worstLift < 1e-3 && worstUv == 0.0 && F > 1.0, text);
 }
 
 inline int runAll() {
@@ -1888,6 +1998,11 @@ inline int runAll() {
     const Prog pMarker = makeProg(rig, marker);
     ComPtr<ID3D11InputLayout> ilMarker = makeLayout(rig, marker);
     runMarkerTests(rig, pMarker, ilMarker.Get());
+    runArrowDepthTests();
+    const std::vector<uint8_t> reticule = compile(edvr::kMapReticuleVS, "vs_5_0");
+    const Prog pReticule = makeProg(rig, reticule);
+    ComPtr<ID3D11InputLayout> ilReticule = makeLayout(rig, reticule);
+    runReticuleTests(rig, pReticule, ilReticule.Get());
     check(rig.problems() == 0, "the debug layer reported nothing");
     std::printf("galaxy_map_vs_test: %u checks, %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;

@@ -16,4 +16,5 @@ static std::vector<Variant> galaxyMapVariants() { return {
     {"kMapMarkerVsBytecode","map_marker_vs","main",nullptr,{},false,edvr::kMapMarkerVS,"vs_5_0"},
     {"kMapPunchVsBytecode","map_punch_vs","main",nullptr,{},false,edvr::kMapPunchVS,"vs_5_0"},
     {"kMapPunchPsBytecode","map_punch_ps","main",nullptr,{},false,edvr::kMapPunchPS,"ps_5_0"},
+    {"kMapReticuleVsBytecode","map_reticule_vs","main",nullptr,{},false,edvr::kMapReticuleVS,"vs_5_0"},
 }; }

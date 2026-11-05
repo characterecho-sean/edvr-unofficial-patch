@@ -22,8 +22,12 @@
 
 #include <d3d11.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+
+#include "galaxy_map_vs.h"   // MapBodies's rows, and the shell and float the arrow and the reticule share
 
 namespace edvr {
 namespace mapui {
@@ -126,7 +130,7 @@ struct RunCounters {
 };
 inline RunCounters g_run;
 
-enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapMarker, kSwapCount };
+enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapMarker, kSwapReticule, kSwapCount };
 
 // Counters, since the last 30 s line (galaxy_map_pointer.cpp reads and clears them). Atomics: the line is said on the frame thread, the draws run on the render thread.
 struct Counters {
@@ -177,14 +181,48 @@ void bodyConstantsUnmapped(ID3D11Resource* res);
 // The table's size, and the map's opening: a new system's bodies start a new table. Frame tick.
 uint32_t bodiesKnown();
 void setSystemOpen(bool system);
-// THE ARROW'S DEPTH on the System Map (kMapArrowDepthVS): the distance from the map camera to the nearest known body's surface, never nearer than kArrowDepthMin. Bodies there run from 80 units away to 3, so one fixed depth cannot do: at 3 an arrow at infinity is 33 pixels of disparity from
-// the settlement icons at 4032. Frame tick; 0 with no body known (the arrow at infinity), and 0 on the Galaxy Map, whose stars are at infinity.
-constexpr float kArrowDepthMin = 0.25f;
-inline float arrowDepthOf(float distance, float surfaceRadius) {
-    const float d = distance - surfaceRadius;
-    return d < kArrowDepthMin ? kArrowDepthMin : d;
+// THE ARROW'S DEPTH on the System Map (kMapArrowDepthVS): just over what the arrow points at. Bodies there run from 80 units away to 2, so one fixed depth cannot do. The nearest body of all, the first cut, read 0.78 units in dump 103332590001 against 1.98 to the surface under the arrow: that body was behind the camera.
+// rayBodyDistance: along the ray from the camera, the nearest body's shell the ray hits; failing that, the point of closest approach to the body it passes closest to in angle, which meets the hit's distance at the limb, so the depth has no step as the arrow leaves a body. A body behind the camera is nobody's. 0: none in front.
+// The rows are MapBodies's (galaxy_map_vs.h kMapBodyRows).
+inline float rayBodyDistance(const float origin[3], const float ray[3], const float (*rows)[4], uint32_t n) {
+    float hit = 0.0f, passing = 0.0f, passingMiss = 0.0f;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float m[3] = {rows[i][0] - origin[0], rows[i][1] - origin[1], rows[i][2] - origin[2]};
+        const float along = m[0] * ray[0] + m[1] * ray[1] + m[2] * ray[2];
+        if (!(along > 0.0f)) continue;
+        const float shell = rows[kMapRadiusRow + i / 4][i % 4] * kMapBodyShell;
+        const float off2 = (std::max)(m[0] * m[0] + m[1] * m[1] + m[2] * m[2] - along * along, 0.0f);
+        if (off2 < shell * shell) {
+            const float t = (std::max)(along - std::sqrt(shell * shell - off2), kMapArrowMin);
+            if (hit == 0.0f || t < hit) hit = t;
+        } else {
+            const float miss = (std::sqrt(off2) - shell) / along;
+            if (passing == 0.0f || miss < passingMiss) { passing = along; passingMiss = miss; }
+        }
+    }
+    return hit > 0.0f ? hit : passing;
 }
-void updateArrowDepth(const float cameraPosition[3]);
+// 1 / depth, the MapBodies row's x; a distance of 0 has no depth to give.
+inline float arrowInverseDepth(float distance) { return distance > 0.0f ? 1.0f / (std::max)(distance, kMapArrowMin) + kMapArrowFloat : 0.0f; }
+// The eased step toward it: a depth that jumps from one body to the next would pop in stereo. No easing from 0, the arrow's first depth. A quarter of the way a frame settles in about 16 frames at 90 fps.
+constexpr float kArrowEase = 0.25f;
+inline float arrowDepthStep(float current, float target) {
+    if (current == 0.0f || target == 0.0f) return target;
+    const float next = current + (target - current) * kArrowEase;
+    return std::fabs(next - target) < 1e-4f * target ? target : next;
+}
+// The close view: a known body in the front of the view whose radius is at least this fraction of its distance, about 95 of the 2016 render pixels across. The far views measured stay below it (radius 0.44 at height 12.25, 0.036), the close views above (0.42 at 8.32, 0.05).
+constexpr float kCloseViewRatio = 0.05f;
+inline bool bodyFillsView(const float origin[3], const float forward[3], const float (*rows)[4], uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i) {
+        const float m[3] = {rows[i][0] - origin[0], rows[i][1] - origin[1], rows[i][2] - origin[2]};
+        const float distance = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+        if (rows[kMapRadiusRow + i / 4][i % 4] >= kCloseViewRatio * distance && m[0] * forward[0] + m[1] * forward[1] + m[2] * forward[2] > 0.5f * distance) return true;
+    }
+    return false;
+}
+// Frame tick, System Map only. ray: the arrow's, in the map's axes (the camera's forward when the cursor is not known yet).
+void updateArrowDepth(const float cameraPosition[3], const float ray[3], const float forward[3]);
 float arrowDepth();   // the last distance, for the 30 s line; 0 when none
 inline bool over() noexcept { return g_over.load(std::memory_order_relaxed); }
 

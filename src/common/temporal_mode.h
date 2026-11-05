@@ -76,6 +76,12 @@ inline bool temporalMapMoved(TemporalMapMotion& m, uint64_t changes) {
 inline std::atomic<unsigned>& temporalMapStillBits() { static std::atomic<unsigned> bits{0}; return bits; }
 inline constexpr unsigned kTemporalFlagMapKeep = 256u;
 
+// THE SYSTEM MAP'S CLOSE VIEW: a body fills enough of the view that its surface's detail shows (galaxy_map_ui.cpp sets this each frame, galaxy_map_ui.h bodyFillsView). The scene there is the body, which writes depth, and the
+// backdrop; every line and icon went to the UI layer. The camera's rows move those exactly, so the history stays through the map camera's moves. A reset there leaves the surface's fine terrain an aliased half-resolution frame,
+// different on every frame of a move (docs\galaxy-map-vr-2026-11-03.md, "The close view's surface"). The far view still resets: its small moons write no depth, and the rows would move them as though at infinity.
+inline std::atomic<bool>& temporalMapCloseView() { static std::atomic<bool> v{false}; return v; }
+inline bool temporalMapKeeps(bool viewNamed, bool moved, bool rowsMoveTheScene) { return viewNamed && (!moved || rowsMoveTheScene); }
+
 // The VR map gate's answer for this frame (native_temporal's begin() stores it, once a frame), published so the draw thread loads one flag per draw: the
 // UI layer's family rule names the map's overlay pairs only while it is set (vscreen.cpp uiLayerFamilyOf, ui_layer_math.h UiFamilyFacts.mapOpen).
 inline std::atomic<bool>& temporalMapGateFlag() { static std::atomic<bool> flag{false}; return flag; }
