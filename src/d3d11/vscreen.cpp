@@ -3632,6 +3632,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
         celestialMotionConstantsMapped(res, mapped->pData);
     }
+    // The System Map's bodies (galaxy_map_ui.h, THE BODIES): one relaxed load off that map.
+    if (mapData0 && type != D3D11_MAP_READ && mapui::systemOpen()) mapui::bodyConstantsMapped(res, mapped->pData);
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (mapSub0 && res == s->compositeCb) {
@@ -3751,6 +3753,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // The planet-patch shadow reads the write BEFORE the real Unmap, like every tee here: after it the memory is
     // no longer ours to look at.
     if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
+    if (mapui::systemOpen()) mapui::bodyConstantsUnmapped(res);
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -4288,7 +4291,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // shaders read their pixel shader's hash (ui_layer_math.h uiLayerMapFamilyOf names the pairs). Every other draw, and every draw with no map open, reads nothing more.
     if (f.targetKind == 1 && temporalMapGateFlag().load(std::memory_order_acquire)) {
         f.mapOpen = true;
-        if (uiVsIsMapOverlay(f.vs)) f.ps = bindingShaderHash(BindSlot::Ps);
+        f.mapSystem = mapui::systemOpen();
+        f.mapPlaneIcon = count == 6;
+        f.mapPlaneGrid = count == 1014;
+        if (uiVsIsMapOverlay(f.vs) || (f.mapSystem && f.vs == kUiVsMapPlane)) f.ps = bindingShaderHash(BindSlot::Ps);
     }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

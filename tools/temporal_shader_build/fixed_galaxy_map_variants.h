@@ -13,4 +13,7 @@ static std::vector<Variant> galaxyMapVariants() { return {
     {"kMapDepthSpritePsBytecode","map_depth_sprite_ps","main",nullptr,{},false,edvr::kMapDepthSpritePS,"ps_5_0"},
     {"kMapDepthCanvasPsBytecode","map_depth_canvas_ps","main",nullptr,{},false,edvr::kMapDepthCanvasPS,"ps_5_0"},
     {"kMapStemVsBytecode","map_stem_vs","main",nullptr,{},false,edvr::kMapStemVS,"vs_5_0"},
+    {"kMapMarkerVsBytecode","map_marker_vs","main",nullptr,{},false,edvr::kMapMarkerVS,"vs_5_0"},
+    {"kMapPunchVsBytecode","map_punch_vs","main",nullptr,{},false,edvr::kMapPunchVS,"vs_5_0"},
+    {"kMapPunchPsBytecode","map_punch_ps","main",nullptr,{},false,edvr::kMapPunchPS,"ps_5_0"},
 }; }

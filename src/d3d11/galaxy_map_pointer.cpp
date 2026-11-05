@@ -84,6 +84,7 @@ struct State {
     unsigned edgeNotes = 0;
     bool openedInWindow = false;
     uint64_t openFrames = 0;   // frames with the map open since the last 30 s line
+    uint64_t galaxyFrames = 0; // of those, the Galaxy Map's: the run of sprites is its alone
     uint64_t lastLineMs = 0;
     bool cursorSaid = false;
     const char* why = "";
@@ -221,6 +222,7 @@ bool tryInstall(State& s, bool& transient) {
 
 void closeGate(State& s) noexcept {
     s.gate.store(0, std::memory_order_release);
+    mapui::setSystemOpen(false);
     mapui::setGates(false, false);
     s.open = false;
 }
@@ -252,7 +254,9 @@ void thirtySecondLine(State& s, uint64_t now) {
     const uint64_t runsEnded = g_run.ended.exchange(0, std::memory_order_relaxed), setsKept = g_run.setsKept.exchange(0, std::memory_order_relaxed);
     const uint64_t setsDropped = g_run.setsDropped.exchange(0, std::memory_order_relaxed), setsOwn = g_run.setsOwn.exchange(0, std::memory_order_relaxed), frames = s.openFrames;
     s.openFrames = 0;
-    if (wasOpen || runBinds || runsStarted)
+    const uint64_t galaxyFrames = s.galaxyFrames;
+    s.galaxyFrames = 0;
+    if (galaxyFrames || runBinds || runsStarted)
         Log::get().note("map pointer: render target binds for the map's sprites %.1f a frame (%llu in all over %llu map frames); runs of sprites started %.2f a frame (%llu), ended %.2f a frame (%llu); "
                         "the game's own sets of the saved targets inside a run kept %llu, of others %llu, of the layer's own read back %llu%s",
                         frames ? static_cast<double>(runBinds) / static_cast<double>(frames) : 0.0, static_cast<unsigned long long>(runBinds), static_cast<unsigned long long>(frames),
@@ -267,13 +271,14 @@ void thirtySecondLine(State& s, uint64_t now) {
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
-                    "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
+                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), cut-outs behind its bodies %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
                     "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
-                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapIconA]),
+                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(),
+                    static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
                     static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(swapped[kSwapStem]), static_cast<unsigned long long>(noPose),
                     static_cast<unsigned long long>(camWrites), static_cast<unsigned long long>(eyesValid), static_cast<unsigned long long>(eyeGenSteps),
@@ -313,6 +318,8 @@ void mapPointerFrame() noexcept {
     State& s = *g_s;
     const uint64_t now = GetTickCount64();
     const bool galaxy = mapCameraGalaxyOpen();
+    mapui::setSystemOpen(!galaxy && mapCameraAnyOpen());
+    if (galaxy) ++s.galaxyFrames;
     if (!s.armed.load(std::memory_order_acquire)) {
         mapui::setGates(galaxy, false);   // the icons, labels and rings are fixed in the world whether or not the pointer's hooks can be had
         if (s.stood) return;

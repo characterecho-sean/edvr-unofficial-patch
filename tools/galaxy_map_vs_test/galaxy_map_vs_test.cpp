@@ -1769,6 +1769,53 @@ inline void runWobbleTests(Rig& rig, const WorldProgs& w, const Prog& stemProg, 
     check(std::fabs(edvr::kMapEyeBand - 0.04f) < 1e-7f, "G11.band: kMapEyeBand is 0.04 units");
 }
 
+// G13: the System Map's markers (galaxy_map_vs.h). With no body at the record's position the shader is the game's maths; at a known body every corner lies k times as far from the quad's centre, vertices and b span alike, and the uv does not change.
+inline void runMarkerTests(Rig& rig, const Prog& marker, ID3D11InputLayout* il) {
+    const Frame fr = frameAlong({0.3, -0.5, 0.8}, {0.12, 1.0, 0.18});
+    const Consts cc = cleanEye(fr, kCam, axesOf(fr), 0.02, 0.02);
+    std::vector<Corner> quad;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) quad.push_back({{static_cast<double>(sx), static_cast<double>(sy), 0.0}, 0.3 * sx, 0.2 * sy});
+    Scene sc = iconScene(cc, mapCameraQ(), V3{1.6, -1.7, 3.3}, 0.88f, quad);
+    sc.c.cb2[1][0] = sc.c.cb2[1][1] = 1.0f;
+    const float* W = sc.recs[0].p;
+    auto runWith = [&](const float (&table)[edvr::kMapBodies][4]) {
+        ComPtr<ID3D11Buffer> bodies = makeBuf(rig, table, sizeof(table), D3D11_BIND_CONSTANT_BUFFER);
+        rig.ctx->VSSetConstantBuffers(11, 1, bodies.GetAddressOf());
+        return run(rig, marker, il, sc);
+    };
+    float none[edvr::kMapBodies][4] = {}, elsewhere[edvr::kMapBodies][4] = {}, found[edvr::kMapBodies][4] = {}, ended[edvr::kMapBodies][4] = {};
+    elsewhere[0][0] = W[0] + 1.0f; elsewhere[0][1] = W[1]; elsewhere[0][2] = W[2]; elsewhere[0][3] = 3.0f;
+    found[0][0] = elsewhere[0][0]; found[0][1] = W[1]; found[0][2] = W[2]; found[0][3] = 3.0f;
+    found[1][0] = W[0]; found[1][1] = W[1]; found[1][2] = W[2]; found[1][3] = 2.0f;
+    ended[2][0] = W[0]; ended[2][1] = W[1]; ended[2][2] = W[2]; ended[2][3] = 2.0f;
+    const std::vector<float> base = runWith(none), other = runWith(elsewhere), late = runWith(ended), big = runWith(found);
+    check(base == other && base == late, "G13.table: a record at no known body, and a body after the list's end, give the same bits as an empty table");
+    double worstGame = 0.0, worstScale = 0.0, worstUv = 0.0;
+    double centre[4] = {0, 0, 0, 0};
+    const size_t n = quad.size(), stride = static_cast<size_t>(marker.outFloats), pos = static_cast<size_t>(marker.posAt), uv = static_cast<size_t>(marker.uvAt);
+    for (size_t i = 0; i < n; ++i) for (int c = 0; c < 4; ++c) centre[c] += base[i * stride + pos + c] / static_cast<double>(n);
+    for (size_t i = 0; i < n; ++i) {
+        double want[4];
+        gameIconClip(sc, i, want);
+        for (int c = 0; c < 4; ++c) {
+            worstGame = (std::max)(worstGame, std::fabs(want[c] - base[i * stride + pos + c]));
+            worstScale = (std::max)(worstScale, std::fabs(centre[c] + 2.0 * (base[i * stride + pos + c] - centre[c]) - big[i * stride + pos + c]));
+        }
+        for (int c = 0; c < 2; ++c) worstUv = (std::max)(worstUv, std::fabs(static_cast<double>(base[i * stride + uv + c]) - big[i * stride + uv + c]));
+    }
+    char text[200];
+    std::snprintf(text, sizeof text, "G13.game: with an empty table the clip position is the game's maths, within %.2e", worstGame);
+    check(worstGame < 2e-2, text);
+    std::snprintf(text, sizeof text, "G13.scale: at a known body each corner is k times as far from the quad's centre, within %.2e, and the uv is unchanged, within %.2e", worstScale, worstUv);
+    check(worstScale < 1e-3 && worstUv == 0.0, text);
+    using edvr::mapui::markerScale;
+    check(markerScale(0.43f) == 1.0f && markerScale(0.0f) == 1.0f && markerScale(100.0f) == edvr::mapui::kMarkerScaleMax, "G13.rule: a moon's marker stays the game's, no radius means no scale, and the scale has a ceiling");
+    const float ring = 0.56f * markerScale(0.886f), arc = 0.687f * markerScale(0.79f);
+    std::snprintf(text, sizeof text, "G13.rule: on the two planets measured in flat the ring is %.3f against 1.14 and the arc %.3f against 1.424, and the arc clears the planet's limb", ring, arc);
+    check(std::fabs(ring - 1.14f) < 0.03f && arc > 0.79f * 1.3f && arc < 1.424f, text);
+}
+
 inline int runAll() {
     Rig rig;
     std::printf("galaxy_map_vs_test: debug layer %s\n", rig.debugLayer ? "ON" : "not installed (messages not checked)");
@@ -1797,6 +1844,10 @@ inline int runAll() {
     runArrowTests(rig, pArrow, ilArrow.Get());
     runProbeTest(rig, probeVs, probePs);
     runDepthTests(rig);
+    const std::vector<uint8_t> marker = compile(edvr::kMapMarkerVS, "vs_5_0");
+    const Prog pMarker = makeProg(rig, marker);
+    ComPtr<ID3D11InputLayout> ilMarker = makeLayout(rig, marker);
+    runMarkerTests(rig, pMarker, ilMarker.Get());
     check(rig.problems() == 0, "the debug layer reported nothing");
     std::printf("galaxy_map_vs_test: %u checks, %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;

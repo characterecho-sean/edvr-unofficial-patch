@@ -2530,11 +2530,11 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
                                fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark ||
-                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks;
+                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks || fam == UiLayerFamily::kMapPlane || fam == UiLayerFamily::kMapGrid;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust and the VR map rings and stems");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust, the VR map rings and stems, and the System Map's plane icons and grid");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the two dusts have no width to give: they are exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
@@ -2837,8 +2837,8 @@ void testSupercruiseLines() {
     n.vs = kUiVsSupercruiseBars;
     n.ps = kUiPsSupercruiseBars;
     check(uiLayerFamilyFor(n) == UiLayerFamily::kSupercruiseBars, "ND1f: ...and the bars the bars");
-    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, last before kCount (no older family's number moved)");
+    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) && static_cast<int>(UiLayerFamily::kMapPlane) + 1 == static_cast<int>(UiLayerFamily::kMapGrid) && static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, and the System Map's plane icons and grid (2026-11-05) last before kCount (no older family's number moved)");
     check(uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, false, true) &&
               !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kNormalSpaceDust),
           "ND1h: fix.ui_quality's half governs it (not the weapons layer's)");
@@ -3102,6 +3102,16 @@ void testSupercruiseLines() {
                   pointer.find("uiLayerQualityLive") == std::string::npos &&
                   mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &t, nullptr);") != std::string::npos && mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &rtv, dsv);") != std::string::npos,
               "GP17b: with the layer not live the panel mask and the arrow's probe run after the game's own issue into its eye target, the game's targets go back, and the pointer's gate does not ask for the layer");
+        // The System Map in the layer: the grid takes no test; the cut-out comes first at the first draw after the bodies, in the colour issue of the HDR layer; the markers' constants are read before the real Unmap.
+        {
+            const std::string layerText = slurp("src/d3d11/ui_layer.cpp");
+            const size_t cutout = layerText.find("mapBodiesPunch(ctx, e);"), blend = layerText.find("ctx->OMSetBlendState(layerBlend, factor, sampleMask);");
+            const size_t unmapTee = screen.find("mapui::bodyConstantsUnmapped(res);"), realUnmap = screen.find("s->realUnmap(self, res, sub);", unmapTee);
+            check(layerText.find("if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;") != std::string::npos && cutout != std::string::npos && blend != std::string::npos && cutout < blend &&
+                      layerText.find("which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq") != std::string::npos && unmapTee != std::string::npos && realUnmap != std::string::npos &&
+                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::setSystemOpen(!galaxy && mapCameraAnyOpen());") != std::string::npos,
+                  "GP17c: the System Map's grid takes no test in the layer, the bodies are cut out once an eye-frame before the first draw after them, the plane's icons are told from the grid by their count, and the markers' constants are read before the real Unmap");
+        }
         // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
         const std::string layer = slurp("src/d3d11/ui_layer.cpp");
         check(layer.find("makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)") != std::string::npos && layer.find("if (e.maskSeq != seq) {") != std::string::npos &&
@@ -3157,7 +3167,7 @@ void testSupercruiseLines() {
                   layer.find("vScreenSetRenderTargetsRaw(ctx, mapDepthIssue ? 0 : 1") == std::string::npos && layer.find("if (!target) return false;") != std::string::npos &&
                   pointer.find("stencil write-backs of the map's sprites and canvases declined") != std::string::npos && pointer.find("stems 3028E7") != std::string::npos &&
                   pointer.find("NO write carried the eyes") != std::string::npos && pointer.find("with the two eyes' offsets, which changed") != std::string::npos &&
-                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 5 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
+                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 6 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
               "GP25: the write-back is declined for the map's sprites and canvases while the map is open in VR and before anything is bound, the depth issue keeps the layer's target under write mask 0, and the 30 s line counts the declined write-backs, the stems swapped and the eyes");
         // The run of sprites (map_run_core.h, docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): every way into a draw or an output-merger call ends or settles it.
         auto count = [](const std::string& hay, const char* needle) {

@@ -126,7 +126,7 @@ struct RunCounters {
 };
 inline RunCounters g_run;
 
-enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapCount };
+enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapMarker, kSwapCount };
 
 // Counters, since the last 30 s line (galaxy_map_pointer.cpp reads and clears them). Atomics: the line is said on the frame thread, the draws run on the render thread.
 struct Counters {
@@ -152,11 +152,31 @@ extern Counters g_counters;
 // mask). One relaxed load each on the draw path.
 inline std::atomic<bool> g_vrOpen{false};   // inline: ui_layer.cpp reads them and is linked whole into rigs that do not link galaxy_map_ui.cpp
 inline std::atomic<bool> g_pointerOpen{false};
-inline std::atomic<bool> g_swapOpen{false};   // either: the draw path's one load for swapBegin (the Galaxy Map, or the System Map's arrow)
+inline std::atomic<bool> g_swapOpen{false};   // any of these: the draw path's one load for swapBegin (the Galaxy Map, or the System Map's arrow and markers)
 inline std::atomic<bool> g_over{false};
+inline std::atomic<bool> g_systemOpen{false};   // the VR profile and the System Map's camera up: its flat plane in the UI layer, the cut-out, the markers' scale
+inline std::atomic<uint64_t> g_bodyCutouts{0};  // the cut-outs made since the last 30 s line (ui_layer.cpp mapBodiesPunch)
 inline bool vrOpen() noexcept { return g_vrOpen.load(std::memory_order_relaxed); }
 inline bool pointerOpen() noexcept { return g_pointerOpen.load(std::memory_order_relaxed); }
 inline bool swapOpen() noexcept { return g_swapOpen.load(std::memory_order_relaxed); }
+inline bool systemOpen() noexcept { return g_systemOpen.load(std::memory_order_relaxed); }
+
+// THE BODIES (docs/galaxy-map-vr-2026-11-03.md, "The System Map"). The game draws the atmosphere ring and the landable arc from a sprite whose world size does not follow the body in VR: 0.56 and 0.69 units on every body, against 1.14 and 1.42 in flat on planets of surface 0.886 and 0.79. No selector was found in
+// the executable, so the sprites are scaled here to the measured fit: k = surface radius / kMarkerFitRadius, never below 1, which puts the ring at the atmosphere's outer radius (1.30 times the surface, which is flat's on 38 Lyncis 1) and leaves the moons, whose surface is 0.43, as they are.
+// Each body's centre and surface radius come from the per-body constants at b1 (cb1[125].yzw, cb1[126].x), read at the Unmap of a constant buffer of that exact size, so a build with another size leaves the markers as the game drew them.
+constexpr float kMarkerFitRadius = 0.4355f;
+constexpr float kMarkerScaleMax = 4.0f;
+constexpr uint32_t kBodyConstantBytes = 5376;
+inline float markerScale(float surfaceRadius) {
+    if (!(surfaceRadius > 0.0f)) return 1.0f;
+    const float k = surfaceRadius / kMarkerFitRadius;
+    return k < 1.0f ? 1.0f : (k > kMarkerScaleMax ? kMarkerScaleMax : k);
+}
+void bodyConstantsMapped(ID3D11Resource* res, const void* data);
+void bodyConstantsUnmapped(ID3D11Resource* res);
+// The table's size, and the map's opening: a new system's bodies start a new table. Frame tick.
+uint32_t bodiesKnown();
+void setSystemOpen(bool system);
 inline bool over() noexcept { return g_over.load(std::memory_order_relaxed); }
 
 // The draw is one of the swapped shaders and the map state wants it: the replacement vertex shader goes in for this draw and every re-issue (raw, so the binding shadow keeps

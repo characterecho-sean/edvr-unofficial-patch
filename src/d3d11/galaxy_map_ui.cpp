@@ -1,6 +1,7 @@
 #include "temporal_shader_bytecode.h"   // kMapIconFacingVsBytecode and the rest: the build's compiles of galaxy_map_vs.h
 #include "galaxy_map_ui.h"
 #include "galaxy_map_axes.h"        // mapCamAxes: the one pair of axes the world quads are spanned on
+#include "galaxy_map_vs.h"          // kMapBodies: the marker shader's table
 
 #include <windows.h>
 
@@ -61,6 +62,8 @@ struct State {
     ComPtr<ID3D11BlendState> directBlend[2];   // maskBlendDesc, probeBlendDesc
     uint64_t directFrame = 1;                  // stepped by the frame tick (setGates)
     bool directSaid = false;
+    ComPtr<ID3D11Buffer> bodyBuf;              // MapBodies at vertex slot 11
+    uint64_t bodyWritten = 0;                  // the table's generation in the buffer
     ComPtr<ID3D11VertexShader> swapVs[kSwapCount];
     bool swapTried[kSwapCount] = {};
     ComPtr<ID3D11VertexShader> probeVs;
@@ -90,10 +93,59 @@ State& st() {
     return *g_st;
 }
 
-const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode, kMapRingVsBytecode, kMapStemVsBytecode};
-const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode), sizeof(kMapRingVsBytecode), sizeof(kMapStemVsBytecode)};
-const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs", "map_ring_vs", "map_stem_vs"};
-const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)", "94EA991C3A03DBD9 (rings)", "3028E7C6E0E097F9 (stems)"};
+const unsigned char* const kBytecode[kSwapCount] = {kMapIconFacingVsBytecode, kMapIconUvFacingVsBytecode, kMapArrowDepthVsBytecode, kMapRingVsBytecode, kMapStemVsBytecode, kMapMarkerVsBytecode};
+const size_t kBytecodeLen[kSwapCount] = {sizeof(kMapIconFacingVsBytecode), sizeof(kMapIconUvFacingVsBytecode), sizeof(kMapArrowDepthVsBytecode), sizeof(kMapRingVsBytecode), sizeof(kMapStemVsBytecode), sizeof(kMapMarkerVsBytecode)};
+const char* const kSwapName[kSwapCount] = {"map_icon_facing_vs", "map_icon_uv_facing_vs", "map_arrow_depth_vs", "map_ring_vs", "map_stem_vs", "map_marker_vs"};
+const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2EA45E9632 (labels)", "4EF6DDB075A927FA (arrow)", "94EA991C3A03DBD9 (rings)", "3028E7C6E0E097F9 (stems)", "12382D2EA45E9632 (the System Map's markers)"};
+
+// The bodies' table (galaxy_map_ui.h, THE BODIES): xyz the centre, w the marker's scale, a zero w ends it. Written behind a try-lock from whichever thread unmaps the constants; a busy writer drops that one row, and the game writes it again next frame.
+constexpr uint32_t kBodySlot = 11;
+struct BodyTable {
+    std::atomic<bool> busy{false};
+    float rows[kMapBodies][4] = {};
+    uint32_t n = 0;
+    uint32_t oldest = 0;   // full: the next row to give up. A system can have more bodies than rows; those in view write their constants each frame, before their sprites
+    std::atomic<uint64_t> generation{1};
+};
+BodyTable g_bodies;
+thread_local ID3D11Resource* t_bodyRes = nullptr;
+thread_local const float* t_bodyData = nullptr;
+
+// The table in the MapBodies buffer, bound at slot 11 when it does not already hold it. False when the buffer cannot be made: the game's own marker sizes and no replacement shader.
+bool bindBodies(State& s, ID3D11DeviceContext* ctx) {
+    const uint64_t generation = g_bodies.generation.load(std::memory_order_acquire);
+    if (!s.bodyBuf || s.bodyWritten != generation) {
+        float copy[kMapBodies][4];
+        while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
+        std::memcpy(copy, g_bodies.rows, sizeof(copy));
+        g_bodies.busy.store(false, std::memory_order_release);
+        if (!s.bodyBuf) {
+            ComPtr<ID3D11Device> dev;
+            ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(copy);
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            D3D11_SUBRESOURCE_DATA init{copy, 0, 0};
+            if (!dev || FAILED(dev->CreateBuffer(&bd, &init, &s.bodyBuf))) {
+                s.bodyBuf.Reset();
+                return false;
+            }
+        } else {
+            ctx->UpdateSubresource(s.bodyBuf.Get(), 0, nullptr, copy, 0, 0);
+        }
+        s.bodyWritten = generation;
+    }
+    ID3D11Buffer* bound = nullptr;
+    ctx->VSGetConstantBuffers(kBodySlot, 1, &bound);
+    const bool same = bound == s.bodyBuf.Get();
+    if (bound) bound->Release();
+    if (!same) {
+        ID3D11Buffer* mine = s.bodyBuf.Get();
+        ctx->VSSetConstantBuffers(kBodySlot, 1, &mine);
+    }
+    return true;
+}
 
 // A new device drops everything made for the old one.
 void bindDevice(State& s, ID3D11DeviceContext* ctx) {
@@ -112,6 +164,8 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     s.depthPsTried = false;
     for (DirectMask& m : s.direct) m = DirectMask{};
     for (auto& b : s.directBlend) b.Reset();
+    s.bodyBuf.Reset();
+    s.bodyWritten = 0;
     s.savedVs.Reset();
     s.bound = false;
     s.camBuf.Reset();
@@ -257,10 +311,67 @@ void drain(State& s, ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
 
 } // namespace
 
+void bodyConstantsMapped(ID3D11Resource* res, const void* data) {
+    t_bodyRes = nullptr;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return;
+    D3D11_BUFFER_DESC d{};
+    static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+    if (d.ByteWidth != kBodyConstantBytes || !(d.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
+    t_bodyRes = res;
+    t_bodyData = static_cast<const float*>(data);
+}
+
+void bodyConstantsUnmapped(ID3D11Resource* res) {
+    if (res != t_bodyRes || !t_bodyData) return;
+    t_bodyRes = nullptr;
+    const float* centre = t_bodyData + 125 * 4;
+    const float* radius = t_bodyData + 126 * 4;
+    if (!(centre[0] == 1.0f) || !(radius[0] > 0.0f)) return;
+    const float k = markerScale(radius[0]);
+    if (g_bodies.busy.exchange(true, std::memory_order_acquire)) return;
+    uint32_t at = g_bodies.n;
+    for (uint32_t i = 0; i < g_bodies.n; ++i) {
+        const float dx = g_bodies.rows[i][0] - centre[1], dy = g_bodies.rows[i][1] - centre[2], dz = g_bodies.rows[i][2] - centre[3];
+        if (dx * dx + dy * dy + dz * dz < 0.0025f) { at = i; break; }
+    }
+    const bool isNew = at == g_bodies.n;
+    if (isNew && at == kMapBodies) {
+        at = g_bodies.oldest;
+        g_bodies.oldest = (g_bodies.oldest + 1) % kMapBodies;
+    }
+    bool changed = false;
+    if (isNew || g_bodies.rows[at][3] != k) {
+        g_bodies.rows[at][0] = centre[1];
+        g_bodies.rows[at][1] = centre[2];
+        g_bodies.rows[at][2] = centre[3];
+        g_bodies.rows[at][3] = k;
+        if (isNew && g_bodies.n < kMapBodies) ++g_bodies.n;
+        changed = true;
+    }
+    g_bodies.busy.store(false, std::memory_order_release);
+    if (changed) g_bodies.generation.fetch_add(1, std::memory_order_release);
+}
+
+uint32_t bodiesKnown() { return g_bodies.n; }
+
+void setSystemOpen(bool system) {
+    const bool was = g_systemOpen.exchange(system, std::memory_order_relaxed);
+    if (system && !was) {
+        while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
+        std::memset(g_bodies.rows, 0, sizeof(g_bodies.rows));
+        g_bodies.n = 0;
+        g_bodies.oldest = 0;
+        g_bodies.busy.store(false, std::memory_order_release);
+        g_bodies.generation.fetch_add(1, std::memory_order_release);
+    }
+}
+
 void setGates(bool vr, bool pointer) {
     const bool wasPointer = g_pointerOpen.exchange(pointer, std::memory_order_relaxed);
     g_vrOpen.store(vr, std::memory_order_relaxed);
-    g_swapOpen.store(vr || pointer, std::memory_order_relaxed);
+    g_swapOpen.store(vr || pointer || g_systemOpen.load(std::memory_order_relaxed), std::memory_order_relaxed);
     if (g_st) ++g_st->directFrame;
     if (wasPointer && !pointer) {
         g_over.store(false, std::memory_order_relaxed);
@@ -287,7 +398,7 @@ void noteUnavailable(const char* what) {
 bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     uint32_t which;
     if (vs == kVsIconA) which = kSwapIconA;
-    else if (vs == kVsIconB) which = kSwapIconB;
+    else if (vs == kVsIconB) which = systemOpen() ? kSwapMarker : kSwapIconB;
     else if (vs == kVsArrow) which = kSwapArrow;
     else if (vs == kVsRing) which = kSwapRing;
     else if (vs == kVsStem) which = kSwapStem;
@@ -301,7 +412,7 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
             g_counters.arrowKept.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-    } else if (!vrOpen()) {
+    } else if (which != kSwapMarker && !vrOpen()) {
         return false;
     }
     FlatComputeInternalScope internal;
@@ -316,7 +427,9 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     }
     ID3D11VertexShader* ours = s.swapVs[which].Get();
     if (!ours) return false;
-    if (which != kSwapArrow && !bindMapCam(s, ctx)) {
+    if (which == kSwapMarker) {
+        if (!bindBodies(s, ctx)) return false;
+    } else if (which != kSwapArrow && !bindMapCam(s, ctx)) {
         g_counters.noPose.fetch_add(1, std::memory_order_relaxed);   // the pose never answered: the draw is the game's
         return false;
     }

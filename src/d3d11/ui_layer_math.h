@@ -707,6 +707,8 @@ enum class UiLayerFamily : uint8_t {
                        // (SRC_ALPHA, ONE) with no depth and no stencil into the R11G11B10F scene, named only while a map is open (UiFamilyFacts.mapOpen) and only
                        // in VR: flat leaves them in its scene (flatUiLayerTakesFamily does not name it). Appended after kNormalSpaceDust (2026-11-04) so no older
                        // family's number moves (docs\galaxy-map-vr-2026-11-03.md, Fix 2).
+    kMapPlane,         // the System Map's flat icons (vs 88DCF1164C640EC3 with ps FEDE6C9825C3828E, n=6), drawn after the bodies with the depth test the game gave them, named only while the System Map's camera is up (UiFamilyFacts.mapSystem): the vertex shader is a general one, also drawn on the Galaxy Map and in the world.
+    kMapGrid,          // the System Map's grid: the same pair at n=1014, drawn before most bodies at viewport depth 0. In the layer it takes no depth test; the bodies are cut out of the layer after it (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES). Both appended after kMapMarks (2026-11-05).
     kCount
 };
 
@@ -733,6 +735,8 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kScopeMark: return "scope mark";
         case UiLayerFamily::kNormalSpaceDust: return "normal-space dust";
         case UiLayerFamily::kMapMarks: return "map rings and stems";
+        case UiLayerFamily::kMapPlane: return "map plane icons";
+        case UiLayerFamily::kMapGrid: return "map grid";
         default: return "none";
     }
 }
@@ -748,7 +752,7 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
            f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark ||
-           f == UiLayerFamily::kNormalSpaceDust || f == UiLayerFamily::kMapMarks;
+           f == UiLayerFamily::kNormalSpaceDust || f == UiLayerFamily::kMapMarks || f == UiLayerFamily::kMapPlane || f == UiLayerFamily::kMapGrid;
 }
 
 // The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
@@ -1025,6 +1029,7 @@ constexpr uint64_t kUiPsMapSpriteB = 0x539A4858CE3A3477ull;  // the System Map's
 constexpr uint64_t kUiPsMapSpriteC = 0x964221955A9E77E7ull;  // the Galaxy Map's icons since game build 334473
 constexpr uint64_t kUiVsMapRings = 0x94EA991C3A03DBD9ull, kUiPsMapRings = 0x65DAC561B5613454ull;
 constexpr uint64_t kUiVsMapStems = 0x3028E7C6E0E097F9ull, kUiPsMapStems = 0x6C28D59784CC493Dull;
+constexpr uint64_t kUiVsMapPlane = 0x88DCF1164C640EC3ull, kUiPsMapPlane = 0xFEDE6C9825C3828Eull;
 // The map frame's tonemap (VR eye dumps, 2026-11-04): vs 6F4B7B60C6C15BBF with ps 5EC48683F6C86A42, the scene at PS t0 and a 1008x1008 R11G11B10F bloom at t1. Its constant
 // buffer b2 is declared CB2[11] (176 bytes).
 constexpr uint64_t kUiVsMapTone = 0x6F4B7B60C6C15BBFull, kUiPsMapTone = 0x5EC48683F6C86A42ull;
@@ -1051,6 +1056,9 @@ struct UiFamilyFacts {
     bool nativeOnFoot = false;    // F26: fix.native_on_foot_sharp_hud is on, VR, and native stereo on foot (only VR's on-foot path sets it)
     bool scopeMark = false;       // A2: the scope lens is armed for the frame and this draw is 6 indices in 1 instance with a learned surface (the readout atlas) bound
     bool mapOpen = false;         // VR: a map is open (the map camera's stage is named, or GuiFocus is 6..8): the HDR branch names the map pairs first. Flat's rule leaves it false
+    bool mapSystem = false;       // VR: the System Map's camera is up, so its flat plane's pair is named
+    bool mapPlaneIcon = false;    // that pair's draw is one of the plane's icons (n=6)
+    bool mapPlaneGrid = false;    // or the grid (n=1014). Flat's census shows the pair at another count too, a mesh of 58416 indices: that stays in the scene
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -1086,7 +1094,7 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
 // two runtime-gated names (the scope mark, the on-foot HUD), and a map's four overlay vertex shaders. False means kNone for every pixel shader. Kind 2 has no such answer: a
 // panel-sized draw is the screen for any vertex shader. The sharp_weapons_test rig proves the implication and scans this list against the rule.
 inline bool uiLayerFamilyHdrVsMayWant(uint64_t vs) {
-    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
+    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || vs == kUiVsMapPlane || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
            vs == kUiVsOrbitLines || vs == kUiVsSupercruiseBars || vs == kUiVsSpaceDust || vs == kVsNormalSpaceDust || weaponsFireVs(vs) || shieldRefractVs(vs) ||
            uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark;
 }
@@ -1121,6 +1129,8 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // theirs into the post-tonemap target is nothing this names.
         // The map's pairs come first while a map is open (UiFamilyFacts.mapOpen): none of the four vertex shaders is named by a rule below.
         out = f.mapOpen ? uiLayerMapFamilyOf(f.vs, f.ps) : UiLayerFamily::kNone;
+        if (out == UiLayerFamily::kNone && f.mapSystem && f.vs == kUiVsMapPlane && f.ps == kUiPsMapPlane)
+            out = f.mapPlaneIcon ? UiLayerFamily::kMapPlane : f.mapPlaneGrid ? UiLayerFamily::kMapGrid : UiLayerFamily::kNone;
         if (out == UiLayerFamily::kNone)
             out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
