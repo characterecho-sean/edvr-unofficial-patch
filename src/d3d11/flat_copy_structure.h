@@ -184,6 +184,7 @@ struct FlatCopyDiag {
     const char* why = "";                // the decline's cause, a literal; empty unless Declined
     FlatMonoReason whitelist = FlatMonoReason::Selected;   // what the whitelist said
     uint32_t srcWidth = 0, srcHeight = 0, srcFormat = 0, srcDraws = 0;
+    uint32_t srcFills = 0;               // of srcDraws, the writes after the first that were full-screen constant fills (constantFillPass)
     uint64_t srcVs = 0, srcPs = 0;
     uint32_t sceneWidth = 0, sceneHeight = 0, outputWidth = 0, outputHeight = 0;
     uint64_t triggerVs = 0, triggerPs = 0;
@@ -288,8 +289,10 @@ inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, 
     if (!src || !src->writes.draws) return decline("the-copy-source-was-not-rendered-this-frame");
     const auto& sk = src->writes.key;
     g.srcWidth = sk.width; g.srcHeight = sk.height; g.srcFormat = sk.format; g.srcDraws = src->writes.draws;
-    g.srcVs = sk.vs; g.srcPs = sk.ps;
-    if (!oneDraw(src->writes)) return decline("the-copy-source-is-not-written-by-one-pass");
+    g.srcVs = sk.vs; g.srcPs = sk.ps; g.srcFills = src->constantFills;
+    // One image-making pass, and after it only the constant fills the Holo-Me screen draws (oneDrawThenFills): a pass that reads
+    // nothing leaves the image a function of the scene alone, so it is no second pass. Any other second writer still declines.
+    if (!oneDrawThenFills(src->writes, src->constantFills)) return decline("the-copy-source-is-not-written-by-one-pass");
     if (sk.format != 27) return decline("the-copy-source-is-not-r8g8b8a8");
     // An explicit write into S after its pass (a Clear, a Copy, an Update or a Map: the prefix model marks the target bad) is what
     // the whitelist's tone count refuses (flatRuntimeWritten zeroes it); the unknown tone pass has no count to lose, so it is
@@ -434,18 +437,25 @@ inline int flatCopyFormatWindow(char* out, size_t size, bool structureOn, const 
     return n;
 }
 // The first admission of a session, once. `routeName` is flatResolveRoute's name for the mode at this size.
+// A frame whose image the game drew over after that pass with a constant fill (g.srcFills, the Holo-Me screen) adds a sentence saying so, and the runtime
+// logs it once more, the first time it sees one: the line a flight reads to know the fill path ran.
 inline int flatCopyFormatFirstAdmission(char* out, size_t size, uint64_t frame, const FlatCopyDiag& g, const char* routeName) {
+    char fills[160] = "";
+    if (g.srcFills)
+        std::snprintf(fills, sizeof(fills), "; %u full-screen constant fill(s) (VS=%016llX PS=%016llX) follow that pass and read nothing, so the image is still the scene's alone",
+                      g.srcFills, static_cast<unsigned long long>(flat_mono_detail::kConstantFillVs),
+                      static_cast<unsigned long long>(flat_mono_detail::kConstantFillPs));
     return std::snprintf(out, size,
         "flat copy structure: first admission at frame=%llu (the HDR route is on): the game's final "
         "copy reads a %ux%u R8G8B8A8 image written by one pass, VS=%016llX PS=%016llX, after the scene HDR's first consumer "
         "(VS=%016llX PS=%016llX), with no other R-sized image pass in between; no whitelisted tone pass wrote it (the "
         "whitelist said %s); the scene is %ux%u on a %ux%u output%s, route=%s; admitted by structure, so bloom, depth of "
-        "field and the tone variant do not matter",
+        "field and the tone variant do not matter%s",
         static_cast<unsigned long long>(frame), g.srcWidth, g.srcHeight, static_cast<unsigned long long>(g.srcVs),
         static_cast<unsigned long long>(g.srcPs), static_cast<unsigned long long>(g.triggerVs),
         static_cast<unsigned long long>(g.triggerPs), flatMonoReasonName(g.whitelist),
         g.sceneWidth, g.sceneHeight, g.outputWidth, g.outputHeight, g.menu ? " (the 3D menu)" : "",
-        routeName ? routeName : "unknown");
+        routeName ? routeName : "unknown", fills);
 }
 // A frame the structure looked at and did not recognise, a dozen a session (the runtime counts).
 inline int flatCopyFormatDeclined(char* out, size_t size, uint64_t frame, const FlatCopyDiag& g) {

@@ -135,6 +135,14 @@ struct MenuContent {
     int      tileCount = 0;
     int      tileColumns = 0;
     char     hint[200];     // an explanation under the rows (information pages)
+    // Reserve the hint box's height even when `hint` is empty. The box is row-dependent on an
+    // entries page (the highlighted row's hint, the others' none), so its height is held whatever
+    // the highlight says, or the card would grow and shrink as the page scrolls. Only entries
+    // pages set it: the Monitor page is built without a hint line on purpose (the height is better
+    // spent on its tiles), so reserving the box there would add nothing and, tallied into the
+    // bitmap's height, would push the page toward the raster's 2048-px bound and make it stop
+    // updating. The Status page, which does show a hint, needs no reservation.
+    bool     reserveHint = false;
     char     footer[160];   // keys, pending-restart count, warnings
     // The flat profile's EDVR version, drawn dim at the right end of the
     // footer's second line on every page. Empty elsewhere (VR draws none).
@@ -208,6 +216,12 @@ struct MenuGeometry {
 void menuPanelSubmit(const MenuContent& c);
 #ifdef EDVR_MENU_TEST
 bool menuPanelWorkerReadyForTest();
+int  menuPanelLayoutHeightForTest(const MenuContent& c);
+// The rect layout() gives the text op for the line at `i`'s left text (pixels, the frame the
+// raster draws in), read from layout()'s own ops. The heading's is the ellipsis check: the
+// DrawTextW single-line path cuts text at the rect's right edge, so a heading measured wider
+// than this rect is ellipsised on screen. Zeroed when the line has no such op.
+void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int* x1, int* y1);
 #endif
 
 // Once per frame: upload a finished raster, create the texture as needed.

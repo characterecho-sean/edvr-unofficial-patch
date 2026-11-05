@@ -199,6 +199,27 @@ inline bool fullViewport(uint32_t count, const float* viewport, uint32_t w, uint
 inline bool fullViewport(const FlatContractObservation& k, uint32_t w, uint32_t h) {
     return fullViewport(k.viewportCount, k.viewport, w, h);
 }
+// The full-screen constant fill the Holo-Me screen lays over its tone pass, into the image the game's final copy reads
+// (edvr_gfx_20261105_045527 frame 185198, flat_trace_185199.bin: the tone variant CFA91824129ECBBC / 2427BEBC2082175D writes the
+// 1920x1080 image, then this pair writes it again). VS E8FDC0D92EEBA6D7 is a position pass-through; PS 5D07ACB4D5D5D92A reads
+// nothing (no texture, no depth, no matrix) and writes cb1[0].xyz * cb1[90].y with alpha cb1[0].w, so the image after it is a
+// function of the image before it and of constants, never of anything the scene did not draw. The copy structure's "written by one
+// pass" rule counts it as a second pass and declined every frame of the screen (the stand-down reads no-known-tone-pass, and the
+// 3D commander is left to the game's own stretch). It is a pair, not a shape: only a pass whose bytecode was read is named here.
+constexpr uint64_t kConstantFillVs = 0xE8FDC0D92EEBA6D7ull;
+constexpr uint64_t kConstantFillPs = 0x5D07ACB4D5D5D92Aull;
+// A full-viewport constant fill into a colour target with no depth: the only draw that may follow the first writer of the copy's
+// source without making a second image-making pass of it (the copy structure's rule, flat_copy_structure.h). Never the first
+// writer: the runtime counts it only on the writes after the target's first.
+inline bool constantFillPass(const FlatContractObservation& k) {
+    return k.vs == kConstantFillVs && k.ps == kConstantFillPs && k.rtv && !k.depth && !k.dsv &&
+           fullViewport(k, k.width, k.height);
+}
+// `r` is a target's writes and `fills` how many of them after the first were constant fills: one image-making pass, then only fills.
+inline bool oneDrawThenFills(const FlatContractRecord& r, uint32_t fills) {
+    if (!fills) return oneDraw(r);
+    return r.draws == 1u + fills && ordered(r) && r.firstInstances == 1;
+}
 inline bool hdrViewport(uint32_t count, const float* viewport, uint32_t w, uint32_t h) {
     // Complete Epic frames 36865/41961 contain three HDR writes at full XY
     // extent with depth clamped to zero. They do not name the motion source.

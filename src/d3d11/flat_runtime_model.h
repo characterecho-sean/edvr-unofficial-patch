@@ -148,6 +148,10 @@ struct FlatRuntimeTarget {
     const void* overlayDepth = nullptr;
     uint32_t tones = 0;
     FlatRuntimeWitness firstBad{};
+    // Writes after the target's first that were full-screen constant fills (constantFillPass): the Holo-Me screen draws one over its tone
+    // pass. They are part of `writes.draws`; the copy structure's one-pass rule subtracts them (oneDrawThenFills). The count is read only
+    // there: no other rule looks at it, so the whitelist's tone count and the frame contract are what they were.
+    uint32_t constantFills = 0;
     // Every cause that made the target bad, one bit each (1u << FlatRuntimeConflict), where firstBad keeps only the first. A bad mark
     // that names no cause sets bit 0 (None), so a target is camera-only bad (flatRuntimeCameraConflictSpatialOnly) only when
     // CameraChange is the single bit and nothing else ever marked it.
@@ -1285,7 +1289,8 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
     }
     if (!t->writes.draws) t->writes = current();
     else { ++t->writes.draws; t->writes.last = q; t->writes.lastInstances = d.instances;
-        if (k.camera) { t->writes.lastWriteEpoch = k.writeEpoch; t->writes.lastWriteSeq = k.writeSeq; } }
+        if (k.camera) { t->writes.lastWriteEpoch = k.writeEpoch; t->writes.lastWriteSeq = k.writeSeq; }
+        if (constantFillPass(k)) ++t->constantFills; }
     if (k.format != 9 && toneHdrSlot(k.vs, k.ps) != ~0u) { ++t->tones; t->tone = current(); }
     if (d.firstPersonCohort && d.supported && k.depth && k.kind == kFlatContractPool) {
         // Not a world source (FlatRuntimeDraw::firstPersonCohort): counted, never a source record. A cohort in two depths is a frame
