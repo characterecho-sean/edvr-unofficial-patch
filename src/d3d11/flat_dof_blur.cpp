@@ -38,6 +38,7 @@ Ptr<ID3D11ComputeShader> g_cs;
 Ptr<ID3D11Buffer> g_weights[kFlatDofBlurMaxFrames];  // [n - 1] holds 1/n
 Ptr<ID3D11Device> g_device;
 bool g_shaderFailed = false;
+FlatDofBlurRetry g_imageRetry;
 
 FlatDofBlurRing g_ring;
 uint64_t g_lastComposite = 0;
@@ -68,6 +69,7 @@ void releaseObjects() {
     g_cs.Reset();
     for (auto& b : g_weights) b.Reset();
     g_shaderFailed = false;
+    flatDofBlurRetryClear(g_imageRetry);
 }
 
 bool readShape(ID3D11ShaderResourceView* view, FlatDofBlurShape* shape, D3D11_TEXTURE2D_DESC* desc, Ptr<ID3D11Texture2D>* texture) {
@@ -111,7 +113,8 @@ bool ensureShader(ID3D11Device* dev) {
     return ok;
 }
 
-bool ensureImages(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& blur, uint32_t viewFormat) {
+// On false, what names the object that could not be made and hr its result.
+bool ensureImages(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& blur, uint32_t viewFormat, const char** what, HRESULT* hr) {
     if (g_images.averaged && g_images.width == blur.Width && g_images.height == blur.Height && g_images.textureFormat == blur.Format && g_images.viewFormat == viewFormat)
         return true;
     releaseImages();
@@ -129,14 +132,21 @@ bool ensureImages(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& blur, uint32_t 
     sv.Format = static_cast<DXGI_FORMAT>(viewFormat);
     sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     sv.Texture2D.MipLevels = 1;
-    for (uint32_t i = 0; i < kFlatDofBlurMaxFrames; ++i)
-        if (FAILED(dev->CreateTexture2D(&d, nullptr, &made.ring[i])) || FAILED(dev->CreateShaderResourceView(made.ring[i].Get(), &sv, &made.ringSrv[i]))) return false;
+    for (uint32_t i = 0; i < kFlatDofBlurMaxFrames; ++i) {
+        *hr = dev->CreateTexture2D(&d, nullptr, &made.ring[i]);
+        if (FAILED(*hr)) { *what = "a ring texture"; return false; }
+        *hr = dev->CreateShaderResourceView(made.ring[i].Get(), &sv, &made.ringSrv[i]);
+        if (FAILED(*hr)) { *what = "a ring view"; return false; }
+    }
     // The mean is always half-float: it holds both formats, and a compute shader can write it.
     d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    if (FAILED(dev->CreateTexture2D(&d, nullptr, &made.averaged)) || FAILED(dev->CreateShaderResourceView(made.averaged.Get(), nullptr, &made.averagedSrv)) ||
-        FAILED(dev->CreateUnorderedAccessView(made.averaged.Get(), nullptr, &made.averagedUav)))
-        return false;
+    *hr = dev->CreateTexture2D(&d, nullptr, &made.averaged);
+    if (FAILED(*hr)) { *what = "the averaged texture"; return false; }
+    *hr = dev->CreateShaderResourceView(made.averaged.Get(), nullptr, &made.averagedSrv);
+    if (FAILED(*hr)) { *what = "the averaged view"; return false; }
+    *hr = dev->CreateUnorderedAccessView(made.averaged.Get(), nullptr, &made.averagedUav);
+    if (FAILED(*hr)) { *what = "the averaged unordered view"; return false; }
     made.width = blur.Width;
     made.height = blur.Height;
     made.viewFormat = viewFormat;
@@ -222,10 +232,29 @@ bool flatDofBlurBegin(ID3D11DeviceContext* ctx, uint64_t frame, bool jittered, b
     }
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
-    if (!dev || !ensureShader(dev.Get()) || !ensureImages(dev.Get(), desc, shape.viewFormat)) {
+    if (!dev || !ensureShader(dev.Get())) {
         ++g_win.failed;
         return false;
     }
+    FlatDofBlurShapeKey key;
+    key.width = desc.Width;
+    key.height = desc.Height;
+    key.textureFormat = static_cast<uint32_t>(desc.Format);
+    key.viewFormat = shape.viewFormat;
+    if (!flatDofBlurRetryAllowed(g_imageRetry, key, frame)) {
+        ++g_win.failed;   // failed on this shape a short while ago: the game's blur stays bound until the wait is over
+        return false;
+    }
+    const char* what = "";
+    HRESULT hr = S_OK;
+    if (!ensureImages(dev.Get(), desc, shape.viewFormat, &what, &hr)) {
+        ++g_win.failed;
+        if (flatDofBlurRetryFailed(g_imageRetry, key, frame))
+            Log::get().note("flat dof blur: %s could not be made for a blur of %ux%u (texture format %u, view format %u), hr=0x%08lX; the game's blur stays bound, and another try waits %llu frames unless the shape changes",
+                            what, desc.Width, desc.Height, key.textureFormat, key.viewFormat, static_cast<unsigned long>(hr), static_cast<unsigned long long>(kFlatDofBlurIdleFrames));
+        return false;
+    }
+    if (g_imageRetry.failed) flatDofBlurRetryClear(g_imageRetry);
     if (!continues) {
         g_ring.restart();
         ++g_win.startedRun;
@@ -297,6 +326,7 @@ void flatDofBlurLogWindow() {
 
 void flatDofBlurRelease() {
     releaseImages();
+    flatDofBlurRetryClear(g_imageRetry);
     g_noteValid = g_movedValid = false;
     g_lastCompositeValid = false;
 }

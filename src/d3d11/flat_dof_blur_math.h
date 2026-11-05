@@ -87,4 +87,31 @@ inline bool flatDofBlurShapeOk(const FlatDofBlurShape& s) {
            s.width != 0 && s.height != 0;
 }
 
+// A failed attempt to make the averaged images (flat_dof_blur.cpp ensureImages) is not repeated every composite: it is remembered by shape and by the frame
+// it failed on, and tried again after kFlatDofBlurIdleFrames frames, at once when the shape changes, and at once after a clear (a resize or a device change).
+struct FlatDofBlurShapeKey {
+    uint32_t width = 0, height = 0, textureFormat = 0, viewFormat = 0;
+    bool operator==(const FlatDofBlurShapeKey& o) const { return width == o.width && height == o.height && textureFormat == o.textureFormat && viewFormat == o.viewFormat; }
+};
+struct FlatDofBlurRetry {
+    bool failed = false;
+    FlatDofBlurShapeKey key;
+    uint64_t failedAt = 0;
+    bool noted = false;   // the log line for this shape has been written
+};
+inline bool flatDofBlurRetryAllowed(const FlatDofBlurRetry& r, const FlatDofBlurShapeKey& key, uint64_t frame) {
+    if (!r.failed || !(r.key == key)) return true;
+    return frame < r.failedAt || frame - r.failedAt >= kFlatDofBlurIdleFrames;   // a frame counter that went backwards is a new run
+}
+// Returns true when the failure should be logged: the first for this shape.
+inline bool flatDofBlurRetryFailed(FlatDofBlurRetry& r, const FlatDofBlurShapeKey& key, uint64_t frame) {
+    const bool say = !(r.noted && r.key == key);
+    r.failed = true;
+    r.key = key;
+    r.failedAt = frame;
+    r.noted = true;
+    return say;
+}
+inline void flatDofBlurRetryClear(FlatDofBlurRetry& r) { r = FlatDofBlurRetry{}; }
+
 }  // namespace edvr

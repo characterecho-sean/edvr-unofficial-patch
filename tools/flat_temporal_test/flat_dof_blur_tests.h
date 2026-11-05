@@ -107,6 +107,24 @@ template<class Check> void run(Check check) {
         check(!flatDofBlurShapeOk(s), "dof blur: an empty texture is refused");
     }
 
+    {
+        // A failed make of the averaged images is not retried every composite.
+        FlatDofBlurRetry r;
+        const FlatDofBlurShapeKey a{1920, 1080, 10, 10}, b{1280, 720, 10, 10}, c{1920, 1080, 26, 26};
+        check(flatDofBlurRetryAllowed(r, a, 100), "dof blur retry: with no failure on record the images are tried");
+        check(flatDofBlurRetryFailed(r, a, 100), "dof blur retry: the first failure of a shape is logged");
+        check(!flatDofBlurRetryAllowed(r, a, 101) && !flatDofBlurRetryAllowed(r, a, 100 + kFlatDofBlurIdleFrames - 1), "dof blur retry: the same shape waits");
+        check(flatDofBlurRetryAllowed(r, a, 100 + kFlatDofBlurIdleFrames), "dof blur retry: the wait ends at kFlatDofBlurIdleFrames frames");
+        check(flatDofBlurRetryAllowed(r, a, 50), "dof blur retry: a frame counter that went backwards tries again");
+        check(!flatDofBlurRetryFailed(r, a, 100 + kFlatDofBlurIdleFrames), "dof blur retry: a second failure of the same shape is not logged again");
+        check(!flatDofBlurRetryAllowed(r, a, 100 + kFlatDofBlurIdleFrames + 1), "dof blur retry: a retry that failed starts a new wait");
+        check(flatDofBlurRetryAllowed(r, b, 101) && flatDofBlurRetryAllowed(r, c, 101), "dof blur retry: a changed size or format tries at once");
+        check(flatDofBlurRetryFailed(r, b, 101), "dof blur retry: a failure of a new shape is logged");
+        check(flatDofBlurRetryAllowed(r, a, 102), "dof blur retry: only the last failed shape is remembered");
+        flatDofBlurRetryClear(r);
+        check(flatDofBlurRetryAllowed(r, b, 102), "dof blur retry: a clear (resize, device change) tries at once");
+    }
+
     const auto read = [](const char* path) {
         std::ifstream in(std::filesystem::path(path), std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
