@@ -177,6 +177,11 @@ struct FlatRuntimeDrawScope {
     const void* glowHdr=nullptr;
     uint64_t glowVs=0,glowPs=0;
     ID3D11ShaderResourceView* glowOriginal=nullptr;
+    // The depth-of-field blur (flat_dof_blur.h): this draw lays the blur over the scene. Begin binds the mean of the recent frames' blur for the game's issue
+    // (dofBlurOriginal holds the game's view then), End puts the game's view back.
+    bool dofBlur=false;
+    uint64_t dofBlurPs=0;
+    ID3D11ShaderResourceView* dofBlurOriginal=nullptr;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
