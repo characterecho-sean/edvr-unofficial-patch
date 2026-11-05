@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course, built as the sixth build 5086b6f3, FLOWN 16:38: the map holds 88 to 90 fps, `xr_end_frame` p50 0.20 to 0.22 ms, 2 render target binds a frame. Sean chose the camera's up, so the key and the grid's-vertical option are removed. Sean: "Wobble is gone", so `mapEyeRel` and the stems' swap stay. Merged with main, which is 168 commits newer and has a rewritten draw path; the merged build is NOT FLOWN, and those readings are from before the merge.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course, built as the sixth build 5086b6f3, FLOWN 16:38: the map holds 88 to 90 fps, `xr_end_frame` p50 0.20 to 0.22 ms, 2 render target binds a frame. Sean chose the camera's up, so the key and the grid's-vertical option are removed. Sean: "Wobble is gone", so `mapEyeRel` and the stems' swap stay. Merged with main, which was 168 commits newer with a rewritten draw path. Main's build 5bce272d FLOWN 18:35: 90 fps on the map and 2 render target binds a frame. ON MAIN, pushed.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -19,7 +19,7 @@ Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` 
 
 Temporary: none left. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone.
 
-Next: Sean flies merged main (card below), gate 2 render target binds a frame; then push. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: nothing outstanding on the VR Galaxy Map. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: the grid's vertical as the quads' up (key value `stems`), because with the camera 45 degrees down a quad at view tangents (x, y) has 1 + y times its height and shears by atan(x / (1 + y)). Flown 16:41 beside the camera's up; Sean prefers the camera's up.
@@ -244,7 +244,9 @@ Main was 168 commits ahead, including PR #166's draw path. Five files conflicted
 
 The same review read the merged draw hooks, fast paths, tracked bindings and output merger readers against the run, and found them sound. That is reading, not a run: the 88 to 90 fps and 2 binds above are from before the merge.
 
-## Flight card, merged main (not flown)
+**Flown on main.** Log edvr_gfx_20261104_183551, build 5bce272d, right build confirmed. Sean: "Flown, push it". The map was open 18:37:55 to 18:38:42, about 47 s: 2.0 render target binds a frame, runs started 2.00 a frame, `of others` equal to the runs, `kept` and `read back` 0, no `-- 0 runs` tail; 899, 901, 891 and 900 frames per 10 s; `xr_end_frame` p50 0.20 to 0.22 ms. So the sprites are in the layer and the run holds on main's draw path. The rest of the flight had no fault lines: in VR 87 to 89 fps over each 30 s window, with single 10 s windows down to 84, then 88 to 90 fps in flat after a live switch at 18:39:36. How the map looks is from Sean's word alone: no problem reported, and no dump.
+
+## Flight card, merged main (flown 18:35)
 
 Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
 
