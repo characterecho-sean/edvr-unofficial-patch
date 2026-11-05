@@ -2375,7 +2375,10 @@ void buildContent(MenuContent& c) {
 
     if (p.monitor) {
         // No hint line: the tiles carry their own captions, and the height
-        // is better spent on them.
+        // is better spent on them. It therefore sets no reserveHint either
+        // (menu_panel.cpp): reserving the box would hold its height with
+        // nothing in it, adding to the bitmap's height and pushing the page
+        // nearer the raster's 2048-px bound for no reason.
         buildMonitor(c);
     } else if (p.status) {
         buildStatus(c);
@@ -2788,8 +2791,15 @@ void buildContent(MenuContent& c) {
         // warnings) so the window is filled whatever they add. A short page
         // keeps scrolling at zero: the clamp above pins scroll to the
         // highlight and the highlight never passes its last entry, so a pad
-        // row is never highlighted and maps to no setting.
+        // row is never highlighted and maps to no setting. A padded page also
+        // holds its hint box's height (reserveHint, menu_panel.cpp): its row
+        // hint is row-dependent, so without the hold the card would grow and
+        // shrink as the page scrolls. Only the padded pages reserve it -- the
+        // Monitor is built without a hint line (see above) and the prompt page
+        // pads nothing, so reserving for them would add an empty box to the
+        // bitmap's height and push the page nearer the raster's 2048-px bound.
         if (!p.prompt && c.lineCount > 0) {
+            c.reserveHint = true;
             for (int i = c.lineCount; i < visibleRows && i < kMenuMaxLines; ++i) {
                 c.lines[i].style = kMenuInfo;   // an empty, non-selectable row: presence only, not a setting
                 c.lineCount++;

@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <thread>
@@ -115,12 +116,18 @@ int wmain(int argc, wchar_t** argv) {
     if (!std::wcscmp(argv[1], L"--layout")) {
         // The panel's bitmap height is the on-screen card's shape: the
         // raster stores its aspect and halfH = halfW * aspect, so a height
-        // that changes between pages changes the card's size. The hint
-        // box must therefore keep its height whatever the highlighted
-        // row's hint holds, or scrolling over a row that does (and one
-        // that does not) carry a hint makes the card grow and shrink.
-        // capPx 34 is the VR path's floor (menu.cpp's sizeContent); the
-        // flat path's ~34x256 card is the rig's own 256-wide test.
+        // that changes between pages changes the card's size. An entries
+        // page therefore reserves its hint box (reserveHint, menu_panel.cpp)
+        // and holds whatever the highlighted row's hint holds, or scrolling
+        // over a row that does (and one that does not) carry a hint makes
+        // the card grow and shrink. A page built without a hint line on
+        // purpose -- the Monitor -- sets no reserveHint and pays nothing
+        // for a box it never fills: the box is part of the bitmap's height,
+        // and carrying it for no reason pushes the page nearer the
+        // raster's 2048-px bound and makes it stop updating sooner. The
+        // Debug tab's heading is measured against the rect layout() draws
+        // it into: the single-line draw path is DT_END_ELLIPSIS, so a
+        // heading wider than its rect reads cut.
         unsigned checks = 0, fails = 0;
         auto check = [&](bool ok, const char* name) {
             ++checks; if (!ok) { ++fails; std::printf("FAIL: %s\n", name); }
@@ -134,6 +141,11 @@ int wmain(int argc, wchar_t** argv) {
         page.lineCount = 5;
         for (int i = 0; i < 5; ++i) std::snprintf(page.lines[i].left, sizeof(page.lines[i].left), "Row %d", i);
         std::strcpy(page.footer, "keys");
+        // The entries-page property: the hint box is row-dependent (the
+        // highlighted row's hint, the rest's none), so a padded entries
+        // page must reserve it -- and keep its height -- whatever the
+        // highlight's hint holds, or the card changes size on a scroll.
+        page.reserveHint = true;
         const int plain = edvr::menuPanelLayoutHeightForTest(page);
         check(plain > 0, "a plain page has a layout height");
         const int hintH = page.capPx * 34 / 10;
@@ -147,9 +159,68 @@ int wmain(int argc, wchar_t** argv) {
         for (const char* hint : hints) {
             std::strcpy(page.hint, hint);
             check(edvr::menuPanelLayoutHeightForTest(page) == plain,
-                  "a hinted page is the same height as an unhinted one");
+                  "a hinted page that reserves its hint box is the same height as an unhinted one");
         }
-        std::printf("native_menu_test: layout %u checks, %u failures\n", checks, fails);
+        std::strcpy(page.hint, "");
+        // The Monitor-page guard (dadf5304 regressed it): a page built
+        // without a hint line on purpose sets no reserveHint, so it
+        // reserves the box for nothing and pays hintH for an empty card
+        // region it never shows -- pushing the page toward the raster's
+        // 2048-px bound. Its height must be exactly what it was before the
+        // box was always reserved: a plain, unhinted page is one hint box
+        // shorter than the same page that reserves the box.
+        page.reserveHint = false;
+        const int monitorH = edvr::menuPanelLayoutHeightForTest(page);
+        check(monitorH == plain - hintH,
+              "a page that builds no hint line reserves none and is a hint box shorter than one that does");
+        // The Debug tab's heading, against the rect layout() draws it into
+        // (menuPanelLineRectForTest, the same frame). Flat: cardPx 860,
+        // capPx 34 -- sizeContent's flat path, fixed. The heading's split
+        // is cardW - pad, its left is pad / 2, so its rect is the whole
+        // line minus a half pad on the right; DT_END_ELLIPSIS cuts it there.
+        edvr::MenuContent dbg{};
+        dbg.widthPx = dbg.cardPx = 860;
+        dbg.capPx = 34;
+        dbg.tabCount = 1;
+        std::snprintf(dbg.tabs[0], sizeof(dbg.tabs[0]), "Debug");
+        dbg.lineCount = 1;
+        std::snprintf(dbg.lines[0].left, sizeof(dbg.lines[0].left), "For bug reports. Both are off unless you turn them on.");
+        dbg.lines[0].style = edvr::kMenuHeading;
+        std::strcpy(dbg.footer, "keys");
+        int hx0 = 0, hy0 = 0, hx1 = 0, hy1 = 0;
+        edvr::menuPanelLineRectForTest(dbg, 0, &hx0, &hy0, &hx1, &hy1);
+        const int headingBoxW = hx1 - hx0;
+        const int headingW = edvr::menuPanelMeasureLine(dbg.lines[0].left, dbg.capPx);
+        check(headingBoxW == 860 - dbg.capPx * 8 / 10 - dbg.capPx * 8 / 10 / 2,
+              "the heading's rect spans the line from its half-pad left to cardW - pad");
+        check(headingW > 0 && headingW <= headingBoxW,
+              "the Debug heading fits the rect it is drawn into (no ellipsis)");
+        // The wiring that makes a padded page reserve its hint box is in
+        // menu.cpp's build, which this rig does not link -- so the height
+        // checks above set reserveHint themselves and cannot see it. Read
+        // the source and pin that menu.cpp sets c.reserveHint = true inside
+        // the pad block, before its pad loop: that block is the only place
+        // that runs, so pinning it there (and nowhere else) means a page
+        // that pads its page reserves the box and a page that does not
+        // (the Monitor, the prompt page) does not. Deleting the line, or
+        // moving it outside the pad block, fails here.
+        {
+            std::ifstream in("src/d3d11/menu.cpp");
+            std::string menu((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const std::string guard = "if (!p.prompt && c.lineCount > 0) {";
+            const std::string padLoop = "for (int i = c.lineCount; i < visibleRows && i < kMenuMaxLines; ++i)";
+            const size_t g = menu.find(guard);
+            const size_t set = menu.find("c.reserveHint = true;");
+            const size_t loop = menu.find(padLoop);
+            check(!menu.empty() && g != std::string::npos && loop != std::string::npos && g < loop,
+                  "menu.cpp's pad block and pad loop can be found in the source");
+            check(set != std::string::npos && g < set && set < loop,
+                  "menu.cpp sets reserveHint inside the pad block, ahead of its pad loop");
+            check(menu.find("c.reserveHint = true;", set + 1) == std::string::npos,
+                  "menu.cpp sets reserveHint in exactly one place (the pad block; the Monitor and prompt pages reserve none)");
+        }
+        std::printf("native_menu_test: layout %u checks, %u failures (heading %dpx in a %dpx rect)\n",
+                    checks, fails, headingW, headingBoxW);
         return fails ? 1 : 0;
     }
     if (std::wcscmp(argv[1], L"--self-test")) return 2;

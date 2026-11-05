@@ -297,19 +297,26 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int tileH = u * 50 / 10;
     const int tileGap = cap / 4;
     const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
-    // The hint box is ALWAYS hintH tall, whatever the hint holds: the row
-    // hints are row-dependent (the dimmed rows' and a few others' set one,
-    // the rest set none), so sizing the box to the hint's presence would
-    // make the whole panel grow and shrink by hintH as the highlight, and
-    // with it the scroll, moved over the rows that do and do not carry one
-    // -- the card changed size and shape while the page was scrolled. The
-    // box keeps its height and is simply empty without a hint, the footer's
-    // own rule for the same reason (kFooterLines below).
+    // The hint box is hintH tall on a page that holds it, and zero tall
+    // otherwise. On an entries page the row hints are row-dependent (the
+    // highlighted row's set one, the rest set none), so sizing the box to the
+    // hint's presence would make the whole panel grow and shrink by hintH as
+    // the highlight, and with it the scroll, moved over the rows that do and
+    // do not carry one -- the card changed size and shape while the page was
+    // scrolled. An entries page therefore sets reserveHint and the box keeps
+    // its height and is simply empty without a hint, the footer's own rule
+    // for the same reason (kFooterLines below). A page built without a hint
+    // line on purpose -- the Monitor, whose tiles spend the height better --
+    // leaves reserveHint clear and pays nothing for a box it never fills:
+    // the box is part of the bitmap's height, and a Pimax page that carries
+    // it for no reason would sit nearer the raster's 2048-px bound and stop
+    // updating sooner.
+    const bool hintReserved = !c.toast && (c.hint[0] || c.reserveHint);
     // A locked FPS readout sits above the tabs so it stays visible while
     // the menu is scrolled or a tooltip is up.
     const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
     const int H = pad + overlayH + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) +
-                  graphH + hintH + footH + pad;
+                  graphH + (hintReserved ? hintH : 0) + footH + pad;
     *outH = H;
 
     // Background.
@@ -609,7 +616,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             h.rgb = kHint;
             ops.push_back(h);
         }
-        y += hintH;
+        y += hintReserved ? hintH : 0;
         if (c.footer[0]) {
             // One single-line op per '\n'-separated line, each in its own
             // slot of the two-line box, so the single-line draw path
@@ -1618,16 +1625,50 @@ bool menuPanelWorkerReadyForTest() {
     std::lock_guard<std::mutex> lock(g_w.m);
     return g_w.hasReady && !g_w.hasPending;
 }
-// The bitmap height layout() produces for `c`, so the test can assert the
-// panel's shape does not depend on which rows carry a hint. The raster's
-// aspect is a pure function of this height, so a constant height here is a
-// constant on-screen card size (halfH = halfW * aspect).
+// The bitmap height layout() produces for `c`, so the test can assert a
+// page's shape is independent of which rows carry a hint (where it
+// reserves the hint box) and that it reserves nothing on a page that does
+// not. The raster's aspect is a pure function of this height, so a constant
+// height here is a constant on-screen card size (halfH = halfW * aspect).
 int menuPanelLayoutHeightForTest(const MenuContent& c) {
     std::vector<Op> ops;
     std::vector<LineRect> lines;
     int h = 0;
     layout(c, ops, lines, &h, 0, nullptr);
     return h;
+}
+void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int* x1, int* y1) {
+    if (x0) *x0 = 0;
+    if (y0) *y0 = 0;
+    if (x1) *x1 = 0;
+    if (y1) *y1 = 0;
+    if (i < 0 || i >= c.lineCount) return;
+    // Mirror layout()'s own size constants and the row's y-derivation (pad,
+    // the overlay, the tabs, the tiles, the graphs, then the rows) so the
+    // rect this returns is the one the raster actually draws.
+    const int cap = c.capPx;
+    const int W = c.widthPx;
+    const int cardW = c.cardPx > 0 && c.cardPx <= W ? c.cardPx : W;
+    const int pad = cap * 8 / 10;
+    const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
+    const int tabH = c.toast ? 0 : cap * 24 / 10;
+    const int u = cap * 9 / 10;
+    const int tileH = u * 50 / 10;
+    const int tileGap = cap / 4;
+    const int columns = c.tileColumns > 0 ? c.tileColumns : 4;
+    const int tileRows = c.tileCount > 0 ? (c.tileCount + columns - 1) / columns : 0;
+    const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
+    const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
+    const MenuLine& l = c.lines[i];
+    const int yTop = pad + overlayH + tabH + tilesH + i * rowPitch;
+    const int split = l.style == kMenuNote || l.style == kMenuHeading ? cardW - pad
+                      : l.style == kMenuInfo                          ? cardW * 26 / 100
+                                                                      : cardW * 6 / 10;
+    const int leftX = l.style == kMenuHeading ? pad / 2 : pad;
+    if (x0) *x0 = leftX;
+    if (y0) *y0 = yTop;
+    if (x1) *x1 = split;
+    if (y1) *y1 = yTop + rowPitch;
 }
 #endif
 
