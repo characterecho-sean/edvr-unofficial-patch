@@ -320,8 +320,7 @@ float4 main(PsIn i) : SV_Target {
         lightDir = asfloat(SunLight.Load3(16));
     }
     float shadow = 1.0;
-    // dirtLevel.y: TEMPORARY, experimental.cockpit_glass_no_shadow (the doc's "Clean glass after a supercruise exit"). Unbound it reads 0, the shadow as shipped.
-    if (lightColour.x + lightColour.y + lightColour.z > 0.001 && dirtLevel.y == 0.0) shadow = sunShadow(i.lightingPosition);
+    if (lightColour.x + lightColour.y + lightColour.z > 0.001) shadow = sunShadow(i.lightingPosition);
     float ndl = saturate(dot(nIn, -lightDir));
     float specAmt = lerp(imp * kImperfectionSpec, kCrackSpec * cb1[56].y, crackA);
     float gloss = lerp(kImperfectionGloss, kCrackGloss, crackA);

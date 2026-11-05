@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. See "Clean glass after a supercruise exit", last section. Temporary key for it: `experimental.cockpit_glass_no_shadow`; remove it with the test.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is overwritten after the swap's bind. Fix built on `claude/legacy-glass-diag`, not flown. See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -882,11 +882,35 @@ read either (it stops at t11 and b2). The flash with the sun ahead also means th
 doc's first guess was wrong that a sun ahead gives the dirt no direct light through
 `ndl`, unless the flash is (b).
 
-Next, the test build on `claude/legacy-glass-diag`: the probe's window line counts, at
-every canopy draw, whether the replacement, t12 and b13 are really bound, and
-`experimental.cockpit_glass_no_shadow = on` makes b13's y ignore the shadow term, live.
-Dirt steady with the switch means (a). A nonzero t12 or b13 count means (c). Neither
-means (b).
+The test build `a2dcd3ef` (log `edvr_gfx_20261105_163445`) counted, at every canopy
+draw, what was really bound:
+
+| Window ending | Binds | All ours | t12 not the streaks | b13 or PS wrong |
+|---|---|---|---|---|
+| 16:36:45 | 1394 | 1394 | 0 | 0 |
+| 16:37:15 (exit 16:37:10, then the velocity change) | 2996 | 2415 | 581 | 0 |
+| 16:37:45 | 3058 | 0 | 3058 | 0 |
+
+So it is (c), for t12 alone: something writes t12 after the swap's bind and before the
+draw, and the streak sample then reads something else, or 0, so the albedo has no dirt.
+The bind happens only at the pixel shader's bind, so nothing puts it back. What writes
+t12 is not known yet, and neither is why a velocity change starts it. The single-frame
+flash fits a frame where the write fell before the bind.
+
+The fix: `cockpitGlassBeforeDraw`, before each draw while the swap's inputs are bound,
+checks t12 and b13, binds the swap's own again, and keeps what it found for the
+hand-back at the next pixel shader, which also closes #188's stale t12 restore. The
+build logs the first view it finds and counts these draws in each 30 s window, so the
+flight names the writer's view. The temporary `no_shadow` switch from the test build
+came out with this: the dirt needs t12 whatever the shadow does.
+
+What the flight must show: the dirt stays through a velocity change; the probe's t12
+count is 0 with `cockpit glass: canopy draws that found another binding` counting; and
+nothing else that uses t12 changes, since it gets its binding back at the next pixel
+shader bind.
+
+- ruled out as the main cause: (a) and (b), because the dirt's albedo is zero without
+  t12 at every one of those draws, whatever the light does.
 
 - ruled out: the swap stopping, because binds equal canopy-seen in every window of
   both logs, about 3,000 in 30 s, after the exit as before.
