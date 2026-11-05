@@ -5,8 +5,8 @@
 - **State (2026-11-05): stall FIXED and flown (`0826fc84`, Frontier, flat), on the
   branch, not merged.** Sean: "Fix seems to work!" The flight's table is in "The naming
   veto stall". Not covered: TAA, a grenade or tool in hand, and per-frame captures.
-- **Before the fix:** the stall was still there at both zoom edges on Frontier, flat, DLSS: 3 frames of 138 to 170 ms. A zoom
-  step over 10 % a frame makes the world's own camera fail the prediction, so nothing
+- **Before the fix:** 3 frames of 138 to 170 ms at both zoom edges on Frontier, flat,
+  DLSS. A zoom step over 10 % a frame makes the world's own camera fail the prediction, so nothing
   names the world and every world draw is captured as first-person, about 13,000 draws
   at 12 us each, until the third frame gives the reference up. See "The naming veto
   stall" below. Flight 4 hit about 90 vetoes a zoom edge against about 40,000 here,
@@ -57,9 +57,6 @@
   stay on branch `claude/flat-scoped-ads-stutter-3987cc`. That branch was cut from
   S0's (the VR scope magnification arc), so S0 is there too. Main got B, F1, F2 and
   this doc, applied to main as `claude/flat-scoped-ads-fix`. E was never built.
-- **D's own cost:** while armed, slow frames of 17 to 31 ms with `e` up to 12 ms
-  spread over families (flights 3 and 4). Flight 4's press medians with every frame
-  clocked: 11.3 to 12.2 ms.
 - **Issues:** none filed yet (waiting on Sean's OK).
 
 ## Environment
@@ -334,6 +331,10 @@ frames).
 session per kind, not every press.
 
 ## Instrument D (designed after flight 2, built on Sean's word)
+
+**D's own cost:** while armed, slow frames of 17 to 31 ms with `e` up to 12 ms spread
+over families (flights 3 and 4). Flight 4's press medians with every frame clocked:
+11.3 to 12.2 ms.
 
 Three causes are left for a `none` frame of 25 to 96 ms, and the log has no
 per-frame figure that separates them:
