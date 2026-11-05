@@ -2,8 +2,16 @@
 
 ## Status
 
+- **State (2026-11-05): REOPENED. Cause found, fix not built.** The stall is still
+  there at both zoom edges on Frontier, flat, DLSS: 3 frames of 138 to 170 ms. A zoom
+  step over 10 % a frame makes the world's own camera fail the prediction, so nothing
+  names the world and every world draw is captured as first-person, about 13,000 draws
+  at 12 us each, until the third frame gives the reference up. See "The naming veto
+  stall" below. Flight 4 hit about 90 vetoes a zoom edge against about 40,000 here,
+  so its clean result does not show F1 and F2 cleared this stall.
+- **Next flight:** the bounded veto proposed in that section, flown in the same spot.
 - **Release (2026-10-30):** The history pools and shader cache fix (b3cf6e80) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
-- **State: FIXED, flown (flight 4, 10-29, `97193c14`, Steam, flat, DLSS); on main
+- **Flight 4 (10-29, `97193c14`, Steam, flat, DLSS), read then as fixed; on main
   without the instruments.** Sean: "The hitches are gone!" Six scoped presses: no frame over 29 ms (flight 3: 43 to 104 ms at every
   zoom edge). EDVR's render-thread CPU is at most 12.4 ms on any slow frame, and
   foreground capture is the heaviest family on one of them, at 2.3 ms (flight 3: 25
@@ -193,6 +201,12 @@ projection scale ratio runs 1.007 to 1.021 while both y-scales move about 6.70 t
 - ruled out: the staging index-range sets (E3) as the bursts' cost, because F1 and F2
   leave them as they were, flight 4's scoped windows still requested up to 267 sets
   a window, and the bursts are gone.
+- ruled out: record rebuilding as the stall on the 11-05 flight, because the press
+  windows compiled 0 to 4 shaders with `reused identity` at or near `allocations`, and
+  12 us a draw over 13,277 draws accounts for the 160 ms frame.
+- ruled out: widening `kFlatDomainWorldScaleTolerance` as the fix, because the world's
+  own step already measures 1.11 and 1.152 a frame against the weapon camera's 1.18 or
+  more, and a slower frame should widen the step further.
 
 ## Fix design (2026-10-29, after the Steam flight)
 
@@ -421,6 +435,65 @@ the bare one three times. Note where it hitched.
 | bursts stay; `reused` low | the pools miss (sizes do not fit, or the cap churns): log the sizes |
 
 Flown 10-29: the first row. See the journal.
+
+## The naming veto stall (2026-11-05)
+
+Flight: Frontier, flat, `v0.22.0-rc.6-210-g80c56505`, DLSS preset M, 1920x1080 to
+3840x2160 on the copy route, RTX 5090, about 65 fps at the test spot. Log
+`edvr_gfx_20261105_055017.log`, with 8 `gpu_pass_profile` captures of 120 frames.
+Scoped Executioner. Sean felt a stall going in and out.
+
+The mechanism:
+
+1. A fast zoom moves the world camera's projection scale more than 10 % between
+   frames: 1.152 at frame 106042 (y scale 2.43802 against the reference's 2.11631),
+   1.11 on the flight before. Section 104's figure of at most 1.038 a frame predates
+   this case.
+2. `flatDomainPredictsWorld` rejects the world's own camera, and `namingVetoed`
+   (`flat_runtime.cpp`) stops its draws naming the world, so nothing names it.
+3. Each world depth writer then takes the first-person path, "capture its geometry
+   and mark it" (`domainPlanned`). Frame 106042 ran sequences 15141 to 28418: 13,277
+   draws in 160 ms, 12 us a draw.
+4. `kFlatNamingVetoFrames` gives the reference up on the third such frame. That is
+   the burst's length.
+5. Then 12 to 16 frames refuse the foreground contract going in, and 1 or 2 coming
+   out, at normal frame time, and DLSS restarts. The reset lines put the time since
+   the last DLSS frame at 766 to 796 ms in and 531 to 547 ms out.
+
+| Evidence | Reading |
+|---|---|
+| 5 DLSS captures, all scope-in by their timestamps | 3 frames of 138 to 170 ms each time; the largest pass, 117 to 138 ms, is the geometry pass (VS EB5234DB) |
+| 2 TAA captures | largest frames 29 and 21 ms |
+| `naming-veto-releases` | +1 a zoom edge, 10 for the 5 DLSS presses, each with about 40,000 vetoes: 3 frames of about 13,000 draws |
+| CPU timing, window to 06:11:45 | foreground capture 8.35 ms a clocked frame at 1990 calls, against 0.89 ms at 108 when quiet: about 130 ms on the one burst frame clocked |
+| Stock weapons, flight of 05:23 | presses 1 to 6 left no vetoes; the first came with the first scoped press |
+| TAA | the veto still fires, but `s.engine!=FlatMonoResolveMode::Taa` keeps the draws out of the capture, so there is no stall |
+| A reporter's 100 captures (FSR3, XeSS, TAA; 3440x1440; modified profiler, build unknown; no log) | all 27 felt: frames over 116 ms and 4 frames with no EDVR pass; all 73 not felt: 34 ms or less. The same 3-frame head, on any weapon with Scope or Faster Handling |
+
+**Flight 4 again:** about 90 vetoes a zoom edge (12:30:22: 618 vetoes, 7 releases)
+against 3,500 to 9,000 in flight 3 and about 40,000 here. It exercised little of this
+path, so F1 and F2 cannot be credited with clearing the stall in a busy scene.
+
+**Open:** the reporter's tail of about 30 frames at 20 to 48 ms on FSR3 and XeSS, with
+the time in a final full-screen pass, is not in these DLSS captures. That the zoom's
+step grows with frame time, which would tie the trigger to frame rate, is a hypothesis.
+
+**Proposed fix, not built (no key):** bound the veto inside the frame. After a set
+number of vetoed draws in one frame, give the reference up there and then.
+`namingVetoed` already passes a draw when there is no reference, so the next supported
+draw names the world and the rest of the frame is not captured. That caps the cost at
+the bound instead of 3 frames of every world draw. The grenade hold, the reason the
+veto exists, draws few first-person draws before the world and stays vetoed; the bound
+needs checking against the most vetoes a named frame has seen. The change's checks go
+in `tools\flat_temporal_test\flat_domain_admission_tests.h`.
+
+**Flight card:** the same spot and presses, DLSS, F4 captures in and out, then TAA.
+
+| What the log shows | Reading |
+|---|---|
+| no capture frame over about 30 ms; vetoes a zoom edge down from about 40,000 to the bound or less | fixed |
+| stall gone, a soft or sharp snap remains | the refusal run: fix A, separate |
+| 3 slow frames stay | the bound never ran, or the cost is elsewhere: read `naming-veto-releases` first |
 
 ## Journal
 
