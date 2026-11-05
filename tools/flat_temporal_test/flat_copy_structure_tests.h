@@ -551,6 +551,29 @@ inline int flatCopyStructureTests() {
                    "the first-admission line names the fills when there are some and reads as it always did when there are none");
         }
 
+        // oneDrawThenFills over synthetic records: the first writer must be an image-making pass, never the constant-fill pair.
+        {
+            using namespace flat_mono_detail;
+            const auto rec = [](uint64_t vs, uint64_t ps, uint32_t draws) {
+                FlatContractRecord r;
+                r.key.vs = vs;
+                r.key.ps = ps;
+                r.draws = draws;
+                r.first = 10;
+                r.last = draws == 1 ? 10 : 10 + draws;
+                r.firstInstances = r.lastInstances = 1;
+                return r;
+            };
+            const uint64_t toneVs = 0xCFA91824129ECBBCull, tonePs = 0x2427BEBC2082175Dull;   // any pair but the fill's
+            expect(!oneDrawThenFills(rec(kConstantFillVs, kConstantFillPs, 2), 1), "a fill, then a fill, is no image pass");
+            expect(!oneDrawThenFills(rec(kConstantFillVs, kConstantFillPs, 3), 2), "a fill first, then two fills, is no image pass");
+            expect(oneDrawThenFills(rec(kConstantFillVs, kConstantFillPs, 1), 0) == oneDraw(rec(kConstantFillVs, kConstantFillPs, 1)),
+                   "a target with no counted fills follows oneDraw whatever its one writer is");
+            expect(oneDrawThenFills(rec(toneVs, tonePs, 2), 1), "a tone pass then a fill is admitted");
+            expect(oneDrawThenFills(rec(toneVs, tonePs, 3), 2), "a tone pass then two fills is admitted");
+            expect(!oneDrawThenFills(rec(toneVs, tonePs, 3), 1), "a fill between two other passes is declined");
+            expect(!oneDrawThenFills(rec(toneVs, tonePs, 2), 0) && oneDrawThenFills(rec(toneVs, tonePs, 1), 0), "no fills: one draw passes, two do not");
+        }
         struct Row { const char* name; Build b; const char* why; };
         std::vector<Row> rows;
         auto add = [&](const char* name, const char* why, void (*edit)(Build&)) { Row r{name, Build{}, why}; edit(r.b); rows.push_back(r); };
