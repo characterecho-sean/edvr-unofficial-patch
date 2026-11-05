@@ -63,6 +63,8 @@ inline bool flatProfileReadsKey(const char* key) {
         // TEMPORARY (cockpit_glass_probe.h, docs\cockpit-glass-legacy-port.md): the canopy draw's state and constants, flat and VR alike.
         // Unlisted, getString answers "off" here and the probe never arms in flat. Remove with the probe.
         std::strcmp(key, "experimental.cockpit_glass_probe") == 0 ||
+        // TEMPORARY (docs\cockpit-glass-legacy-port.md, "Clean glass after a supercruise exit"): the legacy glass ignores the sun's shadow term. Remove with the test.
+        std::strcmp(key, "experimental.cockpit_glass_no_shadow") == 0 ||
         // The HUD layer's edge smoothing (flat_ui_layer.cpp, ui_layer_smaa.h): on | off, off by default, read live a frame at a time. The HUD Anti-Aliasing row
         // of the flat panel's Performance tab, directly under UI quality. Unlisted, getBool answers false here whatever the file says, which reads as off, so the
         // row could never turn it on, and the 30 s "flat ui layer smaa:" line shows key=off.

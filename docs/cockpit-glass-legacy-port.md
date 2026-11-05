@@ -2,6 +2,8 @@
 
 ## Status
 
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. See "Clean glass after a supercruise exit", last section. Temporary key for it: `experimental.cockpit_glass_no_shadow`; remove it with the test.
+
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
@@ -853,3 +855,50 @@ follow the level as the intact canopy does.
 - ruled out: lighting the canopy from t1 alone in a hangar, because the
   sun's colour there is 1e-13; hangar light reaches the glass only
   through local lights and probes (section 7).
+
+## Clean glass after a supercruise exit (2026-11-05)
+
+Report (Sean, flat, Frontier, `v0.22.0-rc.7`): the dirt is there when he drops out of
+supercruise, goes when he changes velocity in normal space, and comes back only after
+a trip to the main menu. Toggling the key at 15:28 did not appear to bring it back.
+Evidence: log `edvr_gfx_20261105_154759` with `experimental.cockpit_glass_probe` on,
+supercruise exit 15:50:52, Shift+NumLock 15:51:20; also `edvr_gfx_20261105_151811`.
+
+The capture's frame (`flat_pixels\20261105_225120_427_23036_1`, frame 17528) has clean
+glass with the sun ahead of the ship.
+
+The test (Sean's screen recording, 16:02:44, log `edvr_gfx_20261105_155949`, exit
+16:02:13): after losing the dirt he turned away from the star and back, and it
+flickers. The recording is 30 fps, so it drops most of the game's frames. Video frame
+56 has the full streaks over the pane; 55 and 57 have none, with the sun ahead of the
+ship. None of the seven other frames checked has them. So the streak texture and the
+dirt level can both still reach the pixels, and the replacement can still draw dirt
+in the bad state. Sean's description has not separated what turning away does.
+
+Open, each per frame: (a) the sun's shadow term, `sunShadow` returning about 0 on most
+frames; (b) `probeAmbient`, whose buffers' contents the probe does not log; (c) t12 or
+b13 overwritten between the bind and the draw on most frames, which the probe does not
+read either (it stops at t11 and b2). The flash with the sun ahead also means this
+doc's first guess was wrong that a sun ahead gives the dirt no direct light through
+`ndl`, unless the flash is (b).
+
+Next, the test build on `claude/legacy-glass-diag`: the probe's window line counts, at
+every canopy draw, whether the replacement, t12 and b13 are really bound, and
+`experimental.cockpit_glass_no_shadow = on` makes b13's y ignore the shadow term, live.
+Dirt steady with the switch means (a). A nonzero t12 or b13 count means (c). Neither
+means (b).
+
+- ruled out: the swap stopping, because binds equal canopy-seen in every window of
+  both logs, about 3,000 in 30 s, after the exit as before.
+- ruled out: another EDVR scope rebinding the stock shader (#188), because the
+  capture's canopy draws have actual PS `D41DCE1D76396A60`, the replacement, in the
+  bad state.
+- ruled out: another pixel shader painting the canopy, because the probe has
+  `other-ps=0` and only `4E4FF61E8A08FC7E` with `8C091FFD08644E02` in every window.
+- ruled out: the constants the shader reads from cb1 and cb2 changing, because
+  cb1[56], [90], [245], [261] and cb2[0], [6], [7], [8], [13], [15] are the same in
+  samples 1 to 6, and cb2[17] moves only in its unused w. Samples 5 and 6 are after
+  the capture of the bad state. cb1[227], [228] and [253] were not in the table read
+  and are not ruled out. The sun's colour and direction stay nonzero.
+- ruled out: the SRVs t0 to t11 and the samplers and output state changing, because
+  those lines are the same in samples 2 to 6.

@@ -36,6 +36,7 @@ bool g_configRead = false;
 uint32_t g_configGeneration = 0;
 bool g_on = false;
 int g_dirtPercent = kDirtPercentDefault;   // visual.cockpit_glass_dirt, read with the look at the frame boundary
+bool g_noShadow = false;                   // TEMPORARY, experimental.cockpit_glass_no_shadow: the shaders ignore the sun's shadow term (the level block's y)
 std::string g_unrecognisedSaid;   // the last unrecognised value the log has named, so a typo is said once and not every config change
 
 // Everything made on one device is kept as raw pointers on purpose, never released at exit (a static destructor that releases a D3D object during shutdown is the kind of
@@ -47,6 +48,7 @@ ID3D11BlendState* g_overlayBlend = nullptr;           // colour ONE + ONE, RGB w
 ID3D11ShaderResourceView* g_streakSrv = nullptr;
 ID3D11Buffer* g_levelCb = nullptr;                    // the dirt level, one register (16 bytes) at b13
 float g_levelUploaded = -1.0f;                        // the level g_levelCb holds; a different one is uploaded at the next bind
+float g_noShadowUploaded = 0.0f;                      // TEMPORARY: the no-shadow switch g_levelCb holds
 bool g_levelRefused = false;
 Replacement g_state = Replacement::NotTried;
 bool g_overlayRefused[2] = {false, false};
@@ -235,11 +237,13 @@ ID3D11PixelShader* replacementFor(ID3D11DeviceContext* ctx) {
 // only on a change). Null when the device refused it; the shaders then read an unbound b13, which is no dirt, never the game's own glass.
 ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
     const float level = dirtLevelOf(g_dirtPercent);
+    const float noShadow = g_noShadow ? 1.0f : 0.0f;
     if (g_levelCb) {
-        if (level != g_levelUploaded) {
-            const float v[4] = {level, 0, 0, 0};
+        if (level != g_levelUploaded || noShadow != g_noShadowUploaded) {
+            const float v[4] = {level, noShadow, 0, 0};
             guarded("cockpitGlass.level.update", [&] { vScreenUpdateSubresourceRaw(ctx, g_levelCb, 0, nullptr, v, 0, 0); });
             g_levelUploaded = level;
+            g_noShadowUploaded = noShadow;
         }
         return g_levelCb;
     }
@@ -248,7 +252,7 @@ ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
     guarded("cockpitGlass.level.create", [&] {
         ctx->GetDevice(&dev);
         if (!dev) return;
-        const float v[4] = {level, 0, 0, 0};
+        const float v[4] = {level, noShadow, 0, 0};
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = sizeof v;
         bd.Usage = D3D11_USAGE_DEFAULT;
@@ -263,6 +267,7 @@ ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
         return nullptr;
     }
     g_levelUploaded = level;
+    g_noShadowUploaded = noShadow;
     return g_levelCb;
 }
 
@@ -373,6 +378,26 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual) { return actual && actual == g_ps ? kReplacedPsHash : 0; }
 
+int cockpitGlassInputsAtDraw(ID3D11DeviceContext* ctx, uint64_t hash) {
+    if (!g_on || hash != kReplacedPsHash || !g_ps) return -1;
+    int bits = 0;
+    guarded("cockpitGlass.inputs.read", [&] {
+        ID3D11PixelShader* ps = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11Buffer* cb = nullptr;
+        ctx->PSGetShader(&ps, nullptr, nullptr);
+        ctx->PSGetShaderResources(kStreakSlot, 1, &srv);
+        ctx->PSGetConstantBuffers(kLevelSlot, 1, &cb);
+        if (ps != g_ps) bits |= 1;
+        if (!srv || srv != g_streakSrv) bits |= 2;
+        if (!cb || cb != g_levelCb) bits |= 4;
+        if (ps) ps->Release();
+        if (srv) srv->Release();
+        if (cb) cb->Release();
+    });
+    return bits;
+}
+
 bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx) {
     const Overlay which = overlayFor(bindingShaderHash(BindSlot::Ps));   // the game's own pixel shader: the shadow records it, never the replacement
     if (which == Overlay::None) return false;
@@ -435,6 +460,13 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
             g_dirtPercent = dirtPercent;
             if (on && g_on)
                 Log::get().note("cockpit glass: dirt level %d%% (visual.cockpit_glass_dirt), from the next canopy bind", dirtPercent);
+        }
+        // TEMPORARY (docs\cockpit-glass-legacy-port.md, "Clean glass after a supercruise exit"): the legacy glass's shaders ignore the sun's shadow term. Said at every change.
+        const bool noShadow = cfg.getString("experimental.cockpit_glass_no_shadow", "off") == "on";
+        if (noShadow != g_noShadow) {
+            g_noShadow = noShadow;
+            Log::get().note("cockpit glass: TEMPORARY experimental.cockpit_glass_no_shadow = %s: the sun's shadow term is %s from the next canopy bind", noShadow ? "on" : "off",
+                            noShadow ? "ignored (the sun lights every pixel)" : "used");
         }
         if (on != g_on) {
             const ULONGLONG now = GetTickCount64();

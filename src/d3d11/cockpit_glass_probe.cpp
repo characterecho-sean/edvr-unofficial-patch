@@ -2,6 +2,7 @@
 #include "cockpit_glass_probe.h"
 
 #include "binding_shadow.h"            // bindingShaderHash: the hashes the draw path already holds
+#include "cockpit_glass.h"             // cockpitGlassInputsAtDraw: what the swap's draw really has bound
 #include "cockpit_glass_probe_core.h"
 #include "flat_compute_readback.h"     // FlatComputeInternalScope: this probe's own copies and maps step past vscreen's hooks
 
@@ -45,6 +46,7 @@ uint32_t g_vsDraws[kCanopyVsCount] = {};
 uint32_t g_otherPsDraws = 0;   // canopy VS, PS none of the nine
 uint64_t g_otherPs[4] = {};
 uint32_t g_windowDraws = 0;
+uint32_t g_inputsAll = 0, g_inputsPsNot = 0, g_inputsT12Not = 0, g_inputsB13Not = 0;   // the swap's draws, by what they really had bound (cockpitGlassInputsAtDraw)
 
 uint32_t g_samples = 0;
 ULONGLONG g_lastSample = 0;
@@ -78,6 +80,7 @@ void resetWindow(ULONGLONG now) {
     for (auto& h : g_otherPs) h = 0;
     g_otherPsDraws = 0;
     g_windowDraws = 0;
+    g_inputsAll = g_inputsPsNot = g_inputsT12Not = g_inputsB13Not = 0;
 }
 
 void logWindow(ULONGLONG now) {
@@ -97,6 +100,8 @@ void logWindow(ULONGLONG now) {
                     (now - g_windowStart) / 1000.0, g_windowDraws, ps[0] ? ps : " none", vs[0] ? vs : " none", g_otherPsDraws,
                     static_cast<unsigned long long>(g_otherPs[0]), static_cast<unsigned long long>(g_otherPs[1]),
                     static_cast<unsigned long long>(g_otherPs[2]), static_cast<unsigned long long>(g_otherPs[3]), g_samples, kSampleCap);
+    Log::get().note("glass probe: window inputs at the swap's draws: all ours=%u, pixel shader not the replacement=%u, t12 not the streaks=%u, b13 not the level=%u",
+                    g_inputsAll, g_inputsPsNot, g_inputsT12Not, g_inputsB13Not);
 }
 
 // A staging copy of `src` (a buffer), bytes [first, first + want) clipped to its size. A constant buffer is copied whole (a box on a
@@ -404,6 +409,13 @@ void cockpitGlassProbeDraw(ID3D11DeviceContext* ctx, char kind, UINT count, UINT
     const int vi = canopyVsIndex(vsH);
     const int pi = canopyPsIndex(psH);
     if (vi < 0 && pi < 0) return;
+    const int inputs = cockpitGlassInputsAtDraw(ctx, psH);
+    if (inputs == 0) ++g_inputsAll;
+    if (inputs > 0) {
+        if (inputs & 1) ++g_inputsPsNot;
+        if (inputs & 2) ++g_inputsT12Not;
+        if (inputs & 4) ++g_inputsB13Not;
+    }
     ++g_windowDraws;
     if (vi >= 0) ++g_vsDraws[vi];
     if (pi >= 0) {
