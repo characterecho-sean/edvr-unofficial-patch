@@ -70,7 +70,7 @@ struct State {
     ComPtr<ID3D11VertexShader> swapVs[kSwapCount];
     bool swapTried[kSwapCount] = {};
     ComPtr<ID3D11VertexShader> probeVs;
-    ComPtr<ID3D11PixelShader> probePs;
+    ComPtr<ID3D11PixelShader> probePs, probeStickyPs;
     bool probeTried = false;
     ComPtr<ID3D11PixelShader> depthPs[2];   // the depth issue's stand-ins for kPsSprite and kPsCanvas
     bool depthPsTried = false;
@@ -163,6 +163,7 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     for (bool& t : s.swapTried) t = false;
     s.probeVs.Reset();
     s.probePs.Reset();
+    s.probeStickyPs.Reset();
     s.probeTried = false;
     for (auto& p : s.depthPs) p.Reset();
     s.depthPsTried = false;
@@ -547,6 +548,8 @@ void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderRes
             s.probeTried = true;
             s.probeVs.Attach(shaderSwapCreateVs(ctx, kMapProbeVsBytecode, sizeof(kMapProbeVsBytecode), "map_probe_vs", "galaxy map"));
             s.probePs.Attach(shaderSwapCreatePs(ctx, kMapProbePsBytecode, sizeof(kMapProbePsBytecode), "map_probe_ps", "galaxy map"));
+            s.probeStickyPs.Attach(shaderSwapCreatePs(ctx, kMapProbeStickyPsBytecode, sizeof(kMapProbeStickyPsBytecode), "map_probe_sticky_ps", "galaxy map"));   // without it the exact test decides both ways
+            if (!s.probeStickyPs) Log::get().note("galaxy map: the arrow probe's sticky edge could not be made: the arrow leaves a panel at its exact edge");
         }
         if (!s.probeVs || !s.probePs) {
             noteUnavailable("the arrow probe's shaders");
@@ -554,6 +557,7 @@ void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderRes
         }
     }
     drain(s, ctx, eye, seq);
+    const bool sticky = s.probeStickyPs && over();   // kMapProbeStickyPS: getting on is exact, staying on is not
     EyeRing& r = s.eye[eye];
     Group* grp = nullptr;
     bool pushed = false;
@@ -599,7 +603,7 @@ void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderRes
     const bool ran = guarded("galaxy map probe", [&] {
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
         vScreenVSSetShaderRaw(ctx, s.probeVs.Get(), nullptr, 0);
-        vScreenPSSetShaderRaw(ctx, s.probePs.Get(), nullptr, 0);
+        vScreenPSSetShaderRaw(ctx, sticky ? s.probeStickyPs.Get() : s.probePs.Get(), nullptr, 0);
         ID3D11ShaderResourceView* m = mask;
         vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &m);
         ctx->Begin(q.Get());
@@ -627,6 +631,7 @@ void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderRes
     }
     ++grp->n;
     g_counters.probes.fetch_add(1, std::memory_order_relaxed);
+    if (sticky) g_counters.stickyProbes.fetch_add(1, std::memory_order_relaxed);
 }
 
 namespace {

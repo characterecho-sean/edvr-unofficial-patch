@@ -643,7 +643,7 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 106 && coreLegacy.size() + 59 == coreFixed.size(),
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 107 && coreLegacy.size() + 60 == coreFixed.size(),
           "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders, the VR maps' twelve (five transcribed vertex shaders, the probe's vertex and pixel shader, the sprites' depth issue's two pixel shaders, the System Map's marker vertex shader and the cut-out's vertex and pixel shader) and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
@@ -1278,7 +1278,7 @@ static void selfTest() {
     // buffer at t33 with its 336-byte stride and the bones at t38 with 48 where the original reads them, and the map camera's constants (the world quads' axes, position, the two eyes) at b10, 96 bytes, where the icons, rings and stems read them). The probe's pair reads the record at t33 and the mask at t0; the rings read only their vertex inputs; the depth issue's two pixel shaders read the sprite at t0 through s0 (and the first b2, two registers).
     {
         struct MapShader { const char* symbol; const char* sourceName; const char* source; const char* profile; UINT b0, b1, b2, b10; bool bones; int input; UINT b11; };   // input: 0 the records at t33, 1 the mask at t0, 2 vertex inputs only, 3 the sprite at t0 and its sampler at s0, 4 the game's depth at t0
-        const MapShader maps[13] = {
+        const MapShader maps[14] = {
             {"kMapIconFacingVsBytecode", "map_icon_facing_vs", edvr::kMapIconFacingVS, "vs_5_0", 12, 279, 0, 6, true, 0},
             {"kMapIconUvFacingVsBytecode", "map_icon_uv_facing_vs", edvr::kMapIconUvFacingVS, "vs_5_0", 12, 279, 2, 6, true, 0},
             {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, 0, true, 0, 33},
@@ -1292,8 +1292,9 @@ static void selfTest() {
             {"kMapPunchVsBytecode", "map_punch_vs", edvr::kMapPunchVS, "vs_5_0", 0, 0, 0, 0, false, 2},
             {"kMapPunchPsBytecode", "map_punch_ps", edvr::kMapPunchPS, "ps_5_0", 2, 0, 0, 0, false, 4},
             {"kMapReticuleVsBytecode", "map_reticule_vs", edvr::kMapReticuleVS, "vs_5_0", 12, 279, 0, 0, true, 0, edvr::kMapBodyRows},
+            {"kMapProbeStickyPsBytecode", "map_probe_sticky_ps", edvr::kMapProbeStickyPS, "ps_5_0", 0, 0, 0, 0, false, 1},
         };
-        for (size_t i = 0; i < 13; ++i) {
+        for (size_t i = 0; i < 14; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 43 + i];
             check(!std::strcmp(shader.symbol, maps[i].symbol) && !std::strcmp(shader.sourceName, maps[i].sourceName) && !std::strcmp(shader.entry, "main") &&
                   !std::strcmp(shader.profile, maps[i].profile) && shader.alternate == maps[i].source && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -1363,7 +1364,7 @@ static void selfTest() {
             {"kCockpitGlassCondensationOverlayPsBytecode", "cockpit_glass_condensation_overlay_ps", condensationMacros, true, 7, 11},
         };
         for (size_t v = 0; v < 3; ++v) {
-            auto& shader = coreFixed[coreLegacy.size() + 56 + v];
+            auto& shader = coreFixed[coreLegacy.size() + 57 + v];
             const GlassContract& want = contracts[v];
             check(!std::strcmp(shader.symbol, want.symbol) && !std::strcmp(shader.sourceName, want.sourceName) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "ps_5_0") && shader.alternate == edvr::kCockpitGlassLegacyPsHlsl &&
