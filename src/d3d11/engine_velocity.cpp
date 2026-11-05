@@ -1283,13 +1283,14 @@ FlatMarkerPlane* flatMarkerPlane(ID3D11DeviceContext* ctx, ID3D11Texture2D* dept
     return plane;
 }
 
-// F2: the eye's target 7, R16G16B16A16_FLOAT at the slot target's size (8 bytes a pixel: about 31 MB an eye at 2016x1949). A failure is
-// remembered until the size changes and costs the eye its second skin only.
+// F2: the eye's target 7, R32G32B32A32_FLOAT at the slot target's size (16 bytes a pixel: about 63 MB an eye at 2016x1949). A character aboard a
+// moving ship carries the ship's travel in E, hundreds of centimetres a frame, and half float's step there is larger than the head's own motion
+// (docs/vr-holo-me-head-flick-2026-11-05.md). A failure is remembered until the size changes and costs the eye its second skin only.
 void makeSkinTarget(ID3D11DeviceContext* ctx, Eye& e, int eye, unsigned width, unsigned height) {
     e.skin.Reset(); e.skinRtv.Reset(); e.skinSrv.Reset(); e.skinBound = false;
     D3D11_TEXTURE2D_DESC d{};
     d.Width = width; d.Height = height; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1;
-    d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     d.Usage = D3D11_USAGE_DEFAULT;
     d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     Ptr<ID3D11Device> dev;
@@ -1299,16 +1300,16 @@ void makeSkinTarget(ID3D11DeviceContext* ctx, Eye& e, int eye, unsigned width, u
         e.skin.Reset(); e.skinRtv.Reset(); e.skinSrv.Reset();
         e.skinFailed = true;
         ++g_draw.createFailed;
-        Log::get().note("skin join: eye %d target 7 could not be created (%ux%u R16G16B16A16_FLOAT); this eye goes on without the second skin.", eye, width, height);
+        Log::get().note("skin join: eye %d target 7 could not be created (%ux%u R32G32B32A32_FLOAT); this eye goes on without the second skin.", eye, width, height);
         return;
     }
     if (eye == kEngineVelocitySourceEye)
-        Log::get().note("skin join: on-foot source target 7 created %ux%u R16G16B16A16_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous "
+        Log::get().note("skin join: on-foot source target 7 created %ux%u R32G32B32A32_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous "
                         "position seen on foot, in centimetres beside a valid flag, read by the world route and the screen motion map.",
-                        width, height, double(width) * height * 8.0 / 1e6, frameNow());
+                        width, height, double(width) * height * 16.0 / 1e6, frameNow());
     else
-        Log::get().note("skin join: eye %d target 7 created %ux%u R16G16B16A16_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous position, "
-                        "in centimetres beside a valid flag.", eye, width, height, double(width) * height * 8.0 / 1e6, frameNow());
+        Log::get().note("skin join: eye %d target 7 created %ux%u R32G32B32A32_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous position, "
+                        "in centimetres beside a valid flag.", eye, width, height, double(width) * height * 16.0 / 1e6, frameNow());
 }
 
 bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* depth) {

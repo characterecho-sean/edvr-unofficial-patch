@@ -2,8 +2,9 @@
 
 namespace edvr {
 // Capture-only point sampler for the native-on-foot jump trace. The packed
-// outputs preserve the source half-float words and the slot target's float
-// words without a lossy CPU conversion.
+// outputs keep E and the motion as half-float words (target 7 itself is 32-bit,
+// so a large E rounds here) and the slot target's float words without a lossy
+// CPU conversion.
 constexpr char kEyeJumpLatticeHlsl[] = R"HLSL(
 Texture2D<float4> SkinE : register(t0);
 Texture2D<float2> Motion : register(t1);

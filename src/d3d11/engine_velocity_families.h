@@ -72,6 +72,10 @@ constexpr Family kFamilies[] = {
     // pass: the skinning chain of D99A and its siblings, one colour output, blending off, depth write on. The pixel shader
     // reads SV_IsFrontFace at v7, the register the vertex shader's E would take, so E travels in v8 for this family (skinRegister).
     {0xA6A39338C06E03A1ull, "vs_A6A39338C06E03A1", {0x1AE6AB9A94C0456Eull, 0, 0, 0}, false, 0, true, true, 8},
+    // 2026-11-05, the commander's suit, helmet, headset and collar on the Holo-Me screen (Frontier 12:48, eye run 125144765001, the ship stopped;
+    // docs/vr-holo-me-head-flick-2026-11-05.md). No slot and no E, so these pixels took the head path while the face beside them had E: their motion
+    // error follows the head's own motion (r 0.985), up to 1.75 input px a frame, and the helmet's thin lines shimmer. The same class as the hair above.
+    {0x01DA82F8D0EA0C99ull, "vs_01DA82F8D0EA0C99", {0x2C3ADCD2FCD47298ull, 0, 0, 0}, false, 0, true, true},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 // F2: the five measured skinned pairs (the NPC's shading pairs, 2026-10-08 F10/F11): the pixel shader exports the vertex shader's E to
@@ -84,6 +88,7 @@ constexpr SkinPair kSkinPairs[] = {
     {0x7B0DC42D383F694Cull, 0x0DF03E64DF9DBEF1ull},
     {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull},
     {0xA6A39338C06E03A1ull, 0x1AE6AB9A94C0456Eull},
+    {0x01DA82F8D0EA0C99ull, 0x2C3ADCD2FCD47298ull},
 };
 constexpr bool skinPair(uint64_t vs, uint64_t ps) noexcept {
     for (const SkinPair& p : kSkinPairs)

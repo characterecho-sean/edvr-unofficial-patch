@@ -416,6 +416,8 @@ void caseCorpus(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::string& 
         // the hair's forward pass (2026-11-01): E travels in v8 (kFamilies skinRegister; its pixel shader reads SV_IsFrontFace at v7). Its two
         // discards are a dissolve test (cb2[2].y) and a checkerboard alpha test against cb2[0].y / cb2[0].z: a threshold of -1000 keeps every pixel
         {"vs_A6A39338C06E03A1", "ps_1AE6AB9A94C0456E", {{1, -1000.0f}, {2, -1000.0f}}, true, 8},
+        // the commander's suit and helmet (2026-11-05): cb2[13].w is the discard threshold, as cb2[5].w is 114A's
+        {"vs_01DA82F8D0EA0C99", "ps_2C3ADCD2FCD47298", {{55, 1000.0f}}, true},
     };
     unsigned present = 0;
     for (const Pair& p : pairs) {

@@ -3,8 +3,9 @@
 ## Status
 
 - **State:** two separate defects, both measured, and together they fit Sean's
-  report. Neither is fixed. No code changed, nothing installed, no ini edited.
-  Main is merged into this branch (`4289884c`) ahead of any build, on Sean's word.
+  report. Both fixes are built on this branch, with main merged first (`4289884c`)
+  on Sean's word, and go on Frontier for the flight below. Not flown yet. No ini
+  edited.
 - **Reports (Sean, 2026-11-05):** "just found my head flicking in Holo-Me"; after
   the test flight, "definitely flickers more when the ship is flying. Though the
   helmet frame still seems to at rest".
@@ -32,10 +33,10 @@
 - **Open:** the visor glint (real, in the game's own image, not what Sean named);
   float32 position precision if the screen stays open for minutes in flight; how
   much the helmet's thin lines shimmer from the input alone (see "After a fix").
-- **Proposed build, waiting for Sean's approval:** target 7 becomes
-  `R32G32B32A32_FLOAT` and the pair `01DA82F8`/`2C3ADCD2` is keyed as a VR-only
-  skinned family, in that order: keyed alone, it would spread the rounding to the
-  suit. No key.
+- **The build (Sean: "Build both fixes"):** target 7 is `R32G32B32A32_FLOAT` and the
+  pair `01DA82F8`/`2C3ADCD2` is keyed as a VR-only skinned family. Keyed alone it
+  would spread the rounding to the suit, so the two go together. No key. Full build
+  green; the real pair passes the clone test and the corpus identity test.
 - **Next flight:** on that build, see "The fix's flight".
 - **Temporary keys:** none added. Frontier's `census_offscreen = 1` belongs to the
   lobby DoF work and was left alone.
@@ -196,38 +197,54 @@ From the census and the depth writer map, first dump.
   dump alone suggested it because the head barely moved there. The stopped dump
   reverses it.
 
-## The proposed build
+## The build
 
-**1. Target 7 at `engine_velocity.cpp:1292` becomes `DXGI_FORMAT_R32G32B32A32_FLOAT`.**
-The shaders read it as `float4` and do not change. The step at 33 m of travel falls to
-about 0.0002 cm. It reports `RENDER_TARGET` and `BLENDABLE` on this GPU; on one that
-refuses it, `makeSkinTarget` already logs that and the eye goes on without the second
-skin. Cost: the eye targets go from 32.5 to 65 MB each at 2016x2017, so +65 MB, plus
-their clear, and F2's on-foot source target doubles when live. The log strings, the
-`gpu_census.h` comment and `tools\eye_inputs.py`'s format note change with it, and the
-eye capture's handling of the format has to be read. The alternative, half float
-without the shared camera travel, costs no memory, but the skin clone needs the
-previous camera origin as new data: a wider patch for 65 MB.
+**1. Target 7 (`makeSkinTarget`) is `DXGI_FORMAT_R32G32B32A32_FLOAT`.** The shaders read
+it as `float4` and do not change. The step at 33 m of travel falls to about 0.0002 cm.
+It reports `RENDER_TARGET` and `BLENDABLE` on this GPU; on one that refuses it,
+`makeSkinTarget` logs that and the eye goes on without the second skin. Cost: the eye
+targets go from 32.5 to 65 MB each at 2016x2017, so +65 MB, plus their clear, and F2's
+on-foot source target doubles when live. The eye dump's writer now saves this format,
+and the jump lattice takes it as its source and keeps half-float samples; its reader
+accepts old and new files. `L4.e` is the new check: E stays exact at a ship's travel,
+where half float would be out by 0.12 cm. The alternative, half float without the
+shared camera travel, costs no memory, but the skin clone needs the previous camera
+origin as new data: a wider patch for 65 MB.
 
-**2. Key `01DA82F8`/`2C3ADCD2` in `kFamilies` (VR only, skinned) and `kSkinPairs`,** as
-A6A3 was. A static read looks right: it loads t33 at offsets 0 and 16 with the same two
-register-offset loads as 114A, has three t38 loads, and its pixel shader reads only
-v0..v3, so the vertex shader's next free register (o5) is not taken. The production
-patcher has not run on it; `skin_clone_test --corpus` (K9) qualifies the real pair, and
-both shaders are in `edvr_logs\shaders`.
+**2. `01DA82F8`/`2C3ADCD2` is in `kFamilies` (VR only, skinned) and `kSkinPairs`,** as
+A6A3 was. It takes the default E register. The real pair, from Frontier's shader dump:
 
-Risks to check on that build:
+- `skin_clone_test --corpus`: 2067 covered pixels in the identity test, E exactly zero;
+  pose, palette, swap, no-history, teeth and limit all pass, 63 checks.
+- `engine_velocity_test --corpus --partial`: patched, reflected, created; 40960 texels
+  compared, 0 mismatches; 577 covered, MRT6 577 checked, 0 bad.
 
-- The order: keyed without step 1, the suit takes on defect 1.
-- Other draws of the pair: the flat design doc lists it among a cockpit's main pairs,
-  so in VR it may also draw the cockpit. A keyed draw whose join fails has no history,
-  by design. The test windows show 4,705 to 11,801 `pose` failures in 35,000 to 46,000
-  jobs. Which jobs fail is not known.
-- The clone's cost on every draw of the pair.
+The full corpus run did not finish in 9 minutes on WARP. Every pair it reached was
+identical, but it was stopped before this pair, so this pair ran alone in a folder with
+only its two shaders.
 
-**After a fix.** The helmet's residual at its best offset is still 2.8 to 4.9, against
-1.5 to 2.4 for the face. Thin lines at 50% render alias in the input, so some shimmer
-may stay. Whether DLSS resolves it once the motion is right is only measurable after.
+Risks the flight has to read:
+
+- **Base 0.** The compose reads E only for a record with a nonzero base, and any other
+  record takes the rigid path, joined or masked. The pool copies do not settle which
+  these are. The first dump's `EnginePool` shows bases 247, 1490 and 186 on these draws
+  (61-bone jobs), but the two test dumps read 0 at the same indices, in records that are
+  plainly not the avatar's, so those copies are not of the eye pass's generation. If
+  they are base 0, the helmet will be masked or rigid, and it will look worse or no
+  better. The dump's `D` flags answer this at once.
+- **Other draws of the pair.** The flat design doc lists it among a cockpit's main
+  pairs. In the 40 newest Frontier logs its census draws are only the suit's five parts
+  (16122, 20388, 23430, 11568, 32358 indices), and only in the Holo-Me flights. A keyed
+  draw whose join fails has no history, by design; the test windows show 4,705 to 11,801
+  `pose` failures in 35,000 to 46,000 jobs, and which jobs fail is not known.
+- **The clone's cost** on every draw of the pair: five draws an eye on this screen.
+
+**After the fix.** The helmet's residual at its best offset is still 2.8 to 4.9, against
+1.5 to 2.4 for the face. Thin lines at 50% render alias in the input, so some shimmer may
+stay. Whether DLSS resolves it once the motion is right is only measurable now.
+
+`analysis\npc_blur\f2\h1_skin_e.py` still requires the old format and needs the same
+change through the analysis intake.
 
 ## The fix's flight
 
@@ -236,9 +253,9 @@ the face and the helmet frame. Then a look round the cockpit in flight, and an N
 foot for the regression.
 
 - Face, flying: `face_mv_check.py` error under 0.6 native px on every frame from 4,
-  with travel still large.
+  with travel still large, and `SkinE` still at 32 bits in the dump.
 - Helmet, stopped: `helmet_mv_check.py` helmet error under 0.25 input px, also during a
-  head turn; the path is engine on those pixels.
+  head turn. Its path line says engine on those pixels and how many are masked.
 - Log: `engine motion: family vs_01DA82F8D0EA0C99: live`, no `takes no second skin` for
   it, and `masked` near 0 in `skin join: second skin this window`.
 - Sean: the flick and the helmet frame.
