@@ -45,6 +45,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "native_on_foot.h"  // nativeOnFootFrameBoundary (the render-mode setter hook, flight F0)
+#include "flat_stationary_camera_capture.h"  // mapCameraFrame (the VR map camera's publisher)
+#include "galaxy_map_pointer.h"                // mapPointerFrame (the VR Galaxy Map's hover and panel depth)
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "store_hook.h"
 #include "flat_world_witness.h"
@@ -1250,6 +1252,7 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // fix.black_void off, fix.panel_distance 1, no flash observation, advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs
 // transport-only): here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeOnFoot, "native_on_foot");
+EDVR_BOUNDARY_TICK(tkMapCamera, "map_camera");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 // A plugin's ownership of input is a lease spent here, once per Present, so it ends even when no eye is rendered (input_gate.h).
@@ -1634,6 +1637,9 @@ void presentFrameBoundary() {
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
+    // The VR map camera (flat_stationary_camera_capture.h): its watch on the renderer hook, installed and read here once a frame, on the render thread that installs the other hooks. Flat only stands it down.
+    // The Galaxy Map's pointer (galaxy_map_pointer.h) follows in the same tick: it reads the open state mapCameraFrame just decided.
+    tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });
     // Native on foot, after the journal's tick it reads (on foot, gameplay). The avatar hooks' boundary runs first: it acts on the want and the body
     // the previous frame's nativeOnFootFrameBoundary published (native_on_foot_hooks.h), which keeps their one-frame order.
     tkNativeOnFoot.run([] {

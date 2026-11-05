@@ -241,6 +241,8 @@ their own facing transcriptions (`src/d3d11/billboard_facing_vs.h`) and are no l
 `78F5F08D02EE38CC` (which drew around the explosion) and the other ten remain roll-free. The table above lists the sixteen as built for the
 flight; the live split is now 5 transcribed, 11 rebound (see Follow-up 2).
 
+2026-11-04: `12382D2EA45E9632`, `94EA991C3A03DBD9` and `C31238331D8AC3D4` (the pool-record sprites in the table above) left the roll-free table: they are the Galaxy Map's, where galactic up and a 45 degree pitch make the basis roll them against the eye. `F1502353BE051A2D` stays. See `docs/galaxy-map-vr-2026-11-03.md`, Fix 1.
+
 ### Follow-up 2: the fireball puffs
 
 The first facing flight still showed a flex. The eye dump found the puffs are drawn by `AFBCD3ADB9092F78` (the no-near-fade twin of `9F4B`)

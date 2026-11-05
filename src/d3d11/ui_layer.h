@@ -62,6 +62,8 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 struct ID3D11ShaderResourceView;
 
 struct ID3D11Texture2D;
@@ -85,6 +87,7 @@ extern bool g_uiLayerWatching;
 extern bool g_uiSeedDiagnostics;
 extern bool g_uiLayerRedirecting;
 extern bool g_uiLayerIssueBlocked;
+extern bool g_uiLayerMapRunHeld;
 extern bool g_uiLayerCrispOn;
 extern bool g_uiLayerCrispPending;
 extern bool g_uiLayerHudGlowPending;
@@ -115,6 +118,23 @@ bool uiLayerRippleLive();
 // after eight failed boundaries). The layer itself stays stood down for the
 // session either way.
 inline bool uiLayerIssueBlocked() { return detail::g_uiLayerIssueBlocked; }
+
+// The VR Galaxy Map's run of sprites (map_run_core.h, docs/galaxy-map-vr-2026-11-03.md "After the fifth flight"): while it is held the real context has the HDR layer and the eye's
+// private D16 bound and the game believes its own targets are bound. Every way into code that reads or sets the output merger ends it first; each is one load while no run is held.
+inline bool uiLayerMapRunHeld() { return detail::g_uiLayerMapRunHeld; }
+// Binds the game's targets back and lets the run go. Idempotent. Ignored from a thread other than the one that holds the run.
+void uiLayerMapRunEndSlow(ID3D11DeviceContext* ctx);
+inline void uiLayerMapRunEnd(ID3D11DeviceContext* ctx) {
+    if (detail::g_uiLayerMapRunHeld) uiLayerMapRunEndSlow(ctx);
+}
+// Lets the run go with no bind: the targets were replaced by the game's own call or a ClearState, or a view was released.
+void uiLayerMapRunDrop();
+// The game sets render targets while a run may be held. True: it sets exactly the targets the run saved, so the caller keeps its shadow and does not make the real call. False: the
+// call is made (a run for other targets has been dropped).
+bool uiLayerMapRunGameSet(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, bool hasUav);
+// The game sets the layer's own targets while a run is held, having read them back: nothing hooks OMGetRenderTargets. True: the caller leaves its shadow alone and does not make the real
+// call, so the game's targets stay the saved ones and the layer is never taken for them.
+bool uiLayerMapRunGameSetsOwn(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv);
 
 // Reads fix.ui_quality and fix.temporal_aa. Live: an "off" composites the frame in flight and
 // redirects nothing from the next draw.
@@ -192,6 +212,28 @@ bool uiLayerMultiplyBegin(ID3D11DeviceContext* ctx);
 // scissors (the draw re-issued as it was; closed by uiLayerWriteBackEnd).
 bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx);
 void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
+
+// The VR Galaxy Map's two more second issues (galaxy_map_ui.h, docs/galaxy-map-vr-2026-11-03.md Fix 3), each closed by uiLayerEnd and each only for a draw the layer took
+// while the map is open and its pointer hooks are armed:
+// a panel draw (vertex shader C4B4B334B26E81A9 or 5DAD41AA66757CE3) re-issued into the eye's panel mask, an A8_UNORM texture at the layer's size that
+// accumulates the draw's alpha (made at the first such draw, cleared once an eye-frame, let go at the frame boundary once the map is shut);
+// and the arrow's draw (4EF6DDB075A927FA), in the layer's bracket with the layer's own target, viewports and scissor, a blend that writes nothing and no depth or stencil:
+// the caller issues its one point there. Both fill in the draw's vertex shader, the eye, the layer's frame sequence and the mask's view. kNoMask: the draw is one of these but
+// the mask could not be made, for the caller to say (the layer does not link galaxy_map_ui.cpp in the rigs that link it whole).
+enum class UiMapBegin { kNotMine, kBound, kNoMask, kNoDepth };
+struct UiMapIssue {
+    ID3D11ShaderResourceView* mask = nullptr;
+    uint64_t vs = 0;
+    uint64_t ps = 0;   // uiLayerMapDepthBegin: the game's pixel shader of the sprite
+    int eye = -1;
+    uint64_t seq = 0;
+};
+UiMapBegin uiLayerMapMaskBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
+UiMapBegin uiLayerMapProbeBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
+// And the sprites' depth issue (galaxy_map_ui.h, THE SPRITES' DEPTH), for a Galaxy Map sprite or canvas draw (pixel shader 964221955A9E77E7 or 855C469156AB997F) the layer took into the HDR
+// layer while the map is open in VR: the layer's bracket with the HDR layer's render target kept (write mask 0), the eye's D16 depth bound with its test and write on, the biased rasterizer, the layer's viewports and
+// scissor (closed by uiLayerEnd); the caller issues the draw with the pixel shader swapped (mapui::depthIssue). kNoDepth: the draw is one of these but the depth could not be made.
+UiMapBegin uiLayerMapDepthBegin(ID3D11DeviceContext* ctx, UiMapIssue* out);
 
 // the crisp-HUD half of fix.ui_quality (Phases 1-3 of docs/cockpit-hud-layer-design-2026-09-27.md): the
 // cockpit's HDR HUD families (the holo panels, the flight HUD, the target

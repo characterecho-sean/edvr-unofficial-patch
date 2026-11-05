@@ -480,6 +480,22 @@ static void r8Pins(const std::string& root) {
     check(countOf(vs, "particleBlockWatched(res)") == 1, "R8.map-tee-asks-the-table");
     check(pf.find("psSetConstantBuffers") == std::string::npos && pf.find("PSSetConstantBuffers") == std::string::npos,
           "R8.the-pixel-stage-is-never-set-by-the-fix");
+    // The Galaxy Map case (docs/galaxy-map-vr-2026-11-03.md, Fix 1): on the map world up is galactic up and the camera is
+    // pitched 45 degrees down, so the roll-free basis rolls these three sprite shaders against the eye. They must not
+    // come back into either table.
+    const std::string ph = slurp(root + "\\src\\d3d11\\particle_fix.h");
+    const size_t tableAt = ph.find("kBillboardVs[15] = {");
+    const size_t tableEnd = tableAt == std::string::npos ? tableAt : ph.find("};", tableAt);
+    check(tableAt != std::string::npos && tableEnd != std::string::npos, "R8.map.billboard-table-found-with-15-entries");
+    const std::string table = tableEnd == std::string::npos ? std::string() : ph.substr(tableAt, tableEnd - tableAt);
+    const size_t rfAt = pf.find("kRollFreeVs[kRollFreeCount] = {");
+    const size_t rfEnd = rfAt == std::string::npos ? rfAt : pf.find("};", rfAt);
+    const std::string rfTable = rfEnd == std::string::npos ? std::string() : pf.substr(rfAt, rfEnd - rfAt);
+    check(!rfTable.empty() && countOf(pf, "constexpr int kRollFreeCount = 8;") == 1, "R8.map.roll-free-table-found-with-8-entries");
+    for (const char* h : {"12382D2EA45E9632", "94EA991C3A03DBD9", "C31238331D8AC3D4"})
+        check(!table.empty() && !rfTable.empty() && table.find(h) == std::string::npos && rfTable.find(h) == std::string::npos,
+              "R8.map.galaxy-map-sprite-shader-is-not-roll-free");
+    check(table.find("F1502353BE051A2D") != std::string::npos, "R8.map.the-fourth-pool-record-sprite-stays");
 }
 
 int main(int argc, char** argv) {

@@ -1,6 +1,7 @@
 #include "fixed_shader_source.h"
 #include "temporal_pass.h"
 #include "temporal_history.h"
+#include "flat_stationary_camera_capture.h"   // mapCameraChanges, mapCameraAnyOpen: the map camera's pose is the map frames' stillness signal
 #include "../common/runtime_profile.h"
 #include "draw_census.h"
 #include "eye_engine_capture.h"
@@ -886,6 +887,11 @@ uint64_t g_dlResets = 0, g_dlResetsAsked = 0;
 // hold or a healed frame, a withheld jump the camera came back from, one
 // left unjudged, a pose without a delta.
 uint64_t g_dlResetsHeld = 0, g_dlResetsReturned = 0, g_dlResetsUnjudged = 0, g_dlResetsNoDelta = 0;
+// A map open (flags bit 8): eye-frames whose history was kept because the map camera's pose had not changed, and eye-frames reset because it had (or
+// no map view was named, or it was the eye's first look); written once by temporalPassLogMap() when the channel closes. g_mapMotion is each eye's
+// look at mapCameraChanges() (temporal_mode.h temporalMapMoved), cleared on every frame a map is not open. Render thread only.
+uint64_t g_mapKept = 0, g_mapReset = 0;
+TemporalMapMotion g_mapMotion[2];
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120) return;
@@ -3832,6 +3838,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         g_chooseSubmit.w = static_cast<uint16_t>(std::min<uint32_t>(w, 0xFFFFu));   // the region, as the "first trained frame" line names it: 2016x2016 per eye
         g_chooseSubmit.h = static_cast<uint16_t>(std::min<uint32_t>(h, 0xFFFFu));
         chooseCameraRows();
+        // A map is open (flags bit 8, native_temporal's treat()): its screens write no depth, so the only motion this pass has is the head's, and the history is
+        // right only while the map camera is at rest. The signal is the map camera's own pose, published by the renderer hook (mapCameraChanges): head-free, and
+        // identical to the last digit at rest (docs\galaxy-map-vr-2026-11-03.md, Fix 2). Any change since this eye's last look, and the look after one, resets the
+        // history, as does a map open by GuiFocus alone (no view named, so no signal); every map frame says which in temporalMapStillBits() (native_temporal's
+        // begin() jitters the next frame only after a kept one).
+        if ((flags & kTemporalFlagMapKeep) != 0) {
+            const bool moved = temporalMapMoved(g_mapMotion[eye & 1], mapCameraChanges());
+            const bool still = mapCameraAnyOpen() && !moved;
+            if (still) {
+                ++g_mapKept;
+            } else {
+                ++g_mapReset;
+                flags |= 1u;
+                trace.events |= 1u;
+                e.haveHistory = false;
+                e.dlHaveHistory = false;
+                e.zPrevValid = false;
+            }
+            const unsigned bit = eye == 0 ? 1u : 2u;
+            if (still) temporalMapStillBits().fetch_or(bit, std::memory_order_relaxed);
+            else temporalMapStillBits().fetch_and(~bit, std::memory_order_relaxed);
+        } else {
+            g_mapMotion[eye & 1] = TemporalMapMotion{};   // the map's gate closed: the next map's first look has no history to keep
+        }
         // The rotation delta for this frame's motion source. The depth
         // motion is the head's rotation with its translation term, and
         // falls back to the rotation alone until the depth is in hand.
@@ -6234,6 +6264,14 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     memcpy(e.eyeOff, eyeOffset, sizeof(e.eyeOff));
     e.headNoted = true;
     e.headNotedFrame = g_rowsFrame;
+}
+
+void temporalPassLogMap() {
+    if (g_mapKept == 0 && g_mapReset == 0) return;
+    Log::get().note("temporal aa map: %llu eye-frames kept their history, %llu reset it; the signal is the map camera's pose "
+                    "(a publish that differs by one bit, or no map view named, resets).",
+                    static_cast<unsigned long long>(g_mapKept), static_cast<unsigned long long>(g_mapReset));
+    g_mapKept = g_mapReset = 0;
 }
 
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],

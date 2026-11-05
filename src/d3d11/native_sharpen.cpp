@@ -52,6 +52,7 @@ void clear(ID3D11Texture2D** out,float* b) { if(out)*out=nullptr; if(b)std::mems
 
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* bounds,ID3D11Texture2D** output,float* outBounds) {
   clear(output,outBounds); std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
+  edvr::uiLayerMapRunEnd(nullptr);   // the Galaxy Map's run of sprites leaves EDVR's targets bound; the door reads and sets the output merger (ui_layer.h)
   if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||eye>1||!seq||seq<s->floor||(s->invalidated&&seq<=s->floor)||!source||!output||!outBounds||!validBounds(bounds)||!validTexture(source)||FAILED(s->device->GetDeviceRemovedReason())||!sameDevice(s->device,source)) return E_INVALIDARG;
   if(seq==s->floor&&s->consumed[eye])return E_INVALIDARG;
   D3D11_TEXTURE2D_DESC desc{}; source->GetDesc(&desc); uint32_t region[4]{}; bool flipU=false,flipV=false;

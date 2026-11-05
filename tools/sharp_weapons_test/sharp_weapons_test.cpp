@@ -346,11 +346,12 @@ static void mayWantTests() {
         (may ? wanted : cleared) += 1;
         if (may) continue;
         for (uint64_t ps : pss)
-            for (unsigned flags = 0; flags < 8; ++flags) {
+            for (unsigned flags = 0; flags < 16; ++flags) {
                 UiFamilyFacts f = hdrFacts(vs, ps);
                 f.nativeOnFoot = (flags & 1) != 0;
                 f.scopeMark = (flags & 2) != 0;
                 f.learnedSurface = (flags & 4) != 0;
+                f.mapOpen = (flags & 8) != 0;
                 check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "a clear UI family bit is kNone on the HDR target for every pixel shader and fact");
             }
     }
@@ -358,6 +359,7 @@ static void mayWantTests() {
     // The exact family the rule names keeps its bit, and the probe's two shaders and the runtime-gated two do too, whatever the facts.
     for (size_t i = 0; i < kWeaponPairCount; ++i) check(vsMayWantByte(kWeaponPairs[i].vs) & kVsMayUiFamily, "each weapons-fire vertex shader keeps the bit");
     for (uint64_t h : kHoloFamiliesTake) check(vsMayWantByte(h) & kVsMayUiFamily, "each take hologram keeps the bit");
+    for (uint64_t h : {kUiVsMapCanvas, kUiVsMapSprite, kUiVsMapRings, kUiVsMapStems}) check(vsMayWantByte(h) & kVsMayUiFamily, "each of a map's four overlay vertex shaders keeps the bit");
     check(!(vsMayWantByte(kUiVsGuiVector) & kVsMayUiFamily), "a GUI-direct shader is not named on the HDR target, so its bit is clear there");
     UiFamilyFacts ldr = hdrFacts(kUiVsGuiVector, 0);
     ldr.targetKind = 2;
@@ -374,9 +376,9 @@ static void mayWantTests() {
     check(b0 != std::string::npos && b1 > b0 && w0 != std::string::npos && w1 > w0, "the rule and its may-want function are found in ui_layer_math.h");
     const std::string rule = math.substr(b0, b1 - b0), want = math.substr(w0, w1 - w0);
     const char* tokens[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
-                            "uiHoloGenericHash", "weaponPairIndex", "shieldRefractPair", "uiOnFootHudMatch"};
+                            "uiHoloGenericHash", "weaponPairIndex", "shieldRefractPair", "uiOnFootHudMatch", "uiLayerMapFamilyOf"};
     const char* mapped[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
-                            "uiHoloGenericHash", "weaponsFireVs", "shieldRefractVs", "uiOnFootHudVs"};
+                            "uiHoloGenericHash", "weaponsFireVs", "shieldRefractVs", "uiOnFootHudVs", "uiVsIsMapOverlay"};
     for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i)
         if (rule.find(tokens[i]) != std::string::npos)
             check(want.find(mapped[i]) != std::string::npos, (std::string("the rule tests ") + tokens[i] + " and the may-want function names it").c_str());
@@ -621,8 +623,9 @@ static void ruleTests() {
               static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
               static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) == static_cast<int>(UiLayerFamily::kScopeMark) + 1 &&
-              static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03) last (no older number moved)");
+              static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) &&
+              static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03) and the map marks (2026-11-04) last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");

@@ -11,6 +11,7 @@
 #include "../../src/common/native_temporal.h"
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/temporal_mode.h"   // the map gate's pass verdict bits and flag (temporalMapStillBits, kTemporalFlagMapKeep)
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_surfaces.h"
@@ -71,6 +72,8 @@ extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float
   if(note.head){std::memcpy(note.previousHead,previous,48);std::memcpy(note.currentHead,current,48);std::memcpy(note.offset,offset,12);}
 }
 namespace edvr {
+unsigned mapLogCalls=0;
+void temporalPassLogMap() { ++mapLogCalls; }
 void temporalPassNoteEyes(int, const float (*previous)[12], const float (*current)[12]) {
   note.eyes=previous&&current;
   if(note.eyes){std::memcpy(note.previousEyes,previous,sizeof(note.previousEyes));
@@ -106,6 +109,12 @@ void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
 unsigned coverNotes=0;float coverLast[2][4]{};
 namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
+// The journal watcher's GuiFocus (src/d3d11/journal_watch.cpp), which begin() reads once a frame for the map gate: scripted here.
+bool mapFocusKnown=false;uint32_t mapFocus=0;
+namespace edvr{bool journalGuiFocus(uint32_t* focus){if(focus)*focus=mapFocus;return mapFocusKnown;}}
+// The VR map camera (src/d3d11/flat_stationary_camera_capture.cpp), which begin() asks whether a map view is named: scripted here.
+bool mapViewNamed=false;
+namespace edvr{bool mapCameraAnyOpen() noexcept{return mapViewNamed;}}
 // The light grid cache's jitter probe (src/d3d11/light_grid_cache_hook.cpp), which begin() tells this frame's jitter: recorded here, asserted below.
 unsigned jitterNotes=0;float jitterLastShift[2][2]{};
 namespace edvr{void lightGridCacheNoteJitter(uint64_t,float,float,const float shift[2][2]){++jitterNotes;std::memcpy(jitterLastShift,shift,sizeof(jitterLastShift));}}
@@ -141,6 +150,8 @@ namespace edvr{
 bool vrWorldRouteOwnsNextFrame(){return routeOwns;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the route's re-issued world, or a map's or menu's 2D screen
 // the layer took under the on-foot maps gate. The door cannot tell which, so one stub answers for both.
+namespace detail { bool g_uiLayerMapRunHeld=false; } // the Galaxy Map's run of sprites is never held in this rig; the doors only ask (src/d3d11/ui_layer.h)
+void uiLayerMapRunEndSlow(ID3D11DeviceContext*){}
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&routeTookEye[eye]&&seq!=0&&routeTookSeq==seq;}
 int uiLayerWorldDoorGap(uint64_t,uint32_t,ID3D11Texture2D* frame){++gapCalls;gapFrame=frame;return gapAnswer;}
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const float colour[4]){++rawClears;c->ClearRenderTargetView(v,colour);}
@@ -402,7 +413,46 @@ void run(){
   f=frame(11,8);p=begin(t,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"flipped eye suppresses jitter");
   check(treat(t,8,0,source.Get())==S_OK&&(calls.back().flags&1),"unflipped image resets history");
   f=frame(11,9);begin(t,f,false);check(treat(t,9,0,source.Get())==E_PENDING,"no projection query cannot justify jittered image metadata");
+  // A map is open (GuiFocus 6, 7, 8; temporal_mode.h temporalMapOpen): the frames it opens and closes on take no history and no jitter; between them the pass judges
+  // (flags bit 8) and begin() jitters only behind a frame it kept. The pass is a stub here: it is the rig that plays its word (temporalMapStillBits).
+  // On this channel (the rig's pool of 16 states has none to spare); the sequences continue from the last begun frame, 9.
+  {
+    auto shiftedNow=[](const EdvrNativeTemporalProjection& q){return q.tangentShift[0][0]!=0||q.tangentShift[0][1]!=0||q.tangentShift[1][0]!=0||q.tangentShift[1][1]!=0;};
+    mapFocusKnown=true;mapFocus=0;
+    auto fm=frame(11,10);begin(t,fm);check(treat(t,10,0,source.Get())==S_OK&&treat(t,10,1,source.Get())==S_OK,"map gate: a first frame rebuilds the history");
+    fm=frame(11,11);auto pm=begin(t,fm);
+    check(shiftedNow(pm),"map gate: with no screen open the frame is jittered");
+    check(treat(t,11,0,source.Get())==S_OK&&!(calls.back().flags&1),"map gate: and its history carries");treat(t,11,1,source.Get());
+    // The map opens: the frame it opens on is an edge, so the pass is handed no history and the frame goes out unjittered.
+    mapFocus=6;fm=frame(11,12);pm=begin(t,fm);
+    check(!shiftedNow(pm),"map gate: the Galaxy Map's first frame is not jittered");
+    check(treat(t,12,0,source.Get())==S_OK&&(calls.back().flags&1)&&!(calls.back().flags&edvr::kTemporalFlagMapKeep),"map gate: and hands the pass no history, nothing of the screen before it carried in");treat(t,12,1,source.Get());
+    // Steady: the pass judges (bit 8), the history is not reset by native_temporal, and the jitter waits for the pass's word that the camera followed the head.
+    mapFocus=7;fm=frame(11,13);pm=begin(t,fm);
+    check(!shiftedNow(pm),"map gate: with no word from the pass that the camera followed the head, the next frame is not jittered");
+    check(treat(t,13,0,source.Get())==S_OK&&(calls.back().flags&edvr::kTemporalFlagMapKeep)&&!(calls.back().flags&1),"map gate: the System Map hands the pass its history and the map bit");treat(t,13,1,source.Get());
+    edvr::temporalMapStillBits().store(3u);   // what the pass says when both eyes kept their history
+    mapFocus=6;fm=frame(11,14);pm=begin(t,fm);
+    check(shiftedNow(pm),"map gate: both eyes kept their history, so the next frame is jittered again");
+    check(treat(t,14,0,source.Get())==S_OK&&(calls.back().flags&edvr::kTemporalFlagMapKeep)&&!(calls.back().flags&1),"map gate: and still carries it");treat(t,14,1,source.Get());
+    edvr::temporalMapStillBits().store(1u);   // the pass reset the right eye: the map moved
+    fm=frame(11,15);pm=begin(t,fm);check(!shiftedNow(pm),"map gate: one eye reset (the map moved): no jitter");treat(t,15,0,source.Get());treat(t,15,1,source.Get());
+    // The map closes onto the Full System Scanner (not a map here): the closing frame is an edge, so nothing of the map is carried out; then the history is back.
+    mapFocus=9;fm=frame(11,16);pm=begin(t,fm);
+    check(shiftedNow(pm),"map gate: the Full System Scanner is not a map here: the jitter is back");
+    check(treat(t,16,0,source.Get())==S_OK&&(calls.back().flags&1)&&!(calls.back().flags&edvr::kTemporalFlagMapKeep),"map gate: and the frame after the map still takes no history (the map is not carried out)");treat(t,16,1,source.Get());
+    fm=frame(11,17);pm=begin(t,fm);check(shiftedNow(pm)&&treat(t,17,0,source.Get())==S_OK&&!(calls.back().flags&1)&&!(calls.back().flags&edvr::kTemporalFlagMapKeep),"map gate: then the history is back");treat(t,17,1,source.Get());
+    mapFocusKnown=false;mapFocus=6;fm=frame(11,18);pm=begin(t,fm);check(shiftedNow(pm),"map gate: a focus the journal cannot state is not a map, whatever the stale value");
+    check(!edvr::temporalMapGateFlag().load(),"map gate: the draw thread's flag is down with no map");
+    // The camera source's stage 0 names a map view with the journal silent (on foot, a menu, the half second before the field is read): the gate opens on that frame, edge and all.
+    mapFocusKnown=false;mapFocus=0;mapViewNamed=true;fm=frame(11,19);pm=begin(t,fm);
+    check(!shiftedNow(pm)&&edvr::temporalMapGateFlag().load(),"map gate: a map view named by its camera opens the gate with the journal silent, and the draw thread's flag goes up");
+    mapViewNamed=false;fm=frame(11,20);pm=begin(t,fm);
+    check(shiftedNow(pm)&&!edvr::temporalMapGateFlag().load(),"map gate: the view no longer named closes the gate and the flag");
+    mapFocusKnown=false;mapFocus=0;
+  }
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
+  check(edvr::mapLogCalls==1,"map gate: the pass's map counters are written once, when the channel closes");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}

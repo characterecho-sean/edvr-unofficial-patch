@@ -13,8 +13,10 @@
 // owner, which may open a frame -- is only read, under native_temporal's own
 // lock, through nativeTemporalDrawJitter.
 #include "ui_layer.h"
+#include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
+#include "map_run_core.h"   // the Galaxy Map's run of sprites: when the real context's render targets change
 #include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
 #include "flat_star_glow_math.h"  // visual.star_glow: the blend equation of the star pass
 #include "ui_scene_composites.h"  // the census of the interface composites left in the scene, and its line
@@ -33,6 +35,7 @@
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
 #include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
+#include "flat_compute_readback.h"   // FlatComputeInternalScope: the map tone's patched constant buffer is EDVR's own call
 #include "flat_mono_frame.h"  // kToneDofCompositePs: the one tone input the re-issue blends rather than adds
 
 #include "binding_shadow.h"
@@ -86,6 +89,7 @@ bool g_uiLayerWatching = false;
 bool g_uiSeedDiagnostics = false;
 bool g_uiLayerRedirecting = false;
 bool g_uiLayerIssueBlocked = false;
+bool g_uiLayerMapRunHeld = false;   // the VR Galaxy Map's run of sprites is held (ui_layer.h)
 bool g_uiLayerCrispOn = false;      // the HDR HUD take/re-issue armed this frame (with the layer)
 bool g_uiLayerCrispPending = false; // a tonemap draw was admitted; its re-issue follows its draw
 bool g_uiLayerHudGlowPending = false; // an eye's HDR HUD layer holds this frame's light that no first-level draw has taken (headset bloom)
@@ -392,6 +396,22 @@ struct Eye {
     uint32_t mW = 0, mH = 0;
     uint64_t mSeq = 0;
 
+    // The Galaxy Map's panel mask (galaxy_map_ui.h): the panels' alpha alone, A8_UNORM at the 8-bit layer's size (e.w, e.h), made at the first panel draw of a Galaxy Map,
+    // cleared at the first panel draw (or the arrow's probe) of each eye-frame and released at the frame boundary once the map is shut.
+    Ptr<ID3D11Texture2D> maskTex;
+    Ptr<ID3D11RenderTargetView> maskRtv;
+    Ptr<ID3D11ShaderResourceView> maskSrv;
+    uint32_t maskW = 0, maskH = 0;
+    uint64_t maskSeq = 0;
+
+    // The Galaxy Map's sprite depth (galaxy_map_ui.h, THE SPRITES' DEPTH): D16_UNORM at the HDR layer's size, reversed (cleared to 0, nearer larger), cleared at the first map sprite
+    // of each eye-frame and released at the frame boundary once the map is shut. mapDepthFail*: the size a creation failed at, not tried again until the size changes.
+    Ptr<ID3D11Texture2D> mapDepthTex;
+    Ptr<ID3D11DepthStencilView> mapDepthDsv;
+    uint32_t mapDepthW = 0, mapDepthH = 0;
+    uint64_t mapDepthSeq = 0;
+    uint32_t mapDepthFailW = 0, mapDepthFailH = 0;
+
     // The 8-bit layer's depth-stencil target, for UI that TESTS depth or
     // stencil.
     LayerDs ds;
@@ -599,6 +619,17 @@ struct Draw {
     ID3D11BlendState* blend = nullptr;
     FLOAT factor[4] = {};
     UINT sampleMask = 0xFFFFFFFFu;
+    // The game's depth-stencil state and rasterizer state, held while a Galaxy Map sprite issue binds its own (galaxy_map_ui.h, THE SPRITES' DEPTH); put back at restore.
+    ID3D11DepthStencilState* dsState = nullptr;
+    UINT dsRef = 0;
+    bool dsStateSaved = false;
+    ID3D11RasterizerState* rsState = nullptr;
+    bool rsStateSaved = false;
+    // The Galaxy Map's run of sprites (map_run_core.h): this issue bound (or kept) the eye's HDR layer and D16, so restore() hands the game's targets to the run instead of binding them.
+    bool mapRunBound = false;
+    int mapRunEye = -1;
+    ID3D11RenderTargetView* mapRunRtv = nullptr;   // identity only until the run starts, then a reference is taken
+    ID3D11DepthStencilView* mapRunDsv = nullptr;
     // The write-back's own save (the game's targets, while its depth-only
     // re-issue runs with no colour target bound).
     ID3D11RenderTargetView* wbRtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -1479,6 +1510,158 @@ bool ensureMult(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     return true;
 }
 
+// The Galaxy Map's panel mask (galaxy_map_ui.h): A8_UNORM at the 8-bit layer's size, made at the first panel draw of a map. The memory is the cost of the mask, said
+// when it is made (40 MB for both eyes at 4508x4510) and let go at the frame boundary once the map is shut.
+bool ensureMapMask(ID3D11DeviceContext* ctx, Eye& e, int eye) {
+    if (e.maskTex && e.maskW == e.w && e.maskH == e.h) return true;
+    const bool resized = e.maskTex != nullptr;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    e.maskW = e.maskH = 0;
+    e.maskSeq = 0;
+    if (!dev || !e.w || !makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)) {
+        e.maskTex.Reset();
+        e.maskRtv.Reset();
+        e.maskSrv.Reset();
+        return false;
+    }
+    e.maskW = e.w;
+    e.maskH = e.h;
+    Log::get().note("galaxy map: %s eye's panel mask %s at %ux%u (A8_UNORM, %.1f MB): the panels' alpha, which says where the arrow's tip is on a panel; let go when the map shuts.",
+                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", e.w, e.h, uiLayerMB(uiLayerBytes(e.w, e.h, 1)));
+    return true;
+}
+
+// The mask for this eye-frame: made if need be and cleared at the frame's first use (the layer's own frame sequence).
+bool prepareMapMask(ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
+    if (eye < 0 || eye > 1) return false;
+    Eye& e = g_eye[eye];
+    bool ok = false;
+    guarded("uiLayer.mapMask", [&] {
+        if (!ensureMapMask(ctx, e, eye)) return;
+        if (e.maskSeq != seq) {
+            const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            vScreenClearRenderTargetViewRaw(ctx, e.maskRtv.Get(), zero);
+            e.maskSeq = seq;
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+// The Galaxy Map's sprite depth (galaxy_map_ui.h, THE SPRITES' DEPTH): made at the first map sprite of a Galaxy Map in VR. The memory is its cost, said when it is made (40.6 MB for
+// both eyes at 4508x4510) and let go at the frame boundary once the map is shut. A failure leaves the sprites drawn as the game made them, said once a size.
+bool ensureMapDepth(ID3D11DeviceContext* ctx, Eye& e, int eye) {
+    if (e.mapDepthTex && e.mapDepthW == e.hdrW && e.mapDepthH == e.hdrH) return true;
+    if (!e.hdrW || !e.hdrH || (e.mapDepthFailW == e.hdrW && e.mapDepthFailH == e.hdrH)) return false;
+    const bool resized = e.mapDepthTex != nullptr;
+    e.mapDepthTex.Reset();
+    e.mapDepthDsv.Reset();
+    e.mapDepthW = e.mapDepthH = 0;
+    e.mapDepthSeq = 0;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = e.hdrW;
+    td.Height = e.hdrH;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = mapui::kDepthFormat;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (!dev || FAILED(dev->CreateTexture2D(&td, nullptr, &e.mapDepthTex)) || FAILED(dev->CreateDepthStencilView(e.mapDepthTex.Get(), nullptr, &e.mapDepthDsv))) {
+        e.mapDepthTex.Reset();
+        e.mapDepthDsv.Reset();
+        e.mapDepthFailW = e.hdrW;
+        e.mapDepthFailH = e.hdrH;
+        mapui::g_depth.unavailable.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note("galaxy map: %s eye's sprite depth could not be made at %ux%u (D16_UNORM): the map's sprites are drawn in the game's order, as before", eye == 0 ? "left" : "right", e.hdrW, e.hdrH);
+        return false;
+    }
+    e.mapDepthW = e.hdrW;
+    e.mapDepthH = e.hdrH;
+    mapui::g_depth.made.fetch_add(1, std::memory_order_relaxed);
+    Log::get().note("galaxy map: %s eye's sprite depth %s at %ux%u (D16_UNORM, %.1f MB): the map's sprites test it and the solid ones write it, so a nearer sprite is not painted over by a farther one drawn later; let go when the map shuts.",
+                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", e.hdrW, e.hdrH, uiLayerMB(uiLayerBytes(e.hdrW, e.hdrH, 2)));
+    return true;
+}
+
+// The depth for this eye-frame: made if need be and cleared to 0 (the reversed depth's far) at the frame's first use (the layer's own frame sequence). Null: not made.
+ID3D11DepthStencilView* prepareMapDepth(ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
+    if (eye < 0 || eye > 1) return nullptr;
+    Eye& e = g_eye[eye];
+    ID3D11DepthStencilView* dsv = nullptr;
+    guarded("uiLayer.mapDepth", [&] {
+        if (!ensureMapDepth(ctx, e, eye)) return;
+        if (e.mapDepthSeq != seq) {
+            ctx->ClearDepthStencilView(e.mapDepthDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+            e.mapDepthSeq = seq;
+        }
+        dsv = e.mapDepthDsv.Get();
+    });
+    return dsv;
+}
+
+// The depth-stencil states of the colour issue ([0], test only) and the depth issue ([1], test and write), and the depth issue's rasterizer (the game's, cloned with the bias; one entry,
+// kept with the game's state it was cloned from).
+Ptr<ID3D11DepthStencilState> g_mapDss[2];
+bool g_mapDssTried[2] = {};
+ID3D11DepthStencilState* mapDepthState(ID3D11DeviceContext* ctx, bool write) {
+    const int i = write ? 1 : 0;
+    if (g_mapDss[i]) return g_mapDss[i].Get();
+    if (g_mapDssTried[i]) return nullptr;
+    g_mapDssTried[i] = true;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    const D3D11_DEPTH_STENCIL_DESC d = mapui::depthStateDesc(write);
+    if (!dev || FAILED(dev->CreateDepthStencilState(&d, &g_mapDss[i]))) {
+        g_mapDss[i].Reset();
+        mapui::g_depth.unavailable.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note("galaxy map: the sprites' %s depth state could not be made: the sprites are drawn in the game's order", write ? "writing" : "testing");
+    }
+    return g_mapDss[i].Get();
+}
+Ptr<ID3D11RasterizerState> g_mapRsGame, g_mapRsBias;
+ID3D11RasterizerState* mapDepthRaster(ID3D11DeviceContext* ctx, ID3D11RasterizerState* game) {
+    if (g_mapRsBias && g_mapRsGame.Get() == game) return g_mapRsBias.Get();
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    D3D11_RASTERIZER_DESC gd{};
+    if (game) {
+        game->GetDesc(&gd);
+    } else {
+        gd.FillMode = D3D11_FILL_SOLID;   // the default state
+        gd.CullMode = D3D11_CULL_BACK;
+        gd.DepthClipEnable = TRUE;
+    }
+    const D3D11_RASTERIZER_DESC d = mapui::depthRasterDesc(gd);
+    g_mapRsBias.Reset();
+    g_mapRsGame = game;
+    if (!dev || FAILED(dev->CreateRasterizerState(&d, &g_mapRsBias))) {
+        g_mapRsBias.Reset();
+        g_mapRsGame.Reset();
+        mapui::g_depth.unavailable.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note("galaxy map: the sprites' depth rasterizer state could not be made: the depth is not written, the sprites are drawn in the game's order");
+    }
+    return g_mapRsBias.Get();
+}
+// The families whose colour issue tests the depth, and those whose depth issue writes it (the rings and stems are additive and test only).
+inline bool mapDepthTests(UiLayerFamily f) { return f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kMapMarks; }
+inline bool mapDepthWrites(UiLayerFamily f) { return f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite; }
+
+// The two blend states of the Galaxy Map's issues (galaxy_map_ui.h): [0] the mask's accumulating alpha, [1] the probe's write mask 0, which the depth issue (its target kept) takes too.
+Ptr<ID3D11BlendState> g_mapBlend[2];
+ID3D11BlendState* mapBlend(ID3D11DeviceContext* ctx, int which) {
+    Ptr<ID3D11BlendState>& b = g_mapBlend[which == 2 ? 0 : 1];
+    if (b) return b.Get();
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    const D3D11_BLEND_DESC d = which == 2 ? mapui::maskBlendDesc() : mapui::probeBlendDesc();
+    if (!dev || FAILED(dev->CreateBlendState(&d, &b))) b.Reset();
+    return b.Get();
+}
+
 void releaseLayerDs(LayerDs& l) {
     l.tex.Reset();
     l.dsv.Reset();
@@ -1491,14 +1674,61 @@ void releaseLayerDs(LayerDs& l) {
     l.seedJx = l.seedJy = 0.0f;
 }
 
+// THE GALAXY MAP'S RUN OF SPRITES (map_run_core.h). The state machine decides; this holds what it points at: the game's render targets (references, taken from the issue that starts the
+// run), the layer's HDR RTV and the eye's D16 (references, so an address cannot be reused while the context holds them), the owner context and the thread. References are never held
+// across a frame: uiLayerFrameBoundary ends the run.
+struct MapRun {
+    maprun::Core core;
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11RenderTargetView* layerRtv = nullptr;
+    ID3D11DepthStencilView* layerDsv = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    DWORD thread = 0;
+};
+MapRun g_mapRun;
+
+// The core's counters into mapui::g_run (inline atomics: the 30 s line reads them in another translation unit).
+void mapRunCount() {
+    const maprun::Core::Counts c = g_mapRun.core.take();
+    if (c.binds) mapui::g_run.binds.fetch_add(c.binds, std::memory_order_relaxed);
+    if (c.started) mapui::g_run.started.fetch_add(c.started, std::memory_order_relaxed);
+    if (c.ended) mapui::g_run.ended.fetch_add(c.ended, std::memory_order_relaxed);
+    if (c.setsKept) mapui::g_run.setsKept.fetch_add(c.setsKept, std::memory_order_relaxed);
+    if (c.setsDropped) mapui::g_run.setsDropped.fetch_add(c.setsDropped, std::memory_order_relaxed);
+    if (c.setsOwn) mapui::g_run.setsOwn.fetch_add(c.setsOwn, std::memory_order_relaxed);
+}
+
+void mapRunReleaseRefs() {
+    for (auto*& r : g_mapRun.rtv) {
+        if (r) r->Release();
+        r = nullptr;
+    }
+    if (g_mapRun.dsv) g_mapRun.dsv->Release();
+    g_mapRun.dsv = nullptr;
+    if (g_mapRun.layerRtv) g_mapRun.layerRtv->Release();
+    g_mapRun.layerRtv = nullptr;
+    if (g_mapRun.layerDsv) g_mapRun.layerDsv->Release();
+    g_mapRun.layerDsv = nullptr;
+    g_mapRun.ctx = nullptr;
+    g_mapRun.thread = 0;
+    detail::g_uiLayerMapRunHeld = false;
+}
+
 // Every layer, transmittance, depth target and composite output released
 // (the door state kept): the key went off, the pass went away, or the layer
 // stood down. About 380 MB at 1.25 on a 4340x4284 eye is not left resident
 // for a feature that is off.
 bool releaseLayers() {
+    // The run holds the HDR layer's view and the eye's D16: let it go (the layer is released with no context at hand, so nothing is bound back; the game's next set replaces ours).
+    if (g_mapRun.core.held) {
+        g_mapRun.core.drop();
+        mapRunReleaseRefs();
+        mapRunCount();
+    }
     bool any = false;
     for (Eye& e : g_eye) {
-        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
+        any = any || e.tex || e.mTex || e.maskTex || e.mapDepthTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
               e.hdrTex || e.hdrDs.tex || e.wTex || e.smaa.ready();
         e.smaa.releaseTargets();
         e.coverage.reset();
@@ -1516,6 +1746,16 @@ bool releaseLayers() {
         e.mSrv.Reset();
         e.mW = e.mH = 0;
         e.mSeq = 0;
+        e.maskTex.Reset();
+        e.maskRtv.Reset();
+        e.maskSrv.Reset();
+        e.maskW = e.maskH = 0;
+        e.maskSeq = 0;
+        e.mapDepthTex.Reset();
+        e.mapDepthDsv.Reset();
+        e.mapDepthW = e.mapDepthH = 0;
+        e.mapDepthSeq = 0;
+        e.mapDepthFailW = e.mapDepthFailH = 0;
         releaseLayerDs(e.ds);
         e.hdrTex.Reset();
         e.hdrRtv.Reset();
@@ -2007,6 +2247,12 @@ void releaseSaved() {
     g_draw.dsv = nullptr;
     if (g_draw.blend) g_draw.blend->Release();
     g_draw.blend = nullptr;
+    if (g_draw.dsState) g_draw.dsState->Release();
+    g_draw.dsState = nullptr;
+    g_draw.dsStateSaved = false;
+    if (g_draw.rsState) g_draw.rsState->Release();
+    g_draw.rsState = nullptr;
+    g_draw.rsStateSaved = false;
     g_draw.saved = false;
 }
 
@@ -2016,6 +2262,12 @@ UINT boundCount(ID3D11RenderTargetView* const* rtvs) {
         if (rtvs[i]) n = i + 1;
     }
     return n;
+}
+
+// The run is over and the context is given the game's targets back (the core has counted the end). The references go whatever happens to the bind.
+void mapRunRebind(ID3D11DeviceContext* ctx) {
+    guarded("uiLayer.mapRunEnd", [&] { vScreenSetRenderTargetsRaw(ctx, boundCount(g_mapRun.rtv), g_mapRun.rtv, g_mapRun.dsv); });
+    mapRunReleaseRefs();
 }
 
 void restore(ID3D11DeviceContext* ctx) {
@@ -2029,10 +2281,43 @@ void restore(ID3D11DeviceContext* ctx) {
     if (holoRestore.retried)
         standDown(holoRestore.restored ? "a hologram shader/b13 restoration fault recovered on the bounded retry"
                                      : "hologram shader/b13 restoration failed; original state untrusted, owner draw issues suppressed until the frame boundary puts it back");
-    vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
+    if (g_draw.mapRunBound) {
+        // A map sprite issue left the layer and the eye's D16 bound: they stay bound for the next issue of the run (the viewports, scissor, blend and states below still go back each
+        // issue; they do not flush a depth surface, a render target change does). The game's targets pass to the run, which puts them back at its end.
+        const void* game[maprun::kTargets] = {};
+        for (int i = 0; i < maprun::kTargets; ++i) game[i] = g_draw.rtv[i];
+        if (g_mapRun.core.handOver(g_draw.mapRunEye, g_draw.mapRunRtv, g_draw.mapRunDsv, game, g_draw.dsv)) {
+            for (int i = 0; i < maprun::kTargets; ++i) {
+                g_mapRun.rtv[i] = g_draw.rtv[i];
+                g_draw.rtv[i] = nullptr;
+            }
+            g_mapRun.dsv = g_draw.dsv;
+            g_draw.dsv = nullptr;
+            g_mapRun.layerRtv = g_draw.mapRunRtv;
+            g_mapRun.layerDsv = g_draw.mapRunDsv;
+            g_mapRun.layerRtv->AddRef();
+            g_mapRun.layerDsv->AddRef();
+            g_mapRun.ctx = ctx;
+            g_mapRun.thread = GetCurrentThreadId();
+            detail::g_uiLayerMapRunHeld = true;
+        }
+        mapRunCount();
+    } else {
+        vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
+        // The game's targets are on the context again, so a run held for others is over (a fault between the issue's start and its bind comes here).
+        if (g_mapRun.core.held) {
+            g_mapRun.core.drop();
+            mapRunReleaseRefs();
+            mapRunCount();
+        }
+    }
+    g_draw.mapRunBound = false;
     vScreenRSSetViewportsRaw(ctx, g_draw.vpCount, g_draw.vp);
     if (g_draw.scissorSet) ctx->RSSetScissorRects(g_draw.scCount, g_draw.sc);
     ctx->OMSetBlendState(g_draw.blend, g_draw.factor, g_draw.sampleMask);
+    // A map sprite issue's depth-stencil state and rasterizer state (galaxy_map_ui.h, THE SPRITES' DEPTH): the game's back, a null state included.
+    if (g_draw.dsStateSaved) vScreenOMSetDepthStencilStateRaw(ctx, g_draw.dsState, g_draw.dsRef);
+    if (g_draw.rsStateSaved) ctx->RSSetState(g_draw.rsState);
     if (g_draw.rippleSwapped) {
         // the game's t0 back (also when it was null: the ramp must not stay bound)
         ID3D11ShaderResourceView* game = g_draw.rippleSrv0;
@@ -2207,8 +2492,15 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     const bool wl = g_draw.weapons && which == 0;
     // The shield ripple: the 820E draw (g_draw.ripple, with g_draw.hdr) goes into the eye's displacement layer D, tested against the same seeded depth.
     const bool rp = g_draw.ripple && which == 0;
+    // The Galaxy Map's own issues (which 2: into the panel mask, which 3: the arrow's probe into the layer with nothing written) take their own blend and test no depth.
+    const bool mapIssue = which >= 2;
+    // The Galaxy Map's sprite depth (galaxy_map_ui.h, THE SPRITES' DEPTH): a map sprite's colour issue into the HDR layer binds the eye's D16 depth and tests it (which 0), and which 4 is the
+    // depth issue that writes it. The depth issue keeps the HDR layer's render target bound with the probe's write mask 0, so the two issues share one set of targets. Between issues the targets change only if the context's are changed: restore() used to rebind the game's R11G11B10 and D32S8 after every issue, which alternated the private D16 and the game's depth-stencil 2,600 to 3,500 times a frame (11.1 ms of GPU measured at 432 sprites an eye; docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight"), and now keeps them bound as a run (map_run_core.h). The earlier claim that the GPU does
+    // not change them between those two issues was false. Both only while a Galaxy Map is open in VR.
+    const bool mapDepthIssue = which == 4;
+    const bool mapDepthColour = which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && mapDepthTests(g_draw.family) && mapui::vrOpen();
     ID3D11RenderTargetView* target =
-        which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
+        which == 2 ? e.maskRtv.Get() : which == 3 ? e.rtv.Get() : which == 4 ? e.hdrRtv.Get() : which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
     if (!target) return false;
     LayerDs& lds = g_draw.hdr ? e.hdrDs : e.ds;
     const uint32_t layerW = rp ? e.dW : (wl ? e.wW : (g_draw.hdr ? e.hdrW : e.w));
@@ -2222,14 +2514,34 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     UiBlendRt game, conv;
     ID3D11BlendState* layerBlend = nullptr;
     const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);
-    const bool converted = shape == g_draw.shape &&
-                           (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv));
-    if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
-    if (!converted || !(layerBlend || (layerBlend = cachedBlend(ctx, conv)))) {
+    const bool converted = mapIssue || (shape == g_draw.shape &&
+                           (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv)));
+    if (mapIssue) layerBlend = mapBlend(ctx, which);
+    else if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
+    if (!converted || !(layerBlend || (!mapIssue && (layerBlend = cachedBlend(ctx, conv))))) {
         if (bs) bs->Release();
         ++g_win.refusedAtIssue;
         if (g_draw.family == UiLayerFamily::kAfterUi) ++g_win.afterRefused;
         return false;
+    }
+    // The sprite depth's pieces, made before anything is changed: the depth, the depth-stencil state and (for the depth issue) the biased rasterizer. Any one missing and a colour issue is
+    // the sprite as the game draws it (counted and said where it failed), a depth issue is not made.
+    ID3D11DepthStencilView* mapDsv = nullptr;
+    ID3D11DepthStencilState* mapDss = nullptr;
+    ID3D11RasterizerState* mapRs = nullptr;
+    Ptr<ID3D11RasterizerState> gameRs;
+    if (mapDepthColour || mapDepthIssue) {
+        mapDsv = prepareMapDepth(ctx, g_draw.eye, g_draw.seq);
+        if (mapDsv) mapDss = mapDepthState(ctx, mapDepthIssue);
+        if (mapDsv && mapDss && mapDepthIssue) {
+            ctx->RSGetState(&gameRs);
+            mapRs = mapDepthRaster(ctx, gameRs.Get());
+        }
+        if (!mapDss || (mapDepthIssue && !mapRs)) mapDsv = nullptr;
+        if (!mapDsv && mapDepthIssue) {
+            if (bs) bs->Release();
+            return false;
+        }
     }
     // A new frame for this eye's layer: clear it, and count a layer the door
     // never composited (the frame took a path without a door, or a withhold).
@@ -2353,7 +2665,23 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     g_draw.blend = bs;
     std::memcpy(g_draw.factor, factor, sizeof(factor));
     g_draw.sampleMask = sampleMask;
-    ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.rtv, &g_draw.dsv);
+    // The Galaxy Map's run of sprites (map_run_core.h): an issue of a run kind that finds a run held for its own eye, layer and D16 binds nothing; anything else ends a held run here,
+    // before the game's targets are read, so the context holds the game's again.
+    const bool mapRunIssue = mapDsv && (mapDepthColour || mapDepthIssue);
+    const maprun::Step mapRunStep = g_mapRun.core.begin(mapRunIssue, g_draw.eye, target, mapDsv);
+    if (mapRunStep == maprun::Step::kEndThenBind) mapRunRebind(ctx);
+    if (mapRunStep == maprun::Step::kKeep) {
+        // The context holds the layer's targets; the game's are the run's.
+        for (int i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+            g_draw.rtv[i] = g_mapRun.rtv[i];
+            if (g_draw.rtv[i]) g_draw.rtv[i]->AddRef();
+        }
+        g_draw.dsv = g_mapRun.dsv;
+        if (g_draw.dsv) g_draw.dsv->AddRef();
+    } else {
+        ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.rtv, &g_draw.dsv);
+    }
+    mapRunCount();
     g_draw.vpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetViewports(&g_draw.vpCount, g_draw.vp);
     g_draw.scissorSet = false;
@@ -2431,7 +2759,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // would refuse to bind beside it (review P3-5).
     const bool seededNow = lds.dsv && lds.w == layerW && lds.h == layerH &&
                            lds.seq == g_draw.seq && lds.source && lds.source == gameDs;
-    const bool needsDs = g_draw.ds.tests() || (g_draw.ds.writes() && seededNow);
+    const bool needsDs = !mapIssue && !mapDsv && (g_draw.ds.tests() || (g_draw.ds.writes() && seededNow));
     if (needsDs) {
         const bool stale = !seededNow;
         const uint8_t wantMask = g_draw.ds.stencilTest ? g_draw.stencilRead : 0;
@@ -2475,6 +2803,9 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         layerDsv = lds.dsv.Get();
         if (g_draw.ds.tests() && !g_draw.counted) ++g_win.dsTested;
     }
+    // A map sprite's issue binds the eye's sprite depth in the layer's depth place. The game's own state on these is depth off and a stencil write; that write is not made while the
+    // map is open in VR (uiLayerWriteBackBegin declines it), and the layer's seeded stencil, which no map draw tests, is not written for them.
+    if (mapDsv) layerDsv = mapDsv;
     // The map (the game's eye target onto the layer) and the jitter cancel.
     const UiLayerMap m = uiLayerMapFromRegion(0.0f, 0.0f, static_cast<float>(g_draw.targetW),
                                               static_cast<float>(g_draw.targetH), layerW, layerH);
@@ -2519,7 +2850,24 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
-    vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    if (mapRunIssue) {
+        g_draw.mapRunBound = true;
+        g_draw.mapRunEye = g_draw.eye;
+        g_draw.mapRunRtv = target;
+        g_draw.mapRunDsv = mapDsv;
+    }
+    if (mapDsv) {
+        // The game's depth-stencil state (and, for the depth issue, rasterizer state) is held and put back at restore; the layer's own go in through the raw setters.
+        ctx->OMGetDepthStencilState(&g_draw.dsState, &g_draw.dsRef);
+        g_draw.dsStateSaved = true;
+        vScreenOMSetDepthStencilStateRaw(ctx, mapDss, 0);
+        if (mapDepthIssue) {
+            g_draw.rsState = gameRs.Detach();
+            g_draw.rsStateSaved = true;
+            ctx->RSSetState(mapRs);
+        }
+    }
     // The ripple's t0: the game's HDR copy is held and the UV ramp bound in its place for this issue (raw: the binding shadow keeps describing the game's).
     if (rp) {
         ctx->PSGetShaderResources(0, 1, &g_draw.rippleSrv0);
@@ -2529,15 +2877,18 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     }
     // An original read-only view can mask its effect, while this private view
     // is writable. Preserve the raw state's potential without another query.
-    g_privateDepthGuard.note(g_draw.seq, g_draw.rawDepthWritePotential);
-    if (g_draw.rawDepthWritePotential && !g_draw.counted) ++g_win.privateDepthPotentialBegins;
+    if (!mapIssue) {
+        g_privateDepthGuard.note(g_draw.seq, g_draw.rawDepthWritePotential);
+        if (g_draw.rawDepthWritePotential && !g_draw.counted) ++g_win.privateDepthPotentialBegins;
+    }
     g_draw.active = true;
+    if (mapDsv && mapDepthColour) mapui::g_depth.tested.fetch_add(1, std::memory_order_relaxed);
     // A multiply's second issue -- the game's draw again, into the
     // transmittance -- is the layer's own work: timed to uiLayerEnd. The
     // first HDR issue is moved game rendering, separately timed only when
     // diagnostics are armed. Both scopes close before state restoration.
     const UiDrawRouteStart timing = g_draw.drawRoute.begin(
-        true, g_draw.hdr, which, g_hdrDrawTimingOn, g_draw.eye, g_draw.seq,
+        !mapDepthIssue, g_draw.hdr, which, g_hdrDrawTimingOn, g_draw.eye, g_draw.seq,
         [&](UiRouteStage stage, int eye, uint64_t seq) { return routeBegin(ctx, stage, eye, seq); },
         [&](int eye, uint64_t seq) { routeMovedMissing(eye, seq); });
     if (g_draw.hdr && which == 0) {
@@ -4360,8 +4711,19 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
         ID3D11DepthStencilView* dsv = nullptr;
         ID3D11UnorderedAccessView* uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
-        ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs,
-                                                       &dsv, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        if (g_mapRun.core.held) {
+            // A run of map sprites is held: the context has the layer's one target and the eye's D16, and the game's are the run's (map_run_core.h). The decision reads the game's, as it
+            // did before the run existed; no UAV is bound on a held run.
+            for (int i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+                rtvs[i] = g_mapRun.rtv[i];
+                if (rtvs[i]) rtvs[i]->AddRef();
+            }
+            dsv = g_mapRun.dsv;
+            if (dsv) dsv->AddRef();
+        } else {
+            ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs,
+                                                           &dsv, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        }
         bool anyUav = false;
         for (auto* u : uavs) {
             if (u) {
@@ -4581,6 +4943,37 @@ void uiLayerEnd(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerRedirecting = false;
 }
 
+void uiLayerMapRunEndSlow(ID3D11DeviceContext* ctx) {
+    if (!g_mapRun.core.held || g_mapRun.thread != GetCurrentThreadId()) return;
+    if (!ctx) ctx = g_mapRun.ctx;
+    if (ctx != g_mapRun.ctx) return;
+    g_mapRun.core.end();
+    mapRunRebind(ctx);
+    mapRunCount();
+}
+
+void uiLayerMapRunDrop() {
+    if (!g_mapRun.core.held) return;
+    g_mapRun.core.drop();
+    mapRunReleaseRefs();
+    mapRunCount();
+}
+
+bool uiLayerMapRunGameSet(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, bool hasUav) {
+    if (!g_mapRun.core.held || ctx != g_mapRun.ctx || g_mapRun.thread != GetCurrentThreadId()) return false;
+    const maprun::GameSet r = g_mapRun.core.onGameSet(n, reinterpret_cast<const void* const*>(rtvs), dsv, hasUav);
+    if (r == maprun::GameSet::kDrop) mapRunReleaseRefs();   // the game's call replaces the targets; nothing is bound back
+    mapRunCount();
+    return r == maprun::GameSet::kKeep;
+}
+
+bool uiLayerMapRunGameSetsOwn(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    if (!g_mapRun.core.held || ctx != g_mapRun.ctx || g_mapRun.thread != GetCurrentThreadId()) return false;
+    if (!g_mapRun.core.onOwnSet(n, reinterpret_cast<const void* const*>(rtvs), dsv)) return false;
+    mapRunCount();
+    return true;
+}
+
 bool uiLayerMultiplyBegin(ID3D11DeviceContext* ctx) {
     if (!g_draw.decided || g_draw.shape != UiBlendShape::kMultiply) return false;
     return beginGuarded(ctx, 1);
@@ -4590,6 +4983,19 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
     if (!g_draw.holoRestoreOk) return false;
     if (!g_draw.decided || !g_draw.counted || !g_draw.ds.writes() || g_draw.active || !ctx)
         return false;
+    // The Galaxy Map's sprites and canvases write the stencil's bit 0x04 and nothing reads it: in the census of all three captured frames the only draws that test stencil are
+    // FC1193AFFC596F74 at #1 and #2, and each eye's depth-stencil is cleared with depth and stencil immediately before them. Going back to the game's buffer for a sprite would end the run of sprites (map_run_core.h), whose single bind is what keeps the private D16 and the game's depth-stencil from alternating; the write-backs' own alternation was one of two, the other was restore() (docs/galaxy-map-vr-2026-11-03.md, "After the fifth flight").
+    // Flat keeps its write-backs.
+    if (mapui::vrOpen() && (g_draw.family == UiLayerFamily::kMapCanvas || g_draw.family == UiLayerFamily::kMapSprite)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("galaxy map: the stencil write-backs of the map's sprites and canvases are off while the map is open in VR (nothing reads the bit they write; the 30 s line counts them)");
+        }
+        mapui::g_writeBackDeclined.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    uiLayerMapRunEnd(ctx);   // the colourless re-issue reads the context's targets as the game's: a held run is over (the sprites' own are declined above)
     bool ok = false;
     guarded("uiLayer.writeBack", [&] {
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.wbRtv, &g_draw.wbDsv);
@@ -4631,6 +5037,43 @@ void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
     if (g_draw.wbDsv) g_draw.wbDsv->Release();
     g_draw.wbDsv = nullptr;
     g_draw.wbActive = false;
+}
+
+// The Galaxy Map's second issues (galaxy_map_ui.h): the decided draw is one the layer took, in the layer's bracket for this issue (closed by uiLayerEnd).
+UiMapBegin uiLayerMapMaskBegin(ID3D11DeviceContext* ctx, UiMapIssue* out) {
+    if (!mapui::pointerOpen() || !ctx || !out || !g_draw.decided || g_draw.hdr || !g_draw.counted || g_draw.active || !mapui::isPanelVs(g_draw.vsHash)) return UiMapBegin::kNotMine;
+    if (!prepareMapMask(ctx, g_draw.eye, g_draw.seq)) return UiMapBegin::kNoMask;
+    if (!beginGuarded(ctx, 2)) return UiMapBegin::kNotMine;
+    out->mask = g_eye[g_draw.eye].maskSrv.Get();
+    out->vs = g_draw.vsHash;
+    out->eye = g_draw.eye;
+    out->seq = g_draw.seq;
+    return UiMapBegin::kBound;
+}
+
+UiMapBegin uiLayerMapDepthBegin(ID3D11DeviceContext* ctx, UiMapIssue* out) {
+    if (!mapui::vrOpen() || !ctx || !out || !g_draw.decided || !g_draw.hdr || g_draw.weapons || g_draw.ripple || !g_draw.counted || g_draw.active || !mapDepthWrites(g_draw.family)) return UiMapBegin::kNotMine;
+    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+    if (ps != mapui::kPsSprite && ps != mapui::kPsCanvas) return UiMapBegin::kNotMine;
+    if (!prepareMapDepth(ctx, g_draw.eye, g_draw.seq)) return UiMapBegin::kNoDepth;
+    if (!beginGuarded(ctx, 4)) return UiMapBegin::kNoDepth;
+    out->vs = g_draw.vsHash;
+    out->ps = ps;
+    out->eye = g_draw.eye;
+    out->seq = g_draw.seq;
+    return UiMapBegin::kBound;
+}
+
+UiMapBegin uiLayerMapProbeBegin(ID3D11DeviceContext* ctx, UiMapIssue* out) {
+    if (!mapui::pointerOpen() || !ctx || !out || !g_draw.decided || g_draw.hdr || !g_draw.counted || g_draw.active || g_draw.vsHash != mapui::kVsArrow) return UiMapBegin::kNotMine;
+    // A frame with no panel draw in this eye has a mask not cleared yet: the probe clears it, so it reads clear rather than last frame's.
+    if (!prepareMapMask(ctx, g_draw.eye, g_draw.seq)) return UiMapBegin::kNoMask;
+    if (!beginGuarded(ctx, 3)) return UiMapBegin::kNotMine;
+    out->mask = g_eye[g_draw.eye].maskSrv.Get();
+    out->vs = g_draw.vsHash;
+    out->eye = g_draw.eye;
+    out->seq = g_draw.seq;
+    return UiMapBegin::kBound;
 }
 
 // ------------------------------------- the crisp-HUD half of fix.ui_quality: the tonemap re-issue
@@ -4723,6 +5166,9 @@ struct CrispToneSave {
     uint8_t step = 0;
     bool hud = false, weapons = false, fellBack = false, faulted = false;
     const char* plainWhy = nullptr;   // why the matched composite was not made when fellBack (a literal), for the mark's reason line
+    // The map tone's patched PS b2 (crispMapToneBindB2): the game's own buffer, put back at End and on Begin's fault path; mapB2 is true while ours is bound.
+    Ptr<ID3D11Buffer> gameB2;
+    bool mapB2 = false;
 };
 CrispToneSave g_crispSave;
 FaultBudget g_crispToneBudget("uiLayer.crispTone", 4);
@@ -5889,6 +6335,74 @@ void crispFindSceneImages(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* ga
                     inputs.empty() ? "none in t0..t15" : inputs.c_str());
 }
 
+// THE MAP TONE'S BLOOM BLEND (docs/galaxy-map-vr-2026-11-03.md, Fix 2). The Galaxy Map frame's tonemap (ui_layer_math.h kUiVsMapTone, kUiPsMapTone) reads the scene at t0
+// and its bloom at t1 and combines them as cb2[1].w >= 0 ? lerp(scene, bloom, w) : scene + bloom. The re-issue zeroes t1 (crispFindSceneImages), so with w >= 0 the layer
+// would come out scaled by (1 - w), and w is not known. The re-issue for this pixel shader alone binds, at PS slot 2, a copy of the game's b2 with cb2[1].w (byte 28)
+// set to -1.0f: the additive branch, so a zero bloom leaves T(L) exactly, whatever w was. The copy is a DEFAULT buffer of the game's width (CopyResource from the
+// game's, as billboard_rollfree.h's copyBlock does), the four bytes a CopySubresourceRegion from a 16-byte patch buffer. Any failure declines to the plain re-issue.
+struct MapToneB2 {
+    Ptr<ID3D11Buffer> copy, patch;
+    uint32_t width = 0;
+    bool onNoted = false, declineNoted = false;
+};
+MapToneB2 g_mapTone;
+constexpr uint32_t kMapToneBloomBlendOffset = 28;   // cb2[1].w
+bool crispMapToneBindB2(ID3D11DeviceContext* ctx, const char** why) {
+    FlatComputeInternalScope internal;
+    *why = "";
+    Ptr<ID3D11Buffer> game;
+    ctx->PSGetConstantBuffers(2, 1, &game);
+    if (!game) { *why = "no buffer at PS b2"; return false; }
+    D3D11_BUFFER_DESC gd{};
+    game->GetDesc(&gd);
+    if (gd.ByteWidth < kMapToneBloomBlendOffset + 4 || !(gd.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) { *why = "PS b2 is not a constant buffer wide enough for cb2[1].w"; return false; }
+    Ptr<ID3D11DeviceContext1> ctx1;
+    if (SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) {
+        Ptr<ID3D11Buffer> again;
+        UINT first = 0, count = 0;
+        ctx1->PSGetConstantBuffers1(2, 1, &again, &first, &count);
+        if (first) { *why = "PS b2 is bound at a constant offset"; return false; }
+    }
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev) { *why = "no device"; return false; }
+    if (!g_mapTone.copy || g_mapTone.width != gd.ByteWidth) {
+        g_mapTone.copy.Reset();
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = gd.ByteWidth;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &g_mapTone.copy))) { *why = "the copy buffer could not be made"; return false; }
+        g_mapTone.width = gd.ByteWidth;
+    }
+    if (!g_mapTone.patch) {
+        const float minusOne[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = sizeof(minusOne);
+        d.Usage = D3D11_USAGE_DEFAULT;
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = minusOne;
+        if (FAILED(dev->CreateBuffer(&d, &init, &g_mapTone.patch))) { *why = "the patch buffer could not be made"; return false; }
+    }
+    ctx->CopyResource(g_mapTone.copy.Get(), game.Get());
+    const D3D11_BOX box{0, 0, 0, 4, 1, 1};
+    ctx->CopySubresourceRegion(g_mapTone.copy.Get(), 0, kMapToneBloomBlendOffset, 0, 0, g_mapTone.patch.Get(), 0, &box);
+    ID3D11Buffer* ours = g_mapTone.copy.Get();
+    ctx->PSSetConstantBuffers(2, 1, &ours);
+    g_crispSave.gameB2 = game;
+    g_crispSave.mapB2 = true;
+    return true;
+}
+// Puts the game's b2 back (End, and Begin's fault path).
+void crispMapToneRestoreB2(ID3D11DeviceContext* ctx) {
+    if (!g_crispSave.mapB2) return;
+    g_crispSave.mapB2 = false;
+    FlatComputeInternalScope internal;
+    ID3D11Buffer* was = g_crispSave.gameB2.Get();
+    ctx->PSSetConstantBuffers(2, 1, &was);
+    g_crispSave.gameB2.Reset();
+}
+
 // After the admitted draw's own issue (vscreen's forwardWithVerdict, around
 // its pureDrawReissue): re-issue it once, tonemapping the HDR layer into the
 // 8-bit layer's colour. False -- state untouched, the draw long since run
@@ -6055,6 +6569,19 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         g_crispSave.plainWhy = plainWhy;
         crispFindSceneImages(ctx, gameHdr.Get(), p.hdrSlot, p.vs, p.ps);
         crispBindStep(ctx, plan.steps[0]);
+        if (p.ps == kUiPsMapTone && !runtimeFlatProfile()) {
+            const char* b2Why = "";
+            const bool patched = crispMapToneBindB2(ctx, &b2Why);
+            if (patched && !g_mapTone.onNoted) {
+                g_mapTone.onNoted = true;
+                Log::get().note("crisp hud: the map tonemap (vs %016llX ps %016llX, PS b2 %u bytes): the re-issue binds a copy of the game's b2 with cb2[1].w = -1, the additive bloom branch, "
+                                "so the zeroed bloom leaves the layer's light as the tone gives it (said once).",
+                                static_cast<unsigned long long>(p.vs), static_cast<unsigned long long>(p.ps), g_mapTone.width);
+            } else if (!patched && !g_mapTone.declineNoted) {
+                g_mapTone.declineNoted = true;
+                Log::get().note("crisp hud: the map tonemap's b2 patch declined (%s): the plain re-issue, so the layer is scaled by 1 - cb2[1].w when the game's w is not negative (said once).", b2Why);
+            }
+        }
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
         g_crispSave.active = true;
         ok = true;
@@ -6082,6 +6609,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
                                                    1, &gameHdr);
                 }
                 crispRestoreSceneImages(ctx);
+                crispMapToneRestoreB2(ctx);
             });
         }
         g_crispSave = CrispToneSave{};
@@ -6143,6 +6671,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
             ID3D11ShaderResourceView* gameHdr = g_crispSave.gameHdrSrv.Get();
             vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(hdrSlot), 1, &gameHdr);
             crispRestoreSceneImages(ctx);
+            crispMapToneRestoreB2(ctx);
         })) {
         crispStandDown("a fault while putting the game's state back after the tonemap re-issue");
     }
@@ -7035,7 +7564,31 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
+    // A run of map sprites never outlives a frame: its references are let go and the game's targets are on the context for everything the boundary and the next frame do.
+    uiLayerMapRunEnd(ctx);
     settleIssueFence(ctx);
+    // The Galaxy Map's sprite depth (40.6 MB for both eyes at 4508x4510) is let go once the map is shut.
+    if (!mapui::vrOpen() && (g_eye[0].mapDepthTex || g_eye[1].mapDepthTex)) {
+        for (Eye& e : g_eye) {
+            e.mapDepthTex.Reset();
+            e.mapDepthDsv.Reset();
+            e.mapDepthW = e.mapDepthH = 0;
+            e.mapDepthSeq = 0;
+            e.mapDepthFailW = e.mapDepthFailH = 0;
+        }
+        Log::get().note("galaxy map: the sprite depths are let go: the map is shut");
+    }
+    // The Galaxy Map's panel mask (40 MB for both eyes at 4508x4510) is let go once the map is shut.
+    if (!mapui::pointerOpen() && (g_eye[0].maskTex || g_eye[1].maskTex)) {
+        for (Eye& e : g_eye) {
+            e.maskTex.Reset();
+            e.maskRtv.Reset();
+            e.maskSrv.Reset();
+            e.maskW = e.maskH = 0;
+            e.maskSeq = 0;
+        }
+        Log::get().note("galaxy map: the panel masks are let go: the map is shut");
+    }
     // The shield ripple's idle clock (D released after kShieldRippleIdleFrames).
     rippleIdleTick();
     // The flat profile's back-off (flatBackOff) lifts itself here.
