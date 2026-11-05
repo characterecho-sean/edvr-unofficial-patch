@@ -177,6 +177,15 @@ void bodyConstantsUnmapped(ID3D11Resource* res);
 // The table's size, and the map's opening: a new system's bodies start a new table. Frame tick.
 uint32_t bodiesKnown();
 void setSystemOpen(bool system);
+// THE ARROW'S DEPTH on the System Map (kMapArrowDepthVS): the distance from the map camera to the nearest known body's surface, never nearer than kArrowDepthMin. Bodies there run from 80 units away to 3, so one fixed depth cannot do: at 3 an arrow at infinity is 33 pixels of disparity from
+// the settlement icons at 4032. Frame tick; 0 with no body known (the arrow at infinity), and 0 on the Galaxy Map, whose stars are at infinity.
+constexpr float kArrowDepthMin = 0.25f;
+inline float arrowDepthOf(float distance, float surfaceRadius) {
+    const float d = distance - surfaceRadius;
+    return d < kArrowDepthMin ? kArrowDepthMin : d;
+}
+void updateArrowDepth(const float cameraPosition[3]);
+float arrowDepth();   // the last distance, for the 30 s line; 0 when none
 inline bool over() noexcept { return g_over.load(std::memory_order_relaxed); }
 
 // The draw is one of the swapped shaders and the map state wants it: the replacement vertex shader goes in for this draw and every re-issue (raw, so the binding shadow keeps

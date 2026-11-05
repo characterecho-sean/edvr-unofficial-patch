@@ -282,14 +282,14 @@ void thirtySecondLine(State& s, uint64_t now) {
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point (the System Map's held and answered unchanged %llu), %llu passed through%s%s%s; "
-                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), cut-outs behind its bodies %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
+                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), arrow's depth %.2f units (0: at infinity), cut-outs behind its bodies %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
                     "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
                     static_cast<unsigned long long>(s.heldCalls.exchange(0, std::memory_order_relaxed)),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
-                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(),
+                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(), static_cast<double>(arrowDepth()),
                     static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
                     static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(swapped[kSwapStem]), static_cast<unsigned long long>(noPose),
@@ -330,7 +330,12 @@ void mapPointerFrame() noexcept {
     State& s = *g_s;
     const uint64_t now = GetTickCount64();
     const bool galaxy = mapCameraGalaxyOpen();
-    mapui::setSystemOpen(!galaxy && mapCameraAnyOpen());
+    const bool system = !galaxy && mapCameraAnyOpen();
+    mapui::setSystemOpen(system);
+    if (system) {
+        MapCameraPose pose;
+        if (mapCameraPose(pose)) mapui::updateArrowDepth(pose.position);
+    }
     if (galaxy) ++s.galaxyFrames;
     if (!s.armed.load(std::memory_order_acquire)) {
         mapui::setGates(galaxy, false);   // the icons, labels and rings are fixed in the world whether or not the pointer's hooks can be had

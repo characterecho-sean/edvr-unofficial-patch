@@ -1050,6 +1050,45 @@ inline void runRingTests(Rig& rig, const WorldProgs& w) {
 
 inline void runArrowTests(Rig& rig, const Prog& arrow, ID3D11InputLayout* il) {
     Gen g;
+    float bodies[edvr::kMapBodies + 1][4] = {};   // no depth: the arrow at infinity, as on the Galaxy Map
+    ComPtr<ID3D11Buffer> noDepth = makeBuf(rig, bodies, sizeof(bodies), D3D11_BIND_CONSTANT_BUFFER);
+    rig.ctx->VSSetConstantBuffers(11, 1, noDepth.GetAddressOf());
+    // G5b: the System Map's arrow at a finite depth D: the eye term comes back scaled by |W| / D, on a negative-scale record only.
+    {
+        const double D = 3.0;
+        Scene sc = makeScene(g, Cls::kUiFrame, 40, false, false);
+        gather(g, sc, V3{0.1, -0.2, 0.3});
+        for (size_t i = 0; i < sc.recs.size(); ++i) {
+            Rec& r = sc.recs[i];
+            float s; std::memcpy(&s, &r.a[1], 4);
+            s = (i % 2 == 0) ? -std::fabs(s) : std::fabs(s);
+            std::memcpy(&r.a[1], &s, 4);
+            r.p[0] = (float)g.u(-1, 1); r.p[1] = (float)g.u(-1, 1); r.p[2] = (float)g.u(0.5, 1.5);
+        }
+        const std::vector<float> atInfinity = run(rig, arrow, il, sc);
+        bodies[edvr::kMapBodies][0] = static_cast<float>(1.0 / D);
+        ComPtr<ID3D11Buffer> finite = makeBuf(rig, bodies, sizeof(bodies), D3D11_BIND_CONSTANT_BUFFER);
+        rig.ctx->VSSetConstantBuffers(11, 1, finite.GetAddressOf());
+        const std::vector<float> atDepth = run(rig, arrow, il, sc);
+        bodies[edvr::kMapBodies][0] = 0.0f;
+        rig.ctx->VSSetConstantBuffers(11, 1, noDepth.GetAddressOf());
+        double worst = 0.0;
+        const size_t stride = static_cast<size_t>(arrow.outFloats), pos = static_cast<size_t>(arrow.posAt);
+        for (size_t i = 0; i < sc.verts.size(); ++i) {
+            const Rec& r = sc.recs[sc.verts[i][0]];
+            float s; std::memcpy(&s, &r.a[1], 4);
+            const double length = std::sqrt(double(r.p[0]) * r.p[0] + double(r.p[1]) * r.p[1] + double(r.p[2]) * r.p[2]);
+            for (int c = 0; c < 4; ++c) {
+                const float* row = sc.c.cb0[4 + c];
+                const double eyeTerm = row[0] * sc.c.cb1[275][0] + row[1] * sc.c.cb1[275][1] + row[2] * sc.c.cb1[275][2];
+                const double want = s < 0.0f ? -eyeTerm * length / D : 0.0;
+                worst = (std::max)(worst, std::fabs(static_cast<double>(atDepth[i * stride + pos + c]) - atInfinity[i * stride + pos + c] - want));
+            }
+        }
+        char text[160];
+        std::snprintf(text, sizeof text, "G5b: at depth D the arrow's clip position moves by the eye term times |W| / D, and a positive-scale record not at all: worst %.2e", worst);
+        check(worst < 2e-2, text);
+    }
     for (int sign = 0; sign < 2; ++sign) {
         for (int enc = 0; enc < 2; ++enc) {
             Scene sc = makeScene(g, Cls::kUiFrame, 600, enc != 0, sign == 0 && enc == 0);
@@ -1779,12 +1818,12 @@ inline void runMarkerTests(Rig& rig, const Prog& marker, ID3D11InputLayout* il) 
     Scene sc = iconScene(cc, mapCameraQ(), V3{1.6, -1.7, 3.3}, 0.88f, quad);
     sc.c.cb2[1][0] = sc.c.cb2[1][1] = 1.0f;
     const float* W = sc.recs[0].p;
-    auto runWith = [&](const float (&table)[edvr::kMapBodies][4]) {
+    auto runWith = [&](const float (&table)[edvr::kMapBodies + 1][4]) {
         ComPtr<ID3D11Buffer> bodies = makeBuf(rig, table, sizeof(table), D3D11_BIND_CONSTANT_BUFFER);
         rig.ctx->VSSetConstantBuffers(11, 1, bodies.GetAddressOf());
         return run(rig, marker, il, sc);
     };
-    float none[edvr::kMapBodies][4] = {}, elsewhere[edvr::kMapBodies][4] = {}, found[edvr::kMapBodies][4] = {}, ended[edvr::kMapBodies][4] = {};
+    float none[edvr::kMapBodies + 1][4] = {}, elsewhere[edvr::kMapBodies + 1][4] = {}, found[edvr::kMapBodies + 1][4] = {}, ended[edvr::kMapBodies + 1][4] = {};
     elsewhere[0][0] = W[0] + 1.0f; elsewhere[0][1] = W[1]; elsewhere[0][2] = W[2]; elsewhere[0][3] = 3.0f;
     found[0][0] = elsewhere[0][0]; found[0][1] = W[1]; found[0][2] = W[2]; found[0][3] = 3.0f;
     found[1][0] = W[0]; found[1][1] = W[1]; found[1][2] = W[2]; found[1][3] = 2.0f;
@@ -1810,6 +1849,7 @@ inline void runMarkerTests(Rig& rig, const Prog& marker, ID3D11InputLayout* il) 
     std::snprintf(text, sizeof text, "G13.scale: at a known body each corner is k times as far from the quad's centre, within %.2e, and the uv is unchanged, within %.2e", worstScale, worstUv);
     check(worstScale < 1e-3 && worstUv == 0.0, text);
     using edvr::mapui::markerScale;
+    check(edvr::mapui::arrowDepthOf(3.197f, 0.421f) > 2.77f && edvr::mapui::arrowDepthOf(3.197f, 0.421f) < 2.78f && edvr::mapui::arrowDepthOf(0.3f, 0.421f) == edvr::mapui::kArrowDepthMin, "G5c: the arrow's depth is the distance to the body's surface, with a floor inside it");
     check(markerScale(0.43f) == 1.0f && markerScale(0.0f) == 1.0f && markerScale(100.0f) == edvr::mapui::kMarkerScaleMax, "G13.rule: a moon's marker stays the game's, no radius means no scale, and the scale has a ceiling");
     const float ring = 0.56f * markerScale(0.886f), arc = 0.687f * markerScale(0.79f);
     std::snprintf(text, sizeof text, "G13.rule: on the two planets measured in flat the ring is %.3f against 1.14 and the arc %.3f against 1.424, and the arc clears the planet's limb", ring, arc);

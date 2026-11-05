@@ -1030,6 +1030,9 @@ constexpr uint64_t kUiPsMapSpriteC = 0x964221955A9E77E7ull;  // the Galaxy Map's
 constexpr uint64_t kUiVsMapRings = 0x94EA991C3A03DBD9ull, kUiPsMapRings = 0x65DAC561B5613454ull;
 constexpr uint64_t kUiVsMapStems = 0x3028E7C6E0E097F9ull, kUiPsMapStems = 0x6C28D59784CC493Dull;
 constexpr uint64_t kUiVsMapPlane = 0x88DCF1164C640EC3ull, kUiPsMapPlane = 0xFEDE6C9825C3828Eull;
+// The System Map's lines round a body in its close view (dump 100700560001): two vertex shaders with one pixel shader, drawn after the body with its depth test. They take the plane icons' family.
+constexpr uint64_t kUiVsMapLinesA = 0x1DEF9D1F9183B1B8ull, kUiVsMapLinesB = 0xBA16062A2EB66F1Full, kUiPsMapLines = 0x33758387B70944A1ull;
+inline bool uiVsIsSystemMapOnly(uint64_t vs) { return vs == kUiVsMapPlane || vs == kUiVsMapLinesA || vs == kUiVsMapLinesB; }
 // The map frame's tonemap (VR eye dumps, 2026-11-04): vs 6F4B7B60C6C15BBF with ps 5EC48683F6C86A42, the scene at PS t0 and a 1008x1008 R11G11B10F bloom at t1. Its constant
 // buffer b2 is declared CB2[11] (176 bytes).
 constexpr uint64_t kUiVsMapTone = 0x6F4B7B60C6C15BBFull, kUiPsMapTone = 0x5EC48683F6C86A42ull;
@@ -1094,7 +1097,7 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
 // two runtime-gated names (the scope mark, the on-foot HUD), and a map's four overlay vertex shaders. False means kNone for every pixel shader. Kind 2 has no such answer: a
 // panel-sized draw is the screen for any vertex shader. The sharp_weapons_test rig proves the implication and scans this list against the rule.
 inline bool uiLayerFamilyHdrVsMayWant(uint64_t vs) {
-    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || vs == kUiVsMapPlane || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
+    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || vs == kUiVsMapPlane || vs == kUiVsMapLinesA || vs == kUiVsMapLinesB || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
            vs == kUiVsOrbitLines || vs == kUiVsSupercruiseBars || vs == kUiVsSpaceDust || vs == kVsNormalSpaceDust || weaponsFireVs(vs) || shieldRefractVs(vs) ||
            uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark;
 }
@@ -1131,6 +1134,8 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         out = f.mapOpen ? uiLayerMapFamilyOf(f.vs, f.ps) : UiLayerFamily::kNone;
         if (out == UiLayerFamily::kNone && f.mapSystem && f.vs == kUiVsMapPlane && f.ps == kUiPsMapPlane)
             out = f.mapPlaneIcon ? UiLayerFamily::kMapPlane : f.mapPlaneGrid ? UiLayerFamily::kMapGrid : UiLayerFamily::kNone;
+        else if (out == UiLayerFamily::kNone && f.mapSystem && (f.vs == kUiVsMapLinesA || f.vs == kUiVsMapLinesB) && f.ps == kUiPsMapLines)
+            out = UiLayerFamily::kMapPlane;
         if (out == UiLayerFamily::kNone)
             out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud

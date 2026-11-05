@@ -361,7 +361,18 @@ static void mayWantTests() {
     for (uint64_t h : kHoloFamiliesTake) check(vsMayWantByte(h) & kVsMayUiFamily, "each take hologram keeps the bit");
     for (uint64_t h : {kUiVsMapCanvas, kUiVsMapSprite, kUiVsMapRings, kUiVsMapStems}) check(vsMayWantByte(h) & kVsMayUiFamily, "each of a map's four overlay vertex shaders keeps the bit");
     // The System Map's flat plane: a general vertex shader, so it keeps the bit, and it is named only by its pair with the System Map's camera up.
-    check(vsMayWantByte(kUiVsMapPlane) & kVsMayUiFamily, "the System Map plane's vertex shader keeps the bit");
+    for (uint64_t h : {kUiVsMapPlane, kUiVsMapLinesA, kUiVsMapLinesB}) check(vsMayWantByte(h) & kVsMayUiFamily, "the System Map plane's and lines' vertex shaders keep the bit");
+    {
+        UiFamilyFacts lines = hdrFacts(kUiVsMapLinesA, kUiPsMapLines);
+        lines.mapOpen = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "the System Map's lines are named only with its camera up");
+        lines.mapSystem = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "with its camera up they take the plane icons' family, at any count");
+        lines.vs = kUiVsMapLinesB;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "...and so does the other vertex shader");
+        lines.ps = kUiPsMapPlane;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "...with their own pixel shader only");
+    }
     {
         UiFamilyFacts plane = hdrFacts(kUiVsMapPlane, kUiPsMapPlane);
         plane.mapOpen = true;

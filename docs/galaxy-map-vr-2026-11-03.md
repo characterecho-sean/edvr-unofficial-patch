@@ -19,7 +19,7 @@ Open: what makes VR draw the small mesh variant of the System Map's atmosphere r
 
 Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. 12382D in `eye_draw_snapshot.h`'s watched list, for the System Map's markers, comes out when those sizes are read.
 
-Next (2026-11-05, see "The System Map"): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). The markers' scale is FLOWN OK (fc05ee07, Sean: "Fixed the atmospheres"). Fly the System Map's click, "Flight card, the System Map's click". Sean calls the click the only difference left from flat, so the map's plane out of the AA pass is flown with nothing against it; no dump of it has been read. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
+Next (2026-11-05, see "The System Map"): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). The markers' scale is FLOWN OK (fc05ee07, Sean: "Fixed the atmospheres"). The System Map's click is FLOWN OK (22eb5c87, Sean: "Clicks work now"). Sean called the click the only difference left from flat, so the map's plane out of the AA pass is flown with nothing against it. Fly "Flight card, the close view". The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
 
 Ruled out:
 - ruled out: a LOD on range holding VR at the small marker variant, because VR draws the same meshes at camera height 12 and at 80 (dumps 072747469002, 072734614001).
@@ -288,6 +288,22 @@ FLOWN 09:20 (build fc05ee07), Sean: the atmospheres are fixed, and the one diffe
 The answer was never equal in VR. The cursor's position runs through the head: over 19 frames of dump 050358167001, mouse still, the arrow's W.z moves 6.6e-4 and its direction about 5e-6 radians, tracking the eye, and it is never the same two frames running. In flat a still mouse gives the same bits. INFERRED: this is the game's own VR behaviour, not EDVR's, and the far-point hover neither made nor mended it (the far point only passes the wander on).
 
 The change: on the System Map's call the K answer is held while the map's camera has not moved (`mapCameraChanges`, which counts a change of a single bit in the head-free pose) and the arrow's direction stays within 5e-4 radians of where it was taken, about 0.03 degrees and three times the 1.7e-4 measured while the head yaws 8.7 degrees. The mouse decides when it changes, and the drawn arrow is untouched. It is below the pick's own radius, at least 0.03 of the viewport's height. A mouse step past it during a click cancels the click, as in flat. The Galaxy Map's call is not held: its clicks work.
+
+### The close view of a body
+
+FLOWN 10:07 (build 22eb5c87), Sean: clicks work. Zooming into a landable body gives a 3D view where the arrow's depth looks wrong against the settlement icons, and it looks a little jagged while zooming. Dumps 100700560001 (at rest, camera 3.2 units from a body of surface 0.42) and 100710371002 (moving, 8.3 units).
+
+**The arrow. MEASURED.** It was at infinity, right for the stars and near enough at 16 units, where a body is 7 pixels of disparity from infinity at 4032. At 3.2 units the body is about 33. So on this map the arrow now goes to the nearest known body's surface: the VS takes the eye term back scaled by |W| / D, which keeps its size and ray and gives it the disparity of an object at D. D is the distance from the map camera to the nearest body's centre less its surface radius, in the bodies' table, once a frame, floor 0.25 (galaxy_map_vs.h kMapArrowDepthVS). In the regular view that is about the camera's height, so the arrow gains the plane's disparity there too. The Galaxy Map stays at infinity. INFERRED: a settlement on the limb is nearer the body's centre plane than D says, by up to its radius; that is 15% at 3 units.
+
+**The jaggedness. Two things, one left OPEN.**
+- Dump 100710371002 was taken moving: 13 of its 16 frames have the DLSS history reset, on purpose (Fix 2: while the map's camera moves its history cannot be reprojected, because the pass has only the head's delta). The planet's limb at 4x looks acceptable. The scene's other edges in those frames were the lines round the body, VS 1DEF9D and BA1606 with PS 337583, which this build moves to the HDR layer with the plane's icons (depth tested, after the body). The planet itself still has no history while the map moves.
+- The settlement icons (12382D sprites) already in the layer break up when small: about 14 pixels across in that dump, against a clean 40 at rest. It does not depend on motion. ruled out: EDVR's mip bias, because this install's samplers are all bias +0.00 (`texture_lod_bias = 0`; the census at 10:04:06). Open: whether the atlas has mips at all. The build logs `the System Map's first marker: its atlas view has N mip level(s)`. If 1, the icons minify with nothing to fall on, and supersampling them is the fix, which can wait for that line and for Sean's word on which of these he means.
+
+## Flight card, the close view
+
+1. Zoom into a landable body. The arrow should read at the level of the settlement icons: one arrow, not two, when you look at an icon. Clicks still work. Log: `arrow's depth` about the camera's distance to the surface, 2 to 3 units here.
+2. Regular System Map: the arrow still reads at the planets' level. Galaxy Map: arrow as before; log says depth 0.
+3. Zoom while looking at the lines round the body: they should stay sharp. Say what still looks jagged: the small settlement icons, or the planet's edge while it moves.
 
 ## Flight card, the System Map's click
 

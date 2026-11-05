@@ -4294,7 +4294,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
         f.mapSystem = mapui::systemOpen();
         f.mapPlaneIcon = count == 6;
         f.mapPlaneGrid = count == 1014;
-        if (uiVsIsMapOverlay(f.vs) || (f.mapSystem && f.vs == kUiVsMapPlane)) f.ps = bindingShaderHash(BindSlot::Ps);
+        if (uiVsIsMapOverlay(f.vs) || (f.mapSystem && uiVsIsSystemMapOnly(f.vs))) f.ps = bindingShaderHash(BindSlot::Ps);
     }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

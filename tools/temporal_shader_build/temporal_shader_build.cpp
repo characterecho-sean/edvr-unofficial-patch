@@ -1279,14 +1279,14 @@ static void selfTest() {
         const MapShader maps[12] = {
             {"kMapIconFacingVsBytecode", "map_icon_facing_vs", edvr::kMapIconFacingVS, "vs_5_0", 12, 279, 0, 6, true, 0},
             {"kMapIconUvFacingVsBytecode", "map_icon_uv_facing_vs", edvr::kMapIconUvFacingVS, "vs_5_0", 12, 279, 2, 6, true, 0},
-            {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, 0, true, 0},
+            {"kMapArrowDepthVsBytecode", "map_arrow_depth_vs", edvr::kMapArrowDepthVS, "vs_5_0", 8, 276, 0, 0, true, 0, 33},
             {"kMapProbeVsBytecode", "map_probe_vs", edvr::kMapProbeVS, "vs_5_0", 8, 276, 0, 0, false, 0},
             {"kMapProbePsBytecode", "map_probe_ps", edvr::kMapProbePS, "ps_5_0", 0, 0, 0, 0, false, 1},
             {"kMapRingVsBytecode", "map_ring_vs", edvr::kMapRingVS, "vs_5_0", 8, 279, 1, 6, false, 2},
             {"kMapDepthSpritePsBytecode", "map_depth_sprite_ps", edvr::kMapDepthSpritePS, "ps_5_0", 0, 0, 2, 0, false, 3},
             {"kMapDepthCanvasPsBytecode", "map_depth_canvas_ps", edvr::kMapDepthCanvasPS, "ps_5_0", 0, 0, 0, 0, false, 3},
             {"kMapStemVsBytecode", "map_stem_vs", edvr::kMapStemVS, "vs_5_0", 8, 276, 0, 6, false, 2},
-            {"kMapMarkerVsBytecode", "map_marker_vs", edvr::kMapMarkerVS, "vs_5_0", 12, 279, 2, 0, true, 0, 32},
+            {"kMapMarkerVsBytecode", "map_marker_vs", edvr::kMapMarkerVS, "vs_5_0", 12, 279, 2, 0, true, 0, 33},
             {"kMapPunchVsBytecode", "map_punch_vs", edvr::kMapPunchVS, "vs_5_0", 0, 0, 0, 0, false, 2},
             {"kMapPunchPsBytecode", "map_punch_ps", edvr::kMapPunchPS, "ps_5_0", 2, 0, 0, 0, false, 4},
         };

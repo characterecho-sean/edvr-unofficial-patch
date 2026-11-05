@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -64,6 +65,7 @@ struct State {
     bool directSaid = false;
     ComPtr<ID3D11Buffer> bodyBuf;              // MapBodies at vertex slot 11
     uint64_t bodyWritten = 0;                  // the table's generation in the buffer
+    bool markerAtlasSaid = false;
     ComPtr<ID3D11VertexShader> swapVs[kSwapCount];
     bool swapTried[kSwapCount] = {};
     ComPtr<ID3D11VertexShader> probeVs;
@@ -102,9 +104,11 @@ const char* const kSwapLabel[kSwapCount] = {"C31238331D8AC3D4 (icons)", "12382D2
 constexpr uint32_t kBodySlot = 11;
 struct BodyTable {
     std::atomic<bool> busy{false};
-    float rows[kMapBodies][4] = {};
+    float rows[kMapBodies + 1][4] = {};   // the last row is the arrow's: x the inverse of its depth
+    float radius[kMapBodies] = {};
     uint32_t n = 0;
     uint32_t oldest = 0;   // full: the next row to give up. A system can have more bodies than rows; those in view write their constants each frame, before their sprites
+    float depth = 0.0f;
     std::atomic<uint64_t> generation{1};
 };
 BodyTable g_bodies;
@@ -115,7 +119,7 @@ thread_local const float* t_bodyData = nullptr;
 bool bindBodies(State& s, ID3D11DeviceContext* ctx) {
     const uint64_t generation = g_bodies.generation.load(std::memory_order_acquire);
     if (!s.bodyBuf || s.bodyWritten != generation) {
-        float copy[kMapBodies][4];
+        float copy[kMapBodies + 1][4];
         while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
         std::memcpy(copy, g_bodies.rows, sizeof(copy));
         g_bodies.busy.store(false, std::memory_order_release);
@@ -350,22 +354,43 @@ void bodyConstantsUnmapped(ID3D11Resource* res) {
         if (isNew && g_bodies.n < kMapBodies) ++g_bodies.n;
         changed = true;
     }
+    g_bodies.radius[at] = radius[0];
     g_bodies.busy.store(false, std::memory_order_release);
     if (changed) g_bodies.generation.fetch_add(1, std::memory_order_release);
 }
 
 uint32_t bodiesKnown() { return g_bodies.n; }
+float arrowDepth() { return g_bodies.depth; }
 
 void setSystemOpen(bool system) {
     const bool was = g_systemOpen.exchange(system, std::memory_order_relaxed);
-    if (system && !was) {
+    if (system != was) {
+        // Open: a new system's bodies start a new table. Shut: the arrow's depth goes back to infinity for the Galaxy Map.
         while (g_bodies.busy.exchange(true, std::memory_order_acquire)) {}
         std::memset(g_bodies.rows, 0, sizeof(g_bodies.rows));
+        std::memset(g_bodies.radius, 0, sizeof(g_bodies.radius));
         g_bodies.n = 0;
         g_bodies.oldest = 0;
+        g_bodies.depth = 0.0f;
         g_bodies.busy.store(false, std::memory_order_release);
         g_bodies.generation.fetch_add(1, std::memory_order_release);
     }
+}
+
+void updateArrowDepth(const float cameraPosition[3]) {
+    if (g_bodies.busy.exchange(true, std::memory_order_acquire)) return;   // a writer is in: next frame's will do
+    float depth = 0.0f;
+    for (uint32_t i = 0; i < g_bodies.n; ++i) {
+        const float dx = g_bodies.rows[i][0] - cameraPosition[0], dy = g_bodies.rows[i][1] - cameraPosition[1], dz = g_bodies.rows[i][2] - cameraPosition[2];
+        const float d = arrowDepthOf(std::sqrt(dx * dx + dy * dy + dz * dz), g_bodies.radius[i]);
+        if (depth == 0.0f || d < depth) depth = d;
+    }
+    const float inverse = depth > 0.0f ? 1.0f / depth : 0.0f;
+    const bool changed = g_bodies.rows[kMapBodies][0] != inverse;
+    g_bodies.rows[kMapBodies][0] = inverse;
+    g_bodies.depth = depth;
+    g_bodies.busy.store(false, std::memory_order_release);
+    if (changed) g_bodies.generation.fetch_add(1, std::memory_order_release);
 }
 
 void setGates(bool vr, bool pointer) {
@@ -427,9 +452,25 @@ bool swapBegin(ID3D11DeviceContext* ctx, uint64_t vs) {
     }
     ID3D11VertexShader* ours = s.swapVs[which].Get();
     if (!ours) return false;
-    if (which == kSwapMarker) {
+    if (which == kSwapMarker || which == kSwapArrow) {
         if (!bindBodies(s, ctx)) return false;
-    } else if (which != kSwapArrow && !bindMapCam(s, ctx)) {
+        if (which == kSwapMarker && !s.markerAtlasSaid) {
+            s.markerAtlasSaid = true;
+            // Which kind of minification the small settlement icons have: a mip chain to fall on, or none.
+            ID3D11ShaderResourceView* srv = nullptr;
+            ID3D11SamplerState* smp = nullptr;
+            ctx->PSGetShaderResources(0, 1, &srv);
+            ctx->PSGetSamplers(0, 1, &smp);
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+            D3D11_SAMPLER_DESC pd{};
+            if (srv) srv->GetDesc(&sd);
+            if (smp) smp->GetDesc(&pd);
+            Log::get().note("galaxy map: the System Map's first marker: its atlas view has %u mip level(s), its sampler filter 0x%X, bias %.2f, max LOD %.1f",
+                            sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D ? sd.Texture2D.MipLevels : 0u, static_cast<unsigned>(pd.Filter), pd.MipLODBias, pd.MaxLOD);
+            if (srv) srv->Release();
+            if (smp) smp->Release();
+        }
+    } else if (!bindMapCam(s, ctx)) {
         g_counters.noPose.fetch_add(1, std::memory_order_relaxed);   // the pose never answered: the draw is the game's
         return false;
     }

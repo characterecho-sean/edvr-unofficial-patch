@@ -234,6 +234,7 @@ constexpr char kMapArrowDepthVS[] =
     R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[8]; };
 cbuffer CB1 : register(b1) { float4 cb1[276]; };
+cbuffer MapBodies : register(b11) { float4 mapBody[32]; float4 mapArrow; };
 
 void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
           out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
@@ -245,7 +246,9 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
     uint4 a = rec.a;
     v = mapSkin(a, v3.xy, v);
     float s = asfloat(a.y);
-    float3 center = rec.p.xyz - ((s < 0.0) ? float3(0.0, 0.0, 0.0) : cb1[275].xyz);
+    // The arrow's depth: W - eye is the arrow at |W|; W - eye * |W| / D is the same arrow, at the same size and on the same ray, at distance D. mapArrow.x is 1 / D: 0 on the Galaxy Map, whose stars are at infinity, and on the
+    // System Map the nearest body's surface (galaxy_map_ui.cpp). Bodies there can be 3 units away, where an arrow at infinity sits a good way behind them in stereo.
+    float3 center = rec.p.xyz - ((s < 0.0) ? cb1[275].xyz * (length(rec.p.xyz) * mapArrow.x) : cb1[275].xyz);
     float4 q = mapQuat(a);
     float4 p = float4(mapRotate(q, v) * s + center, 1.0);
     o1 = float4(dot(cb0[4], p), dot(cb0[5], p), dot(cb0[6], p), dot(cb0[7], p));
@@ -360,7 +363,7 @@ constexpr char kMapMarkerVS[] =
 cbuffer CB0 : register(b0) { float4 cb0[12]; };
 cbuffer CB1 : register(b1) { float4 cb1[279]; };
 cbuffer CB2 : register(b2) { float4 cb2[2]; };
-cbuffer MapBodies : register(b11) { float4 mapBody[32]; };
+cbuffer MapBodies : register(b11) { float4 mapBody[32]; float4 mapArrow; };
 
 void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
           out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
