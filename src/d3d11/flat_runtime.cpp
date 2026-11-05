@@ -3,6 +3,8 @@
 #include "flat_origin_capture.h"
 #include "flat_runtime.h"
 #include "flat_star_glow.h"   // visual.star_glow
+#include "flat_dof_blur.h"    // the depth-of-field blur's average
+#include "flat_dof_blur_math.h"
 #include "ui_layer.h"          // UiGlowStar: the first level's star input
 #include "flat_sdk_bench_probe.h"
 #include "flat_capture_policy.h"
@@ -1782,6 +1784,7 @@ bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
 // of that size, a full viewport. Names the scene HDR's resource at t0 for the model, as the menu copy's verification does.
 constexpr uint64_t kDofCompositeVs=0x20F383BBAC05C031ull;
 constexpr uint64_t kDofCompositePs=0xBF2302BCC7B434DBull;
+static_assert(kDofCompositePs==kFlatDofBlurCompositePs,"the blur's average names the same composite");
 bool verifyDofComposite(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kDofCompositeVs || k.ps!=kDofCompositePs || k.format!=26)return false;
@@ -3483,6 +3486,7 @@ void flatRuntimeResize() {
     // composited (none of them the back buffer, all of them released), and the door, so a fresh one arms the layer.
     flatUiLayerRelease();
     flatStarGlowRelease();   // visual.star_glow: the star layer is the scene target's size, made afresh by the next star frame
+    flatDofBlurRelease();    // the depth-of-field blur's average: made afresh by the next composite
     s.drawPackets.cancel();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
@@ -4269,6 +4273,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // visual.star_glow: the setting (live), the new frame's state and the 5 s line, before any early return below -- a setting above 100 whose scope
     // never ran still prints its line, with every count zero.
     flatStarGlowFrame(frame + 1, s.frameLive);
+    flatDofBlurFrame(frame + 1);
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
@@ -4408,6 +4413,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // adopted after a resize cleared the old one) releases every device child the shared layer keeps; same device, nothing.
     flatUiLayerNoteDevice(s.device.Get());
     flatStarGlowNoteDevice(s.device.Get());
+    flatDofBlurNoteDevice(s.device.Get());
     // Stand-down (flat_standdown.h): what the frame that just ended showed about its
     // chain, and the mode of the frame that starts now. Before anything below reads s.work.
     bool engineConfiguredPaused = enginePausedThen;
@@ -4854,6 +4860,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat dof composite: accepted=%llu refused=%llu last-refusal-frame=%llu last-refusal-mask=%04X source-first-bad=%s",
             (unsigned long long)s.dofCompositesAccepted,(unsigned long long)s.dofCompositesRefused,(unsigned long long)s.dofLastFrame,
             s.dofLastMask,flatRuntimeConflictName(s.dofLastSourceBad));
+        flatDofBlurLogWindow();
         // The steady-detail rule (always on: the resolver is handed steadyDetail = true at both treatment call sites), every window while a
         // temporal mode runs, zeros included: the resolves whose prep ran the depth check against last frame's depth (ran) and the ones
         // that could not (skipped: a reset frame is neither). "depth-check=0/0" is no frame reaching the resolver in the window; ran=0 with
@@ -7066,6 +7073,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // the frame goes to the copy route, which runs the spatial recovery in place of it (flatRuntimeMapTemporalOff).
     if (hdrTrigger && s.hdrKey == FlatHdrKey::Auto && s.hdrSelected.selected() && !flatRuntimeMapTemporalOff())
         treatHdr(s.hdrSelected, s.hdr.trigger.srvSlot);
+    // The draw that lays the game's depth-of-field blur over the scene (flat_dof_blur.h): beginActualDraw binds the mean of the recent frames' blur, for this draw only.
+    if (flatDofBlurComposite(k.ps)) {
+        dofBlur = true;
+        dofBlurPs = k.ps;
+    }
     // fix.ui_quality's HUD bloom (flat_ui_layer.h flatUiGlowWanted): the trigger that writes a half-size target of H is the bloom chain's first level,
     // which reads the H the layer's HUD is not in. The route's resolve above has written H by now; beginActualDraw binds H' = H + the HUD's light at the
     // slot the trigger read H at, for this draw only. Asked on every route: the copy route's frames have the same first level.
@@ -7410,6 +7422,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         f.mode, f.renderWidth, f.renderHeight, f.outputWidth, f.outputHeight,
         f.evalWidth, f.evalHeight);
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
+    flatDofBlurNoteCamera(s.prefix.frame, f.camera);   // for the next frame's composite: an average holds only while the camera is still
     const bool resetMissing = !s.havePrevious;
     const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
     const bool resetDepth = s.havePrevious && s.previous.depth != selected.depth;
@@ -7800,6 +7813,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         s.plannedResolve = plan; s.haveResolvePlan = true;
     }
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
+    flatDofBlurNoteCamera(s.prefix.frame, f.camera);   // for the next frame's composite: an average holds only while the camera is still
     const bool resetMissing = !s.havePrevious;
     const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
     const bool resetDepth = s.havePrevious && s.previous.depth != selected.depth;
@@ -7948,6 +7962,10 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         const bool haveStar=starFeed && flatStarGlowFeedInput(&star);
         const bool bound=flatUiGlowBegin(ctx,state().prefix.frame,glowSlot,glowHdr,glowVs,glowPs,glowHdrW,glowHdrH,glowTargetW,glowTargetH,&glowOriginal,haveStar?&star:nullptr);
         if(haveStar)flatStarGlowNoteFeed(star,bound,state().prefix.frame,glowSlot,glowVs,glowPs,glowHdrW,glowHdrH,glowTargetW,glowTargetH);
+    }
+    if(dofBlur && !dofBlurOriginal) {
+        auto& s=state();
+        flatDofBlurBegin(ctx,s.prefix.frame,s.phase.applied!=0,s.hdrTreated,s.phase.phaseCount,dofBlurPs,&dofBlurOriginal);
     }
     if(domainPlanned && !producer) {
         FlatComputeInternalScope internal;flatcpu::Scope captureCost(flatcpu::kForegroundCapture);
@@ -8236,6 +8254,7 @@ void FlatRuntimeDrawScope::endActualDraw() {
     if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
+    if(dofBlurOriginal){flatDofBlurEnd(ctx,dofBlurOriginal);dofBlurOriginal=nullptr;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
     if(drawPacketOnly)return;
     if(domainProtectedOverlay && !overlayStarted && !overlayReplayPending)
@@ -8288,6 +8307,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
+    if(dofBlurOriginal){flatDofBlurEnd(ctx,dofBlurOriginal);dofBlurOriginal=nullptr;}
     FlatComputeInternalScope guard;
     if(domainStarted){
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;

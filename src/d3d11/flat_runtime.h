@@ -177,6 +177,11 @@ struct FlatRuntimeDrawScope {
     const void* glowHdr=nullptr;
     uint64_t glowVs=0,glowPs=0;
     ID3D11ShaderResourceView* glowOriginal=nullptr;
+    // The depth-of-field blur (flat_dof_blur.h): this draw lays the blur over the scene. Begin binds the mean of the recent frames' blur for the game's issue
+    // (dofBlurOriginal holds the game's view then), End puts the game's view back.
+    bool dofBlur=false;
+    uint64_t dofBlurPs=0;
+    ID3D11ShaderResourceView* dofBlurOriginal=nullptr;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
@@ -192,7 +197,7 @@ struct FlatRuntimeDrawScope {
     forward_light::Issue forwardIssue{};
     uint64_t lightPayloadToken=0;
     const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
-    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow ||
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow || dofBlur ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's
