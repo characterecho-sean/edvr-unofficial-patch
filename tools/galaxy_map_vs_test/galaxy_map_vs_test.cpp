@@ -1108,7 +1108,7 @@ inline void runArrowTests(Rig& rig, const Prog& arrow, ID3D11InputLayout* il) {
     }
 }
 
-inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std::vector<uint8_t>& psCode) {
+inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std::vector<uint8_t>& psCode, const std::vector<uint8_t>& stickyCode) {
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
     hr(rig.dev->CreateVertexShader(vsCode.data(), vsCode.size(), nullptr, &vs), "probe vs");
@@ -1325,6 +1325,44 @@ inline void runProbeTest(Rig& rig, const std::vector<uint8_t>& vsCode, const std
             std::printf("%s\n", label);
             check(done && samples == s.expect, label);
         }
+    }
+    // G6b, the sticky edge: the probe while the arrow is on a panel. Mask within reach on either side holds it, along each axis; past the reach it lets go; and it says yes wherever the exact test does, so the two cannot alternate at one place.
+    {
+        const ComPtr<ID3D11PixelShader> exact = ps;   // the lambda above reads ps
+        hr(rig.dev->CreatePixelShader(stickyCode.data(), stickyCode.size(), nullptr, &ps), "sticky ps");
+        auto sticky = [&](const std::vector<uint8_t>& px, int tx, int ty, float s) {
+            const ComPtr<ID3D11ShaderResourceView> mv = makeMask(px);
+            bool done = false;
+            const UINT64 samples = probe(bigRtv.Get(), BIG, mv.Get(), s, tx, ty, done);
+            return done ? samples : UINT64(99);
+        };
+        for (const Axis& a : axes) {
+            const Axis other{a.name, -a.x, -a.y};
+            struct G { const char* what; std::vector<uint8_t> px; uint64_t expect; };
+            const G gs[] = {
+                {"mask within reach on the positive side only", band(a, reach - 5.0, 6.0, false), 1},
+                {"mask within reach on the negative side only", band(other, reach - 5.0, 6.0, false), 1},
+                {"mask within reach on both sides", band(a, reach - 5.0, 6.0, true), 1},
+                {"mask 5 pixels past the reach on one side", band(a, reach + 5.0, 6.0, false), 0},
+                {"mask 5 pixels past the reach on both sides", band(a, reach + 5.0, 6.0, true), 0},
+            };
+            for (const G& g : gs) {
+                const UINT64 samples = sticky(g.px, TX, TY, -0.4f);
+                char label[200];
+                std::snprintf(label, sizeof label, "G6b.sticky.%s, %s: %llu sample(s)", a.name, g.what, static_cast<unsigned long long>(samples));
+                std::printf("%s\n", label);
+                check(samples == g.expect, label);
+            }
+        }
+        std::vector<uint8_t> one(static_cast<size_t>(BIG) * BIG, 0), half(static_cast<size_t>(BIG) * BIG, 0), none(static_cast<size_t>(BIG) * BIG, 0);
+        one[static_cast<size_t>(TY) * BIG + TX] = 255;
+        for (int y = 0; y < static_cast<int>(BIG); ++y)
+            for (int x = TX + 5; x < static_cast<int>(BIG); ++x) half[static_cast<size_t>(y) * BIG + x] = 255;
+        check(sticky(one, TX, TY, -0.4f) == 1, "G6b.sticky: the tip on the mask stays on");
+        check(sticky(half, TX, TY, -0.4f) == 1, "G6b.sticky: a tip 5 pixels outside a large panel's edge stays on, where the exact test lets go");
+        check(sticky(none, TX, TY, -0.4f) == 0, "G6b.sticky: no mask anywhere lets go");
+        check(sticky(one, TX, TY, 0.4f) == 0, "G6b.sticky: a positive scale is still not the arrow");
+        ps = exact;
     }
     // the layers are untouched: write mask 0
     for (int which = 0; which < 2; ++which) {
@@ -1973,7 +2011,7 @@ inline int runAll() {
     check(!edvr::mapui::isPanelVs(edvr::mapui::kVsHoverHalo) && edvr::mapui::isPanelVs(edvr::mapui::kVsPanelA) && edvr::mapui::isPanelVs(edvr::mapui::kVsPanelC) &&
               edvr::mapui::panelIndex(edvr::mapui::kVsHoverHalo) == -1 && edvr::mapui::panelIndex(edvr::mapui::kVsPanelC) == 1,
           "G9: B10B032BDFD46700 (the hover halo) is not in the mask set; C4B4B3 and 5DAD41 are");
-    const std::vector<uint8_t> probeVs = compile(edvr::kMapProbeVS, "vs_5_0"), probePs = compile(edvr::kMapProbePS, "ps_5_0");
+    const std::vector<uint8_t> probeVs = compile(edvr::kMapProbeVS, "vs_5_0"), probePs = compile(edvr::kMapProbePS, "ps_5_0"), probeStickyPs = compile(edvr::kMapProbeStickyPS, "ps_5_0");
     const std::vector<uint8_t> ring = compile(edvr::kMapRingVS, "vs_5_0");
     const Prog pIcon = makeProg(rig, icon), pIconUv = makeProg(rig, iconUv), pArrow = makeProg(rig, arrow);
     const std::vector<uint8_t> stem = compile(edvr::kMapStemVS, "vs_5_0");
@@ -1992,7 +2030,7 @@ inline int runAll() {
     runSharedAxes(rig, wp);
     runWobbleTests(rig, wp, pStem, ilStem.Get());
     runArrowTests(rig, pArrow, ilArrow.Get());
-    runProbeTest(rig, probeVs, probePs);
+    runProbeTest(rig, probeVs, probePs, probeStickyPs);
     runDepthTests(rig);
     const std::vector<uint8_t> marker = compile(edvr::kMapMarkerVS, "vs_5_0");
     const Prog pMarker = makeProg(rig, marker);

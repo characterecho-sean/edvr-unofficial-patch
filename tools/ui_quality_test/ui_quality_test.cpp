@@ -3139,6 +3139,8 @@ void testSupercruiseLines() {
                   pointer.find("uiLayerQualityLive") == std::string::npos &&
                   mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &t, nullptr);") != std::string::npos && mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &rtv, dsv);") != std::string::npos,
               "GP17b: with the layer not live the panel mask and the arrow's probe run after the game's own issue into its eye target, the game's targets go back, and the pointer's gate does not ask for the layer");
+        check(mapUi.find("const bool sticky = s.probeStickyPs && over();") != std::string::npos && mapUi.find("vScreenPSSetShaderRaw(ctx, sticky ? s.probeStickyPs.Get() : s.probePs.Get(), nullptr, 0);") != std::string::npos,
+              "GP17e: the arrow's probe takes the sticky edge only while the arrow is on a panel, and the exact test otherwise");
         // The System Map in the layer: the grid takes no test; the cut-out comes first at the first draw after the bodies, in the colour issue of the HDR layer; the markers' constants are read before the real Unmap.
         {
             const std::string layerText = slurp("src/d3d11/ui_layer.cpp");
