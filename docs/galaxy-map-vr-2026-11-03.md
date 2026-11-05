@@ -15,13 +15,15 @@ Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log 
 
 Decided (Sean, 2026-11-04, after flying it): panels at the game's depth, the arrow on a panel at the panel's depth and off it at star depth. This replaces the first decision (panels at star depth), which clipped through the map in stereo.
 
-Open: why the System Map's thick blue ring and landable arc do not fit the body in VR ("The System Map", H1 to H3). The hover pointer block's class ([vis+0x110]) is now of no consequence. The System Map's hover is read and takes fix 3 (built 2026-11-05, not flown); the facing icons and the sprite depth stay Galaxy Map only. `SystemMapView` is the System Map's stage name (dump 050358167001).
+Open: what makes VR draw the small mesh variant of the System Map's atmosphere ring and landable arc on bodies flat draws the next one on ("The System Map", H4 to H6). The hover pointer block's class ([vis+0x110]) is now of no consequence. The System Map's hover is read and takes fix 3 (built 2026-11-05, not flown); the facing icons and the sprite depth stay Galaxy Map only. `SystemMapView` is the System Map's stage name (dump 050358167001).
 
-Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. The four draws added to `eye_draw_snapshot.h` for the System Map's markers come out when those sizes are read.
+Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. 12382D in `eye_draw_snapshot.h`'s watched list, for the System Map's markers, comes out when those sizes are read.
 
-Next (2026-11-05, see "The System Map"): fly the cursor with Anti-aliasing off and on the System Map, then one VR dump and one flat dump on the same body, which settle the two marker sizes static RE could not. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
+Next (2026-11-05, see "The System Map"): fly the cursor with Anti-aliasing off and on the System Map, and zoom over a marked planet in each mode, which splits the markers' hypotheses where static RE could not. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
 
 Ruled out:
+- ruled out: 338A85 (BD801F) as the landable arc, because it is one draw a frame against seven arcs in both modes, and it sits in the run of the star's draws; and E79BF3 (4724A8) as the atmosphere ring, because the ring's bodies and count are 12382D's and E79BF3's shader is most opaque at a surface's centre. Both were first guesses in this doc, and neither draw's constants have been read.
+- ruled out: a reader of the `SystemMapPlanet_*` set in the System Map's code, a run-time name, and a radius-to-index ladder in its node code, because a scan of the whole image and every caller of the node's radius, scale and extent slots found none (analysis-inbox 20261105-system-map, section 4).
 - ruled out: the atmosphere pass (9FFA5D, 8134D0) as the System Map's small blue shell, because in dump 050358167001 its camera constant cb1[3] equals the eye-relative body position over the outer radius to four digits and to 0.000 degrees, per eye, and its inner radius matches the planet's silhouette to the pixel in both eyes.
 - ruled out: making the pointer stand aside when the UI layer is not live (35a97739 on `claude/rc7-review-fixes`), because the hover then goes back to the game's near point and the cursor stops selecting stars with Anti-aliasing off (Sean, 2026-11-05). The hover needs no layer, and the mask and probe now run without it.
 - ruled out: the grid's vertical as the quads' up (key value `stems`), because with the camera 45 degrees down a quad at view tangents (x, y) has 1 + y times its height and shears by atan(x / (1 + y)). Flown 16:41 beside the camera's up; Sean prefers the camera's up.
@@ -249,25 +251,35 @@ The change: the pointer's gate opens on either map; K's detour takes both return
 
 **The cursor with Anti-aliasing off.** The regression was `35a97739` on `claude/rc7-review-fixes`, flown in 80c56505 and not on main: with the layer down the pointer stood aside, so the hover went back to the game's near point. Its reason stands: the mask and the probe ran only inside draws the layer took, so the arrow had nothing to say it was on a panel. Now both run from the game's own issue when the layer is not live (galaxy_map_ui.h, THE MASK WITHOUT THE LAYER), with a mask the size of the target, and the pointer's gate takes no term from the layer. That commit must not land as it is: merging that branch has to drop its `pointerWanted` gate.
 
-**The two markers. Sizes OPEN.** What the dump shows:
+**The two markers. Cause OPEN.** Flat's screenshot and census (log `edvr_gfx_20261105_062523`, 06:28:33, 1920x1080, build f379c288) against the VR dump. World sizes are measured against the 3.29 units between the two bodies' centres, in each picture.
 
-| Marker | Measured | Draw | Standing |
+| | Flat | VR | Flat / VR |
 |---|---|---|---|
-| Atmosphere pass, faint, at the limb | Inner radius is the silhouette, in both eyes | 9FFA5D, 8134D0 | Correct |
-| Thick blue ring, inner 0.615 of outer | World radius about 0.57 on every body with one: 0.63 of the silhouette on 38 Lyncis 1 (surface 0.886), about the atmosphere's outer radius on moons (surface 0.43, outer 0.556). A circle far off axis, so parallel to the image. In the scene: it is in the left eye's frame 0, which loses the UI | E79BF3, 4724A8: INFERRED | Size OPEN |
-| Landable arc | Concentric, 0.87 of the silhouette on the planet at (15.35, 0, 0) (80 px against 92) | 338A85, BD801F: a ring mesh of radius cb2[0].w: INFERRED | Size OPEN |
+| 38 Lyncis 1, surface | 0.885 | 0.886 | 1.00 |
+| Planet at (15.35, 0, 0), surface | 0.785 | 0.79 | 0.99 |
+| The X icon's width | 1.00 | 1.05 | 0.96 |
+| Atmosphere ring on 38 Lyncis 1, outer radius | 1.14 (its atmosphere's outer radius is 1.15) | 0.56 | 2.04 |
+| Landable arc on the planet at (15.35, 0, 0) | 1.424 | 0.687 | 2.07 |
 
-Static RE (analysis-inbox 20261105-system-map; addresses in `docs/build-334925.md`) found the assets by name and no reader of them: 25 `SystemMapPlanet_*` models in five variants each (`Atmospheric`, `LandableArc`, `LandableCity`, `PermitArc`, `PermitCity`), loaded in one switch into a set no code was found reading, so the choice and the scale may come from data. `gPlanetSystemMapUpScale` is written once per planet draw from a double behind the planet record, with no camera read at the write. Nothing on the path reads a camera or a viewport, and no stereo branch was found. One global byte tested in the planet draw is unread. None of that shows why flat and VR would differ.
+The markers are 12382D sprites (PS 855C46) from 1024x1024 atlases, one sprite on each marked body, and the sprites' meshes split the modes. INFERRED that these are the ring and the arc: the bodies and the counts match, nothing else in both draw lists does, and the ring and arc are in the scene where the white hover halos (B10B03, UI frame) are not. Index start and base vertex in each census:
 
-Hypotheses, and what splits them in one VR dump and one flat dump of the same body (the dump now keeps these draws' constants):
+| Kind | Flat | VR |
+|---|---|---|
+| Atmosphere ring, 9 bodies | 8 on (736, 368), 1 on (744, 372) | 9 on (7248, 1734) |
+| Landable arc, 7 bodies | 6 on (776, 388), 1 on (784, 392) | 7 on (7288, 1754) |
+| Settlement ticks, 6 bodies | 6 on (216, 108) | 6 on (6728, 1474) |
+
+The same pool, loaded 6512 indices later in VR: all three kinds sit at that one offset, so VR's meshes are flat's common ones, and VR draws nothing on the next mesh along. VR's sizes fit the moons (surface 0.43, atmosphere 0.556) and flat's fit these two larger planets. So this reads as a choice of mesh variant per body rather than a wrong scale. Not proven: flat's record scale s is unread (VR's is 0.88 on every marker), and neither mesh's size has been read.
+
+Static RE (analysis-inbox 20261105-system-map; addresses in `docs/build-334925.md`) did not find the selector. There are 25 `SystemMapPlanet_*` models in five variants each (`Atmospheric`, `LandableArc`, `LandableCity`, `PermitArc`, `PermitCity`), loaded by name in one switch into a set nothing in the executable was found reading: no reader of the set, no name built at run time, no ladder from the body's radius to an index in the System Map's node code, and no camera or viewport read outside the pick. So the choice may be the engine's, acting on the assets' own data. The engine has a LOD manager, whose selection was not found, and a settings block holding `LODDistanceScale` beside `HMDRenderTargetMultiplier`. Whether either feeds this is OPEN.
 
 | Hypothesis | Signature |
 |---|---|
-| H1. The marker's size is fixed by data and the body's is not: the planet is bigger in VR than in flat | E79BF3's cb0[9..11] scale and 338A85's cb2[0].w the same in both; cb1[126].x differs |
-| H2. A camera term in the marker's size | The marker's scale differs, cb1[126].x the same; the ratio is the projections' or the render sizes' |
-| H3. Same numbers in both, and the flat picture only looks right for another reason | All the same: the markers were never at the limb, and the ask becomes what they should be |
+| H4. A LOD on distance: near bodies draw the larger variant, and the VR camera was farther | The ring jumps with zoom in both modes, at the same camera height. Flat zoomed out looks like VR |
+| H5. A LOD on on-screen size, which VR's wider view makes smaller by about 2 | It jumps in both, and VR needs to be nearer by about the projections' ratio |
+| H6. Something else holds VR at the small variant | It never jumps in VR, whatever the zoom |
 
-No fix for the markers until this is read.
+The test is one look, no build: zoom in and out over a planet with the ring in each mode. A dump either side of a jump gives the height. The next dump also keeps 12382D's vertex streams, which give each variant's size. No fix for the markers until this is read; H4 would mean flat has the same mismatch when zoomed out, and the ask becomes what they should be.
 
 ## Flight card, System Map and Anti-aliasing off
 
@@ -277,7 +289,7 @@ Environment: Frontier, native OpenXR, whichever headset; DLSS on unless the step
 2. Galaxy Map, AA off (F7, or the F8 menu). Expect: the cursor selects stars as with AA on, and the arrow is at panel depth on panels and star depth off them. Log: `galaxy map: the UI layer is not taking the panels`, and in the 30 s line panel draws issued into the mask and probes made and answered, all above zero. All zero means the path never ran.
 3. System Map, AA off: the same as step 1.
 4. Galaxy Map, AA on: 90 fps, and selection as before.
-5. The markers. System Map, AA on, on a body with the thick blue ring and a landable planet with the arc in view: Insert dump. Then switch to flat (the same session, the same body and as near the same zoom as you can): a screenshot, and F10 if you are willing. Those give the marker's size in both modes (H1 to H3 above).
+5. The markers. System Map, AA on, with a large planet carrying the ring or arc in view: zoom slowly all the way in and all the way out, and watch whether the ring or arc jumps in size against its planet. Insert dump at the farthest zoom where it is small and, if it jumps, just past the jump. Then in flat: the same zoom in and out, and note whether it jumps too. Those split H4, H5 and H6 above.
 
 ## The merge with main
 
