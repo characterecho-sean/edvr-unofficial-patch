@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State (2026-11-05): stall FIXED and flown (`0826fc84`, Frontier, flat), on the
-  branch, not merged.** Sean: "Fix seems to work!" The flight's table is in "The naming
+- **State (2026-11-05): stall FIXED and flown (`0826fc84`, Frontier, flat), on main; not
+  in a release yet.** Sean: "Fix seems to work!" The flight's table is in "The naming
   veto stall". Not covered: TAA, a grenade or tool in hand, and per-frame captures.
 - **Before the fix:** 3 frames of 138 to 170 ms at both zoom edges on Frontier, flat,
   DLSS. A zoom step over 10 % a frame makes the world's own camera fail the prediction, so nothing
