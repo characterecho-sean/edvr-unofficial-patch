@@ -2934,6 +2934,14 @@ void testSupercruiseLines() {
         hold = hold && h.step(3, 1) && h.step(4, 1) && h.step(3 + mapcam::kHoldFrames, 1) && !h.step(4 + mapcam::kHoldFrames, 1);
         hold = hold && h.step(20, 2) && h.step(21, 2);
         check(hold, "MC2: a counter that never advanced is not open; an advance opens it, it stays open for the hold's frames and then closes; the next advance reopens it");
+        {   // a reset (the flat profile's stand-down) while the publish counter is not 0: closed until the counter advances. A default Hold read it as a map opening.
+            mapcam::Hold stale;
+            const bool falseEdge = stale.step(100, 5);
+            mapcam::Hold seeded = mapcam::Hold::closedAt(5);
+            bool closed = !seeded.step(100, 5) && !seeded.step(101, 5) && !seeded.step(100 + mapcam::kHoldFrames + 5, 5);
+            const bool opens = seeded.step(200, 6) && seeded.step(200 + mapcam::kHoldFrames, 6) && !seeded.step(201 + mapcam::kHoldFrames, 6);
+            check(falseEdge && closed && opens, "MC2b: a hold reset with a non-zero publish counter stays closed until the counter advances (an unseeded one reads the counter's value as a map opening), then opens and holds as before");
+        }
         check(mapcam::viewOfName("GalaxyMapView") == mapcam::View::kGalaxy && mapcam::viewOfName("SystemMapView") == mapcam::View::kSystem && mapcam::viewOfName("") == mapcam::View::kNone &&
                   mapcam::viewOfName("GalaxyMapViewX") == mapcam::View::kNone && mapcam::viewOfName("galaxymapview") == mapcam::View::kNone && mapcam::viewOfName(nullptr) == mapcam::View::kNone,
               "MC3: the two stage names are exact; anything else is no view");
@@ -3056,6 +3064,15 @@ void testSupercruiseLines() {
             const float yawed[3] = {0.040855f + 1.7e-4f * 1.035048f, -0.007648f, 1.035048f};
             check(holdApplies(h, yawed, 7), "GP6c: the 1.7e-4 radians the arrow drifts while the head yaws 8.7 degrees is held");
         }
+        // The System Map's state is on only when the pointer is armed, the build's System Map return was found, a map is open and it is not the Galaxy Map.
+        {
+            using edvr::mappointer::systemMapOn;
+            check(!systemMapOn(true, true, 0x1000, true) && !systemMapOn(true, false, 0, true), "GP6d: the Galaxy Map open is never the System Map");
+            check(systemMapOn(false, true, 0x1000, true), "GP6d: the System Map open, armed, with its return found, is on");
+            check(!systemMapOn(false, true, 0, true), "GP6d: the System Map open without its return found stays as the game made it");
+            check(!systemMapOn(false, false, 0x1000, true) && !systemMapOn(false, false, 0, true), "GP6d: before the pointer is armed, or after it stood down, the System Map's state is off");
+            check(!systemMapOn(false, true, 0x1000, false) && !systemMapOn(false, true, 0, false), "GP6d: no map open is off");
+        }
         uint8_t gate[edvr::mappointer::kGateRelayBytes];
         std::memset(gate, 0xCC, sizeof(gate));
         int cell = 0, callback = 0;
@@ -3099,7 +3116,7 @@ void testSupercruiseLines() {
               "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
         check(pointer.find("if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);") != std::string::npos && pointer.find("gamePinMatches(kSystemPointerReturnRva") != std::string::npos &&
                   pointer.find("return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);") != std::string::npos &&
-                  pointer.find("const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
+                  pointer.find("const bool open = galaxy || system;") != std::string::npos && pointer.find("const bool system = mappointer::systemMapOn(galaxy, s.armed.load(std::memory_order_acquire), s.systemReturn, mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
               "GP14: any caller but the two maps' pointer calls goes straight to the original projector; the System Map's is optional and pinned, and its gate opens the pointer alone, not the Galaxy Map's fixed icons");
         std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);
         check(!copyRoute.good() && screen.find("map_ui_depth.h") == std::string::npos && screen.find("mapuidepth") == std::string::npos && pointer.find("mapuidepth") == std::string::npos &&
@@ -3131,7 +3148,7 @@ void testSupercruiseLines() {
             const size_t unmapTee = screen.find("mapui::bodyConstantsUnmapped(res);"), realUnmap = screen.find("s->realUnmap(self, res, sub);", unmapTee);
             check(layerText.find("if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;") != std::string::npos && cutout != std::string::npos && blend != std::string::npos && cutout < blend &&
                       layerText.find("which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq") != std::string::npos && unmapTee != std::string::npos && realUnmap != std::string::npos &&
-                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = !galaxy && mapCameraAnyOpen();") != std::string::npos,
+                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = mappointer::systemMapOn(galaxy, s.armed.load(std::memory_order_acquire), s.systemReturn, mapCameraAnyOpen());") != std::string::npos,
                   "GP17c: the System Map's grid takes no test in the layer, the bodies are cut out once an eye-frame before the first draw after them, the plane's icons are told from the grid by their count, and the markers' constants are read before the real Unmap");
             const std::string passText = slurp("src/d3d11/temporal_pass.cpp");
             check(passText.find("const bool still = temporalMapKeeps(mapCameraAnyOpen(), moved, mapRows);") != std::string::npos && passText.find("if (mapRows) p.split[0] = temporalSplitMetres(kTemporalShipMetres, true, false);") != std::string::npos &&

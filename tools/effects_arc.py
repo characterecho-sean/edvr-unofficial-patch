@@ -64,7 +64,11 @@ def fnv1a64(data):
 def inflate(raw):
     if len(raw) <= HEADER_BYTES:
         raise ValueError("archive shorter than its header")
-    return zlib.decompressobj(-15).decompress(raw[HEADER_BYTES:])
+    d = zlib.decompressobj(-15)
+    data = d.decompress(raw[HEADER_BYTES:])
+    if not d.eof:
+        raise ValueError("archive stream is truncated: the deflate data ends before its end marker")
+    return data
 
 
 def records(data):
@@ -315,6 +319,32 @@ def self_test():
     except ValueError:
         pass
 
+    # A truncated stream is refused, not read as a shorter archive.
+    good = fake_archive(5)
+    try:
+        inflate(good[:-6])
+        check(False, "truncated stream refused")
+    except ValueError as exc:
+        check("truncated" in str(exc), "truncated stream says so")
+    check(inflate(good) is not None, "the whole stream still inflates")
+
+    # A bad archive gets the tool's message and exit 2, not a traceback: a truncated stream, and a record the walker accepts that holds a DXBC header cut short.
+    with tempfile.TemporaryDirectory() as tmp:
+        cut = os.path.join(tmp, "cut.arc")
+        with open(cut, "wb") as f:
+            f.write(good[:-6])
+        check(main(["list", "--arc", cut]) == 2, "a truncated archive exits 2")
+        short = os.path.join(tmp, "short.arc")
+        stub = fake_record(5, b"ah", SHADER_4CC, b"DXBC")
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)
+        with open(short, "wb") as f:
+            f.write(b"\0" * HEADER_BYTES + c.compress(stub) + c.flush())
+        try:
+            rc = main(["list", "--arc", short])
+        except struct.error:
+            rc = "struct.error escaped"
+        check(rc == 2, "a record too short to read exits 2 (got %s)" % (rc,))
+
     for f in failures:
         print("FAIL: %s" % f)
     print("effects_arc self-test: %s" % ("FAILED" if failures else "passed"))
@@ -343,7 +373,7 @@ def main(argv=None):
         return 2
     try:
         return {"list": cmd_list, "find": cmd_find, "extract": cmd_extract}[args.cmd](args)
-    except (OSError, ValueError, zlib.error) as exc:
+    except (OSError, ValueError, zlib.error, struct.error) as exc:
         print("effects_arc: %s" % exc)
         return 2
 

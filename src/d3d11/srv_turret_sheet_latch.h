@@ -106,7 +106,10 @@ private:
 //     preceding kBlindWindowMs (the watcher is blind: a joystick the game reads in a way it misses). In fallback the gate is open while the commander is in the Scorpion with the view
 //     off, the sheet raises the view unfiltered and the hold starts there: a4ebcbec's behaviour.
 constexpr uint64_t kPressWaitMs = 2000;
-constexpr uint64_t kBlindWindowMs = 2000;
+// Longer than the press window: a press whose view arrives after kPressWaitMs times out first, and the view that follows it must still find that press recent, or the watcher is declared blind
+// until the bindings change.
+constexpr uint64_t kBlindWindowMs = 5000;
+static_assert(kBlindWindowMs > kPressWaitMs, "a press that timed out must still count as seen when its late view arrives");
 
 enum class FallbackWhy : uint8_t { kNone, kUnobservable, kBlind };
 enum class GateEvent : uint8_t {

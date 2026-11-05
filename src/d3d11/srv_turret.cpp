@@ -995,14 +995,13 @@ void srvTurretFrameTick(uint32_t frameNo) {
     const bool on = gate.on;
     if (gate.event == st::sheetlatch::GateEvent::kFellBack) {
         Log::get().note("srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): %s",
-                        gate.fallback == st::sheetlatch::FallbackWhy::kUnobservable ? press.why : "the view went on with no press seen in the preceding 2000 ms, so the watcher is blind (a device it does not see)");
+                        gate.fallback == st::sheetlatch::FallbackWhy::kUnobservable ? press.why : "the view went on with no press seen in the preceding 5000 ms, so the watcher is blind (a device it does not see)");
     } else if (gate.event == st::sheetlatch::GateEvent::kFallbackOff) {
         Log::get().note("srv turret press: the bindings changed; the press is trusted again");
     }
     {   // the press gate's words for the entry fade, which runs later in this frame
         SrvTurretPressWords w;
         w.ageMs = static_cast<double>(gate.pressAgeMs);
-        w.waiting = gate.waiting;
         w.sheetEdge = gate.sheetEdge;
         w.noPress = gate.noPress;
         w.fallback = static_cast<uint8_t>(gate.fallback);

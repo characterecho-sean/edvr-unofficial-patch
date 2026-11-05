@@ -25074,12 +25074,12 @@ def self_test_health():
               lacks=["UNPARSED"])
         check("srv turret: the press watcher's, the fallback's and the entry press lines are not this rule's: no UNPARSED, no change of verdict",
               st_ok + [(1, st_set()),
-                       (1, "srv turret press: Elite's ToggleBuggyTurretButton in Custom.4.2.binds: 1 bound slot(s): [0] GamePad:GamePad_FaceUp (xinput pad); 1 watched, 0 cannot be seen. The press starts the entry fade."),
+                       (1, "srv turret press: Elite's ToggleBuggyTurretButton in Custom.4.2.binds: 1 bound slot(s): [0] GamePad:GamePad_FaceUp (xinput pad); 1 watched, 0 cannot be seen. The press opens the window in which the gunner sheet raises the turret view."),
                        (2, st_view_early()), (3, st_cam()),
                        (3, "srv turret entry fade: entry 1: press at frame 4100; sheet +310 ms after the press; Status.json +430 ms after the press"),
                        (3, "srv turret entry fade: entry 2: no press was seen (the press watcher saw nothing before the view went on: fallback); the view was raised by Status.json"),
                        (4, "srv turret entry fade: press at frame 4300: the press raised no view in 2000 ms; the black fades back in over 200 ms, no camera move"),
-                       (4, "srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): the view went on with no press seen in the preceding 2000 ms, so the watcher is blind (a device it does not see)"),
+                       (4, "srv turret press: falling back to the gunner-sheet watch for the rest of the session or until the bindings change (the gate stays open in the Scorpion with the view off, the hold starts at the sheet): the view went on with no press seen in the preceding 5000 ms, so the watcher is blind (a device it does not see)"),
                        (5, "srv turret press: the bindings changed; the press is trusted again"), (7, st_view(False))], 0, [("OK", ST)],
               has=["camera back 0.60 m published 1 time(s)"], lacks=["UNPARSED", "NEVER APPLIED"])
         check("srv turret: a drifted early-edge tail is UNPARSED", st_ok + [st_view_early().replace("Status.json not yet", "status unknown")], 4, [("UNPARSED", ST)])

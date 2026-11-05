@@ -35,6 +35,13 @@ struct Hold {
         if (count != lastCount) { lastCount = count; lastFrame = frame; seen = true; }
         return seen && frame - lastFrame <= kHoldFrames;
     }
+    // A closed hold that takes the publish counter as it stands now for the last one seen: a reset while the counter is not 0 (a map was opened earlier in the session) reads as
+    // closed until the counter advances, not as a map opened by the counter differing from 0.
+    static Hold closedAt(uint64_t count) {
+        Hold h;
+        h.lastCount = count;
+        return h;
+    }
 };
 
 struct Pose {

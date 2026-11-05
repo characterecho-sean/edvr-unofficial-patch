@@ -216,8 +216,10 @@ inline bool constantFillPass(const FlatContractObservation& k) {
            fullViewport(k, k.width, k.height);
 }
 // `r` is a target's writes and `fills` how many of them after the first were constant fills: one image-making pass, then only fills.
+// The first writer's pair, which is the record's key, is the fill's own: then no image-making pass came first and the target is not one.
 inline bool oneDrawThenFills(const FlatContractRecord& r, uint32_t fills) {
     if (!fills) return oneDraw(r);
+    if (r.key.vs == kConstantFillVs && r.key.ps == kConstantFillPs) return false;
     return r.draws == 1u + fills && ordered(r) && r.firstInstances == 1;
 }
 inline bool hdrViewport(uint32_t count, const float* viewport, uint32_t w, uint32_t h) {

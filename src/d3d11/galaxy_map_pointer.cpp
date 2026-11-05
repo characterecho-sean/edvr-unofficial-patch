@@ -331,7 +331,7 @@ void mapPointerFrame() noexcept {
     State& s = *g_s;
     const uint64_t now = GetTickCount64();
     const bool galaxy = mapCameraGalaxyOpen();
-    const bool system = !galaxy && mapCameraAnyOpen();
+    const bool system = mappointer::systemMapOn(galaxy, s.armed.load(std::memory_order_acquire), s.systemReturn, mapCameraAnyOpen());
     mapui::setSystemOpen(system);
     if (system) {
         MapCameraPose pose;
@@ -372,7 +372,7 @@ void mapPointerFrame() noexcept {
                         s.systemReturn ? "" : " (not found in this build: the System Map stays as the game made it)");
     }
     // The hover and the arrow on either map: the arrow's direction is the same ray in both (docs/galaxy-map-vr-2026-11-03.md, "The System Map"). The fixed icons and the sprite depth stay the Galaxy Map's.
-    const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());
+    const bool open = galaxy || system;
     if (open) ++s.openFrames;
     if (open != s.open) {
         if (open) s.openedInWindow = true;

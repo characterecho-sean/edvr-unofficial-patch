@@ -860,8 +860,8 @@ void mapCameraFrame() noexcept {
         if (!f.automaticLive.load(std::memory_order_acquire) && !f.eye.live.load(std::memory_order_acquire)) f.gate.store(0, std::memory_order_release);
         f.mapGalaxyOpen.store(false, std::memory_order_release);
         f.mapAnyOpen.store(false, std::memory_order_release);
-        f.mapGalaxyHold = mapcam::Hold{};
-        f.mapSystemHold = mapcam::Hold{};
+        f.mapGalaxyHold = mapcam::Hold::closedAt(f.map.galaxyPublishes());   // the counters keep their values: seeded, so the first VR frame after the switch back is no map opening
+        f.mapSystemHold = mapcam::Hold::closedAt(f.map.systemPublishes());
         f.mapWasOpen = false;
         return;
     }
