@@ -1598,6 +1598,146 @@ inline void run87(Check&& check) {
         f87::planWindows(f87::ClusterHist{}, false, 0, total, &p);
         check(p.windows == 0 && !p.holds(0) && p.distance(5) == ~0u, "F87c: no entries, no windows");
     }
+    // ---- C, build 3: one marker copy for both eyes (mergePlans, the merged lookup, MergedPlan::fault) --------------------------------------------------
+    {
+        const uint32_t total = 196608;
+        uint64_t seed = 0x9E3779B97F4A7C15ull;
+        auto rnd = [&seed](uint32_t m) {
+            seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+            return static_cast<uint32_t>((seed >> 33) % m);
+        };
+        bool setOk = true, shape = true, capOk = true, lookupOk = true;
+        uint32_t mergedAny = 0;
+        for (int iter = 0; iter < 300; ++iter) {
+            f87::WinPlan pl[2];
+            for (int e = 0; e < 2; ++e) {
+                f87::ClusterHist h;
+                const uint32_t nc = rnd(12);
+                for (uint32_t i = 0; i < nc; ++i) h.add(rnd(total), 10 + i);
+                const bool have = rnd(4) != 0;
+                f87::planWindows(h, have, rnd(total), total, &pl[e]);
+            }
+            f87::MergedPlan m;
+            f87::mergePlans(pl[0], pl[1], &m);
+            std::vector<uint8_t> held(total, 0), inMerged(total, 0);
+            for (int e = 0; e < 2; ++e)
+                for (uint32_t w = 0; w < pl[e].windows; ++w)
+                    for (uint32_t i = 0; i < pl[e].n[w]; ++i) held[pl[e].lo[w] + i] = 1;
+            for (uint32_t r = 0; r < m.ranges; ++r)
+                for (uint32_t i = 0; i < m.n[r]; ++i) inMerged[m.lo[r] + i] = 1;
+            setOk = setOk && held == inMerged;
+            uint32_t offAt = 0;
+            for (uint32_t r = 0; r < m.ranges; ++r) {
+                shape = shape && m.n[r] > 0 && (m.lo[r] % 2u) == 0u && (m.n[r] % 2u) == 0u && m.off[r] == offAt;
+                if (r) shape = shape && m.lo[r - 1] + m.n[r - 1] < m.lo[r];   // sorted, disjoint and not touching
+                offAt += m.n[r];
+            }
+            capOk = capOk && m.ranges <= 14 && m.used == offAt && m.used <= 65536u;
+            if (m.joined) ++mergedAny;
+            // the lookup: every entry the plans hold has a slot that is inside the buffer, and no other entry has one
+            for (uint32_t i = 0; i < total; i += 7) {
+                const uint32_t s = m.slot(i);
+                lookupOk = lookupOk && ((s != ~0u) == (held[i] != 0)) && (s == ~0u || s < m.used);
+            }
+        }
+        check(setOk, "F87c build 3: random plans of both eyes: the merged ranges hold every entry either plan holds, and nothing else");
+        check(shape && capOk, "F87c build 3: ranges are sorted, disjoint, not touching, even and non-empty; off runs end to end; within 14 ranges and 65,536 entries");
+        check(lookupOk && mergedAny > 0, "F87c build 3: the merged lookup has a slot for exactly the held entries (and some random plans did join windows)");
+    }
+    {
+        // the capacity guard: two disjoint full plans (7 windows, 32,768 entries each) merge to 14 ranges and 65,536 entries
+        f87::WinPlan a, b;
+        for (uint32_t w = 0; w < 7; ++w) {
+            const uint32_t n = w == 0 ? f87::kF85Entries : f87::kWinEntries;
+            f87::planAdd(&a, w * 10000u, n);
+            f87::planAdd(&b, 100000u + w * 10000u, n);
+        }
+        f87::MergedPlan m;
+        f87::mergePlans(a, b, &m);
+        check(a.used == 32768u && b.used == 32768u && m.ranges == 14 && m.used == 65536u && m.joined == 0 && m.windows == 14 && m.where(100000u + 6 * 10000u + 4095) >= 0 && m.where(6 * 10000u) >= 0,
+              "F87c build 3: two disjoint full plans merge to 14 ranges and 65,536 entries, nothing dropped");
+        // identical plans: copied is the plan's own union, requested is twice the plan's
+        f87::WinPlan c;
+        f87::planAdd(&c, 1000, 8192);
+        f87::planAdd(&c, 6000, 4096);    // overlaps the first
+        f87::planAdd(&c, 50000, 4096);
+        f87::MergedPlan same, solo;
+        f87::mergePlans(c, c, &same);
+        f87::mergePlans(c, f87::WinPlan{}, &solo);
+        const uint32_t requested = c.used;   // 16,384 entries
+        check(same.used == solo.used && same.used == (10096u - 1000u) + 4096u && same.ranges == 2 && same.used < requested && 2u * requested == 32768u && same.joined == 6,
+              "F87c build 3: identical plans copy the plan's own union once (less than its requested entries when its windows overlap); requested counts twice");
+        // a zero-length window is skipped
+        f87::WinPlan z = c;
+        f87::planAdd(&z, 30000, 0);
+        f87::MergedPlan mz;
+        f87::mergePlans(z, f87::WinPlan{}, &mz);
+        bool same2 = mz.ranges == solo.ranges && mz.used == solo.used && mz.windows == 3;
+        for (uint32_t r = 0; r < solo.ranges; ++r) same2 = same2 && mz.lo[r] == solo.lo[r] && mz.n[r] == solo.n[r] && mz.off[r] == solo.off[r];
+        check(same2 && mz.where(30000) < 0, "F87c build 3: a zero-length window is skipped and the rest merge as without it");
+        // touching windows join
+        f87::WinPlan t0, t1;
+        f87::planAdd(&t0, 0, 4096);
+        f87::planAdd(&t1, 4096, 4096);
+        f87::MergedPlan mt;
+        f87::mergePlans(t0, t1, &mt);
+        check(mt.ranges == 1 && mt.n[0] == 8192 && mt.joined == 2, "F87c build 3: windows that touch join into one range");
+    }
+    {
+        // a synthetic stream (entry i holds x = i): the merged lookup returns what the two-buffer lookup returns, hit or miss
+        const uint32_t total = 196608;
+        f87::ClusterHist h0, h1;
+        for (uint32_t i = 0; i < 5; ++i) {
+            h0.add(20000u + i * 9000u, 10 + i);
+            h1.add(23000u + i * 9500u, 10 + i);
+        }
+        f87::WinPlan pl[2];
+        f87::planWindows(h0, true, 21000, total, &pl[0]);
+        f87::planWindows(h1, true, 24000, total, &pl[1]);
+        std::vector<uint32_t> bufEye[2], bufMerged;
+        for (int e = 0; e < 2; ++e) {
+            bufEye[e].assign(static_cast<size_t>(f87::kWinCapEntries) * 2u, 0u);
+            for (uint32_t w = 0; w < pl[e].windows; ++w)
+                for (uint32_t i = 0; i < pl[e].n[w]; ++i) bufEye[e][2u * (pl[e].off[w] + i)] = pl[e].lo[w] + i;
+        }
+        f87::MergedPlan m;
+        f87::mergePlans(pl[0], pl[1], &m);
+        bufMerged.assign(static_cast<size_t>(f87::kMergeCapEntries) * 2u, 0u);
+        for (uint32_t r = 0; r < m.ranges; ++r)
+            for (uint32_t i = 0; i < m.n[r]; ++i) bufMerged[2u * (m.off[r] + i)] = m.lo[r] + i;
+        bool equal = true;
+        for (uint32_t i = 0; i < total; ++i) {
+            int hitOld = -1;
+            uint32_t xOld = 0;
+            for (int e = 0; e < 2 && hitOld < 0; ++e) {
+                const int w = pl[e].where(i);
+                if (w >= 0) {
+                    hitOld = e;
+                    xOld = bufEye[e][2u * (pl[e].off[w] + (i - pl[e].lo[w]))];
+                }
+            }
+            const uint32_t s = m.slot(i);
+            if ((hitOld >= 0) != (s != ~0u)) equal = false;
+            else if (s != ~0u && (bufMerged[2u * s] != xOld || xOld != i)) equal = false;
+        }
+        check(equal, "F87c build 3: the merged lookup returns the same x as the two-buffer lookup for every entry of the stream, hit or miss");
+        // a fault in one range: it and the plan windows inside it read empty, the lookup skips it, every other range still returns its entries
+        f87::WinPlan pl0, pl1;
+        f87::planAdd(&pl0, 1000, 8192);
+        f87::planAdd(&pl0, 6000, 4096);
+        f87::planAdd(&pl1, 50000, 4096);
+        f87::planAdd(&pl1, 1000, 4096);
+        f87::planAdd(&pl1, 90000, 4096);
+        f87::MergedPlan mp;
+        f87::mergePlans(pl0, pl1, &mp);
+        check(mp.ranges == 3 && mp.lo[0] == 1000 && mp.lo[1] == 50000 && mp.lo[2] == 90000, "F87c build 3: the fault fixture merges to three ranges");
+        f87::WinPlan q0 = pl0, q1 = pl1;
+        f87::MergedPlan mf = mp;
+        mf.fault(0, &q0, &q1);
+        bool windowsEmpty = q0.n[0] == 0 && q0.n[1] == 0 && q1.n[1] == 0 && q1.n[0] == 4096 && q1.n[2] == 4096;
+        bool othersKept = mf.slot(1000) == ~0u && mf.slot(9000) == ~0u && mf.slot(50000) == mp.slot(50000) && mf.slot(94095) == mp.slot(94095) && mf.where(50000) == 1 && mf.where(94095) == 2;
+        check(windowsEmpty && othersKept && mf.n[0] == 0 && mf.where(1000) < 0, "F87c build 3: a fault zeroes that range and the plan windows inside it; the lookup skips it and every other range still returns its entries");
+    }
     // ---- F: the scene rows' fallback ---------------------------------------------------------------------------------------------------------------
     {
         float a[20], b[20];

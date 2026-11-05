@@ -386,6 +386,77 @@ inline void planWindows(const ClusterHist& h, bool haveCentre, uint32_t centre, 
         }
     }
 }
+// Build 3: both eyes' windows merged into sorted, disjoint ranges, each copied once at an Unmap into one buffer. An entry both eyes' plans hold (or two windows of one plan
+// hold) is read once instead of up to four times; the values read are the same bytes of the same Unmap.
+constexpr uint32_t kMergeMax = 2 * kWinMax, kMergeCapEntries = 2 * kWinCapEntries;   // ranges and entries of the merged copy buffer
+struct MergedPlan {
+    uint32_t lo[kMergeMax] = {}, n[kMergeMax] = {}, off[kMergeMax] = {};   // off: where the range's copy starts in the buffer (entries)
+    uint32_t ranges = 0, used = 0;                                         // used: the entries copied (the sum of n)
+    uint32_t windows = 0, joined = 0;                                      // the non-empty windows of both plans; those that landed in a range with another window
+    // The range holding `entry`, -1 when none (a zero-length range holds nothing).
+    int where(uint32_t entry) const noexcept {
+        for (uint32_t r = 0; r < ranges; ++r)
+            if (n[r] && entry >= lo[r] && entry - lo[r] < n[r]) return static_cast<int>(r);
+        return -1;
+    }
+    // The entry's offset in the buffer (entries), ~0u when no range holds it.
+    uint32_t slot(uint32_t entry) const noexcept {
+        const int r = where(entry);
+        return r < 0 ? ~0u : off[r] + (entry - lo[r]);
+    }
+    // A failed copy of range `r`: it and every window of either plan inside it read as empty (each window lies inside exactly one range).
+    void fault(uint32_t r, WinPlan* p0, WinPlan* p1) noexcept {
+        if (r >= ranges) return;
+        const uint32_t a = lo[r], b = lo[r] + n[r];
+        WinPlan* const ps[2] = {p0, p1};
+        for (WinPlan* p : ps) {
+            if (!p) continue;
+            for (uint32_t w = 0; w < p->windows; ++w)
+                if (p->n[w] && p->lo[w] >= a && p->lo[w] + p->n[w] <= b) p->n[w] = 0;
+        }
+        n[r] = 0;
+    }
+};
+inline void mergePlans(const WinPlan& p0, const WinPlan& p1, MergedPlan* out) noexcept {
+    *out = MergedPlan{};
+    uint32_t slo[kMergeMax], sn[kMergeMax], cnt = 0;
+    const WinPlan* const ps[2] = {&p0, &p1};
+    for (const WinPlan* p : ps)
+        for (uint32_t w = 0; w < p->windows && cnt < kMergeMax; ++w) {
+            if (!p->n[w]) continue;
+            uint32_t i = cnt++;
+            while (i > 0 && slo[i - 1] > p->lo[w]) {   // insertion sort by lo
+                slo[i] = slo[i - 1];
+                sn[i] = sn[i - 1];
+                --i;
+            }
+            slo[i] = p->lo[w];
+            sn[i] = p->n[w];
+        }
+    out->windows = cnt;
+    uint32_t members = 0;   // windows in the range being built
+    for (uint32_t i = 0; i < cnt; ++i) {
+        const uint32_t end = slo[i] + sn[i];
+        if (out->ranges && slo[i] <= out->lo[out->ranges - 1] + out->n[out->ranges - 1]) {   // overlaps or touches the open range
+            uint32_t& rn = out->n[out->ranges - 1];
+            const uint32_t rend = out->lo[out->ranges - 1] + rn;
+            if (end > rend) rn = end - out->lo[out->ranges - 1];
+            ++members;
+            continue;
+        }
+        if (members > 1) out->joined += members;
+        members = 1;
+        const uint32_t r = out->ranges++;
+        out->lo[r] = slo[i];
+        out->n[r] = sn[i];
+    }
+    if (members > 1) out->joined += members;
+    for (uint32_t r = 0; r < out->ranges; ++r) {
+        out->off[r] = out->used;
+        out->used += out->n[r];
+    }
+}
+
 // The escalation: a draw that no window held starts kEscalateFrames frames of whole-stream copies.
 struct Escalation {
     uint32_t until = 0;

@@ -1,5 +1,8 @@
 #include "perf_monitor.h"
 #include "config_refresh_line.h"
+#include "draw_reissue_line.h"
+#include "draw_mask_line.h"
+#include "gpu_query_count.h"
 #include "cross_profile_cost.h"
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
@@ -198,6 +201,14 @@ struct State {
     double   drawWindowMs = 0.0;
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
+    // The re-issue counter (draw_reissue_line.h): the frame in progress (timed ticks and calls on a sample frame, calls on any frame) folded into the window at the boundary.
+    int64_t  reissueFrameTicks[kReissueCallers] = {};
+    uint32_t reissueFrameCalls[kReissueCallers] = {};
+    uint32_t reissueFrameAll = 0;
+    double   reissueWindowMs[kReissueCallers] = {};
+    uint32_t reissueWindowCalls[kReissueCallers] = {};
+    uint32_t reissueWindowAll = 0, reissueWindowSampledCalls = 0;
+    double   reissueWindowTotalMs = 0.0, reissueWindowMaxMs = 0.0;
     // The config refresh window (the line beside the draw hook's, every 1800 frames): what kEvReload (edvr.ini re-read and every module reconfigured, on the frame
     // thread, its duration the whole of it) and kEvIniWrite (a menu edit queued for the file) were noted since the last line. A held numeric row in the F8 menu is
     // one edit and, once the write lands, one refresh about every 83 ms; this prices it.
@@ -1206,7 +1217,21 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.drawWindowMs += s.drawsMsRunning;
         s.drawWindowMaxMs = std::max(s.drawWindowMaxMs, s.drawsMsRunning);
         ++s.drawWindowSamples;
+        // The same sampled frame's re-issues, each timed whole (no stride, so no scaling).
+        double frameMs = 0.0;
+        for (size_t c = 0; c < kReissueCallers; ++c) {
+            const double ms = static_cast<double>(s.reissueFrameTicks[c]) * 1000.0 / static_cast<double>(qpcFrequency());
+            s.reissueWindowMs[c] += ms;
+            s.reissueWindowCalls[c] += s.reissueFrameCalls[c];
+            s.reissueWindowSampledCalls += s.reissueFrameCalls[c];
+            frameMs += ms;
+        }
+        s.reissueWindowTotalMs += frameMs;
+        s.reissueWindowMaxMs = std::max(s.reissueWindowMaxMs, frameMs);
     }
+    s.reissueWindowAll += s.reissueFrameAll;
+    s.reissueFrameAll = 0;
+    for (size_t c = 0; c < kReissueCallers; ++c) { s.reissueFrameTicks[c] = 0; s.reissueFrameCalls[c] = 0; }
     // Reuse the existing sampled clocks; do not time every draw just to
     // explain a settlement's many thousands of hook invocations. Average
     // only measured frames, never the held value copied into the ring.
@@ -1218,6 +1243,14 @@ void perfMonitorFrame(ID3D11Device* dev) {
             double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
             unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride),
             vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
+        // Beside it, written every window (0 and "none" when nothing was re-issued), so a missing line means the code did not run.
+        char reissueLine[1024];
+        formatReissueWindow(reissueLine, sizeof(reissueLine), s.frameNo,
+                            s.drawWindowSamples ? s.reissueWindowTotalMs / s.drawWindowSamples : 0.0, s.reissueWindowMaxMs, s.drawWindowSamples,
+                            unsigned(kDrawSampleEvery), s.reissueWindowAll, s.reissueWindowSampledCalls, s.reissueWindowMs, s.reissueWindowCalls);
+        Log::get().note("%s", reissueLine);
+        for (size_t c = 0; c < kReissueCallers; ++c) { s.reissueWindowMs[c] = 0.0; s.reissueWindowCalls[c] = 0; }
+        s.reissueWindowAll = s.reissueWindowSampledCalls = 0; s.reissueWindowTotalMs = s.reissueWindowMaxMs = 0.0;
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
@@ -1227,6 +1260,25 @@ void perfMonitorFrame(ID3D11Device* dev) {
         char refreshLine[320];
         formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);
         Log::get().note("%s", refreshLine);
+        // Beside them, and written every window for the same reason: what the vertex shader's may-want byte skipped (vs_may_want.h) and the GPU timing queries EDVR
+        // issued, by owner. Both counters run from the start; each line is the change since the last one.
+        static DrawMaskCounts lastMask;
+        static GpuQueryCounts lastQueries;
+        const DrawMaskCounts maskNow = vScreenDrawMaskCounts();
+        DrawMaskCounts maskWindow;
+        maskWindow.draws = maskNow.draws - lastMask.draws;
+        for (size_t k = 0; k < kMaskSkips; ++k) maskWindow.skips[k] = maskNow.skips[k] - lastMask.skips[k];
+        lastMask = maskNow;
+        char maskLine[320];
+        formatDrawMaskWindow(maskLine, sizeof(maskLine), s.frameNo, maskWindow);
+        Log::get().note("%s", maskLine);
+        const GpuQueryCounts queriesNow = gpuQueryCountsNow();
+        GpuQueryCounts queriesWindow;
+        for (size_t o = 0; o < kGpuQueryOwners; ++o) queriesWindow.ends[o] = queriesNow.ends[o] - lastQueries.ends[o];
+        lastQueries = queriesNow;
+        char queryLine[448];
+        formatGpuQueryWindow(queryLine, sizeof(queryLine), s.frameNo, 1800u, queriesWindow);
+        Log::get().note("%s", queryLine);
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;
@@ -1311,6 +1363,14 @@ void perfMonitorNotePresentWait(double ms) {
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;
     if (realTicks > 0) g_s.drawRealTicks += realTicks;
+}
+
+void perfMonitorNoteReissue(size_t caller, bool timed, int64_t ticks) {
+    if (caller >= kReissueCallers) return;
+    ++g_s.reissueFrameAll;
+    if (!timed) return;
+    ++g_s.reissueFrameCalls[caller];
+    if (ticks > 0) g_s.reissueFrameTicks[caller] += ticks;
 }
 
 void perfMonitorSetActive(bool active) {

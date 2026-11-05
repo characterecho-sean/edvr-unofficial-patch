@@ -1,6 +1,7 @@
 #pragma once
 #include "flat_pixel_capture_policy.h"
 #include "flat_capture_directory.h"
+#include "vehicle_rig.h"
 #include "../common/config.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
@@ -147,15 +148,16 @@ public:
         if(!packed) {fail("pack-failed");return;}
         bool ok=true;
         for(unsigned i=0;i<used_ && ok;++i)ok=write(directory_+L"\\"+wide(items_[i].filename),payload[i].data(),payload[i].size());
-        char header[1600]{};
+        char header[1700]{};
         // rows_jitter: the raster phase the camera ROWS carry (2026-09-29; nonzero only under the
         // upstream camera injector), so a replay removes it as the shader does instead of guessing.
         // static_scene: the frame took the 3D main menu's stale-slot policy (FlatMonoResolveFrame::staticScene).
-        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"refusal_overlay\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"rows_jitter\":[%.9g,%.9g],\"previous_rows_jitter\":[%.9g,%.9g],\"static_scene\":%s,\"route\":\"%s\",\"capture_roi\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},\"color_provenance\":\"%s\",\"raw_provenance\":\"%s\",\"final_provenance\":\"%s\",\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"display_width\":%u,\"display_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
+        // vehicle_frame: the frame carried the vehicle frame (FlatMonoResolveFrame::vehicleFrame), so near pixels in the rig root's sphere rode it; the replay cannot redo it.
+        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"refusal_overlay\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"rows_jitter\":[%.9g,%.9g],\"previous_rows_jitter\":[%.9g,%.9g],\"static_scene\":%s,\"vehicle_frame\":%s,\"route\":\"%s\",\"capture_roi\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},\"color_provenance\":\"%s\",\"raw_provenance\":\"%s\",\"final_provenance\":\"%s\",\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"display_width\":%u,\"display_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
             static_cast<unsigned long long>(frame_.frame),frame_.mode==FlatMonoResolveMode::Dlaa?"dlaa":"dlss",frame_.configuredDlssPreset,frame_.reset?"true":"false",sample.refusalPainted?"true":"false",
             frame_.jitterX,frame_.jitterY,frame_.previousJitterX,frame_.previousJitterY,
             frame_.rowsJitterX,frame_.rowsJitterY,frame_.previousRowsJitterX,frame_.previousRowsJitterY,
-            frame_.staticScene?"true":"false",frame_.hdr?"hdr":"sdr",sample.roiX,sample.roiY,sample.roiWidth,sample.roiHeight,
+            frame_.staticScene?"true":"false",frame_.vehicleFrame?"true":"false",frame_.hdr?"hdr":"sdr",sample.roiX,sample.roiY,sample.roiWidth,sample.roiHeight,
             frame_.hdr?"private-copy-of-scene-H-before-resolve":"private-color-copy",
             frame_.hdr?"ngx-fp16-output0":"ngx-rgba8-output0",
             frame_.hdr?"scene-H-after-finish-before-tonemap":"private-finish-output1",
@@ -298,6 +300,8 @@ public:
         }
         pending_.push_back(std::move(sample));
         Log::get().note("flat pixels: copied frame=%llu resources=%u bytes=%llu sample=%u",static_cast<unsigned long long>(frame.frame),used_,static_cast<unsigned long long>(bytes),policy_.copied);
+        // The vehicle rig (issue 186): the ship and cockpit rig records' poses at the frame the pool was copied, so a capture's pool records join them by exact bits.
+        if(const auto tap=g_vehicleRigCaptureTap.load(std::memory_order_acquire))tap(frame.frame,frame.camera[5]);
     }
 };
 } // namespace edvr

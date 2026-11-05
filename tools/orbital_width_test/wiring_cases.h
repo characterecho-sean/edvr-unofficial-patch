@@ -97,7 +97,7 @@ static bool wiredUiDepth(const std::string& t) {
     if (!found(begin) || !found(end) || !found(shutdown) || !(begin < end && end < shutdown)) return false;
     const size_t made = t.find("g_orbitalWidthCb.get(ctx,orbital_width::factor())", begin);
     const size_t gate = t.find("(orbital && g_orbitalVs && orbitalWidth)", begin);
-    const size_t prepared = t.find("holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0,shader->slot);", begin);
+    const size_t prepared = t.find("holo=g_holoMotion[detail::g_uiDepthDraw.drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0,shader->slot);", begin);
     const size_t saved = t.find("ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&g_savedOrbitalWidth);", begin);
     const size_t bindVs = t.find("ctx->VSSetShader(g_orbitalVs.Get(),nullptr,0);", begin);
     const size_t bindCb = t.find("ctx->VSSetConstantBuffers(orbital_width::kSlot,1,&orbitalWidth);", begin);
@@ -136,7 +136,7 @@ static bool wiredLayerTakeVscreen(const std::string& t) {
     const size_t issue = t.find("const bool originalIssued=observedDraw(", fn);
     const size_t end = t.find("if (orbitScaled) orbitalWidthEnd(self);", fn);
     const size_t layerEnd = t.find("        uiLayerEnd(self);\n        if (originalIssued) uiLayerSecondIssues(", fn);
-    const size_t twin = t.find("if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", fn);
+    const size_t twin = t.find("if (reissues.uiDepthCoverage && uiDepthWantsReissue()) {", fn);
     const size_t twinBegin = t.find("uiDepthReissueBegin(self)", fn);
     if (!found(gate) || !found(begin) || !found(layerBegin) || !found(issue) || !found(end) || !found(layerEnd) || !found(twin) || !found(twinBegin)) return false;
     // the same factor in the layer: the gate never asks whether the layer takes the draw
@@ -234,7 +234,7 @@ static void wiringCases() {
           "control: a width patch that stands down for a draw the layer takes (another factor in the layer) trips the pin");
     check(!wiredLayerTakeVscreen(replacedAfter(vscreen, "const bool orbitScaled = ", gateText, gateText + " !barsDecided &&")),
           "control: ...whatever name the layer's decision goes by");
-    check(!wiredLayerTakeVscreen(replaced(vscreen, "if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
+    check(!wiredLayerTakeVscreen(replaced(vscreen, "if (reissues.uiDepthCoverage && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
           "control: a coverage twin that also runs for a draw the layer took (a second, phantom line in the scene's account) trips the pin");
     check(!wiredLayerTakeVscreen(replaced(without(vscreen, "    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks\n"),
                                           "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n",

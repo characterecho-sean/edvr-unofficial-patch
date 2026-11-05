@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/vscreen_auto_state.h"
@@ -82,6 +83,20 @@ bool nativeRenderLabels(NativeRenderLabels* out) {
     std::lock_guard<std::mutex> lock(g_sizingMutex);
     *out = g_labels;
     return out->valid != 0;
+}
+
+OpenxrResolutionValue readOpenxrResolutionValue() {
+    edvr::Config& config = edvr::Config::get();
+    OpenxrResolutionValue read;
+    if (edvr::runtimeVrProfile()) {
+        read.value = config.getString("fix.openxr_resolution", "");
+        read.file = config.iniName();
+        return read;
+    }
+    std::string text;
+    if (edvr::readFileBytes(config.vrSettingsPath(), &text, 1u << 20))
+        read.value = edvr::iniValue(text, "fix.openxr_resolution", "");
+    return read;
 }
 
 std::string formatOpenxrResolutionReport(const OpenxrResolutionReport& report) {
@@ -175,7 +190,8 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
     using namespace edvr::native_render;
     const std::string rt = headsetToken(in.runtimeName, sizeof(in.runtimeName));
     const std::string sys = headsetToken(in.systemName, sizeof(in.systemName));
-    const std::string value = edvr::Config::get().getString("fix.openxr_resolution", "");
+    const OpenxrResolutionValue source = readOpenxrResolutionValue();
+    const std::string& value = source.value;
     ResolutionEntry entries[kResolutionEntryMax];
     std::vector<std::string> skipped;
     const size_t count = parseResolutionEntries(value.c_str(), entries, &skipped);
@@ -212,7 +228,7 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
     report.matched = matched;
     report.width = resolved;
     report.eyes = in.eyes;
-    report.settingsFile = edvr::Config::get().iniName();
+    report.settingsFile = source.file;
     const std::string line = formatOpenxrResolutionReport(report);
     edvr::Log::get().note("%s", line.c_str());
     return TRUE;

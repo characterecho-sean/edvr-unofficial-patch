@@ -112,6 +112,92 @@ bool token(const char* raw,const char* expected,const char* message) {
     check(ok,message);
     return ok;
 }
+
+bool writeFile(const std::wstring& path,const char* text) {
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return false;
+    DWORD wrote=0;
+    const DWORD size=static_cast<DWORD>(std::strlen(text));
+    const bool ok=WriteFile(file,text,size,&wrote,nullptr) && wrote==size;
+    CloseHandle(file);
+    return ok;
+}
+
+// What the query answers for `f` as a width, with the file the log line would name.
+struct FlatAnswer { BOOL answered; Active size; uint32_t matched, entries; };
+FlatAnswer ask(const Fixture& f) {
+    FlatAnswer a{};
+    const auto answer=query(f,&a.answered);
+    a.size=active(f,answer);
+    a.matched=answer.matchedEntry;
+    a.entries=answer.entryCount;
+    return a;
+}
+
+// A session that starts in the flat profile and is switched to VR live (2026-11-04, Epic, Pimax Crystal Super,
+// edvr_gfx_20261104_133846): the OpenXR runtime is up from launch, the query runs there with the flat profile
+// active, and the game asks the runtime for the eye size again at the 3D-on apply, 260 ms BEFORE the profile
+// commit. The flight read "edvr-flat.ini has no entry for it" and the game built 4508-wide eye targets where a VR
+// launch built 4032: Config's getter answers "off" for a key the flat profile does not list, so the value has to
+// come from the VR file at the launch query. Each fixture below is a directory of its own with both files.
+void flatLaunchCases() {
+    using edvr::RuntimeProfile;
+    edvr::Config& config=edvr::Config::get();
+    const RuntimeProfile saved=edvr::runtimeProfileValue();
+    wchar_t temp[MAX_PATH]{};
+    const DWORD tempLength=GetTempPathW(MAX_PATH,temp);
+    check(tempLength>0 && tempLength<MAX_PATH,"a temporary directory exists for the flat-launch fixtures");
+    const std::wstring dir=std::wstring(temp)+L"edvr_nrs_flat_"+std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(dir.c_str(),nullptr);
+    const std::wstring vrFile=dir+L"\\"+edvr::kIniNameVrW;
+    const std::wstring flatFile=dir+L"\\"+edvr::kIniNameFlatW;
+    // The flat file carries a DIFFERENT entry for the same headset: nothing may take it (the flat profile does not list the key).
+    check(writeFile(vrFile,"[fix]\nopenxr_resolution = oculus/meta-quest-3:3283 ; set in the VR file\n") &&
+          writeFile(flatFile,"[fix]\nopenxr_resolution = oculus/meta-quest-3:2000\n"),
+          "both settings files were written");
+    config.init(dir);
+    edvr::runtimeProfileSet(RuntimeProfile::Flat);
+    config.switchProfile();
+    check(!std::strcmp(config.iniName(),edvr::kIniNameFlat),
+          "the fixture runs the flat profile on the flat file");
+    check(config.getString("fix.openxr_resolution","unset")=="off",
+          "premise: Config answers \"off\" for the VR-only key under the flat profile");
+
+    const OpenxrResolutionValue flatRead=readOpenxrResolutionValue();
+    check(flatRead.value=="oculus/meta-quest-3:3283" && !std::strcmp(flatRead.file,edvr::kIniNameVr),
+          "flat profile: the value is the VR file's, and the log line names the VR file");
+    FlatAnswer a=ask(kQ3Oculus);
+    if(a.answered!=TRUE || a.size.w!=3283 || a.size.h!=3542 || a.matched!=1 || a.entries!=1)
+        std::printf("  flat Q3 got %ux%u matched=%u entries=%u\n",a.size.w,a.size.h,a.matched,a.entries);
+    check(a.answered==TRUE && a.size.w==3283 && a.size.h==3542 && a.matched==1 && a.entries==1,
+          "flat launch: the query sizes the headset from the VR file's entry, not 100% and not the flat file's");
+    a=ask(kPimaxPi);
+    check(a.answered==TRUE && a.size.w==kPimaxPi.w && a.matched==0 && a.entries==1,
+          "flat launch: a headset with no entry in the VR file runs at 100%");
+
+    // The same file a VR launch reads, through Config, answers the same.
+    edvr::runtimeProfileSet(RuntimeProfile::Vr);
+    config.switchProfile();
+    check(!std::strcmp(config.iniName(),edvr::kIniNameVr),"the fixture runs the VR profile on the VR file");
+    const OpenxrResolutionValue vrRead=readOpenxrResolutionValue();
+    check(vrRead.value=="oculus/meta-quest-3:3283" && !std::strcmp(vrRead.file,edvr::kIniNameVr),
+          "VR profile: the same value and the same file name");
+    a=ask(kQ3Oculus);
+    check(a.answered==TRUE && a.size.w==3283 && a.size.h==3542 && a.matched==1 && a.entries==1,
+          "VR launch: the query sizes the headset from the same entry");
+
+    // A flat launch must answer exactly what a VR launch answers: the width the headset gets does not depend on the profile it started in.
+    edvr::runtimeProfileSet(RuntimeProfile::Flat);
+    config.switchProfile();
+    const FlatAnswer flatAgain=ask(kQ3Oculus);
+    check(flatAgain.size.w==a.size.w && flatAgain.size.h==a.size.h && flatAgain.matched==a.matched && flatAgain.entries==a.entries,
+          "the flat launch and the VR launch resolve the same size");
+
+    edvr::runtimeProfileSet(saved);
+    DeleteFileW(vrFile.c_str());
+    DeleteFileW(flatFile.c_str());
+    RemoveDirectoryW(dir.c_str());
+}
 }
 
 int wmain(int argc,wchar_t** argv) {
@@ -613,6 +699,8 @@ int wmain(int argc,wchar_t** argv) {
         sizeof(observed)-1,&observed)==FALSE,"sizing query rejects short ABI");
     check(edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
         sizeof(observed),reinterpret_cast<void*>(1))==FALSE,"sizing query rejects bad pointer");
+
+    flatLaunchCases();
 
     std::printf("native_render_settings_test: %u checks, %u failures\n",checks,failures);
     return failures ? 1 : 0;

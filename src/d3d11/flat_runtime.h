@@ -28,6 +28,14 @@ void flatRuntimeMapBounceNoteMap(ID3D11DeviceContext*, ID3D11Resource*, UINT,
 void* flatRuntimeMapBounceInstall(ID3D11DeviceContext*, ID3D11Resource*, UINT,
                                   D3D11_MAP, void* real);
 FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext*, ID3D11Resource*);
+// The bounce, published once it is constructed (flat_runtime.cpp mapBounce(), release store inside the static initialiser) so the Map and Unmap hooks can
+// test "anything open" inline, from any thread. Null before the first mapBounce(): nothing can be open then, because open_ rises only in install, which
+// reaches the bounce through mapBounce(). The object is never freed, so the pointer never dangles.
+extern std::atomic<FlatMapBounce*> g_flatMapBounce;
+inline bool flatRuntimeMapBounceAnyOpen() {
+    const FlatMapBounce* bounce = g_flatMapBounce.load(std::memory_order_acquire);
+    return bounce && bounce->anyOpen();
+}
 bool flatRuntimeMapBounceSamplePending(uint32_t width);
 void flatRuntimeMapBounceObserveCopy(uint32_t width, uint64_t ticks);
 void flatRuntimeMapBounceTrackedMap(D3D11_MAP type);

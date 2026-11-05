@@ -284,7 +284,7 @@ int      g_rfKind = 0;
 uint64_t g_rfFrames = 0;
 uint64_t g_rfNoteMs = 0;
 rollfree::Counters g_rfAtNote;
-GpuIntervals<8> g_copyGpu;               // the lazy copy's GPU time, one copy in 16, polled once a frame
+GpuIntervals<8, GpuQueryOwner::ParticleCopy> g_copyGpu;               // the lazy copy's GPU time, one copy in 16, polled once a frame
 ID3D11DeviceContext* g_copyGpuCtx = nullptr;
 uint64_t g_copySeq = 0;
 uint64_t g_cpuSampled = 0, g_cpuTicks = 0, g_rfBindCalls = 0;   // Begin's own CPU time, one in 8

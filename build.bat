@@ -244,6 +244,7 @@ python tools\run_jobs.py ^
     --gate "tools\package_native.py --self-test" ^
     --gate "tools\install_proton.py --self-test" ^
     --gate "tools\build_diff.py --self-test" ^
+    --gate "tools\effects_arc.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
     --gate "tools\compile_only.py --self-test" ^
     --gate "tools\linux_toolchain.py --self-test" ^
@@ -692,10 +693,11 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
+    "src\d3d11\cockpit_glass_probe.cpp" "src\d3d11\cockpit_glass.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" "src\d3d11\vehicle_rig.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1075,7 +1077,7 @@ if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe fixture assembly bui
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
@@ -2314,6 +2316,32 @@ if errorlevel 1 ( echo [edvr] ERROR: celestial motion test build failed & exit /
 "%OBJ%\celestialmotion\celestial_motion_test.exe" || exit /b 1
 exit /b 0
 
+:rig_cockpit_glass_probe_test
+echo [edvr] === cockpit glass probe (TEMPORARY) ===
+REM The canopy table, register list and log formatting of src\d3d11\cockpit_glass_probe_core.h (docs\cockpit-glass-legacy-port.md
+REM section 5). Pure; no device. Goes with the probe.
+if not exist "%OBJ%\glassprobe" mkdir "%OBJ%\glassprobe"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /WX /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\glassprobe\\" /Fe"%OBJ%\glassprobe\cockpit_glass_probe_test.exe" ^
+    "tools\cockpit_glass_probe_test\cockpit_glass_probe_test.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: cockpit glass probe test build failed & exit /b 1 )
+"%OBJ%\glassprobe\cockpit_glass_probe_test.exe" || exit /b 1
+exit /b 0
+
+:rig_cockpit_glass_test
+echo [edvr] === cockpit glass test ===
+REM visual.cockpit_glass = legacy (docs\cockpit-glass-legacy-port.md section 8): src\d3d11\cockpit_glass_core.h (the key, which bound shader is replaced, the log lines) and the build's
+REM bytecode kCockpitGlassLegacyPsBytecode (src\d3d11\cockpit_glass_shader.h) on a WARP device with the D3D debug layer, drawn with a vertex shader that carries the game's canopy vertex shader's
+REM outputs: no coverage, dirt under the sun, a cascade's shadow, a hangar lit by the probe alone. Compiled /W4 /WX. Output under obj\ and System32's d3d11.
+if not exist "%OBJ%\cockpitglass" mkdir "%OBJ%\cockpitglass"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /WX /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\cockpitglass\\" /Fe"%OBJ%\cockpitglass\cockpit_glass_test.exe" ^
+    "tools\cockpit_glass_test\cockpit_glass_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: cockpit glass test build failed & exit /b 1 )
+"%OBJ%\cockpitglass\cockpit_glass_test.exe" || exit /b 1
+exit /b 0
+
 :rig_on_foot_split_test
 echo [edvr] === on_foot_split_test.exe ===
 REM The ship split on foot (docs\per-object-motion.md, 2026-10-07; src\common\temporal_mode.h): Explorer Cam's ground within ten metres smeared
@@ -2562,6 +2590,19 @@ if errorlevel 1 ( echo [edvr] ERROR: light grid cache test build failed & exit /
 "%BUILD%\light_grid_cache_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_vehicle_rig_test
+echo [edvr] === vehicle_rig_test.exe ===
+REM The vehicle rig's pure half (src\d3d11\vehicle_rig_core.h, issue 186): a rig with a zero count, a rig torn down between frames, a vtable mismatch, a fault in a guarded read,
+REM an absurd count, the name and root sphere, the two largest record radii, the pose math against tools\flat_pixels_engine.py's, and the corrected reads
+REM (R = *(I+0x2F0)). No DLL and no game.
+if not exist "%OBJ%\vehiclerig" mkdir "%OBJ%\vehiclerig"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vehiclerig\\" ^
+    /Fe"%BUILD%\vehicle_rig_test.exe" "tools\vehicle_rig_test\vehicle_rig_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vehicle rig test build failed & exit /b 1 )
+"%BUILD%\vehicle_rig_test.exe" --self-test || exit /b 1
+exit /b 0
 :rig_pad_state_test
 echo [edvr] === pad_state_test.exe ===
 REM The pad-state probe's pure half (src\d3d11\pad_state_core.h): the identity and prologue decision, change detection, the exact line texts, the
@@ -3195,7 +3236,7 @@ REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
 %CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_render_settings\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
     "tools\native_render_settings_test\native_render_settings_test.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )

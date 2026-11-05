@@ -163,6 +163,9 @@ namespace detail {
 extern bool g_temporalPassWantedFssChrome;
 }  // namespace detail
 inline bool temporalPassWantsFssChrome() { return detail::g_temporalPassWantedFssChrome; }
+// The first test of temporalPassWantsRigidDraw, inline for the draw path: while it is false the call returns false at once. The callee keeps it as its own
+// first line, so an inline caller that tests this first changes nothing.
+inline bool temporalPassRigidDrawMayWant(int eye) { return detail::g_temporalPassWantedFssChrome && eye >= 0 && eye <= 1; }
 
 // For the periodic totals line: eye-submits treated, the measured price,
 // and the share of pixels whose history was rejected (off the image or

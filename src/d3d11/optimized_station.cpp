@@ -29,6 +29,9 @@
 #include "view_source.h"
 
 namespace edvr {
+namespace detail {
+std::atomic<bool> g_sunOff{false};   // the sun skip is on; optimized_station.h reads it inline
+}  // namespace detail
 namespace {
 
 // ---- The frame's state (the store's observations, the own pad, the held cell) --------------------------------------------------------------
@@ -1250,7 +1253,6 @@ sealed::SealState g_sealState;             // the seal trigger (optimized_statio
 bool g_flagHangarChanged = false;          // promote saw the held pad go or another own pad nearest: the tick releases on it
 // Built v14.13: the sun inside the hangar (its own state, the skip read by the draw), the hangar watch, the names near a pad with no sized shell.
 sealed::SunState g_sun;
-std::atomic<bool> g_sunOff{false};
 sealed::HangarWatch g_hangarWatch;
 char g_hangarWhy[160] = "searching for a hangar shell";
 struct NameNote {
@@ -1887,7 +1889,7 @@ void applySetting(bool on, uint32_t frame) noexcept {
         bumpRigEpoch();                      // built v14.20 (review 4): the rig and collection tables start afresh
         if (!on && g_sun.off) {   // setting off: the sun comes back on (built v14.13)
             g_sun.off = false;
-            g_sunOff.store(false, std::memory_order_release);
+            detail::g_sunOff.store(false, std::memory_order_release);
             Log::get().note("optimized station: sun light inside the hangar back on (setting off; Status docked=%s)",
                             g_dockedNow.load(std::memory_order_acquire) ? "yes" : "no");
         }
@@ -2514,7 +2516,7 @@ bool optimizedStationSealed() noexcept { return g_sealedFlag.load(std::memory_or
 
 // The draw path asks: while sealed, the sun pair is not drawn.
 bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept {
-    if (!g_sunOff.load(std::memory_order_acquire) || vs != kSunVs || ps != kSunPs) return false;   // the sun skip follows the pad, not the seal (built v14.13)
+    if (!optimizedStationSunOff() || vs != kSunVs || ps != kSunPs) return false;   // the sun skip follows the pad, not the seal (built v14.13)
     g_winSunDrawsSkipped.fetch_add(1, std::memory_order_relaxed);   // built v14.34: the 30 s line says how many (a flat flight shows 0 if the flat hashes differ)
     return true;
 }
@@ -2893,7 +2895,7 @@ void optimizedStationFrameBody(uint32_t frame) {
         su.hangarChanged = g_flagHangarChanged;
         const char* why = "";
         if (sealed::sunStep(su, &g_sun, &why)) {
-            g_sunOff.store(g_sun.off, std::memory_order_release);
+            detail::g_sunOff.store(g_sun.off, std::memory_order_release);
             // Built v14.23: the sun line carries the own pad's r0 and r1 and the Status docked flag.
             const char* dockedText = g_dockedNow.load(std::memory_order_acquire) ? "yes" : "no";
             char r0Text[16];

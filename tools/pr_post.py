@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Post replies and a summary comment to a PR, but only after seeing everything
-newer than the last thing you looked at.
+"""Post replies, a review and a summary comment to a PR, but only after seeing
+everything newer than the last thing you looked at.
 
 Why this exists (issue #96): during PR #92 a whole review was missed, and once
 the re-check ran in the same command as the post, found new activity, and
@@ -10,7 +10,7 @@ cannot be skipped.
 
 Usage:
     python tools\\pr_post.py --repo OWNER/REPO --pr N --since 2026-10-16T00:00:00Z
-        [--me LOGIN] [--reply COMMENT_ID=FILE ...] [--comment FILE]
+        [--me LOGIN] [--reply COMMENT_ID=FILE ...] [--review FILE] [--comment FILE]
         [--ack-new ID@REV,ID@REV,...] [--dry-run]
 
 Flow:
@@ -23,13 +23,21 @@ Flow:
        but gets a new REV, so an edit made after you read it trips the guard
        again. A bare id is refused: it cannot say which text you read.
     2. Otherwise post each --reply as a reply to that inline comment, then
-       post --comment as an issue comment. Bodies are read from files as UTF-8
-       (a BOM is stripped; an empty body is refused) and sent as JSON on
-       gh's stdin, never on a command line. Stop at the first failure and say
-       what was and was not posted.
+       --review as one review, then --comment as an issue comment. Bodies are
+       read from files as UTF-8 (a BOM is stripped; an empty body is refused)
+       and sent as JSON on gh's stdin, never on a command line. Stop at the
+       first failure and say what was and was not posted.
     3. Print the timestamp to use as the next --since.
 
---dry-run runs the guard (reads only) and prints the plan; it posts nothing.
+--review FILE is a JSON object: {"event": "COMMENT" | "REQUEST_CHANGES" |
+"APPROVE", "commit_id": the 40-digit head you read, "body": the summary,
+"comments": [{"path": repo path, "line": line in the head, "body": text}, ...]}.
+A second guard refuses it (exit 1, nothing posted) when the PR's head is no
+longer that commit: a review of code the author has since replaced says nothing
+about what is there now. GitHub takes a review whole, so an anchor outside the
+diff rejects all of it (exit 3) rather than posting part.
+
+--dry-run runs the guards (reads only) and prints the plan; it posts nothing.
 
 "Newer" means created or edited after --since (an edited comment counts again).
 The printed next --since is the scan's start time minus CURSOR_SLACK_SECONDS,
@@ -260,6 +268,61 @@ def parse_replies(specs):
     return out
 
 
+REVIEW_EVENTS = ("COMMENT", "REQUEST_CHANGES", "APPROVE")
+REVIEW_KEYS = {"event", "commit_id", "body", "comments"}
+REVIEW_COMMENT_KEYS = {"path", "line", "body"}
+
+
+def read_review(path):
+    """The --review file as the payload for POST .../reviews. Everything is checked
+    here, before any request: a typo must not reach GitHub as half a review."""
+    text = read_body(path)
+    try:
+        r = json.loads(text)
+    except ValueError as e:
+        raise ToolError("review file %s is not valid JSON: %s" % (path, e))
+    if not isinstance(r, dict):
+        raise ToolError("review file %s must hold a JSON object" % path)
+    unknown = sorted(set(r) - REVIEW_KEYS)
+    if unknown:
+        raise ToolError("review file %s has unknown keys: %s" % (path, ", ".join(unknown)))
+    if r.get("event") not in REVIEW_EVENTS:
+        raise ToolError("review file %s: event must be one of %s, got %r" % (path, ", ".join(REVIEW_EVENTS), r.get("event")))
+    commit = r.get("commit_id")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ToolError("review file %s: commit_id must be the 40-digit head you read, got %r" % (path, commit))
+    body = r.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise ToolError("review file %s: body is empty" % path)
+    comments = r.get("comments", [])
+    if not isinstance(comments, list):
+        raise ToolError("review file %s: comments must be a list" % path)
+    for n, c in enumerate(comments):
+        where = "review file %s: comment %d" % (path, n)
+        if not isinstance(c, dict) or set(c) != REVIEW_COMMENT_KEYS:
+            raise ToolError("%s must have exactly path, line and body" % where)
+        if not isinstance(c["path"], str) or not c["path"] or "\\" in c["path"]:
+            raise ToolError("%s: path must be a repo path with forward slashes, got %r" % (where, c["path"]))
+        if isinstance(c["line"], bool) or not isinstance(c["line"], int) or c["line"] < 1:
+            raise ToolError("%s: line must be a positive whole number, got %r" % (where, c["line"]))
+        if not isinstance(c["body"], str) or not c["body"].strip():
+            raise ToolError("%s: body is empty" % where)
+    return {"event": r["event"], "commit_id": commit, "body": body,
+            "comments": [{"path": c["path"], "line": c["line"], "side": "RIGHT", "body": c["body"]} for c in comments]}
+
+
+def read_head(gh, repo, pr):
+    """The PR's head commit now."""
+    what = "pull request %s#%d" % (repo, pr)
+    rc, o, e = gh(["api", "repos/%s/pulls/%d" % (repo, pr)])
+    if rc != 0:
+        raise ToolError("could not read %s (exit %d): %s" % (what, rc, e.strip()[:200]))
+    try:
+        return json.loads(o)["head"]["sha"]
+    except (ValueError, KeyError, TypeError):
+        raise ToolError("could not read the head commit of %s" % what)
+
+
 def parse_ack(text):
     """{id: revision} from ID@REV,ID@REV. A bare id is a usage error: it cannot
     name which version of the text was read."""
@@ -294,10 +357,11 @@ def split_response(out):
 
 
 def post_json(gh, path, body):
-    """POST {"body": body} via stdin. ASCII-only JSON, so no encoding hazard.
-    The outcome is unknown unless the response proves it: 2xx accepted, 4xx
-    (not 408) rejected, anything else unknown."""
-    payload = json.dumps({"body": body})
+    """POST {"body": body} via stdin, or `body` itself when it is a whole payload
+    (a review). ASCII-only JSON, so no encoding hazard. The outcome is unknown
+    unless the response proves it: 2xx accepted, 4xx (not 408) rejected, anything
+    else unknown."""
+    payload = json.dumps(body if isinstance(body, dict) else {"body": body})
     try:
         rc, out, err = gh(["api", "--include", "-X", "POST", path, "--input", "-"], payload)
     except RunnerTimeout as e:
@@ -332,9 +396,10 @@ def run(args, gh, out, err, clock=utc_now):
         ack = parse_ack(args.ack_new)
         # Validate every body before touching the network or posting anything.
         reply_bodies = [(cid, path, read_body(path)) for cid, path in replies]
+        review = read_review(args.review) if args.review else None
         comment_body = read_body(args.comment) if args.comment else None
-        if not reply_bodies and comment_body is None:
-            raise ToolError("nothing to post: give --reply and/or --comment")
+        if not reply_bodies and review is None and comment_body is None:
+            raise ToolError("nothing to post: give --reply, --review and/or --comment")
 
         me = args.me
         if not me:
@@ -382,8 +447,24 @@ def run(args, gh, out, err, clock=utc_now):
     elif ack:
         print("note: --ack-new given but nothing new was found; ignoring it.", file=out)
 
+    if review is not None:
+        try:
+            head = read_head(gh, repo, args.pr)
+        except ToolError as e:
+            print("pr_post: %s" % e, file=err)
+            return 2
+        if head != review["commit_id"]:
+            print("\nGUARD: the review was written against %s but the PR's head is now %s. Nothing was posted."
+                  % (review["commit_id"], head), file=out)
+            print("Read what changed, then rewrite the review's anchors and commit_id.", file=out)
+            print("Next --since once you have read it: %s" % fmt_ts(resume), file=out)
+            return 1
+
     plan = [("reply to inline comment %d" % cid, "repos/%s/pulls/%d/comments/%d/replies" % (repo, args.pr, cid),
              path, body) for cid, path, body in reply_bodies]
+    if review is not None:
+        plan.append(("review (%s, %d inline)" % (review["event"], len(review["comments"])),
+                     "repos/%s/pulls/%d/reviews" % (repo, args.pr), args.review, review))
     if comment_body is not None:
         plan.append(("issue comment", "repos/%s/issues/%d/comments" % (repo, args.pr), args.comment, comment_body))
 
@@ -391,8 +472,13 @@ def run(args, gh, out, err, clock=utc_now):
     if args.dry_run:
         print("\nDRY RUN: would post %d item(s), posting nothing:" % len(plan), file=out)
         for what, path, src, body in plan:
-            print("  %s  <- %s (%d chars)  POST %s" % (what, src, len(body), path), file=out)
-            print("      " + snippet(body), file=out)
+            text = body["body"] if isinstance(body, dict) else body
+            print("  %s  <- %s (%d chars)  POST %s" % (what, src, len(text), path), file=out)
+            print("      " + snippet(text), file=out)
+            if isinstance(body, dict):
+                print("      on %s" % body["commit_id"], file=out)
+                for c in body["comments"]:
+                    print("      %s:%d: %s" % (c["path"], c["line"], snippet(c["body"])), file=out)
         print("Next --since: %s" % nxt, file=out)
         return 0
 
@@ -423,14 +509,17 @@ def run(args, gh, out, err, clock=utc_now):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Post PR replies/comment only after the unseen-activity guard passes.")
+    p = argparse.ArgumentParser(description="Post PR replies/review/comment only after the unseen-activity guard passes.")
     p.add_argument("--repo", help="OWNER/REPO")
     p.add_argument("--pr", type=int, help="pull request number")
     p.add_argument("--since", help="ISO-8601 UTC time of the last activity you read")
     p.add_argument("--me", help="your login (default: the authenticated gh user)")
     p.add_argument("--reply", action="append", metavar="COMMENT_ID=FILE",
                    help="reply to an inline review comment with the contents of FILE (repeatable)")
-    p.add_argument("--comment", metavar="FILE", help="post FILE as an issue comment, after the replies")
+    p.add_argument("--review", metavar="FILE",
+                   help="post FILE, a JSON review (event, commit_id, body, comments), after the replies; "
+                        "refused when the PR's head is no longer commit_id")
+    p.add_argument("--comment", metavar="FILE", help="post FILE as an issue comment, after the replies and the review")
     p.add_argument("--ack-new", metavar="ID@REV,ID@REV,...",
                    help="proceed past the guard; must list exactly the ID@REV pairs the guard printed "
                         "(REV is a digest of the item's text and edit time; an edit changes it)")
@@ -481,9 +570,11 @@ REFUSED = (1, "", 'Post "https://localhost:1/api/v3/repos/o/r/issues/7/comments"
 
 class FakeGh:
     def __init__(self, reviews=(), comments=(), inline=(), me="sean", fail_post_at=None, pages=1,
-                 timeout_post_at=None, on_get=None, post_fault=None):
+                 timeout_post_at=None, on_get=None, post_fault=None, head=None):
         self.reviews, self.comments, self.inline = list(reviews), list(comments), list(inline)
         self.me, self.fail_post_at, self.pages = me, fail_post_at, pages
+        self.head = head                        # the PR's head commit; None: the PR read fails
+        self.payloads = []                      # every POST's whole decoded payload
         self.timeout_post_at = timeout_post_at  # accept the POST, then raise the runner timeout
         self.on_get = on_get                    # called with the path before each list is served
         self.post_fault = post_fault or {}      # {post index: (rc, stdout, stderr)}: what real gh printed
@@ -503,6 +594,7 @@ class FakeGh:
         if "-X" in args and args[args.index("-X") + 1] == "POST":
             path = args[args.index("-X") + 2]
             self.posts.append((path, json.loads(stdin_text)["body"]))
+            self.payloads.append(json.loads(stdin_text))
             if self.timeout_post_at is not None and len(self.posts) - 1 == self.timeout_post_at:
                 raise RunnerTimeout("gh timed out (api -X POST)")
             if self.fail_post_at is not None and len(self.posts) - 1 == self.fail_post_at:
@@ -515,6 +607,10 @@ class FakeGh:
         path = args[-1]
         if self.on_get:
             self.on_get(path)
+        if path.endswith("/pulls/7"):
+            if self.head is None:
+                return 1, "", "gh: Not Found (HTTP 404)"
+            return 0, json.dumps({"head": {"sha": self.head}}), ""
         if "/pulls/7/reviews" in path:
             return 0, self._paged(self.reviews), ""
         if "/issues/7/comments" in path:
@@ -804,6 +900,89 @@ def self_test():
         check("full text: gh api repos/o/r/issues/comments/52" in o, "full text: api command when there is no url")
         check("x" * 300 not in o, "full text: body still cut in the list")
         check("gh pr view" in o and "omits inline comments" in o, "full text: warns --comments omits inline")
+
+        # --review: the payload reaches GitHub whole, in order, on the head it was written against.
+        head = "a" * 40
+        good = {"event": "REQUEST_CHANGES", "commit_id": head, "body": "summary %s é" % EM,
+                "comments": [{"path": "src/a.cpp", "line": 12, "body": "inline ✓"}]}
+        rev = wr("rev.json", json.dumps(good, ensure_ascii=False), bom=True)
+        f = FakeGh(head=head)
+        rc, o, e = go(f, base + ["--comment", summ, "--review", rev, "--reply", "5=" + r1])
+        check(rc == 0, "review: exit 0, got %r (%s)" % (rc, e))
+        check([p for p, _ in f.posts] == ["repos/o/r/pulls/7/comments/5/replies", "repos/o/r/pulls/7/reviews",
+                                          "repos/o/r/issues/7/comments"], "review: replies, review, comment in order")
+        check(f.payloads[1:2] == [{"event": "REQUEST_CHANGES", "commit_id": head, "body": "summary %s é" % EM,
+                                   "comments": [{"path": "src/a.cpp", "line": 12, "side": "RIGHT", "body": "inline ✓"}]}],
+              "review: payload byte-exact, anchored on the head's side, got %r" % f.payloads[1:2])
+        check(all(ord(ch) < 128 for call in f.calls if call[1] for ch in call[1]), "review: ASCII-only JSON on stdin")
+        f = FakeGh(head=head)
+        rc, o, e = go(f, base + ["--review", rev])
+        check(rc == 0 and len(f.posts) == 1, "review: alone is enough to post, rc=%r" % rc)
+        no_inline = wr("rev0.json", json.dumps({"event": "COMMENT", "commit_id": head, "body": "b"}))
+        f = FakeGh(head=head)
+        rc, o, e = go(f, base + ["--review", no_inline])
+        check(rc == 0 and f.payloads[0]["comments"] == [], "review: no inline comments is allowed, rc=%r" % rc)
+
+        # The head moved since the review was written: nothing goes, not even the replies before it.
+        f = FakeGh(head="b" * 40)
+        rc, o, e = go(f, base + ["--reply", "5=" + r1, "--review", rev, "--comment", summ])
+        check(rc == 1 and not f.posts and "GUARD" in o and head in o and "b" * 40 in o, "review: moved head trips, rc=%r" % rc)
+        f = FakeGh(head="b" * 40)
+        rc, o, e = go(f, base + ["--review", rev, "--dry-run"])
+        check(rc == 1 and not f.posts, "review: dry-run still trips on a moved head, rc=%r" % rc)
+        f = FakeGh(head=None)
+        rc, o, e = go(f, base + ["--review", rev])
+        check(rc == 2 and not f.posts, "review: an unreadable PR is refused, rc=%r" % rc)
+
+        # The unseen-activity guard comes first, and the head is not asked for without a review.
+        f = FakeGh(reviews=[_rv(11, "bob", new)], head=head)
+        rc, o, e = go(f, base + ["--review", rev])
+        check(rc == 1 and not f.posts and "--ack-new 11@" in o, "review: unseen activity trips first, rc=%r" % rc)
+        f = FakeGh()
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 0 and not any(c[0][-1].endswith("/pulls/7") for c in f.calls), "no review: the PR's head is not read")
+
+        # --dry-run: no POST and no file, prints every anchor.
+        f = FakeGh(head=head)
+        before = sorted(os.listdir(tmp))
+        rc, o, e = go(f, base + ["--review", rev, "--dry-run"])
+        check(rc == 0 and not f.posts and "src/a.cpp:12" in o and "pulls/7/reviews" in o and head in o,
+              "review: dry-run prints the plan and posts nothing, rc=%r" % rc)
+        check(sorted(os.listdir(tmp)) == before, "review: dry-run wrote no files")
+
+        # A bad file stops before any request, and before any other post.
+        ok_comment = {"path": "a.cpp", "line": 1, "body": "x"}
+        for label, doc in (("event", {"event": "NOPE", "commit_id": head, "body": "b"}),
+                           ("lower-case event", {"event": "comment", "commit_id": head, "body": "b"}),
+                           ("short commit", {"event": "COMMENT", "commit_id": "abc123", "body": "b"}),
+                           ("no commit", {"event": "COMMENT", "body": "b"}),
+                           ("empty body", {"event": "COMMENT", "commit_id": head, "body": "  "}),
+                           ("unknown key", {"event": "COMMENT", "commit_id": head, "body": "b", "x": 1}),
+                           ("comments not a list", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": {}}),
+                           ("line 0", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, line=0)]}),
+                           ("line text", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, line="1")]}),
+                           ("line true", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, line=True)]}),
+                           ("backslash path", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, path="src\\a.cpp")]}),
+                           ("empty comment", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, body=" ")]}),
+                           ("missing line", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [{"path": "a.cpp", "body": "x"}]}),
+                           ("extra comment key", {"event": "COMMENT", "commit_id": head, "body": "b", "comments": [dict(ok_comment, side="LEFT")]}),
+                           ("not an object", ["x"])):
+            bad = wr("bad.json", json.dumps(doc))
+            f = FakeGh(head=head)
+            rc, o, e = go(f, base + ["--reply", "5=" + r1, "--review", bad])
+            check(rc == 2 and not f.calls, "bad review (%s): exit 2 with no request, rc=%r calls=%d" % (label, rc, len(f.calls)))
+        f = FakeGh(head=head)
+        rc, o, e = go(f, base + ["--review", wr("bad.json", "{not json")])
+        check(rc == 2 and not f.calls and "not valid JSON" in e, "bad review (syntax): exit 2 with no request, rc=%r" % rc)
+
+        # A POST's outcome: a 4xx is a proven rejection of the whole review, anything unproven is unknown and read back.
+        f = FakeGh(head=head, post_fault={0: HTTP_422})
+        rc, o, e = go(f, base + ["--review", rev, "--comment", summ])
+        check(rc == 3 and "NOT posted: review (REQUEST_CHANGES, 1 inline), issue comment" in o, "review: 422 is rejected, rc=%r" % rc)
+        f = FakeGh(head=head, post_fault={0: EOF_DROP})
+        rc, o, e = go(f, base + ["--review", rev, "--comment", summ])
+        check(rc == 4 and "gh api --paginate repos/o/r/pulls/7/reviews" in o and "Not attempted: issue comment" in o,
+              "review: a dropped response is unknown and names the read-back, rc=%r" % rc)
 
     if fails:
         for m in fails:

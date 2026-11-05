@@ -1,5 +1,6 @@
 #include "gpu_span_d3d11.h"
 #include <windows.h>
+#include "gpu_query_count.h"
 
 namespace edvr {
 namespace {
@@ -11,6 +12,7 @@ HRESULT beginQuery(void*, ID3D11DeviceContext* ctx, ID3D11Asynchronous* query) {
     return S_OK;
 }
 HRESULT endQuery(void*, ID3D11DeviceContext* ctx, ID3D11Asynchronous* query) {
+    gpuQueryNoteEnd();
     ctx->End(query);
     return S_OK;
 }

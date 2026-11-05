@@ -55,3 +55,18 @@ struct OpenxrResolutionReport {
     const char* settingsFile = edvr::kIniNameVr;
 };
 std::string formatOpenxrResolutionReport(const OpenxrResolutionReport& report);
+
+// fix.openxr_resolution as the render-settings query reads it, and the file it came from (the name the log line gives).
+//
+// The key is the VR file's, whichever profile is active. The OpenXR runtime sizes its session at launch, flat launch
+// included, and it answers Elite's eye-size query from that session: a flat launch that is switched to VR later is
+// asked at the 3D-on apply, before the profile commit, so the size has to be right at launch. Under the VR profile
+// this is Config's getter, unchanged. Under any other profile Config's getter answers from the flat file, which does
+// not list the key (the allow-list reads "off"), so the VR file is read for this key alone, beside the module and
+// then the .exe, with the reader's own rules; a missing or unreadable file reads as no entry.
+// docs/openxr-resolution-per-headset-2026-09-14.md, 2026-11-04.
+struct OpenxrResolutionValue {
+    std::string value;
+    const char* file = edvr::kIniNameVr;
+};
+OpenxrResolutionValue readOpenxrResolutionValue();

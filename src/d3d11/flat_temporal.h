@@ -21,14 +21,19 @@ extern std::atomic<bool> g_flatTemporalManual;
 extern std::atomic<DWORD> g_flatTemporalOwnerThread;
 extern std::atomic<uint64_t> g_flatTemporalForeignCalls;
 }
-inline bool flatTemporalCapturing() {
-    if (!detail::g_flatTemporalCapturing.load(std::memory_order_relaxed)) return false;
+// The rest of flatTemporalCapturing's tests, kept out of line so the draw path's call sites inline only the first relaxed load (build 4, item 1). The tests
+// and their order are unchanged. noinline on an inline function: one copy, in the header, for every rig that includes it.
+__declspec(noinline) inline bool flatTemporalCapturingSlow() {
     // The flat runtime's stand-down (flat_standdown.h) pauses the discovery observers
     // for the frames it does not watch; a probe frame runs them.
     if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;
     if (g_flatComputeInternal) return false;
     return flatObserveAsOwner(detail::g_flatTemporalOwnerThread,
                               detail::g_flatTemporalForeignCalls, GetCurrentThreadId());
+}
+__forceinline bool flatTemporalCapturing() {
+    if (!detail::g_flatTemporalCapturing.load(std::memory_order_relaxed)) return false;
+    return flatTemporalCapturingSlow();
 }
 
 // Unlike the observer gate this policy query does not count foreign calls.
@@ -44,7 +49,7 @@ inline bool flatTemporalNeedsOriginalState() {
 }
 
 void flatTemporalStart(ID3D11Device* device);
-void flatTemporalArm(bool full = false);  // Shift + dump_draws requests the large full capture
+void flatTemporalArm(ID3D11Device* device, bool full = false);  // starts the window when none exists (a session that began in VR); Shift + dump_draws requests the large full capture
 void flatTemporalArmPassive(ID3D11Device* device);  // Ctrl + keyboard dump_draws restarts automatic discovery
 void flatTemporalStop();
 // Stand-down: the observers see no draw or call while paused (flatTemporalCapturing).

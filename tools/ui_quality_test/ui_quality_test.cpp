@@ -3091,7 +3091,7 @@ void testSupercruiseLines() {
         const size_t second = screen.find("void uiLayerSecondIssues("), writeBack = screen.find("uiLayerWriteBackEnd(self);", second), mapCall = screen.find("if (mapui::pointerOpen()) mapSecondIssues(self, kind, count, instances, args, census);", second);
         check(second != std::string::npos && writeBack != std::string::npos && mapCall > writeBack && mapCall < screen.find("// Issue 140", second) &&
                   screen.find("uiLayerMapMaskBegin(self, &issue)") != std::string::npos && screen.find("uiLayerMapProbeBegin(self, &issue)") != std::string::npos &&
-                  screen.find("pureDrawReissue(d.self, d.kind, 1, d.instances, *d.args);") != std::string::npos,
+                  screen.find("pureDrawReissue(ReissueCaller::UiLayerSecond, d.self, d.kind, 1, d.instances, *d.args);") != std::string::npos,
               "GP17: the second-issue path issues the panel into the mask and, for the arrow, one point (index count 1, the draw's own start index, base vertex and start instance) after the layer's own issues");
         // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
         const std::string layer = slurp("src/d3d11/ui_layer.cpp");

@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course, built as the sixth build 5086b6f3, FLOWN 16:38: the map holds 88 to 90 fps, `xr_end_frame` p50 0.20 to 0.22 ms, 2 render target binds a frame. Sean chose the camera's up, so the key and the grid's-vertical option are removed. Sean: "Wobble is gone", so `mapEyeRel` and the stems' swap stay. On branch `claude/galaxy-map-motion-cursor-e864cb`, not merged.
+State (2026-11-04): fixes 1, 2 and 3 FLOWN 09:50 (ca707034): the map is crisp and does not smear, systems select properly, the UI works. Build bf17a80a FLOWN 11:00: panels at the game's depth and the arrow's panel mask work; icons facing the eye REJECTED, they yaw with the head. Third build 6a12ef42 FLOWN 12:35: world-fixed quads and gap bridging work. Fourth build 759ec617 FLOWN 13:21: "basically works", but the map fell to 45 fps and near icons wobble. Fifth build e02c6248 FLOWN 14:13: still about 60 fps on the map, and icons and text rotate about y as the camera moves sideways. An adversarial review found both causes (see "After the fifth flight"; `reviews\galaxy-map-perf-review-2026-11-04.md`, not in git). Its course, built as the sixth build 5086b6f3, FLOWN 16:38: the map holds 88 to 90 fps, `xr_end_frame` p50 0.20 to 0.22 ms, 2 render target binds a frame. Sean chose the camera's up, so the key and the grid's-vertical option are removed. Sean: "Wobble is gone", so `mapEyeRel` and the stems' swap stay. Merged with main, which is 168 commits newer and has a rewritten draw path; the merged build is NOT FLOWN, and those readings are from before the merge.
 
 Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log `edvr_gfx_20261104_060905`, dumps 061416462001, 061443363002, 061450674003 (head yaw -28, -3, +17 degrees, map still). Environment: native OpenXR runtime, 2016x2017 in, 4032x4034 out, DLSS performance.
 
@@ -19,7 +19,7 @@ Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` 
 
 Temporary: none left. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone.
 
-Next: Sean's word on merging. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next: Sean flies merged main (card below), gate 2 render target binds a frame; then push. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
 
 Ruled out:
 - ruled out: the grid's vertical as the quads' up (key value `stems`), because with the camera 45 degrees down a quad at view tangents (x, y) has 1 + y times its height and shears by atan(x / (1 + y)). Flown 16:41 beside the camera's up; Sean prefers the camera's up.
@@ -234,6 +234,25 @@ The card's reading of `of others` was wrong. It is 4394 of 4394 runs and 4636 of
 `app_gpu_timing` went back to commented in the Frontier ini after this flight.
 
 **The wobble.** Asked after the flight, Sean: "Wobble is gone". So `mapEyeRel` and the stems' swap stay. The flight cannot separate them from the shared axes, which landed between the report and this answer. The rig gives the mechanism: three steps of float32 noise in the game's eye move an icon 4 units away by 3.44e-3 NDC under the game's formula, about 7 pixels across the 4032-wide output, and by 0 with the precise parts (G11). A flight without them would only test that, so none is planned.
+
+## The merge with main
+
+Main was 168 commits ahead, including PR #166's draw path. Five files conflicted, all because both sides had added to them. The signature table and the two expectation files were regenerated with `hook_signatures.py`, not merged by hand. Two failures came with no conflict:
+
+- `pureDrawReissue` gained a caller argument on main: a compile error at three of this arc's call sites, and one source pin.
+- `uiLayerFamilyHdrVsMayWant`, main's skip of the UI family test for vertex shaders the rule never names on the HDR target, did not list the map's four overlay shaders, so every map sprite would have stayed in the scene. Good fps, the smear back, no sprite depth, and `0 runs` in the 30 s line, with the build still green. A review of the merged tree found it before a flight. Fixed, and `sharp_weapons_test` now sets `mapOpen` and pins the four.
+
+The same review read the merged draw hooks, fast paths, tracked bindings and output merger readers against the run, and found them sound. That is reading, not a run: the 88 to 90 fps and 2 binds above are from before the merge.
+
+## Flight card, merged main (not flown)
+
+Right build first: `python tools\edvr_log.py --target <odyssey path> --expect-build HEAD --version`.
+
+1. Open the map. Expect 90 fps, and lines and text crisp while the map moves. Smear here means the sprites have left the layer.
+2. Check the rest still holds: icons and text do not rotate, near icons cover far ones, hover and selection, the panels and the gaps between them.
+3. Fly a normal stretch away from the map too: this is the first flight of this work with main's 168 commits.
+
+Log gates: the `map pointer:` 30 s line with render target binds about 2 a frame and runs started about 2 a frame, and no `-- 0 runs` tail; `of others` equal to the runs is the clean ending; `xr_end_frame` p50 in `native_submit_phases` (the `edvr_openxr` log) under 1 ms.
 
 ## Flight card, sixth build (flown 16:38)
 

@@ -248,7 +248,9 @@ that order. Visual lists the `[visual]` options of edvr.ini that do something in
 user settings, Fix tier, like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly
 `fix.intro_video`, which left the Performance tab) and Star glow (`visual.star_glow`, 100 to 400
 percent in steps of 25, live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`,
-kept in edvr.ini order and checked against the flat key gate like the other two tabs.
+kept in edvr.ini order and checked against the flat key gate like the other two tabs. Cockpit glass
+(`visual.cockpit_glass`, `odyssey` or `legacy`, live; `docs/cockpit-glass-legacy-port.md` section 8) is the
+third row, on both profiles' Visual pages (`menu visual`).
 
 Since 2026-10-27 VR's menu has a Visual page of the same name (above, "What it shows"), built from
 the rows whose token is `menu visual`; the flat tab is built from the table whatever the token. The

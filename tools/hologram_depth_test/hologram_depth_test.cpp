@@ -14,6 +14,7 @@
 // returns before touching the shadow at all.
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/ui_depth.cpp"
+#include "../../src/d3d11/vs_may_want.h"   // build 4, item 9: the hologram-depth bit
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
@@ -69,10 +70,13 @@ void FaultBudget::charge() { --m_remaining; }
 bool Config::getBool(const char*, bool) const { std::abort(); }
 float Config::getFloat(const char*, float) const { std::abort(); }
 std::string Config::getString(const char*, const char*) const { std::abort(); }
-void* bindingGet(BindSlot) { std::abort(); }
+// The classifier's vertex-shader reads are live only inside the may-want byte test (build 4, item 9): one bound VS hash, nothing else bound.
+bool g_shadowVsLive = false;
+uint64_t g_shadowVsHash = 0;
+void* bindingGet(BindSlot s) { if (!g_shadowVsLive) std::abort(); return s == BindSlot::Vs ? static_cast<void*>(&g_shadowVsHash) : nullptr; }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
 uint32_t bindingEyeKeyGeneration() { std::abort(); }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
-uint64_t bindingShaderHash(BindSlot) { std::abort(); }
+uint64_t bindingShaderHash(BindSlot s) { if (!g_shadowVsLive || s != BindSlot::Vs) std::abort(); return g_shadowVsHash; }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
@@ -152,6 +156,7 @@ void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTarge
 }  // namespace edvr
 
 using namespace edvr;
+using edvr::detail::g_holoEye;
 int checks = 0;
 void check(bool ok, const char* label) {
     ++checks;
@@ -1267,6 +1272,60 @@ int main() {
               "family builder: the target reticle is the world marker");
         check(!inList(fam, famCount, kHoloWorldMarkerReticle),
               "family builder: the world marker is not one of the cockpit families");
+    }
+
+    // Build 4 item 9: the vertex shader's may-want byte (vs_may_want.h) carries a hologram-depth bit, and a clear bit means
+    // classifyHologramDraw declines the draw. The byte is built from the constexpr lists only, so this holds with the runtime list
+    // (g_holoFamilies) empty, as before holoDepthConfigure, and configured, and for every hash the lists name, kNullPsMesh, hash 0 and
+    // random hashes. A skipped draw leaves g_holoEye at -1 (uiDepthHologramSkippedDraw).
+    {
+        check((kVsMayWantAll & kVsMayHoloDepth) == kVsMayHoloDepth && kVsMayHoloDepth == 0x10 && kVsMayWantAll == 0x1F,
+              "may-want: kVsMayWantAll includes the hologram-depth bit");
+        check((vsMayWantByte(0) & kVsMayHoloDepth) != 0, "may-want: hash 0 keeps the hologram-depth call");
+        uint64_t fam[kMaxHashes];
+        const uint32_t famCount = holoBuildFamilyList(fam, kMaxHashes);
+        uint64_t world[kMaxHashes];
+        const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);
+        // The byte covers the whole runtime lists, and the constexpr lists it is built from.
+        for (uint32_t i = 0; i < famCount; ++i) check((vsMayWantByte(fam[i]) & kVsMayHoloDepth) != 0, "may-want: every runtime family has the bit");
+        for (uint32_t i = 0; i < worldCount; ++i) check((vsMayWantByte(world[i]) & kVsMayHoloDepth) != 0, "may-want: every world marker has the bit");
+        for (uint64_t f : kHoloFamiliesBuiltIn) check((vsMayWantByte(f) & kVsMayHoloDepth) != 0, "may-want: every built-in family has the bit");
+        check((vsMayWantByte(kHoloPanel) & kVsMayHoloDepth) != 0, "may-want: the holo panel has the bit");
+        check((vsMayWantByte(kHoloWorldMarkerReticle) & kVsMayHoloDepth) != 0, "may-want: the world marker has the bit");
+        check((vsMayWantByte(kNullPsMesh) & kVsMayHoloDepth) == 0, "may-want: kNullPsMesh is in neither list, so its bit is clear");
+
+        std::vector<uint64_t> probes = {kNullPsMesh, kHoloCanopy, 1, ~0ull};
+        uint64_t x = 0x9E3779B97F4A7C15ull;
+        for (int i = 0; i < 4000; ++i) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; probes.push_back(x); }
+        const uint32_t savedCount = g_holoFamilyCount;
+        uint64_t savedFam[kMaxHashes];
+        memcpy(savedFam, g_holoFamilies, sizeof(savedFam));
+        unsigned clearBits = 0;
+        for (int configured = 0; configured < 2; ++configured) {
+            g_holoFamilyCount = configured ? famCount : 0;
+            memcpy(g_holoFamilies, fam, famCount * sizeof(uint64_t));
+            std::vector<uint64_t> all = probes;
+            all.insert(all.end(), fam, fam + famCount);
+            all.insert(all.end(), world, world + worldCount);
+            for (uint64_t h : all) {
+                if ((vsMayWantByte(h) & kVsMayHoloDepth) != 0) continue;
+                ++clearBits;
+                g_shadowVsLive = true;
+                g_shadowVsHash = h;
+                detail::g_holoEye = 3;
+                classifiermemo::Exit exit = classifiermemo::Exit::kOther;
+                const bool accepted = classifyHologramDraw(ctx.Get(), &exit);
+                g_shadowVsLive = false;
+                check(!accepted && exit == classifiermemo::Exit::kPlainDecline && detail::g_holoEye == 3,
+                      "may-want: a clear hologram-depth bit means classifyHologramDraw declines, storing nothing");
+            }
+        }
+        g_holoFamilyCount = savedCount;
+        memcpy(g_holoFamilies, savedFam, sizeof(savedFam));
+        check(clearBits > 8000, "may-want: the random hashes mostly carry a clear bit");
+        detail::g_holoEye = 5;
+        uiDepthHologramSkippedDraw();
+        check(g_holoEye == -1, "may-want: a skipped draw leaves g_holoEye at -1, as the callee's decline does");
     }
 
     // World markers, unlisted: kHoloUnlistedMarker never appears in

@@ -42,8 +42,9 @@ extern std::atomic<bool> g_gpuFrameCommandLive;
 // is only ever reached (from here or directly) after passing these same
 // tests for real inside gpuFrameCommand itself.
 inline bool gpuFrameCommandMightAct() noexcept {
-    return !detail::g_gpuFrameInternal &&
-           detail::g_gpuFrameCommandLive.load(std::memory_order_relaxed);
+    // The relaxed load first: both are pure reads, so the order changes no answer, and with advanced.app_gpu_timing off the thread-local slot is not touched.
+    return detail::g_gpuFrameCommandLive.load(std::memory_order_relaxed) &&
+           !detail::g_gpuFrameInternal;
 }
 
 // True while advanced.app_gpu_timing is on with a controller bound: the application-frame clock keeps a frequency scope open across the render, which
@@ -59,7 +60,8 @@ extern std::atomic<bool> g_frameWorkArmed;
 }  // namespace detail
 void frameWorkFirstCommand(ID3D11DeviceContext*) noexcept;
 
-inline void gpuFrameCommandIfLive(ID3D11DeviceContext* ctx) noexcept {
+// __forceinline: it was `inline` and still an out-of-line call at the draw thunk (build 3 profile).
+__forceinline void gpuFrameCommandIfLive(ID3D11DeviceContext* ctx) noexcept {
     if (gpuFrameCommandMightAct()) gpuFrameCommand(ctx);
     if (detail::g_frameWorkArmed.load(std::memory_order_relaxed)) frameWorkFirstCommand(ctx);
 }

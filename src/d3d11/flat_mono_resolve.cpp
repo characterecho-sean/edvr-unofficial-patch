@@ -421,11 +421,17 @@ bool g_steadyFailureLogged=false;
 // unchanged.
 // debug: x = this frame samples the refusal census, y = this frame paints the refusal view (FlatMonoResolveFrame::refusalCensus and
 // refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither. debug.w bit 3 (8): the
-// planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise.
+// planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise. debug.w bit 4
+// (16): a stale slot's pixel asks the record under it first (FlatMonoResolveFrame::staleRecordTerm; set only with the steady-detail depth check
+// available); debug.w bit 5 (32): this frame holds the vehicle frame (the player vehicle's cockpit rig root pose, this frame's and last frame's, and its
+// sphere, in vehiclePosNow/vehiclePosPrev/vehicleQuat/vehicleSphere), and a near pixel inside the sphere that has no motion of its own rides it
+// (FlatMonoResolveFrame::vehicleFrame; same condition). The bits 1, 2, 4, 8, 16 and 32 are the untrusted-camera map, the foreground map, the skin
+// target, the planet records, the stale record term and the vehicle frame, each tested alone.
 // celestialTanNow/celestialTanPrev: the flat tangents (l, r, b, t) of this frame's and last frame's camera rows, read only with that bit.
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4];
-    float celestialTanNow[4], celestialTanPrev[4]; };
-static_assert(sizeof(Constants)==336, "HLSL cbuffer layout");
+    float celestialTanNow[4], celestialTanPrev[4];
+    float vehiclePosNow[4], vehiclePosPrev[4]; uint32_t vehicleQuat[4]; float vehicleSphere[4]; };
+static_assert(sizeof(Constants)==400, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
 // (flat_isolation_mode.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
@@ -1300,6 +1306,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Planet patch motion (celestial_motion.h): the planet records the flat runtime fetched for this frame, bound at t18 with their tangents.
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
+    // The vehicle frame (FlatMonoResolveFrame::vehicleFrame): the steady-detail depth check validates it, so it needs that; and the engine's views.
+    const bool vehicleNow=f.vehicleFrame && depthCheck && engine;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     // Continued history always receives the actual previous origin. Ambiguous
     // inputs take the existing reset path, which seeds from the current rows.
@@ -1311,6 +1319,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
     constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
+    if(f.staleRecordTerm && depthCheck)constants.debug[3]|=16u;
+    if(vehicleNow) {
+        constants.debug[3]|=32u;
+        for(int i=0;i<3;++i){constants.vehiclePosNow[i]=f.vehiclePosition[0][i];constants.vehiclePosPrev[i]=f.vehiclePosition[1][i];}
+        constants.vehicleQuat[0]=f.vehicleQuat[0][0];constants.vehicleQuat[1]=f.vehicleQuat[0][1];
+        constants.vehicleQuat[2]=f.vehicleQuat[1][0];constants.vehicleQuat[3]=f.vehicleQuat[1][1];
+        std::memcpy(constants.vehicleSphere,f.vehicleSphere,sizeof(f.vehicleSphere));
+    }
     if(celestialBound){constants.debug[3]|=8u;std::memcpy(constants.celestialTanNow,f.celestialTanNow,sizeof(f.celestialTanNow));std::memcpy(constants.celestialTanPrev,f.celestialTanPrev,sizeof(f.celestialTanPrev));}
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;

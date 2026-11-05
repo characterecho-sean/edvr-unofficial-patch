@@ -59,7 +59,9 @@ offline. What the files show:
   897 DXBC blobs and is unchanged since 2026-10-01; `Effects2_` holds 1,831
   and was rewritten on 2026-10-20 (16-byte header, then raw deflate).
   Neither holds a bloom, tone or copy shader: none of the hashes named in
-  this doc is present. The old `Effects2_` is gone, and the launcher's
+  this doc is present. (2026-11-03: that search used the standard FNV basis,
+  not EDVR's; re-check with `tools\effects_arc.py find`, see
+  `cockpit-glass-legacy-port.md`.) The old `Effects2_` is gone, and the launcher's
   staging copy in the Proton prefix has no EffectsBinary.
 - **Asset containers.** `Win64/xx/<sha1>` files are either zlib-wrapped
   assets (0 of 130 sampled hold DXBC) or `FREA` containers. Those are

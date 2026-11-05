@@ -1073,6 +1073,49 @@ internal static class SelfTests
         var stacksInRegion = (Dictionary<string, object?>[])submit["topStacks"]!;
         Check(stacksInRegion.Length == 2 && Convert.ToInt64(stacksInRegion[0]["count"]) == 1,
               "the region's stacks are grouped by signature");
+
+        // Own time against time below (build 4, item 8): a sample is own when its innermost frame is in EDVR's d3d11.dll, the test behind
+        // callerSamplesTopFrameInEdvr. The fixture's submit stack reaches the same EDVR address through the system's d3d11 and the driver, so that
+        // address is below there and own where EDVR's code was itself on top.
+        {
+            var edvrId = data.Stacks.EdvrD3d11ModuleId;
+            var belowId = cycle.CallerSamplesByRegion.First(item => data.Stacks[item.StackId].AnyEdvrD3d11).StackId;
+            var ownId = data.Stacks.AddForTest(new StackInfo
+            {
+                ModuleIds = [edvrId, edvrId],
+                Addresses = [0x7FF000003000, 0x7FF000004000],
+                ClassIds = [],
+                Label = StackLabel.OtherModule,
+                AnyEdvrD3d11 = true,
+                Depth = 2,
+                TopModuleId = edvrId,
+            });
+            var mixed = new FrameCycle();
+            mixed.CallerSamplesByRegion.Add((1, ownId));
+            mixed.CallerSamplesByRegion.Add((1, ownId));
+            mixed.CallerSamplesByRegion.Add((1, belowId));
+            var mixedRows = (List<Dictionary<string, object?>>)Report.CallerStacksByRegion([mixed], data);
+            var mixedRegion = mixedRows[1];
+            var mixedInnermost = (Dictionary<string, object?>[])mixedRegion["edvrInnermostRvas"]!;
+            var row3000 = mixedInnermost.Single(item => (string)item["rva"]! == "0x3000");
+            Check(Convert.ToInt64(row3000["count"]) == 3 && Convert.ToInt64(row3000["own"]) == 2 &&
+                  Convert.ToInt64(row3000["below"]) == 1,
+                  "an address's count splits into own (EDVR on top) and below (a forwarded call on top)");
+            var mixedChains = (Dictionary<string, object?>[])mixedRegion["edvrChains"]!;
+            Check(mixedChains.Sum(item => Convert.ToInt64(item["own"])) == 2 &&
+                  mixedChains.Sum(item => Convert.ToInt64(item["below"])) == 1 &&
+                  mixedChains.All(item => Convert.ToInt64(item["own"]) + Convert.ToInt64(item["below"]) ==
+                                          Convert.ToInt64(item["count"])),
+                  "a chain's count splits into own and below, and the two sum to the count");
+            var mixedTop = ((Dictionary<string, object?>[])mixedRegion["byTopModule"]!)
+                .Where(module => (string)module["module"]! == "d3d11.dll [edvr]")
+                .Sum(module => Convert.ToInt64(module["samples"]));
+            Check(Convert.ToInt64(mixedRegion["edvrOwnTotal"]) == 2 && Convert.ToInt64(mixedRegion["edvrOwnTotal"]) == mixedTop &&
+                  Convert.ToInt64(mixedRegion["edvrBelowTotal"]) == 1 &&
+                  Convert.ToInt64(mixedRegion["edvrOwnTotal"]) + Convert.ToInt64(mixedRegion["edvrBelowTotal"]) ==
+                  Convert.ToInt64(mixedRegion["edvrInnermostTotal"]),
+                  "the own total equals the samples whose top frame is in EDVR (callerSamplesTopFrameInEdvr), and own plus below is the innermost total");
+        }
         Check(rows[3] is not null && Convert.ToInt64(rows[3]["samples"]) == 0, "R6 has no samples here");
     }
 
@@ -1340,6 +1383,10 @@ internal static class SelfTests
             Check(export["callerSamplesTopFrameInEdvr"].GetInt64() == 0 &&
                   export["callerSamplesAnyEdvrFrame"].GetInt64() == 1,
                   "the export carries both populations so neither is mistaken for the other");
+            Check(export["edvrOwnTotal"].GetInt64() == export["callerSamplesTopFrameInEdvr"].GetInt64() &&
+                  export["edvrOwnTotal"].GetInt64() + export["edvrBelowTotal"].GetInt64() == export["edvrInnermostTotal"].GetInt64() &&
+                  rows.All(row => row.GetProperty("own").GetInt64() + row.GetProperty("below").GetInt64() == row.GetProperty("count").GetInt64()),
+                  "the export's own total equals callerSamplesTopFrameInEdvr, and every row splits its count into own and below");
 
             var symbolsOn = (Dictionary<string, object?>)symbolized["symbols"]!;
             Check(symbolsOn["enabled"] is true && Convert.ToInt64(symbolsOn["resolvedEdvrFrameLookups"]) > 0,

@@ -14,6 +14,9 @@ namespace edvr {
 namespace detail {
 BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 uint32_t g_bindingEyeKeyGen = 0;
+// Build 5, item 4: engine velocity's aggregate over its five slots. Starts at 1 and never takes 0 (the increment skips it): engine_velocity.h's DrawCache holds
+// 0 when fresh or reset and has no valid flag, so 0 must never equal a live value. The per-slot generations start at 1 for the same reason.
+uint32_t g_bindingEvKeyGen = 1;
 }  // namespace detail
 
 namespace {
@@ -30,8 +33,19 @@ constexpr uint32_t kEyeKeySlots = slotBit(BindSlot::Vs) | slotBit(BindSlot::Ps) 
                                   slotBit(BindSlot::Rtv0) | slotBit(BindSlot::Dsv0);
 static_assert(static_cast<uint32_t>(BindSlot::Count) <= 32, "the eye key's slot mask is one word");
 
-void noteEyeKeySlot(BindSlot s) {
-    if (kEyeKeySlots & slotBit(s)) ++detail::g_bindingEyeKeyGen;
+// The five slots engine velocity's draw cache follows (bindingEvKeyGeneration): the vertex and pixel shaders, render target 0, the depth view and the blend.
+constexpr uint32_t kEvKeySlots = slotBit(BindSlot::Vs) | slotBit(BindSlot::Ps) | slotBit(BindSlot::Rtv0) | slotBit(BindSlot::Dsv0) | slotBit(BindSlot::Blend);
+
+void bumpEvKey() {
+    if (++detail::g_bindingEvKeyGen == 0) detail::g_bindingEvKeyGen = 1;
+}
+
+// The one helper bindingSet, bindingInvalidate and bindingSetShader call after bumping the slot's own generation. `ptrMoved` is false only for a PS SRV 0..3
+// set of the pointer already bound (build 6, S2): the eye key stays, the slot's own generation moved. The engine velocity key follows every set, as before.
+void noteEyeKeySlot(BindSlot s, bool eyeKeyMoves = true) {
+    const uint32_t bit = slotBit(s);
+    if (eyeKeyMoves && (kEyeKeySlots & bit)) ++detail::g_bindingEyeKeyGen;
+    if (kEvKeySlots & bit) bumpEvKey();
 }
 
 // This module's own budget, not shared with any fix.
@@ -103,14 +117,19 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
 
 void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
+    const bool srv = slot >= BindSlot::PsSrv0 && slot <= BindSlot::PsSrv3;
+    // Build 6, S2 (maintainer-approved behaviour change, 2026-11-04): a PS SRV 0..3 set of the pointer already bound moves the slot's own generation (the scrim
+    // cache, engine velocity and srv0IsPanelSized compare it) but not the eye key. Compared before the pointer is overwritten.
+    const bool eyeKeyMoves = !(srv && s.ptr == ptr);
     s.ptr = ptr;
     ++s.gen;
-    noteEyeKeySlot(slot);
+    noteEyeKeySlot(slot, eyeKeyMoves);
 }
 
 void bindingInvalidate(BindSlot slot) {
     Slot& s = slotOf(slot);
     s.ptr = nullptr;
+    s.mayWant = 0xFF;   // a cleared shader slot must not keep a stale may-want byte (vs_may_want.h)
     ++s.gen;
     noteEyeKeySlot(slot);
 }
@@ -119,17 +138,24 @@ void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;
     s.hash = hash;
+    s.mayWant = 0xFF;   // unknown until bindingSetVsMayWant
     ++s.gen;
     noteEyeKeySlot(slot);
+}
+
+void bindingSetVsMayWant(uint8_t mayWant) {
+    slotOf(BindSlot::Vs).mayWant = mayWant;
 }
 
 void bindingForgetAll() {
     for (Slot& s : detail::g_bindingSlots) {
         s.ptr = nullptr;
         s.hash = 0;
+        s.mayWant = 0xFF;
         ++s.gen;
     }
     ++detail::g_bindingEyeKeyGen;   // every slot moved, so the aggregate does, once
+    bumpEvKey();
 }
 
 void bindingFrameBoundary() {
@@ -139,6 +165,7 @@ void bindingFrameBoundary() {
     // the change and 1 after.
     for (Slot& s : detail::g_bindingSlots) ++s.gen;
     ++detail::g_bindingEyeKeyGen;   // ...and the aggregate, so a memo keyed on it cannot outlive a frame either
+    bumpEvKey();
 }
 
 namespace {

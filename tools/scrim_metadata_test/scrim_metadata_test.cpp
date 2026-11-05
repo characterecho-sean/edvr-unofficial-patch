@@ -118,9 +118,15 @@ int eyeKeyGenerationChecks() {
         const uint32_t afterSet = edvr::bindingEyeKeyGeneration();
         check((afterSet != beforeSet) == follows, follows ? "eye key moves on a set of a followed slot"
                                                            : "eye key stays on a set of a slot it does not follow");
-        edvr::bindingSet(slot, p);   // the same pointer again: a rebind is a move all the same (bindingSet's own contract)
-        check((edvr::bindingEyeKeyGeneration() != afterSet) == follows,
-              follows ? "eye key moves on a rebind of the same pointer" : "eye key stays on a rebind of a slot it does not follow");
+        // The same pointer again. Build 6, S2 (maintainer-approved, 2026-11-04): a PS SRV 0..3 re-set of the pointer already bound leaves the EYE KEY alone, but the
+        // slot's own generation still moves (the scrim cache, engine velocity and srv0IsPanelSized compare it). Every other followed slot still moves the key.
+        const bool srv = slot == BindSlot::PsSrv0 || slot == BindSlot::PsSrv1 || slot == BindSlot::PsSrv2 || slot == BindSlot::PsSrv3;
+        const uint32_t genBeforeRebind = edvr::bindingGeneration(slot);
+        edvr::bindingSet(slot, p);
+        check((edvr::bindingEyeKeyGeneration() != afterSet) == (follows && !srv),
+              srv ? "S2: eye key stays on a same-pointer re-set of PS SRV 0..3" : follows ? "eye key moves on a rebind of the same pointer (every other followed slot)"
+                                                                                : "eye key stays on a rebind of a slot it does not follow");
+        check(edvr::bindingGeneration(slot) != genBeforeRebind, "the slot's own generation moves on every set, a same-pointer re-set included");
         const uint32_t beforeInvalidate = edvr::bindingEyeKeyGeneration();
         edvr::bindingInvalidate(slot);
         check((edvr::bindingEyeKeyGeneration() != beforeInvalidate) == follows,
@@ -129,7 +135,7 @@ int eyeKeyGenerationChecks() {
         edvr::bindingSetShader(slot, p, 0x1234u);
         check((edvr::bindingEyeKeyGeneration() != beforeShader) == follows,
               follows ? "eye key moves on a shader set of a followed slot" : "eye key stays on a shader set of a slot it does not follow");
-        checks += 4;
+        checks += 5;
     }
     check(followed == 8, "the eye key follows eight slots");
     check(inert == static_cast<int>(BindSlot::Count) - 8, "every other slot is left alone");
@@ -145,6 +151,81 @@ int eyeKeyGenerationChecks() {
     (void)edvr::bindingShaderHash(BindSlot::Vs);
     check(edvr::bindingEyeKeyGeneration() == beforeQuiet, "eye key stays put when nothing is written");
     return checks + 5;
+}
+
+// Build 5, item 4: engine velocity's aggregate (bindingEvKeyGeneration) over Vs, Ps, Rtv0, Dsv0 and Blend. It moves exactly when one of those generations moves: a
+// set, an invalidate and a shader set of each, a forget-all and a frame boundary; it never takes 0 (a reset DrawCache holds 0 and has no valid flag), including across
+// the 32-bit wrap; and it is not 0 before any bind. Build 6, S2: the eye key itself leaves a same-pointer PS SRV 0..3 set alone (the per-slot generation and the ev key still move), and moves
+// for everything else exactly as before.
+int evKeyAndPointerKeyChecks() {
+    using edvr::BindSlot;
+    int checks = 0;
+    const auto isEv = [](BindSlot s) { return s == BindSlot::Vs || s == BindSlot::Ps || s == BindSlot::Rtv0 || s == BindSlot::Dsv0 || s == BindSlot::Blend; };
+    const auto isSrv = [](BindSlot s) { return s == BindSlot::PsSrv0 || s == BindSlot::PsSrv1 || s == BindSlot::PsSrv2 || s == BindSlot::PsSrv3; };
+    const auto isEye = [](BindSlot s) {
+        return s == BindSlot::Vs || s == BindSlot::Ps || s == BindSlot::PsSrv0 || s == BindSlot::PsSrv1 || s == BindSlot::PsSrv2 || s == BindSlot::PsSrv3 ||
+               s == BindSlot::Rtv0 || s == BindSlot::Dsv0;
+    };
+    int stubA = 0, stubB = 0;
+    void* const a = &stubA;
+    void* const b = &stubB;
+    check(edvr::bindingEvKeyGeneration() != 0, "ev key: not 0 before any bind (a fresh DrawCache holds 0 and must read stale)");
+    checks += 1;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(BindSlot::Count); ++i) {
+        const BindSlot slot = static_cast<BindSlot>(i);
+        uint32_t ev = edvr::bindingEvKeyGeneration(), pk = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSet(slot, a);
+        check((edvr::bindingEvKeyGeneration() != ev) == isEv(slot), isEv(slot) ? "ev key moves on a set of one of its five slots" : "ev key stays on a set of another slot");
+        check(edvr::bindingEvKeyGeneration() != 0, "ev key is never 0 after a set");
+        edvr::bindingSet(slot, b);   // a pointer change, then back, so the next set is a same-pointer one
+        edvr::bindingSet(slot, a);
+        ev = edvr::bindingEvKeyGeneration();
+        pk = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSet(slot, a);   // the SAME pointer again
+        check((edvr::bindingEvKeyGeneration() != ev) == isEv(slot),
+              isEv(slot) ? "ev key moves on a same-pointer rebind (every set bumps the generation)" : "ev key stays on a rebind of another slot");
+        check((edvr::bindingEyeKeyGeneration() != pk) == (isEye(slot) && !isSrv(slot)),
+              isSrv(slot) ? "eye key stays on a same-pointer PS SRV set"
+                          : isEye(slot) ? "eye key moves on a same-pointer set of a non-SRV eye slot" : "eye key stays on a slot the eye key does not follow");
+        pk = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSet(slot, b);   // a pointer change
+        check((edvr::bindingEyeKeyGeneration() != pk) == isEye(slot),
+              isEye(slot) ? "eye key moves on a pointer change" : "eye key stays on a pointer change of a slot the eye key does not follow");
+        ev = edvr::bindingEvKeyGeneration();
+        pk = edvr::bindingEyeKeyGeneration();
+        edvr::bindingInvalidate(slot);
+        check((edvr::bindingEvKeyGeneration() != ev) == isEv(slot), "ev key follows an invalidate exactly when the slot is one of its five");
+        check((edvr::bindingEyeKeyGeneration() != pk) == isEye(slot), "eye key moves on an invalidate of an eye slot, always (an SRV included)");
+        ev = edvr::bindingEvKeyGeneration();
+        pk = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSetShader(slot, a, 0x77u);
+        check((edvr::bindingEvKeyGeneration() != ev) == isEv(slot), "ev key follows a shader set exactly when the slot is one of its five");
+        check((edvr::bindingEyeKeyGeneration() != pk) == isEye(slot), "eye key moves on a shader set of an eye slot, always");
+        checks += 9;
+    }
+    uint32_t ev = edvr::bindingEvKeyGeneration(), pk = edvr::bindingEyeKeyGeneration();
+    edvr::bindingForgetAll();
+    check(edvr::bindingEvKeyGeneration() != ev && edvr::bindingEyeKeyGeneration() != pk, "both move on forget-all");
+    ev = edvr::bindingEvKeyGeneration();
+    pk = edvr::bindingEyeKeyGeneration();
+    edvr::bindingFrameBoundary();
+    check(edvr::bindingEvKeyGeneration() != ev && edvr::bindingEyeKeyGeneration() != pk, "both move on the frame boundary");
+    ev = edvr::bindingEvKeyGeneration();
+    pk = edvr::bindingEyeKeyGeneration();
+    (void)edvr::bindingGet(BindSlot::Vs);
+    (void)edvr::bindingGeneration(BindSlot::Ps);
+    check(edvr::bindingEvKeyGeneration() == ev && edvr::bindingEyeKeyGeneration() == pk, "neither moves when nothing is written");
+    // The wrap: the increment skips 0, from a bind, a forget-all and a frame boundary alike.
+    edvr::detail::g_bindingEvKeyGen = 0xFFFFFFFFu;
+    edvr::bindingSet(BindSlot::Vs, a);
+    check(edvr::bindingEvKeyGeneration() == 1u, "ev key skips 0 on the wrap (a bind)");
+    edvr::detail::g_bindingEvKeyGen = 0xFFFFFFFFu;
+    edvr::bindingForgetAll();
+    check(edvr::bindingEvKeyGeneration() == 1u, "ev key skips 0 on the wrap (forget-all)");
+    edvr::detail::g_bindingEvKeyGen = 0xFFFFFFFFu;
+    edvr::bindingFrameBoundary();
+    check(edvr::bindingEvKeyGeneration() == 1u, "ev key skips 0 on the wrap (the frame boundary)");
+    return checks + 6;
 }
 
 // Trim D (2026-10-27): beginPanelOverride asks remlokOnFootVisorVsBound() before it calls remlokOnFootDiagnose, which returns on its first line
@@ -193,6 +274,7 @@ int main() {
     try {
         std::printf("scrim_metadata_test: %d eye key generation checks passed (the slot sweep ran per set, rebind, invalidate and shader set)\n",
                     eyeKeyGenerationChecks());
+        std::printf("scrim_metadata_test: %d ev key and S2 eye key checks passed (build 5 item 4, build 6 S2)\n", evKeyAndPointerKeyChecks());
         std::printf("scrim_metadata_test: %d visor vertex shader checks passed (trim D, the inline test)\n", visorVsChecks());
         const auto createDevice = edvr::systemD3D11CreateDevice();
         check(createDevice != nullptr, "load System32 D3D11CreateDevice");

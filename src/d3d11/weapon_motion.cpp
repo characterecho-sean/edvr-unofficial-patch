@@ -1,6 +1,7 @@
 #include "temporal_shader_bytecode.h"
 #include "weapon_motion.h"
 #include "animated_vertex_history.h"
+#include "motion_vs.h"
 #include <cstring>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -30,7 +31,7 @@ struct State {
 constexpr uint64_t gpuWindowFrames=1800;
 constexpr unsigned gpuDrainFrames=120;
 struct GpuMetric {
-    GpuIntervals<16> timer;
+    GpuIntervals<16, GpuQueryOwner::WeaponMotion> timer;
     uint64_t selected=0,submitted=0;
     bool begin(ID3D11DeviceContext* ctx){++selected;if(!timer.begin(ctx))return false;++submitted;return true;}
     uint64_t pending()const{const uint64_t retired=uint64_t(timer.totals.samples)+timer.totals.invalid;return submitted>retired?submitted-retired:0;}
@@ -90,8 +91,7 @@ struct GpuDiagnostics {
     }
 } gpu;
 bool family(uint64_t hash){
-    return hash==0x7B0DC42D383F694Cull || hash==0x8B589D25B2A0ADDCull ||
-        hash==0x114AF608F86D9ED8ull || hash==0xAACFDCF2FB9AD809ull || hash==0x174E8D76363BE337ull;
+    return weaponMotionFamilyHash(hash);   // motion_vs.h
 }
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
     if(g.rtv)return true;

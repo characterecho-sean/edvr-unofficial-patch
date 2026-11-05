@@ -1081,6 +1081,16 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
     }
 }
 
+// Can any pixel shader and any runtime fact make uiLayerFamilyFor name a family for this vertex shader on the HDR target (kind 1)? The
+// vertex shaders the kind-1 branch above tests, plus the panel and loader pair (the family probe records them whatever the family) and the
+// two runtime-gated names (the scope mark, the on-foot HUD), and a map's four overlay vertex shaders. False means kNone for every pixel shader. Kind 2 has no such answer: a
+// panel-sized draw is the screen for any vertex shader. The sharp_weapons_test rig proves the implication and scans this list against the rule.
+inline bool uiLayerFamilyHdrVsMayWant(uint64_t vs) {
+    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
+           vs == kUiVsOrbitLines || vs == kUiVsSupercruiseBars || vs == kUiVsSpaceDust || vs == kVsNormalSpaceDust || weaponsFireVs(vs) || shieldRefractVs(vs) ||
+           uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark;
+}
+
 inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why = nullptr) {
     UiFamilyWhy w = UiFamilyWhy::kOther;
     UiLayerFamily out = UiLayerFamily::kNone;

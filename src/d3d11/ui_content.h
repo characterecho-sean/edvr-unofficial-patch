@@ -62,7 +62,7 @@ public:
     }
     struct Totals {uint32_t updates=0, hits=0, declined=0, evicted=0, resets=0;} totals;
     uint32_t allocated=0;
-    GpuIntervals<32> gpu;
+    GpuIntervals<32, GpuQueryOwner::UiContent> gpu;
 
     // Set by every prepare() call, for the eye run's per-draw census
     // (ui_depth.cpp's surfaceComposite branch): why this call returned

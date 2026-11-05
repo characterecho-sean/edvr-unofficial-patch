@@ -121,6 +121,13 @@ public:
     }
     const std::wstring& logDir() const { return m_logDir; }
 
+    // The VR profile's settings file, whichever profile is active: the first of the one beside the module and the one beside the
+    // .exe that exists, else the first (the order chooseSettingsPath uses for the VR file). For a VR-only value that is wanted
+    // while the flat profile is active -- the OpenXR runtime sizes its session at launch, and a flat launch that is switched to VR
+    // later asks for that size while the flat file is still the one Config has parsed (native_render_settings.cpp). No getter reads
+    // it: a getter answers from the active profile's file.
+    std::wstring vrSettingsPath() const;
+
 private:
     Config() = default;
     // Reads m_path and swaps the result in. fromDefaults: a file that is missing or unreadable

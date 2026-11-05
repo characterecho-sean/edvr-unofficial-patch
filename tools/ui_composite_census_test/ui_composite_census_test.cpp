@@ -672,22 +672,23 @@ void pins() {
     // hologram family list does not, because the stand-in's input signature (TEXCOORD4/7/8) is not the new vertex shader's output.
     // Since 2026-10-27 the call is two functions (the memo's wrapper, which resets the outputs and tests the pass, and the classifier it
     // calls after them); the pins read them in that order, as the one body they were before.
+    // Build 5 made the wrapper inline in ui_depth.h; build 6 (item 5) put it back out of line, in build 4's form.
     const std::string onEye = functionBody(depth, "bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {") +
                               functionBody(depth, "static bool classifyEyeDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {");
     const auto depthPlaces = [](const std::string& body) {
-        return inOrder(body, {"detail::g_uiDepthDrawComposite = false;", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
-                              "const bool composite = surfaceSlot >= 0;", "detail::g_uiDepthDrawComposite = composite;", "const uint64_t h = boundVsHash(ctx);"}) &&
-               countOf(body, "detail::g_uiDepthDrawComposite=composite;") == 1 && countOf(body, "detail::g_uiDepthDrawComposite=false;") == 1;
+        return inOrder(body, {"detail::g_uiDepthDraw = detail::UiDepthDraw{};", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
+                              "const bool composite = surfaceSlot >= 0;", "detail::g_uiDepthDraw.composite = composite;", "const uint64_t h = boundVsHash(ctx);"}) &&
+               countOf(body, "detail::g_uiDepthDraw.composite=composite;") == 1 && countOf(body, "detail::g_uiDepthDraw=detail::UiDepthDraw{};") == 1;
     };
     check(depthPlaces(onEye),
           "P2a: uiDepthOnEyeDraw clears the composite flag first (before its early returns) and sets it once, from the composite it classifies by");
     {
         std::string late = onEye, missing = onEye, twice = onEye;
-        late = edited(late, "detail::g_uiDepthDrawComposite = false;", "");
+        late = edited(late, "detail::g_uiDepthDraw = detail::UiDepthDraw{};", "");
         late = edited(late, "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
-                      "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false; detail::g_uiDepthDrawComposite = false;");
-        missing = edited(missing, "detail::g_uiDepthDrawComposite = composite;", "");
-        twice = edited(twice, "detail::g_uiDepthDrawComposite = composite;", "detail::g_uiDepthDrawComposite = composite; detail::g_uiDepthDrawComposite = composite;");
+                      "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false; detail::g_uiDepthDraw = detail::UiDepthDraw{};");
+        missing = edited(missing, "detail::g_uiDepthDraw.composite = composite;", "");
+        twice = edited(twice, "detail::g_uiDepthDraw.composite = composite;", "detail::g_uiDepthDraw.composite = composite; detail::g_uiDepthDraw.composite = composite;");
         check(!depthPlaces(late) && !depthPlaces(missing) && !depthPlaces(twice),
               "P2a control: cleared after the early returns, never set, or set twice, the pin fails");
     }
@@ -731,8 +732,8 @@ void pins() {
               "P2b control: with either pair in the stand-in table, in the hologram-depth family list, its pixel shader named, or its vertex shader named a second time, the pin fails");
     }
 
-    // P3: vscreen.cpp. The flag is cleared with the other per-draw flags, set right after the pass's own call (inside the pass's gate), taken and
-    // cleared by the scope, and the census is settled once, AFTER both takes -- the family's and the after-UI retry's -- and before the loader
+    // P3: vscreen.cpp. The flag is the draw's own (build 6, #184: a DrawCallFlags the thunk declares false and beginPanelOverride fills), set right after the pass's own
+    // call (inside the pass's gate), taken by the scope, and the census is settled once, AFTER both takes -- the family's and the after-UI retry's -- and before the loader
     // panel's and the curve's substitutions.
     const std::string fwd = functionBody(vsc, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
     const std::string beginOverride = functionBody(vsc, "DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,");
@@ -748,10 +749,10 @@ void pins() {
     };
     const auto vsPlaces = [&countOnlyReads](const std::string& begin, const std::string& body) {
         return countOnlyReads(body) &&
-               inOrder(begin, {"t_uiDepthThisDraw = false;", "t_compositeThisDraw = false;", "if (!drawGateWanted()) {"}) &&
-               has(begin, "if (uiDepthWantsDraws()) { t_uiDepthThisDraw = uiDepthOnEyeDraw(") && has(begin, "t_compositeThisDraw = uiDepthDrawSampledSurface(); }") &&
-               countOf(begin, "t_compositeThisDraw=uiDepthDrawSampledSurface();") == 1 &&
-               has(body, "composite(t_compositeThisDraw)") && has(body, "t_compositeThisDraw = false;") &&
+               has(begin, "DrawCallFlags& flags") && inOrder(begin, {"if (!drawGateWanted()) {", "if (uiDepthWantsDraws()) { flags.uiDepth = uiDepthOnEyeDraw("}) &&
+               has(begin, "flags.composite = uiDepthDrawSampledSurface();") &&
+               countOf(begin, "flags.composite=uiDepthDrawSampledSurface();") == 1 &&
+               has(body, "composite(f.composite)") &&
                inOrder(body, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "uiLayer = uiLayerNoteOther(", "if (compositeCounted) {",
                               "uiLayerNoteCompositeTaken();", "uiLayerNoteCompositeLeft(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),",
                               "if (v == DrawVerdict::kLoaderPanel) {"}) &&
@@ -759,11 +760,11 @@ void pins() {
                countOf(body, "uiLayerNoteCompositeTaken();") == 1 && countOf(body, "uiLayerNoteCompositeLeft(") == 1;
     };
     check(!fwd.empty() && !beginOverride.empty() && vsPlaces(beginOverride, fwd),
-          "P3: vscreen.cpp clears the composite flag with the other per-draw flags, sets it right after uiDepthOnEyeDraw, consumes it in the scope, and counts the composite "
+          "P3: vscreen.cpp sets the draw's own composite flag right after uiDepthOnEyeDraw, consumes it in the scope, and counts the composite "
           "once, after the family's take and the after-UI retry and before the substitutions");
     {
         const std::string taken = "uiLayerNoteCompositeTaken();";
-        std::string early = fwd, noLeft = fwd, extraTaken = fwd, notCleared = beginOverride, notSet = beginOverride, notConsumed = fwd, writes = fwd, returns = fwd;
+        std::string early = fwd, noLeft = fwd, extraTaken = fwd, setTwice = beginOverride, notSet = beginOverride, notConsumed = fwd, writes = fwd, returns = fwd;
         writes = edited(writes, "if (compositeCounted) {", "if (compositeCounted) { uiLayer = false;");
         returns = edited(returns, "uiLayerNoteCompositeTaken();", "uiLayerNoteCompositeTaken(); return;");
         // the count moved in front of the after-UI retry
@@ -771,12 +772,12 @@ void pins() {
         early = edited(early, "uiLayer = uiLayerNoteOther(", "if (compositeCounted) { uiLayerNoteCompositeTaken(); } uiLayer = uiLayerNoteOther(");
         noLeft = edited(noLeft, "uiLayerNoteCompositeLeft(", "uiLayerNoteOtherThing(");
         extraTaken = edited(extraTaken, taken.c_str(), "uiLayerNoteCompositeTaken(); uiLayerNoteCompositeTaken();");
-        notCleared = edited(notCleared, "t_compositeThisDraw = false;", "");
-        notSet = edited(notSet, "t_compositeThisDraw = uiDepthDrawSampledSurface();", "");
-        notConsumed = edited(notConsumed, "composite(t_compositeThisDraw)", "composite(false)");
-        check(!vsPlaces(beginOverride, early) && !vsPlaces(beginOverride, noLeft) && !vsPlaces(beginOverride, extraTaken) && !vsPlaces(notCleared, fwd) &&
+        setTwice = edited(setTwice, "flags.composite = uiDepthDrawSampledSurface();", "flags.composite = uiDepthDrawSampledSurface(); flags.composite = uiDepthDrawSampledSurface();");
+        notSet = edited(notSet, "flags.composite = uiDepthDrawSampledSurface();", "");
+        notConsumed = edited(notConsumed, "composite(f.composite)", "composite(false)");
+        check(!vsPlaces(beginOverride, early) && !vsPlaces(beginOverride, noLeft) && !vsPlaces(beginOverride, extraTaken) && !vsPlaces(setTwice, fwd) &&
                   !vsPlaces(notSet, fwd) && !vsPlaces(beginOverride, notConsumed) && !vsPlaces(beginOverride, writes) && !vsPlaces(beginOverride, returns),
-              "P3 control: counted before the after-UI retry, with no left-composite call, with a second taken call, with the flag never cleared, never set, "
+              "P3 control: counted before the after-UI retry, with no left-composite call, with a second taken call, with the flag set twice, never set, "
               "not consumed by the scope, with the count assigning the take or returning, the pin fails");
     }
 

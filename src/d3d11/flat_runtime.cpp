@@ -69,6 +69,9 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "cockpit_glass.h"
+#include "vehicle_frame.h"
+#include "vehicle_rig.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
@@ -109,6 +112,7 @@ bool FlatMapBounceD3DDriver::verify(void* real, const void* cached, size_t bytes
     return std::memcmp(real, cached, bytes) == 0;
 }
 std::atomic<bool> g_flatRuntimeLive{false};
+std::atomic<FlatMapBounce*> g_flatMapBounce{nullptr};   // flat_runtime.h: flatRuntimeMapBounceAnyOpen
 namespace {
 std::atomic<bool> nativeScale{false};
 std::atomic<uint64_t> mapBouncePresentEpoch{1};
@@ -848,6 +852,25 @@ bool flatRuntimeMapOpenFrame() {
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
+// The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
+// journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
+// (known and not on foot); the last gate seen is what the 30 s line reports.
+static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
+static void fillVehicleFrame(FlatMonoResolveFrame& f) {
+    bool onFoot=false;
+    const bool known=journalFlatOnFoot(&onFoot);
+    g_vehicleGateSeen=vframe::gate(known,onFoot);
+    f.vehicleFrame=false;
+    if(g_vehicleGateSeen!=vframe::Gate::kOn)return;
+    VehicleFrameRead frame;
+    if(vehicleRigFrameTake(engineVelocityPresentClock(),&frame)!=vframe::Why::kOk)return;
+    if(!vframe::useFrame(known,onFoot,true))return;
+    for(int i=0;i<3;++i){std::memcpy(&f.vehiclePosition[0][i],&frame.frame.now.pos[i],4);std::memcpy(&f.vehiclePosition[1][i],&frame.frame.prev.pos[i],4);}
+    for(int i=0;i<2;++i){f.vehicleQuat[0][i]=frame.frame.now.quat[i];f.vehicleQuat[1][i]=frame.frame.prev.quat[i];}
+    std::memcpy(f.vehicleSphere,frame.sphere,sizeof(f.vehicleSphere));
+    f.vehicleFrame=true;
+}
+
 static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
     if (f.reset) return;
     State::CameraOriginWindow& o = s.origin;
@@ -1342,7 +1365,11 @@ static void noteReplayQueryCheck(State& s,ID3D11DeviceContext* ctx,bool rejected
 }
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
-    static FlatMapBounce* bounce = new FlatMapBounce(*driver);
+    static FlatMapBounce* bounce = [] {
+        FlatMapBounce* made = new FlatMapBounce(*driver);
+        g_flatMapBounce.store(made, std::memory_order_release);
+        return made;
+    }();
     return *bounce;
 }
 struct MapBounceWindow {
@@ -2879,7 +2906,9 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     bool shadersMatch = false;
     if (cs) { s.context->CSGetShader(&actualCs,nullptr,nullptr); shadersMatch=lookupShaderHash(actualCs.Get())==cs; }
     else { s.context->VSGetShader(&actualVs,nullptr,nullptr); s.context->PSGetShader(&actualPs,nullptr,nullptr);
-        shadersMatch=lookupShaderHash(actualVs.Get())==vs && lookupShaderHash(actualPs.Get())==ps; }
+        // visual.cockpit_glass = legacy swaps the canopy's pixel shader at the bind, so the actual one is EDVR's: that is still the game's canopy. Without this the F10 audit, the one
+        // path that reaches here under Upstream ownership, took the swap for a modded context and held the route in observation for the whole 900-frame arm (issue 193).
+        shadersMatch=lookupShaderHash(actualVs.Get())==vs && (lookupShaderHash(actualPs.Get())==ps || cockpitGlassReplacedHash(actualPs.Get())==ps); }
     if (!shadersMatch) {
         if(audit) { ++s.projectionMissing;projectionDetail(s,vs,ps,cs,100,"actual-shader-mismatch"); }
         // Local refusal only on the draw path (cs==0); the dispatch path
@@ -4811,6 +4840,20 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
         {
+            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root): every 30 s (every sixth of these windows), zeros included, so a gate that never opens cannot hide.
+            // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
+            // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
+            static unsigned vehicleWindows=0;
+            if(++vehicleWindows%6==0) {
+            VehicleFrameWindow vw;
+            vehicleRigFrameWindow(&vw);
+            Log::get().note("flat vehicle frame 30s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,(unsigned long long)vw.fromOlder,
+                (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
+                !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
+            }
+        }
+        {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
             Log::get().note("flat steady detail 5s: steady-detail=on depth-check=%llu/%llu; a stale-slot pixel takes the camera term only where "
                             "last frame's depth confirms it (ran/skipped resolves this window)",
@@ -4832,12 +4875,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu vehicle-frame=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
-                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],"off",
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],(unsigned long long)steady.skinned,s.refusalView?"on":"off",
                     used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
@@ -5544,6 +5587,8 @@ void* flatRuntimeMapBounceInstall(ID3D11DeviceContext* context, ID3D11Resource* 
 }
 FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext* context,
                                                      ID3D11Resource* resource) {
+    // The open test first, so the flat CPU report's kShadows scope times only a call that can do something: beginUnmap returns at this same test.
+    if (!mapBounce().anyOpen()) return {};
     flatcpu::Scope shadows(flatcpu::kShadows);
     return mapBounce().beginUnmap(reinterpret_cast<uintptr_t>(resource),
                                   reinterpret_cast<uintptr_t>(context));
@@ -7254,6 +7299,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm=true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -7698,6 +7745,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm = true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {

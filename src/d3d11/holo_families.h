@@ -56,6 +56,10 @@ constexpr uint64_t kHoloContactE     = 0x94D5C556DFD6D705ull;
 // bracketed ship's (+0.14,+0.27) at 1.65 km, going indistinct with speed.
 constexpr uint64_t kHoloWorldMarkerReticle = 0x71DD8B8B09060A81ull;
 
+// The cockpit's holo-panel family (panel_upscale.h, removed 2026-09-29). Moved
+// here from ui_depth.cpp so vs_may_want.h can name it.
+constexpr uint64_t kHoloPanel = 0x81216C77F90DEDD6ull;
+
 // The built-in cockpit list: the ten short-range panel/icon/hologram
 // families above.
 constexpr uint64_t kHoloFamiliesBuiltIn[10] = {kHoloIconCore, kHoloCoronaFamily,

@@ -496,12 +496,13 @@ void panelTable(const std::string& root, const std::string& gen) {
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
         check(same, "the Performance tab has the flat page's six rows in their order (HUD Anti-Aliasing directly under UI quality)");
     }
-    check(kFlatVisualRowCount == 3 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
+    check(kFlatVisualRowCount == 4 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
               std::strcmp(kFlatVisualRows[1].section, "visual") == 0 && std::strcmp(kFlatVisualRows[1].key, "star_glow") == 0 &&
-              std::strcmp(kFlatVisualRows[2].section, "fix") == 0 && std::strcmp(kFlatVisualRows[2].key, "particle_billboard") == 0 &&
-              flatVisualHasRow("visual", "star_glow") && flatVisualHasRow("fix", "particle_billboard") && !flatVisualHasRow("fix", "temporal_aa") &&
-              flatProfileReadsKey("fix.particle_billboard"),
-          "the Visual tab has the Intro movie, the Star glow and the Billboards (the table's order; the tab's is edvr.ini's)");
+              std::strcmp(kFlatVisualRows[2].section, "visual") == 0 && std::strcmp(kFlatVisualRows[2].key, "cockpit_glass") == 0 &&
+              std::strcmp(kFlatVisualRows[3].section, "fix") == 0 && std::strcmp(kFlatVisualRows[3].key, "particle_billboard") == 0 &&
+              flatVisualHasRow("visual", "star_glow") && flatVisualHasRow("visual", "cockpit_glass") && flatVisualHasRow("fix", "particle_billboard") &&
+              !flatVisualHasRow("fix", "temporal_aa") && flatProfileReadsKey("fix.particle_billboard"),
+          "the Visual tab has the Intro movie, the Star glow, the Cockpit glass and the Billboards (the table's order; the tab's is edvr.ini's)");
     check(!flatPageHasRow("fix", "particle_billboard") && !flatDebugHasRow("fix", "particle_billboard"), "the Billboards row is on the Visual tab only");
     check(!flatPageHasRow("visual", "star_glow") && !flatDebugHasRow("visual", "star_glow") && !flatVisualHasRow("advanced", "flat_cpu_timing"),
           "no key is on two tabs");

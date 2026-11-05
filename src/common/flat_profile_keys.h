@@ -35,6 +35,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The star glow (visual.star_glow, star_glow.h): a percentage of the halo the game's own bloom draws around a star, in both profiles.
         // The Visual tab's row. Unlisted, getString answers "off" here, which the reader takes for the stock 100.
         std::strcmp(key, "visual.star_glow") == 0 ||
+        // The canopy glass (visual.cockpit_glass, cockpit_glass.h): odyssey | legacy, read live at the frame boundary, in both profiles. The Visual tab's row.
+        // Unlisted, getString answers "off" here, which the reader takes for odyssey, and the row could never turn the legacy look on.
+        std::strcmp(key, "visual.cockpit_glass") == 0 ||
         // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
         // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
         // running stock", so the row could never turn the fix on.
@@ -54,6 +57,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // chain (bloom, tone, copy) is in no effects archive, so a running game is the only place its bytecode can be read.
         // Developer tier, no flat panel row. Unlisted, getBool answers false here whatever the file says.
         std::strcmp(key, "advanced.glare_shader_dump") == 0 ||
+        // TEMPORARY (cockpit_glass_probe.h, docs\cockpit-glass-legacy-port.md): the canopy draw's state and constants, flat and VR alike.
+        // Unlisted, getString answers "off" here and the probe never arms in flat. Remove with the probe.
+        std::strcmp(key, "experimental.cockpit_glass_probe") == 0 ||
         // The HUD layer's edge smoothing (flat_ui_layer.cpp, ui_layer_smaa.h): on | off, off by default, read live a frame at a time. The HUD Anti-Aliasing row
         // of the flat panel's Performance tab, directly under UI quality. Unlisted, getBool answers false here whatever the file says, which reads as off, so the
         // row could never turn it on, and the 30 s "flat ui layer smaa:" line shows key=off.

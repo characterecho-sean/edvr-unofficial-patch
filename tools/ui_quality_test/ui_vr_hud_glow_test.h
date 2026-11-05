@@ -305,7 +305,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         pins.push_back({"hook-asks-once",
                         found && inOrder(body, {"constboolhudAsked=g_hudMode==VrHudGlowMode::kOn&&uiLayerHudGlowPending();", "if(!starIn&&!hudAsked)return;",
                                                 "uiLayerHeadsetGlowFeed(ctx,0,info.resource,starIn,&glow);", "vrHudCount(g_hudWin,pick,glow.eye,hudFed,", "if(!canBind)return;",
-                                                "vScreenPSSetShaderResourcesRaw(ctx,0,1,&bound);", "g_t0.active=true;", "vrHudGlowFedLine("}),
+                                                "vScreenPSSetShaderResourcesRaw(ctx,0,1,&bound);", "detail::g_vrStarT0Active=true;", "vrHudGlowFedLine("}),
                         "the first level is looked at for the HUD only while the mode is on and an eye waits; one H' is built for the star light and the HUD together, counted, bound at t0 "
                         "through the raw setter for this draw, and said once"});
         pins.push_back({"h-prime-once",
@@ -315,9 +315,9 @@ std::vector<Pin> wiringPins(const Sources& src) {
     }
     pins.push_back({"boundary-order",
                     inOrder(mod, {"voidvrStarGlowFrameBoundary(){", "if(runtimeFlatProfile()){hudStandDown();", "if(!g_budget.shouldRun()){hudStandDown();", "hudFrameBoundary();",
-                                  "if(g_mode==VrStarMode::kOn)foldFrame();"}) &&
+                                  "if(detail::g_vrStarMode==VrStarMode::kOn)foldFrame();"}) &&
                         has(mod, "constVrHudGlowModemode=vrHudGlowMode(uiLayerCrispOn(),menuStarGlowBloom());") &&
-                        has(mod, "detail::g_vrStarGlowWanted.store(g_mode==VrStarMode::kOn||g_hudMode==VrHudGlowMode::kOn,std::memory_order_relaxed);"),
+                        has(mod, "detail::g_vrStarGlowWanted.store(detail::g_vrStarMode==VrStarMode::kOn||g_hudMode==VrHudGlowMode::kOn,std::memory_order_relaxed);"),
                     "the HUD's mode is read once a frame from the HDR take and the Bloom reading, before the star glow's own boundary; the hooks stay armed while either runs; the flat "
                     "profile and a spent fault budget stand it down"});
     pins.push_back({"window-line",
@@ -366,10 +366,10 @@ void testWiring() {
         {"hook-asks-once", 2, "    if (!canBind) return;\n", ""},
         {"hook-asks-once", 2, "vrHudCount(g_hudWin, pick, glow.eye, hudFed, ", "vrHudCount(g_hudWin, pick, glow.eye, true, "},
         {"h-prime-once", 2, "    vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &bound);\n", "    vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &bound);\n    vScreenPSSetShaderResourcesRaw(ctx, 1, 1, &bound);\n"},
-        {"boundary-order", 2, "    hudFrameBoundary();\n    if (g_mode == VrStarMode::kOn) foldFrame();", "    if (g_mode == VrStarMode::kOn) foldFrame();\n    hudFrameBoundary();"},
+        {"boundary-order", 2, "    hudFrameBoundary();\n    if (detail::g_vrStarMode == VrStarMode::kOn) foldFrame();", "    if (detail::g_vrStarMode == VrStarMode::kOn) foldFrame();\n    hudFrameBoundary();"},
         {"boundary-order", 2, "vrHudGlowMode(uiLayerCrispOn(), menuStarGlowBloom())", "vrHudGlowMode(true, menuStarGlowBloom())"},
-        {"boundary-order", 2, "g_vrStarGlowWanted.store(g_mode == VrStarMode::kOn || g_hudMode == VrHudGlowMode::kOn, std::memory_order_relaxed);",
-         "g_vrStarGlowWanted.store(g_mode == VrStarMode::kOn, std::memory_order_relaxed);"},
+        {"boundary-order", 2, "g_vrStarGlowWanted.store(detail::g_vrStarMode == VrStarMode::kOn || g_hudMode == VrHudGlowMode::kOn, std::memory_order_relaxed);",
+         "g_vrStarGlowWanted.store(detail::g_vrStarMode == VrStarMode::kOn, std::memory_order_relaxed);"},
         {"window-line", 2, "uiLayerHudEyeFrames(e) - g_hudEyeFramesBase[e];", "g_hudEyeFramesBase[e];"},
         {"no-new-key", 2, "    ++g_boundaries;\n", "    ++g_boundaries;\n    Config::get().getString(\"fix.hud_glow\", \"on\");\n"},
     };
