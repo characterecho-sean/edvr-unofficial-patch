@@ -39,6 +39,36 @@ inline Why farPoint(const float rows[3][3], const float position[3], const float
     return Why::kOk;
 }
 
+// THE HELD POINTER, the System Map's click (docs/galaxy-map-vr-2026-11-03.md, "The System Map's click"). The game keeps the pointer's viewport x, y at the button's press and selects at its release only when the two are exactly equal, bit for bit. With a mouse at rest that holds in flat. In VR the arrow's
+// position is smoothed through the head and differs every frame, so a click was never a click. So the answer is held: while the map's camera has not moved and the arrow's direction is within kHoldRadians of the direction it was taken at, the same answer is returned, and the mouse decides when it changes.
+// Measured: the arrow's direction wanders by about 5e-6 radians over 19 frames of a near-still head (dump 050358167001) and by 1.7e-4 while the head yaws 8.7 degrees (dump 061416462001). The pick's own radius is at least 0.03 of the viewport's height, far above this.
+constexpr float kHoldRadians = 5e-4f;
+struct PointerHold {
+    bool have = false;
+    float dir[3] = {};
+    uint64_t changes = 0;
+    float out[4] = {};
+    uint64_t ret = 0;
+};
+inline bool arrowDirection(const float arrow[3], float d[3]) {
+    const float length = std::sqrt(arrow[0] * arrow[0] + arrow[1] * arrow[1] + arrow[2] * arrow[2]);
+    if (!(length > kArrowMin && length < kArrowMax)) return false;
+    for (int i = 0; i < 3; ++i) d[i] = arrow[i] / length;
+    return true;
+}
+inline bool holdApplies(const PointerHold& h, const float arrow[3], uint64_t changes) {
+    float d[3];
+    if (!h.have || h.changes != changes || !arrowDirection(arrow, d)) return false;
+    const float dx = d[0] - h.dir[0], dy = d[1] - h.dir[1], dz = d[2] - h.dir[2];
+    return dx * dx + dy * dy + dz * dz < kHoldRadians * kHoldRadians;
+}
+inline void holdTake(PointerHold& h, const float arrow[3], uint64_t changes, const float out[4], uint64_t ret) {
+    h.have = arrowDirection(arrow, h.dir);
+    h.changes = changes;
+    std::memcpy(h.out, out, sizeof(h.out));
+    h.ret = ret;
+}
+
 // rel in the map's axes: a = rel . rows[0], b = rel . rows[1], c = rel . rows[2] (the rig checks the far point's direction with it).
 inline void inMapAxes(const float rows[3][3], const float rel[3], float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = rel[0] * rows[i][0] + rel[1] * rows[i][1] + rel[2] * rows[i][2];

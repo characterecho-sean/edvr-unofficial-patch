@@ -19,7 +19,7 @@ Open: what makes VR draw the small mesh variant of the System Map's atmosphere r
 
 Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. 12382D in `eye_draw_snapshot.h`'s watched list, for the System Map's markers, comes out when those sizes are read.
 
-Next (2026-11-05, see "The System Map"): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). Fly the markers' scale and the map's plane out of the AA pass, the flight card's steps 5 and 6. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
+Next (2026-11-05, see "The System Map"): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). The markers' scale is FLOWN OK (fc05ee07, Sean: "Fixed the atmospheres"). Fly the System Map's click, "Flight card, the System Map's click". Sean calls the click the only difference left from flat, so the map's plane out of the AA pass is flown with nothing against it; no dump of it has been read. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
 
 Ruled out:
 - ruled out: a LOD on range holding VR at the small marker variant, because VR draws the same meshes at camera height 12 and at 80 (dumps 072747469002, 072734614001).
@@ -280,6 +280,22 @@ Static RE (analysis-inbox 20261105-system-map; addresses in `docs/build-334925.m
 **The fix, a measured rule rather than the game's selector.** Each sprite is drawn k times larger about its own position, in a replacement for 12382D on the System Map (galaxy_map_vs.h, THE SYSTEM MAP'S MARKERS): k = surface radius / 0.4355, never below 1, at most 4. The ring then sits at the atmosphere's outer radius (1.139 on 38 Lyncis 1, flat's is 1.14), the arc on the planet of surface 0.79 at 1.246 (flat's is 1.424: outside the limb, 12% smaller), and moons stay as they are. One k for all three kinds, because telling them apart in the draw has no clean signal. The radius comes from the same per-body constants as the atmosphere pass, cb1[125] and cb1[126], read at the Unmap of a 5376-byte constant buffer into a table at vertex slot 11, so another build's size leaves the markers as the game drew them. INFERRED: that rocky bodies write those rows too (their pixel shader reads them). If not, the planet at (15.35, 0, 0) keeps its small arc and the log's body count shows it.
 
 **Everything but the bodies out of the AA pass.** Already in the layer on the System Map: the markers and labels (12382D), the icons (C31238) and the stems (3028E7). Left in the scene until now: the plane's X and diamond icons (88DCF1, FEDE6C, n=6) and the grid (same pair, n=1014). Both now go to the HDR layer while the System Map's camera is up. The icons come after the bodies and keep their depth test, against the layer's seeded copy. The grid and the stems come before most bodies at viewport depth 0, and the game relies on the bodies covering them, which a layer composited over the scene cannot do. So the grid takes no test, and at the first draw after the bodies the layer is cut back to clear wherever the game's depth holds anything (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES). That also stops stems running over the gas giant. Left over: small moons write no depth (dump 072747469002), so the grid lies over them; planetary rings write none either, so the grid and stems lie over those; and the edge of a cut-out is at the eye's render resolution. The planets' rings (1F3AD1) and 6041FD stay in the scene as part of the bodies.
+
+### The System Map's click
+
+FLOWN 09:20 (build fc05ee07), Sean: the atmospheres are fixed, and the one difference left is that clicking a body does not select it, nor a second click move the camera to it. MEASURED in the code (analysis-inbox 20261105-system-map, `decomp_3AF9060`, `decomp_3B46A40`): at the button's press the map's step keeps the pointer's K answer, and at the release it calls select-at-pointer only if the answer is exactly equal in x and y, bit for bit. Select-at-pointer does both jobs: it picks the body and sets it, and if that body is already the target it moves the camera there. So both symptoms have one cause.
+
+The answer was never equal in VR. The cursor's position runs through the head: over 19 frames of dump 050358167001, mouse still, the arrow's W.z moves 6.6e-4 and its direction about 5e-6 radians, tracking the eye, and it is never the same two frames running. In flat a still mouse gives the same bits. INFERRED: this is the game's own VR behaviour, not EDVR's, and the far-point hover neither made nor mended it (the far point only passes the wander on).
+
+The change: on the System Map's call the K answer is held while the map's camera has not moved (`mapCameraChanges`, which counts a change of a single bit in the head-free pose) and the arrow's direction stays within 5e-4 radians of where it was taken, about 0.03 degrees and three times the 1.7e-4 measured while the head yaws 8.7 degrees. The mouse decides when it changes, and the drawn arrow is untouched. It is below the pick's own radius, at least 0.03 of the viewport's height. A mouse step past it during a click cancels the click, as in flat. The Galaxy Map's call is not held: its clicks work.
+
+## Flight card, the System Map's click
+
+1. System Map: click a planet. It should select, as in flat. Click it again: the camera should move to it. Try a moon, a planet and the star.
+2. With the mouse still and the head moving, the hover should not flicker between neighbours. Drag the map with the button held: it should drag and select nothing.
+3. Galaxy Map: selection as before.
+
+Log: in the `map pointer` 30 s line, `the System Map's held and answered unchanged` close to the call count while the mouse is still. If that is 0, the hold never applied: the map's camera is moving every frame or the arrow's direction is wandering past the limit.
 
 ## Flight card, System Map and Anti-aliasing off
 

@@ -3037,6 +3037,25 @@ void testSupercruiseLines() {
         const float badPosition[3] = {position[0], std::numeric_limits<float>::infinity(), position[2]};
         check(edvr::mappointer::farPoint(badRows, position, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose && edvr::mappointer::farPoint(rows, badPosition, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose,
               "GP6: a non-finite pose is refused");
+        // The System Map's click: the arrow's real positions over 19 frames of one dump, with the mouse still, all hold the first frame's answer bit for bit; a mouse step, a moved camera or a position that is not the arrow's does not.
+        {
+            using namespace edvr::mappointer;
+            PointerHold h;
+            const float frames[][3] = {{0.040855f, -0.007648f, 1.035048f}, {0.040847f, -0.007646f, 1.034886f}, {0.040868f, -0.00765f, 1.035324f}, {0.040837f, -0.007644f, 1.034665f}, {0.040860f, -0.007648f, 1.035147f}};
+            const float answer[4] = {812.5f, 433.25f, 0.0f, 0.0f};
+            check(!holdApplies(h, frames[0], 7), "GP6c: nothing is held before the first answer");
+            holdTake(h, frames[0], 7, answer, 1);
+            bool all = true;
+            for (const auto& f : frames) all = all && holdApplies(h, f, 7);
+            const float mouseStep[3] = {0.0420f, -0.007648f, 1.035048f};   // 1.1e-3 radians along x from the first frame
+            const float notArrow[3] = {0.0f, 0.0f, 0.01f};
+            check(all && h.ret == 1 && h.out[0] == 812.5f && h.out[1] == 433.25f, "GP6c: the arrow's drift with the mouse still holds the answer exactly");
+            check(!holdApplies(h, frames[0], 8), "GP6c: a moved map camera lets the answer go");
+            check(!holdApplies(h, mouseStep, 7) && !holdApplies(h, notArrow, 7), "GP6c: a mouse step, or a position that is not the arrow's, lets it go");
+            // The yaw case measured in dump 061416462001: 1.7e-4 radians of direction stays held.
+            const float yawed[3] = {0.040855f + 1.7e-4f * 1.035048f, -0.007648f, 1.035048f};
+            check(holdApplies(h, yawed, 7), "GP6c: the 1.7e-4 radians the arrow drifts while the head yaws 8.7 degrees is held");
+        }
         uint8_t gate[edvr::mappointer::kGateRelayBytes];
         std::memset(gate, 0xCC, sizeof(gate));
         int cell = 0, callback = 0;
@@ -3079,6 +3098,7 @@ void testSupercruiseLines() {
                   pointer.find("otherReturn") == std::string::npos && pointer.find("kNearCamera") == std::string::npos,
               "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
         check(pointer.find("if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);") != std::string::npos && pointer.find("gamePinMatches(kSystemPointerReturnRva") != std::string::npos &&
+                  pointer.find("return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);") != std::string::npos &&
                   pointer.find("const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
               "GP14: any caller but the two maps' pointer calls goes straight to the original projector; the System Map's is optional and pinned, and its gate opens the pointer alone, not the Galaxy Map's fixed icons");
         std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);

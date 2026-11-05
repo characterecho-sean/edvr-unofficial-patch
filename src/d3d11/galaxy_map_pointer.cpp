@@ -74,7 +74,9 @@ struct State {
     // Counters, since the last 30 s line.
     std::atomic<uint64_t> pointerCalls{0};
     std::atomic<uint64_t> replaced{0};
+    std::atomic<uint64_t> heldCalls{0};
     std::atomic<uint64_t> passed[kPassCount] = {};
+    PointerHold held;                        // the System Map's held answer: the game's update thread only
 
     // Frame thread only.
     unsigned tries = 0;
@@ -126,7 +128,7 @@ uint64_t pass(State& s, Project original, Pass why, void* k, const float* in, in
     return original(k, in, idx, out);
 }
 
-uint64_t pointerCall(State& s, Project original, void* k, const float* in, int idx, float* out) noexcept {
+uint64_t pointerCall(State& s, Project original, void* k, const float* in, int idx, float* out, bool hold) noexcept {
     s.pointerCalls.fetch_add(1, std::memory_order_relaxed);
     MapCameraPose pose;
     if (!mapCameraPose(pose)) return pass(s, original, kNoPose, k, in, idx, out);
@@ -141,8 +143,17 @@ uint64_t pointerCall(State& s, Project original, void* k, const float* in, int i
     if (!readMem(reinterpret_cast<uintptr_t>(in), game, sizeof(game))) return pass(s, original, kBadInput, k, in, idx, out);
     alignas(16) float farIn[4];
     if (farPoint(pose.rows, pose.position, arrow, game[3], farIn) != Why::kOk) return pass(s, original, kBadArrow, k, in, idx, out);
-    const uint64_t ret = original(k, farIn, idx, out);
     s.replaced.fetch_add(1, std::memory_order_relaxed);
+    if (!hold) return original(k, farIn, idx, out);
+    // The System Map's click wants the same bits at press and release (galaxy_map_pointer_core.h, THE HELD POINTER). Its call passes a 16-byte out.
+    const uint64_t changes = mapCameraChanges();
+    if (holdApplies(s.held, arrow, changes)) {
+        std::memcpy(out, s.held.out, sizeof(s.held.out));
+        s.heldCalls.fetch_add(1, std::memory_order_relaxed);
+        return s.held.ret;
+    }
+    const uint64_t ret = original(k, farIn, idx, out);
+    holdTake(s.held, arrow, changes, out, ret);
     return ret;
 }
 
@@ -152,7 +163,7 @@ __declspec(noinline) uint64_t projectDetour(void* k, const float* in, int idx, f
     State& s = *g_s;
     const auto original = reinterpret_cast<Project>(s.forward.load(std::memory_order_acquire));
     if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);   // the stars' and bodies' own calls and any other: the game's, untouched
-    return pointerCall(s, original, k, in, idx, out);
+    return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);
 }
 
 // Allocates one hook's relay within reach of its target. A non-null reason on failure.
@@ -270,12 +281,13 @@ void thirtySecondLine(State& s, uint64_t now) {
     size_t n = 0;
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
-    Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
+    Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point (the System Map's held and answered unchanged %llu), %llu passed through%s%s%s; "
                     "cursor object %s; the System Map's markers scaled %llu (%u bodies known), cut-outs behind its bodies %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
                     "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
+                    static_cast<unsigned long long>(s.heldCalls.exchange(0, std::memory_order_relaxed)),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
                     s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(),
                     static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapIconA]),
