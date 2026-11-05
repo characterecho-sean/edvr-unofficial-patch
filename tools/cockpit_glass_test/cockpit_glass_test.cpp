@@ -74,6 +74,10 @@ static void testCore() {
     check(std::strcmp(line, "cockpit glass: window 30 s legacy binds=3050 canopy-seen=3050 ice-overlays=90 replacement=ready") == 0, "a working window reads binds equal to canopy-seen");
     check(std::strcmp(cg::replacementName(cg::Replacement::NotTried), "not-made-yet") == 0, "an untried replacement is named");
 
+    check(cg::dirtLevelOf(100) == 1.0f && cg::dirtLevelOf(0) == 0.0f && cg::dirtLevelOf(250) == 2.5f && cg::dirtLevelOf(300) == 3.0f, "the dirt level is the percent over 100: 100 is the look as shipped");
+    check(cg::dirtLevelOf(-5) == 0.0f && cg::dirtLevelOf(1000) == 3.0f, "a percent outside 0 to 300 is held to the key's range");
+    check(cg::kDirtPercentDefault == 100 && cg::kLevelSlot == 13, "the key ships at 100 and the level lives at b13");
+    check(cg::dirtRowDim(cg::Look::Odyssey) && !cg::dirtRowDim(cg::Look::Legacy), "the Legacy glass dirt row is dimmed with odyssey and live with legacy");
     check(cg::overlayFor(0x7F770D61DEA7CD30ull) == cg::Overlay::Ice && cg::overlayFor(0x42747CC92CF844C4ull) == cg::Overlay::Condensation, "the quality-3 ice and condensation shaders are overlaid");
     check(cg::overlayFor(0xF90EA0D834A8B44Eull) == cg::Overlay::None && cg::overlayFor(0x4BF640EED290C885ull) == cg::Overlay::None &&
               cg::overlayFor(0x3B4EDBBAF1BA87BFull) == cg::Overlay::None && cg::overlayFor(0x2A4B54153FBF97EEull) == cg::Overlay::None &&
@@ -169,6 +173,8 @@ enum Variant { kIntact = 0, kIce = 1, kCondensation = 2 };
 struct Case {
     Variant variant = kIntact;
     bool streaks = true;      // the streak texture bound at t12 (its texel is 1, so the dirt texture reads the legacy max, 0.09)
+    bool levelBound = true;   // the dirt level block bound at b13
+    float dirtLevel = 1.0f;   // its x: visual.cockpit_glass_dirt / 100, 1 = the look as shipped
     float masks[4] = {0, 0, 0, 0};   // as the vertex shader of the variant passes them
     float normal[3] = {0, 0, 1}, position[3] = {0, 0, 5}, tangent[3] = {1, 0, 0};
     float tint = 0, alphaMultiplier = 1;
@@ -275,6 +281,10 @@ public:
         ctx->PSSetShader(psh[c.variant].Get(), nullptr, 0);
         ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
         ctx->PSSetConstantBuffers(1, 2, cbs);
+        const Float4 levelData{{c.dirtLevel, 0, 0, 0}};
+        ComPtr<ID3D11Buffer> levelCb = constantBuffer(&levelData, sizeof levelData);
+        ID3D11Buffer* level = c.levelBound ? levelCb.Get() : nullptr;
+        ctx->PSSetConstantBuffers(cg::kLevelSlot, 1, &level);
         ID3D11ShaderResourceView* crackView = c.crack ? crackFull.Get() : crack.Get();
         const bool overlay = c.variant != kIntact;   // the ice and condensation draws keep the crack map at t7 and the blemish map at t11
         ID3D11ShaderResourceView* srvs[13] = {t0.Get(), t1.Get(), t2.Get(), t3.Get(), nullptr, t5.Get(), overlay ? nullptr : crackView, overlay ? crackView : nullptr, nullptr,
@@ -798,6 +808,28 @@ static void testShader() {
     iceNoStreaks.streaks = false;
     const Pixel ins = canopy.draw(iceNoStreaks);
     check(ins.r == 0 && ins.g == 0 && ins.b == 0, "with no streak texture the overlay adds no dirt");
+
+    // The dirt level (visual.cockpit_glass_dirt / 100, b13): it scales the dirt albedo and nothing else, in the intact variant and in both overlays. 1 is the look as shipped.
+    {
+        Case half = dirt, twice = dirt, none0 = dirt, unbound = dirt;
+        half.dirtLevel = 0.5f;
+        twice.dirtLevel = 2.0f;
+        none0.dirtLevel = 0.0f;
+        unbound.levelBound = false;
+        const Pixel lvHalf = canopy.draw(half), lvTwice = canopy.draw(twice), lvZero = canopy.draw(none0), lvUnbound = canopy.draw(unbound);
+        std::printf("dirt level: 0 gives %g, 0.5 gives %g, 1 gives %g, 2 gives %g\n", lvZero.r, lvHalf.r, d.r, lvTwice.r);
+        check(closeTo(lvHalf.r, d.r * 0.5f, 0.02f) && closeTo(lvTwice.r, d.r * 2.0f, 0.02f), "the dirt level scales the dirt: 50 % is half the light, 200 % twice");
+        check(lvZero.r == 0 && lvZero.g == 0 && lvZero.b == 0 && closeTo(lvZero.a, kBaseAlpha, 0.01f), "a level of 0 is a clean pane: no dirt light, the legacy alpha base still drawn");
+        check(lvUnbound.r == 0 && lvUnbound.g == 0 && lvUnbound.b == 0 && closeTo(lvUnbound.a, kBaseAlpha, 0.01f), "with no level block bound the replacement draws without dirt (never stock)");
+        check(closeTo(lvHalf.a, kBaseAlpha, 0.01f) && closeTo(lvTwice.a, kBaseAlpha, 0.01f), "the level does not touch the alpha");
+        Case iceTwice = ice, iceZero = ice, condensationTwice = condensation;
+        iceTwice.dirtLevel = 2.0f;
+        iceZero.dirtLevel = 0.0f;
+        condensationTwice.dirtLevel = 2.0f;
+        const Pixel lvIceTwice = canopy.draw(iceTwice), lvIceZero = canopy.draw(iceZero), lvCondTwice = canopy.draw(condensationTwice);
+        check(closeTo(lvIceTwice.r, io.r * 2.0f, 0.02f) && closeTo(lvCondTwice.r, co.r * 2.0f, 0.02f), "both overlays take the level too: 200 % adds twice the dirt light");
+        check(lvIceZero.r == 0 && lvIceZero.g == 0 && lvIceZero.b == 0 && lvIceZero.a == 0, "an overlay at a level of 0 adds nothing");
+    }
 
     const unsigned problems = canopy.rig.problems();
     std::printf("D3D debug layer: %s\n", canopy.rig.debugLayer ? "on" : "not installed here (the signature check in temporal_shader_build still holds the link)");

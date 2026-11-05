@@ -6466,6 +6466,13 @@ void vScreenPSSetShaderResourcesRaw(ID3D11DeviceContext* ctx, uint32_t startSlot
     g_state->realPSSetShaderResources(ctx, startSlot, n, srvs);
 }
 
+void vScreenPSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot, uint32_t n, ID3D11Buffer* const* bufs) {
+    if (!ctx) return;
+    // realPSSetConstantBuffers is set only where the flat-scope observer hook was installed; without it the vtable entry is the driver's own.
+    if (g_state && g_state->realPSSetConstantBuffers) g_state->realPSSetConstantBuffers(ctx, startSlot, n, bufs);
+    else ctx->PSSetConstantBuffers(startSlot, n, bufs);
+}
+
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
                                      const float colour[4]) {
     if (!g_state || !g_state->realClearRtv || !ctx || !rtv) return;

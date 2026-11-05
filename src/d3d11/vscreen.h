@@ -170,6 +170,9 @@ void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTarge
 // shadow must keep describing the game's bindings throughout.
 void vScreenPSSetShaderResourcesRaw(ID3D11DeviceContext* ctx, uint32_t startSlot, uint32_t n,
                                     ID3D11ShaderResourceView* const* srvs);
+// The PS constant-buffer slots, past the flat discovery observer's hook (hookedPSSetConstantBuffers, installed for the flat scope only): visual.cockpit_glass_dirt's
+// one-register block at b13 (cockpit_glass.cpp), bound with the legacy canopy shader and put back after. In a VR launch the context's own call is not hooked and is used.
+void vScreenPSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot, uint32_t n, ID3D11Buffer* const* bufs);
 // The layer's copy of the game's depth-stencil target, which it seeds its
 // own from (a depth- or stencil-tested UI draw): past the copy hook, which
 // would report the write to the motion paths.

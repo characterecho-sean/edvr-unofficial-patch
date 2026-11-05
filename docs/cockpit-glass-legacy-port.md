@@ -45,6 +45,9 @@ Flown with 5 x (probe(N) + probe(-N)) ambient (268b292c): still almost no dirt. 
 
 15619672 flown: too faint, no visible difference from `odyssey`; film 0.4 and edge 0.3 flown 25cb4723, "looks better" (end of section 13). CB2[17].w behaves like per-ship wear driving Odyssey's dirt; Horizons' glass shader has no such term, and Sean decided on 2026-11-04 that EDVR's grime stays fixed (section 16). A dashed bright line under the top strut turned out not to be the glass, it shows with `odyssey` too (section 15). Whether the film and patches read naturally is still Sean's call.
 
+BUILT 2026-11-05, NOT FLOWN (section 17): `visual.cockpit_glass_dirt`, 0 to 300 percent, shipped 100, live, flat and VR, under Cockpit glass.
+A one-register block at b13 scales the dirt only; the row is dimmed unless the look is `legacy`. It makes Sean's strength call a slider.
+
 Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\cockpit_glass_probe_test`, the
 `:rig_cockpit_glass_probe_test` rig, its flat allow-list line). Default off, kept on main while users try `legacy` (Sean, 2026-11-04), so a report can turn it on. Remove all of it once that feedback is in. Pre-merge review follow-ups, none seen in a flight: issue #188.
 
@@ -794,6 +797,35 @@ object in both builds, so calling it wear is still an inference from how it beha
 **Decided (Sean, 2026-11-04): the legacy grime stays fixed.** It does not read CB2[17].w, so it looks the same on every
 ship, new or worn, matching Horizons as far as the code reaches. With `odyssey`, the game's own wear-driven dirt is
 unchanged. The unresolved items above no longer block anything here; f matters again only if this is reopened.
+
+## 17. A live dirt level (2026-11-05, BUILT, NOT FLOWN)
+
+Sean's eye decides how much dirt the legacy glass shows (the measured legacy dirt is one or two display levels; sections 12 and 13), and
+each value tried cost a build and a flight. So the strength is now a setting: `visual.cockpit_glass_dirt`, a whole percent from 0 to 300,
+shipped 100, live, both profiles, on the Visual page (VR) and Visual tab (flat) directly under Cockpit glass. 100 is the shader's
+`kDirtStrength` 4.0 as flown in 25cb4723; 0 is a clean pane (the alpha base still darkens it a little); 300 is three times the dirt.
+
+How. The shader gets a one-register block `Level` at **b13** (`dirtLevel.x` = percent / 100), and multiplies the dirt albedo term by it
+in all three variants. Nothing else is scaled: not the crack colour, the smudge and crack glare, or the alpha. `cockpit_glass.cpp` makes
+a 16-byte DEFAULT buffer per device, uploads a new value only when the setting moved (`vScreenUpdateSubresourceRaw`), and binds it with
+the streak texture (`bindGlassInputs`), saving what the game had at b13 and giving it back where t12 is given back (the overlay: around
+its one reissued draw). b13 is the last of D3D11's fourteen slots; the canopy shaders bind b1 and b2, and `ui_depth.cpp` already
+uses b13 for its own draws. `vScreenPSSetConstantBuffersRaw` is a new raw call: `hookedPSSetConstantBuffers` exists only for the flat
+scope's discovery observer, and the glass's bind should not reach it.
+
+Failure modes, both visible and neither stock: a refused block is bound as null, so the shaders read 0 and draw no dirt (logged, "the dirt
+level block was refused"); an unbound b13 reads 0 the same way, which `tools\cockpit_glass_test` pins. A key outside 0 to 300 is
+clamped and logged by `getIntInRange`.
+
+The menu. The row is dimmed, and refuses a step, a typed value and the reset, unless `visual.cockpit_glass` is `legacy`
+(`cockpit_glass_core.h` `dirtRowDim`, `menu.cpp` `cockpitGlassDirtRowDisabled`, read live as the glass reads it). It is dimmed and not
+hidden, as the Sharpening and DLSS preset rows are, so the setting does not seem to vanish. The flat gate lists the key
+(`flat_profile_keys.h`), which matters: unlisted, `getIntInRange` answers 0 in flat and the pane would be clean whatever the file says.
+
+What the flight must check: with `legacy` the log says `legacy on ... at a dirt level of N%`, and each change says `dirt level N%`;
+200 shows twice the dirt of 100 and 0 shows none; choosing `odyssey` dims the row and its steps are refused with the line
+"Legacy glass dirt is inactive"; the same in the headset (both eyes) and on the flat Visual tab; and the ice and condensation draws
+follow the level as the intact canopy does.
 
 ## Ruled out
 

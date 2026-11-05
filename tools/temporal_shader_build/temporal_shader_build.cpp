@@ -1392,14 +1392,17 @@ static void selfTest() {
                 }
                 check(signature, "each legacy cockpit glass shader's inputs are its game vertex shader's outputs, element for element and register for register, so it links with it");
                 D3D11_SHADER_INPUT_BIND_DESC bind{};
-                D3D11_SHADER_BUFFER_DESC frame{}, material{};
+                D3D11_SHADER_BUFFER_DESC frame{}, material{}, level{};
                 ID3D11ShaderReflectionConstantBuffer* frameBuffer = ok ? reflection->GetConstantBufferByName("Frame") : nullptr;
                 ID3D11ShaderReflectionConstantBuffer* materialBuffer = ok ? reflection->GetConstantBufferByName("Material") : nullptr;
-                bool bindings = ok && desc.ConstantBuffers == 2 && desc.BoundResources == 13 &&
+                ID3D11ShaderReflectionConstantBuffer* levelBuffer = ok ? reflection->GetConstantBufferByName("Level") : nullptr;
+                bool bindings = ok && desc.ConstantBuffers == 3 && desc.BoundResources == 14 &&
                                 frameBuffer && SUCCEEDED(frameBuffer->GetDesc(&frame)) && frame.Size == 16u * cg::kFrameRegisters &&
                                 materialBuffer && SUCCEEDED(materialBuffer->GetDesc(&material)) && material.Size == 16u * cg::kMaterialRegisters &&
+                                levelBuffer && SUCCEEDED(levelBuffer->GetDesc(&level)) && level.Size == 16u &&
                                 SUCCEEDED(reflection->GetResourceBindingDescByName("Frame", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 1 &&
-                                SUCCEEDED(reflection->GetResourceBindingDescByName("Material", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 2;
+                                SUCCEEDED(reflection->GetResourceBindingDescByName("Material", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 2 &&
+                                SUCCEEDED(reflection->GetResourceBindingDescByName("Level", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == cg::kLevelSlot;
                 struct Slot { const char* name; D3D_SHADER_INPUT_TYPE type; UINT point; };
                 const Slot slots[] = {
                     {"ClusterLists", D3D_SIT_BYTEADDRESS, 0}, {"SunLight", D3D_SIT_BYTEADDRESS, 1}, {"ProbeRecords", D3D_SIT_BYTEADDRESS, 2}, {"Probes", D3D_SIT_TEXTURE, 3},
@@ -1410,7 +1413,7 @@ static void selfTest() {
                 for (const Slot& slot : slots)
                     bindings = bindings && SUCCEEDED(reflection->GetResourceBindingDescByName(slot.name, &bind)) && bind.Type == slot.type && bind.BindPoint == slot.point &&
                                bind.BindCount == 1;
-                check(bindings, "each legacy cockpit glass shader keeps the game's b1 (327 registers) and b2 (18), reads t0 to t3, t5, its crack and blemish maps and the streaks at t12, samples with s0 to s2, and binds nothing else");
+                check(bindings, "each legacy cockpit glass shader keeps the game's b1 (327 registers) and b2 (18), reads t0 to t3, t5, its crack and blemish maps and the streaks at t12, EDVR's one-register dirt level at b13, samples with s0 to s2, and binds nothing else");
             }
         }
     }

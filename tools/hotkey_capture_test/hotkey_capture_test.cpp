@@ -2226,6 +2226,7 @@ void testVisualPage() {
         {"visual", "intro_video", "The launch movie"},
         {"visual", "star_glow", "Stars"},
         {"visual", "cockpit_glass", "The cockpit"},
+        {"visual", "cockpit_glass_dirt", "The cockpit"},
     };
     constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
     int at = 0, world = -1;
@@ -2242,12 +2243,26 @@ void testVisualPage() {
         if (strcmp(kMenuRows[i].key, "world_scale") == 0) world = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie, Star glow and Cockpit glass, Fix tier, in edvr.ini order under their headings (the desktop window rows moved to their own page, 2026-10-28)");
+    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie, Star glow, Cockpit glass and Legacy glass dirt, Fix tier, in edvr.ini order under their headings (the desktop window rows moved to their own page, 2026-10-28)");
     for (int i = 0; i < kCount; ++i) {
         const bool moved = strcmp(kMenuRows[i].key, "panel_curvature") == 0 || strcmp(kMenuRows[i].key, "intro_backdrop") == 0 || strcmp(kMenuRows[i].key, "intro_video") == 0;
         if (moved && strcmp(kMenuRows[i].section, "advanced") != 0) checkf(strcmp(kMenuRows[i].page, "fixes") != 0, "%s.%s is no longer on the Fixes page", kMenuRows[i].section, kMenuRows[i].key);
         if (strcmp(kMenuRows[i].key, "star_glow") == 0)
             check(strcmp(kMenuRows[i].page, "visual") == 0, "Star glow is on the Visual page both menus build (the headset reads it since 2026-10-27), not on the flat tab's own page");
+    }
+    {
+        int dirt = -1;
+        for (int i = 0; i < kCount; ++i)
+            if (strcmp(kMenuRows[i].section, "visual") == 0 && strcmp(kMenuRows[i].key, "cockpit_glass_dirt") == 0) dirt = i;
+        check(dirt >= 0, "the Visual page has the Legacy glass dirt row");
+        if (dirt >= 0) {
+            const MenuRowDef& g = kMenuRows[dirt];
+            check(g.kind == MenuKind::Number && strcmp(g.label, "Legacy glass dirt") == 0 && strcmp(g.shipped, "100") == 0 && strcmp(g.lo, "0") == 0 && strcmp(g.hi, "300") == 0 &&
+                      g.precision == 0 && !g.percent && strcmp(g.step, "10") == 0 && strcmp(g.unit, "%") == 0 && g.applies == 1,
+                  "Legacy glass dirt is a live whole-percent number row from 0 to 300 in steps of 10, shipped at 100 (the look as it ships)");
+            check(menuSteppedNumber(g, 100.0, 1, 1) == 110.0 && menuSteppedNumber(g, 0.0, -1, 1) == 0.0 && menuSteppedNumber(g, 300.0, 1, 1) == 300.0 && menuFormatNumber(g, 150.0) == "150 %",
+                  "a press steps by 10, the ends hold at 0 and 300, and the row reads \"150 %\"");
+        }
     }
     if (world < 0) return;
     const MenuRowDef& d = kMenuRows[world];

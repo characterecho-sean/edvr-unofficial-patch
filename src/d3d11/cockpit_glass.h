@@ -6,7 +6,10 @@
 // The swap is at bind time. vscreen.cpp's PSSetShader hook asks cockpitGlassPsFor() for the shader to hand the real call; the binding shadow still
 // records the game's own shader and hash, so the draw census and the glass probe see what the game bound. Off, the hook pays one load.
 //
-// Both profiles. Render thread, owner context only. The key is read at the frame boundary (live): cockpitGlassFrameBoundary().
+// visual.cockpit_glass_dirt (percent, 100 = the look as shipped) scales the legacy dirt. It reaches the shaders as a one-register constant buffer at b13, which the swap
+// binds with the streak texture and puts back; it does nothing with `odyssey`, and the menus dim its row then (cockpit_glass_core.h dirtRowDim).
+//
+// Both profiles. Render thread, owner context only. The keys are read at the frame boundary (live): cockpitGlassFrameBoundary().
 // Log lines (each starts "cockpit glass:"): the key changing, the replacement made or refused, and every 30 s while `legacy` is on a window line
 // with binds=N canopy-seen=M ice-overlays=K, so a key that is on but never took effect reads differently from one that worked.
 #include <d3d11.h>
