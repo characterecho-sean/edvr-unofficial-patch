@@ -267,7 +267,7 @@ inline bool declarations(const std::vector<BYTE>& ps, std::vector<Decl>& out, st
             d.space = 't';
             d.kind = kind;
             d.ret = ret;
-            if (d.kind != "texture2d" && d.kind != "texture2darray" && d.kind != "texturecube" &&
+            if (d.kind != "texture2d" && d.kind != "texture2darray" && d.kind != "texturecube" && d.kind != "texturecubearray" &&
                 d.kind != "texture3d" && d.kind != "buffer") {
                 why = "no dummy for: " + line;
                 return false;
@@ -388,9 +388,10 @@ inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, uns
         vd.BufferEx.NumElements = count;
         vd.BufferEx.Flags = d.kind == "raw" ? D3D11_BUFFEREX_SRV_FLAG_RAW : 0u;
     } else {
-        const bool cube = d.kind == "texturecube", volume = d.kind == "texture3d";
+        const bool cubeArray = d.kind == "texturecubearray";
+        const bool cube = d.kind == "texturecube" || cubeArray, volume = d.kind == "texture3d";
         const unsigned size = volume ? 8u : 16u, mips = volume ? 4u : 5u, bpp = texelBytes(f);
-        const unsigned layers = cube ? 6u : d.kind == "texture2darray" ? 4u : 1u;
+        const unsigned layers = cubeArray ? 12u : cube ? 6u : d.kind == "texture2darray" ? 4u : 1u;
         std::vector<std::vector<uint32_t>> data;
         std::vector<D3D11_SUBRESOURCE_DATA> init;
         for (unsigned layer = 0; layer < layers; ++layer)
@@ -429,12 +430,13 @@ inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, uns
         }
         if (FAILED(hr)) return false;
         vd.Format = f;
-        vd.ViewDimension = cube ? D3D11_SRV_DIMENSION_TEXTURECUBE
+        vd.ViewDimension = cubeArray ? D3D11_SRV_DIMENSION_TEXTURECUBEARRAY
+                           : cube ? D3D11_SRV_DIMENSION_TEXTURECUBE
                            : volume ? D3D11_SRV_DIMENSION_TEXTURE3D
                            : layers > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DARRAY
                                         : D3D11_SRV_DIMENSION_TEXTURE2D;
         vd.Texture2DArray.MipLevels = mips;   // MipLevels sits at the same offset in every texture view
-        vd.Texture2DArray.ArraySize = layers;
+        vd.Texture2DArray.ArraySize = cubeArray ? 2u : layers;   // NumCubes for a cube array sits at ArraySize's offset
     }
     ComPtr<ID3D11ShaderResourceView> srv;
     if (FAILED(dev->CreateShaderResourceView(res.Get(), &vd, &srv))) return false;

@@ -76,6 +76,10 @@ constexpr Family kFamilies[] = {
     // docs/vr-holo-me-head-flick-2026-11-05.md). No slot and no E, so these pixels took the head path while the face beside them had E: their motion
     // error follows the head's own motion (r 0.985), up to 1.75 input px a frame, and the helmet's thin lines shimmer. The same class as the hair above.
     {0x01DA82F8D0EA0C99ull, "vs_01DA82F8D0EA0C99", {0x2C3ADCD2FCD47298ull, 0, 0, 0}, false, 0, true, true},
+    // 2026-11-05, an NPC's eyes (Frontier 14:37, eye run 143722980001, a bartender; docs/vr-npc-eye-motion-2026-11-05.md). No slot and no E, so these
+    // pixels took the world path while the face round them had E: 2.8 to 7.7 native px a frame apart while the head moved. Drawn by a depth prepass
+    // (vs F516/ps B40B, depth only) and then this forward pass, the shape of the hair above. Its 432- and 168-index meshes are not identified.
+    {0x33A5025C48FC8259ull, "vs_33A5025C48FC8259", {0x7AA0441EE0E88667ull, 0, 0, 0}, false, 0, true, true},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 // F2: the five measured skinned pairs (the NPC's shading pairs, 2026-10-08 F10/F11): the pixel shader exports the vertex shader's E to
@@ -89,6 +93,7 @@ constexpr SkinPair kSkinPairs[] = {
     {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull},
     {0xA6A39338C06E03A1ull, 0x1AE6AB9A94C0456Eull},
     {0x01DA82F8D0EA0C99ull, 0x2C3ADCD2FCD47298ull},
+    {0x33A5025C48FC8259ull, 0x7AA0441EE0E88667ull},
 };
 constexpr bool skinPair(uint64_t vs, uint64_t ps) noexcept {
     for (const SkinPair& p : kSkinPairs)

@@ -355,6 +355,45 @@ void caseDeclines() {
         check(refused, "K3.j a t33 that is not the 336-byte pool is declined");
     }
     {
+        // The eyes' forward pass (vs 33A5): after the displacement block one add carries the pose chain's position into the register the matrix multiplies
+        // read. Build that shape from the displaced synthetic: a new register, an add into it from the position, and the multiplies reading it.
+        using namespace edvr::dxbc_skin_detail;
+        const auto base = programOf(compile(skin_clone_synthetic::vertexSource(true), "vs_5_0"));
+        const Plan basePlan = analyse(base);
+        const auto carried = [&](bool negate) {
+            auto w = base;
+            size_t first = 0;
+            const uint32_t fresh = basePlan.temps;
+            w[basePlan.tempsAt + 1] = fresh + 1;
+            for (size_t at = 2; at < w.size(); at += edvr::dxbc_container::instructionLength(w, at)) {
+                if ((w[at] & 0x7ffu) != kMul || isDeclaration(w[at] & 0x7ffu)) continue;
+                const Instr in = parseInstr(w, at);
+                if (in.operand.size() != 3 || typeOf(w[in.operand[2]]) != kTypeCb || in.operandLen[2] != 3 || w[in.operand[2] + 1] != 1) continue;
+                if (w[in.operand[2] + 2] < 270 || w[in.operand[2] + 2] > 272) continue;
+                if (!first) first = at;
+                w[indexWordAt(w, in.operand[1])] = fresh;
+            }
+            const uint32_t sw = 0x00100006u | ((0u | 1u << 2 | 2u << 4 | 2u << 6) << 4);
+            std::vector<uint32_t> add = {0x07000000u, 0x00100072u, fresh, sw, basePlan.posReg, sw, basePlan.posReg};
+            if (negate) add = {0x08000000u, 0x00100072u, fresh, sw | 0x80000000u, 0x00000041u, basePlan.posReg, sw, basePlan.posReg};
+            w.insert(w.begin() + first, add.begin(), add.end());
+            w[1] = uint32_t(w.size());
+            return w;
+        };
+        const auto shape = carried(false);
+        bool analysed = true;
+        Plan plan;
+        try { plan = analyse(shape); } catch (const std::exception&) { analysed = false; }
+        check(analysed, "K3.l a position carried into the multiplies' register by one add after the branch is analysed");
+        check(analysed && plan.posReg == basePlan.posReg && plan.anchorEnd == basePlan.anchorEnd, "K3.m the anchor is the pose chain's own, in the register before the carry, not the carry");
+        bool patchedOk = true;
+        try { patchProgram(shape, 3); } catch (const std::exception&) { patchedOk = false; }
+        check(patchedOk, "K3.n the carried shape patches");
+        bool refused = false;
+        try { analyse(carried(true)); } catch (const std::exception& e) { refused = has(e.what(), "anchor"); }
+        check(refused, "K3.o a carry from a negated register is not a position: declined");
+    }
+    {
         // the derive step reports no skin register for a shader that cannot take the second skin
         Variant noPose;
         noPose.noPose = true;
@@ -418,6 +457,8 @@ void caseCorpus(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::string& 
         {"vs_A6A39338C06E03A1", "ps_1AE6AB9A94C0456E", {{1, -1000.0f}, {2, -1000.0f}}, true, 8},
         // the commander's suit and helmet (2026-11-05): cb2[13].w is the discard threshold, as cb2[5].w is 114A's
         {"vs_01DA82F8D0EA0C99", "ps_2C3ADCD2FCD47298", {{55, 1000.0f}}, true},
+        // an NPC's eyes (2026-11-05): the discard is t11's alpha against max(v2.w, cb2[4].x), so a cb2[4].x of -1000 leaves v2.w to decide
+        {"vs_33A5025C48FC8259", "ps_7AA0441EE0E88667", {{16, -1000.0f}}, true},
     };
     unsigned present = 0;
     for (const Pair& p : pairs) {
