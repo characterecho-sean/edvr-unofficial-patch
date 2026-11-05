@@ -92,6 +92,8 @@ extern bool g_uiLayerWorldReissue;
 extern bool g_uiLayerMapsOn;
 extern uint64_t g_uiLayerGateFrame;
 extern uint64_t g_uiLayerNamedAt;
+extern uint32_t g_uiLayerTargetGen;
+extern int g_uiLayerTargetKindCache;
 }  // namespace detail
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
@@ -123,6 +125,11 @@ void uiLayerConfigure(Config& cfg);
 // lit HDR target, the G-buffer), 2 an eye target viewed as 8-bit UNORM (the
 // post-tonemap target the UI composites draw into).
 int uiLayerTargetKind();
+// uiLayerTargetKind with its first test inline: `rtv0Gen` is bindingGeneration(BindSlot::Rtv0). When it equals the generation the cache answered for, the cached kind is
+// returned, which is what the callee's first two lines do; otherwise the callee runs. The draw path calls this for every eye draw.
+inline int uiLayerTargetKindAt(uint32_t rtv0Gen) {
+    return rtv0Gen == detail::g_uiLayerTargetGen ? detail::g_uiLayerTargetKindCache : uiLayerTargetKind();
+}
 
 // For an owner-context draw whose family vscreen.cpp recognised
 // (ui_layer_math.h's UiLayerFamily, as an int): true when the draw goes to
@@ -203,8 +210,17 @@ inline bool uiLayerCrispOn() { return detail::g_uiLayerCrispOn; }
 // eye's HDR layer holds this frame's HUD draws and every ordering guard
 // passes; then the caller skips its after-UI read check for the draw and
 // brackets the draw's own issue with uiLayerCrispToneBegin/End.
-bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                             uint32_t startInstance);
+bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                 uint32_t startInstance);
+// The per-draw entry, inline: the body's first act is to clear a pending tonemap record, and its second is the shape test, so
+// it is needed only when a tonemap draw is pending (the header flag, set and cleared together with the record on every
+// path) or this draw has the tonemap's shape. Anything else it would leave at that test with nothing to clear.
+inline bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                    uint32_t startInstance) {
+    if (!detail::g_uiLayerCrispPending && ((kind != 'D' && kind != 'N') || count != 3 || instances != 1 || startInstance != 0))
+        return false;
+    return uiLayerCrispNoteEyeDrawBody(ctx, kind, count, instances, startInstance);
+}
 // One load for the ordinary draw between admission and issue: an admission is
 // outstanding, so forwardWithVerdict must run the re-issue bracket after the
 // game's own issue.

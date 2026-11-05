@@ -12,6 +12,7 @@
 // (the look probe's method, claude/hangar-test-4 look_probe.cpp, widened from one pixel to the window). Draws are offered by
 // vscreen.cpp's forwardWithVerdict, after the routing is decided and before the game's own issue; the grid is offered by the
 // temporal pass (temporal_pass.cpp) after eye 0's motion dispatch. Unarmed, each entry is one relaxed atomic load.
+#include <atomic>
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -28,7 +29,13 @@ void blendProbeFrameBoundary(uint32_t gameFrame) noexcept;
 
 // The draw path's gate, one relaxed load each. Wants: a capture is collecting draws (also true of the draw gate, so the verdict ladder
 // runs and the AA-off fast path is not taken). Collecting is the same fact for the thread that owns the draws.
-bool blendProbeWantsDraws() noexcept;
+namespace detail {
+extern std::atomic<int> g_blendProbePhase;   // blend_probe.cpp's phase; idle 0, collecting kBlendProbeCollecting
+constexpr int kBlendProbeCollecting = 2;
+}  // namespace detail
+inline bool blendProbeWantsDraws() noexcept {
+    return detail::g_blendProbePhase.load(std::memory_order_relaxed) == detail::kBlendProbeCollecting;
+}
 
 // What the draw path knows about one eye draw by the time its routing is decided (vscreen.cpp fills it).
 struct BlendDrawInfo {

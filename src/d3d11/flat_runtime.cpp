@@ -112,6 +112,7 @@ bool FlatMapBounceD3DDriver::verify(void* real, const void* cached, size_t bytes
     return std::memcmp(real, cached, bytes) == 0;
 }
 std::atomic<bool> g_flatRuntimeLive{false};
+std::atomic<FlatMapBounce*> g_flatMapBounce{nullptr};   // flat_runtime.h: flatRuntimeMapBounceAnyOpen
 namespace {
 std::atomic<bool> nativeScale{false};
 std::atomic<uint64_t> mapBouncePresentEpoch{1};
@@ -1364,7 +1365,11 @@ static void noteReplayQueryCheck(State& s,ID3D11DeviceContext* ctx,bool rejected
 }
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
-    static FlatMapBounce* bounce = new FlatMapBounce(*driver);
+    static FlatMapBounce* bounce = [] {
+        FlatMapBounce* made = new FlatMapBounce(*driver);
+        g_flatMapBounce.store(made, std::memory_order_release);
+        return made;
+    }();
     return *bounce;
 }
 struct MapBounceWindow {
@@ -5582,6 +5587,8 @@ void* flatRuntimeMapBounceInstall(ID3D11DeviceContext* context, ID3D11Resource* 
 }
 FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext* context,
                                                      ID3D11Resource* resource) {
+    // The open test first, so the flat CPU report's kShadows scope times only a call that can do something: beginUnmap returns at this same test.
+    if (!mapBounce().anyOpen()) return {};
     flatcpu::Scope shadows(flatcpu::kShadows);
     return mapBounce().beginUnmap(reinterpret_cast<uintptr_t>(resource),
                                   reinterpret_cast<uintptr_t>(context));

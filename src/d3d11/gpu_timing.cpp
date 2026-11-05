@@ -1,4 +1,5 @@
 #include "gpu_timing.h"
+#include "gpu_query_count.h"
 #include "gpu_disjoint_d3d11.h"
 #include "../common/log.h"
 #include <atomic>
@@ -12,7 +13,7 @@ HRESULT createQuery(void*, ID3D11Device* d, const D3D11_QUERY_DESC* desc, ID3D11
     return d->CreateQuery(desc, q);
 }
 HRESULT beginQuery(void*, ID3D11DeviceContext* c, ID3D11Asynchronous* q) { c->Begin(q); return S_OK; }
-HRESULT endQuery(void*, ID3D11DeviceContext* c, ID3D11Asynchronous* q) { c->End(q); return S_OK; }
+HRESULT endQuery(void*, ID3D11DeviceContext* c, ID3D11Asynchronous* q) { gpuQueryNoteEnd(); c->End(q); return S_OK; }
 HRESULT queryData(void*, ID3D11DeviceContext* c, ID3D11Asynchronous* q, void* p, UINT n, UINT flags) {
     return c->GetData(q, p, n, flags);
 }

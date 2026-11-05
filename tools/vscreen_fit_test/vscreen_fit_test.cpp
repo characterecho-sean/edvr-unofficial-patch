@@ -1115,7 +1115,7 @@ void caseR12() {
               "R12f: the curved screen's swallowed draw calls the instrument once: owner context only, an eye draw, behind the same flag, whether or not the route owns the frame");
         check(has(swallowed, "v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance"),
               "R12f: and tells it the panel distance the draw's constants carry, with the draw's own base vertex and start instance");
-        const std::string gate = functionBody(vs, "bool drawGateSubscribed(State* s) {");
+        const std::string gate = functionBody(vs, "uint32_t drawGateHolders(State* s) {");
         check(has(gate, "vscreenFootprintWanted()"), "R12g: the draw gate lists the instrument (a subscriber that is not listed starves when nothing else is on)");
         check(count(vs, "tkVScreenFootprint.run(") == 1 && before(vs, "tkVrCameraCensus.run(", "tkVScreenFootprint.run(") && before(vs, "tkVScreenFootprint.run(", "tkScreenMotion.run(") &&
                   has(vs, "EDVR_BOUNDARY_TICK(tkVScreenFootprint, \"vscreen_footprint\");"),

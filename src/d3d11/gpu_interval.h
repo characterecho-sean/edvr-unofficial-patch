@@ -1,5 +1,6 @@
 #pragma once
 #include "gpu_timing.h"
+#include "gpu_query_count.h"
 #include <wrl/client.h>
 #include <cstdint>
 
@@ -8,7 +9,8 @@ namespace edvr {
 // measurement; it never waits or flushes the game's command stream. Poll
 // once per frame, at least four frames after submission. Failure/disjoint
 // counts distinguish unavailable timestamps from a measured zero cost.
-template<unsigned Capacity> class GpuIntervals {
+// Owner names the intervals' timing queries in gpu_query_count.h's window line.
+template<unsigned Capacity, GpuQueryOwner Owner = GpuQueryOwner::Other> class GpuIntervals {
     struct Slot {
         GpuTimer timer;
         uint64_t frame=0;
@@ -23,6 +25,7 @@ public:
         Microsoft::WRL::ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(!dev || !gpuTimingBind(dev.Get(),ctx) || !gpuTimingAccepts(ctx))return false;
         if(open_>=0){++totals.skipped;return false;}
+        const GpuQueryOwnerScope owner(Owner);
         for(unsigned i=0;i<Capacity;++i) {
             auto& s=slots_[i];if(s.pending)continue;
             // Clock/lease pressure is transient: skipping must not permanently
@@ -35,6 +38,7 @@ public:
     void end(ID3D11DeviceContext* ctx) {
         if(!ctx || !gpuTimingAccepts(ctx) || open_<0)return;
         auto& s=slots_[open_];
+        const GpuQueryOwnerScope owner(Owner);
         if(!s.timer.end(ctx)){s.timer.reset(ctx);++totals.invalid;open_=-1;return;}
         s.pending=true;s.frame=frame_;open_=-1;
     }

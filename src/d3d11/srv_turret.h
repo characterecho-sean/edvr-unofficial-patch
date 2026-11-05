@@ -128,7 +128,7 @@ inline void srvTurretHudCountIssue(ID3D11DeviceContext* ctx) {
 
 // True while the Scorpion's turret view is on (VR) and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back,
 // experimental.srv_turret_hud_gap and experimental.srv_turret_systems_near is above 0.
-// Also a term of the draw gate (vscreen.cpp drawGateSubscribed).
+// Also a term of the draw gate (vscreen.cpp drawGateHolders).
 inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(std::memory_order_relaxed); }
 
 // Part 1 and the state both parts read. Frame thread, once a frame, nativeOnFootFrameBoundary just before alignTick.

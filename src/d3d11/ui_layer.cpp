@@ -92,6 +92,8 @@ bool g_uiLayerHudGlowPending = false; // an eye's HDR HUD layer holds this frame
 bool g_uiLayerWorldReissue = false; // the VR world route: the screen composite just decided is re-issued after the game's draw
 bool g_uiLayerMapsOn = false;       // the on-foot maps gate: the layer and screen motion live -- naming decides the gate
 uint64_t g_uiLayerGateFrame = 0;    // frame boundaries the layer has seen: what a naming is attributed to (ui_layer.h)
+uint32_t g_uiLayerTargetGen = 0;        // uiLayerTargetKind's cache: the Rtv0 binding generation it answered for (ui_layer.h reads it inline)
+int g_uiLayerTargetKindCache = 0;       // ...and the kind it answered
 uint64_t g_uiLayerNamedAt = ~0ull;  // the gate frame in which a draw last named the screen's source (never: ~0)
 }  // namespace detail
 
@@ -543,13 +545,18 @@ void markStandDown(int eye, uint32_t streak, const char* why) {
 // ------------------------------------------------------------ the draw path
 
 // The target Rtv0 names, once per binding generation.
+// Its binding generation and kind are detail::g_uiLayerTargetGen / g_uiLayerTargetKindCache (ui_layer.h reads them inline); the rest is here.
 struct TargetCache {
-    uint32_t gen = 0;
-    int kind = 0;
     ResourceInfo info;
     DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
 };
 TargetCache g_tc;
+// Forgets the cache entirely: the generation 0 and kind 0 a fresh TargetCache had.
+void targetCacheReset() {
+    g_tc = TargetCache{};
+    detail::g_uiLayerTargetGen = 0;
+    detail::g_uiLayerTargetKindCache = 0;
+}
 
 // One decided draw at a time: forwardWithVerdict decides, then brackets each
 // issue with Begin/End, on the render thread, before the next draw arrives.
@@ -4024,9 +4031,9 @@ void uiLayerConfigure(Config& cfg) {
 
 int uiLayerTargetKind() {
     const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
-    if (gen == g_tc.gen) return g_tc.kind;
-    g_tc = TargetCache{};
-    g_tc.gen = gen;
+    if (gen == detail::g_uiLayerTargetGen) return detail::g_uiLayerTargetKindCache;
+    targetCacheReset();
+    detail::g_uiLayerTargetGen = gen;
     void* rtv = bindingGet(BindSlot::Rtv0);
     ResourceInfo info;
     if (!rtv || !bindingResolve(rtv, &info) || !info.isTexture2D ||
@@ -4040,11 +4047,11 @@ int uiLayerTargetKind() {
     }
     g_tc.info = info;
     g_tc.view = d.Format;
-    g_tc.kind = (d.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && d.Texture2D.MipSlice == 0 &&
+    detail::g_uiLayerTargetKindCache = (d.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && d.Texture2D.MipSlice == 0 &&
                  uiLayerLdrView(d.Format))
                     ? 2
                     : 1;
-    return g_tc.kind;
+    return detail::g_uiLayerTargetKindCache;
 }
 
 // --------------------------------- the VR world route's re-issue (ui_layer.h)
@@ -5589,8 +5596,8 @@ void crispArm(int eye, uint64_t seq, int hdrSlot, const void* rtvRes, const void
 }
 }  // namespace
 
-bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
-                             uint32_t startInstance) {
+bool uiLayerCrispNoteEyeDrawBody(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                                 uint32_t startInstance) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
     if (!detail::g_uiLayerCrispOn || !ctx) return false;
@@ -7167,7 +7174,7 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
     g_flatDraw.seq = frame;
     g_flatDraw.jx = jx;
     g_flatDraw.jy = jy;
-    if (g_flatDraw.renderW != renderW || g_flatDraw.renderH != renderH) g_tc = TargetCache{};  // the eye size moved
+    if (g_flatDraw.renderW != renderW || g_flatDraw.renderH != renderH) targetCacheReset();  // the eye size moved
     g_flatDraw.renderW = renderW;
     g_flatDraw.renderH = renderH;
 }
@@ -7194,7 +7201,7 @@ bool uiLayerFlatRelease() {
         e.compositedSeq = 0;
     }
     g_glow = GlowFeedTexture{};  // H' is H's size: a resize or a profile switch builds it afresh
-    g_tc = TargetCache{};
+    targetCacheReset();
     g_flatDraw = FlatDraw{};
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;

@@ -40,11 +40,21 @@
     CPU` calls went from 454 to about 1285 a frame.
   - H4: the runtime's per-eye submit differs between the modes. Signature:
     `first_submit_roundtrip` + `second_submit_roundtrip`.
-- **Ruled out (design, see "Sharing candidates"):** union-frustum cull, shared
-  LOD, a light grid shared between the eyes, render-list reuse (Elite already
-  does it), and instanced stereo from a D3D11 proxy.
-- **Next flight:** "The A/B flight" below, on the build already installed on
-  Frontier. No new instrument.
+- **Ruled out (see "Sharing candidates"):** union-frustum cull, shared LOD, a
+  shared light grid, render-list reuse (Elite does it), D3D11 instanced stereo.
+- **2026-10-31 (PSVR2 rig, concourse): H5, H6, H7 confirmed**
+  (`edvr_gfx_20261031_225516`). The rig is CPU-bound throughout (`held_by=game`
+  96%, vendor xrEndFrame 0.36 ms). In the concourse, AA on (DLAA or TAA alike)
+  costs about 4.2 ms of frame time: 29.6 fps against 34.7 with F7 off, twice
+  over. EDVR's draw hooks read 5.7-6.1 ms a frame with AA on and still 2.7-3.5
+  with F7 off, because F7 leaves the subscriber gate open. EDVR's draw path is
+  thus about 6-7 ms of a 32 ms concourse frame. See "2026-10-31: result".
+- **2026-11-01 CPU profile:** EDVR's own code is about a quarter of the busy
+  concourse render thread; EDHM 2.4-3.2 ms; the draw gate never closes in VR
+  (see "2026-11-01: the CPU profile"). **Continued in
+  `docs\vr-draw-path-cpu-2026-11-01.md`** (VR draw-path CPU in general; test
+  build 1, spec #157). Candidate 5 became #153. "The A/B flight" below is
+  stale: Explorer Cam and `perf baseline F5` are gone.
 - **Environment:** SteamVR (aapvr), RTX 5090, 2016x2016 per eye rendered and
   DLSS'd to 4032x4032, 90 Hz; Elite build 332841. On foot, the native runtime
   paces `deferred` in both modes (the weapon-stability pacing), so the second
@@ -209,3 +219,187 @@ calls.
 ruled out: instanced or single-pass stereo from the D3D11 proxy, because every
 vertex-shader family and per-eye pass would need rewriting, for at most the
 game's second-eye submission.
+
+## 2026-10-31: the concourse
+
+Environment: SteamVR OpenXR, PSVR2 at 90 Hz, 2632x2684 per eye, DLAA
+(`fix.temporal_aa = dlss`, HMD Image Quality 1.0), RTX 5070 Ti, Ryzen 7
+5700X3D, EDHM chained (3Dmigoto 1.3.16), Motion Smoothing forced off. Build
+v0.22.0-rc.4-1-ge1606a23. On foot the frame rate is 31-38 in a concourse,
+about 56 in a hangar; the runtime puts 94% of slow frames on the game
+(`held_by=game`), and SteamVR reports CPU 11.4 / GPU 4.9 ms.
+
+What the last flight already shows (`edvr_gfx_20261031_195628`, `draw hook
+CPU:` windows, AA on throughout; every F7 leg was under 15 s, shorter than
+one window, so no AA-off window exists):
+
+| window ending | hooks ms/frame mean | max | eye draws |
+|---|---|---|---|
+| 19:57:32 (hangar) | 0.249 | 1.075 | 855 |
+| 19:58:51 | 1.749 | 9.920 | 13215 |
+| 19:59:40 | 4.255 | 11.059 | 15248 |
+| 20:00:53 | 1.396 | 7.027 | 1132 |
+
+Hypotheses, one flight for all of them:
+
+- H5: EDVR's AA-on draw hooks cost 1.5 ms or more a frame in the
+  concourse. Signature: `draw hook CPU:` mean, AA-on legs against AA-off
+  legs, and CPU TIME (`native_frame_cycle` `cycle` minus
+  `next_wait_roundtrip`) over the same legs. Refuted if the CPU TIME delta
+  is under 0.5 ms.
+- H6: F7 does not release the draw subscribers (the 10-16 note above says
+  it leaves the gate held). Signature: `eye draws counted this frame` on an
+  AA-off window; nonzero means held, and an F7 A/B then underprices H5.
+- H7: the per-draw cost scales with the concourse's draw count rather than
+  a fixed per-frame cost. Signature: hook ms against eye draws across the
+  hangar and concourse windows.
+
+The flight. Legs must hold one whole `draw hook CPU:` window, which is 1800
+frames (about 51 s at 35 fps), so each standing leg is 2 minutes. The log
+marks every F7 press (`aa compare: AA OFF` / `RESTORED`), so no timings need
+writing down.
+
+1. Concourse, standing still, one heading: AA on, off, on, off (F7 between
+   legs), 2 minutes each. The repeat legs separate the AA effect from drift
+   (NPC traffic, streaming, heat).
+   1b. Optional, same spot: the F8 menu's Anti-aliasing set to TAA (`on`),
+   2 minutes, then set back to DLSS (an F8 pick writes the ini). DLAA and
+   TAA share the draw subscribers, so the hook cost should match; a
+   mismatch means the per-draw price is per mode. Presets (K/L/M) and
+   FSR/XeSS change GPU work only and are not legs.
+2. Concourse, walking one fixed loop: AA on 2 minutes, off 2 minutes.
+3. Hangar, standing still: AA on, off, on, 2 minutes each.
+## 2026-10-31: result
+
+`edvr_gfx_20261031_225516` and its runtime log, same environment as above,
+build v0.22.0-rc.4-1-ge1606a23 (`--expect-build HEAD` matches). The legs were
+flown in this order, each opened by a double F7 flicker as a marker. fps is
+1800 frames over the spacing of consecutive `draw hook CPU:` windows; game ms
+is the runtime's `native_slow_regime` `game_ms` over the leg. Eye draws is the
+window's one-frame snapshot.
+
+| leg | AA | windows ending | fps | game ms | hooks ms/frame | eye draws |
+|---|---|---|---|---|---|---|
+| concourse, standing | DLAA | 21600, 23400 | 29.6 | 32.0-33.0 | 5.81, 6.11 | 13.6-13.9k |
+| concourse, standing | off (F7) | 27000 | 34.8 | 27.7-29.2 | 3.08 (3.47 mixed) | 13.3k |
+| concourse, standing | TAA (F8) | 30600, 32400 | 30.2 | 32.0-33.8 | 5.67, 5.87 | 13.6-13.7k |
+| concourse, walking | DLAA | 37800, 39600 | 39.6 | 28.0-30.3 | 3.67, 3.72 | 3.8-7.4k |
+| concourse, walking | off (F7) | 43200, 45000 | 45.5 | n/a | 1.70, 1.77 | 5.7-7.4k |
+| hangar, standing | DLAA | 50400-54000 | 57.4 | n/a | 1.67-1.96 | 1.9k |
+| hangar, standing | off (F7) | 57600-63000 | 62.5 | n/a | 0.72-0.79 | 2.0-2.2k |
+| concourse, standing | DLAA | 68400 | 29.3 | 31.7-32.8 | 5.89 | 13.6k |
+| concourse, standing | off (F7) | 72000 | 34.7 | 27.8-28.4 | 2.70 | 13.8k |
+
+GPU is not the limit anywhere: vendor xrEndFrame 0.35-0.38 ms and
+`held_by=game` at 96% in every slow-regime event, so the hooks' time is
+frame time.
+
+- **H5 confirmed.** Concourse AA on against F7 off: game ms 32.3 -> 28.1
+  (-4.2 ms), 29.6 -> 34.7 fps, the same in both concourse pairs. The hooks'
+  own delta is 2.7-3.2 ms; EDVR's present-side work (`edvr_work_ms`) adds
+  0.40. The remaining 0.6-1.1 ms lies outside the sampled draw scope; the bind
+  hooks' VsSrv33/Blend shadows, which `bindShadowsSkipped` drops with AA off,
+  are the first suspect (unmeasured).
+- **H6 confirmed.** Every F7-off window counts 13-14k eye draws (the counter
+  reads 0 on the AA-off fast path), and the hooks still cost 2.7-3.5 ms in the
+  concourse and 0.72-0.79 in the hangar. Some term of `drawGateSubscribed`, or
+  the VR world route, stays open with AA off; which one is not in the log. The
+  live ini sets none of the probe keys (`scheduler_probe`,
+  `eye_depth_capture`, `object_probe`), and `developer = on`. F7 therefore
+  underprices EDVR's draw path: with DLAA it is about 6 ms of hooks plus about
+  1.5 ms around them, near a quarter of the concourse frame.
+- **H7 confirmed, with a fixed part.** AA on: about 0.33 us an eye draw plus
+  about 1.3 ms a frame (concourse 13.6k -> 5.9 ms, hangar 1.9k -> 1.9 ms,
+  walking between them). AA off: about 0.20 us a draw plus 0.35 ms.
+- **DLAA = TAA** within noise (5.8-6.1 against 5.7-5.9 ms; 29.6 against
+  30.2 fps): the price is the shared draw subscribers, not the AA mode.
+- **Also seen:** the F100 marker-probe tee (`native on foot marker probe:
+  cost`, about 16.5k tee calls a frame in the concourse) loses its own fast
+  path with AA off (`fast path 0 of N`): its estimate rises from 0.47-0.56
+  to 1.1-1.5 ms a frame. That is part of the AA-off floor, and backwards.
+
+What this is worth: if EDVR's draw path in the concourse fell to the
+hangar's per-draw price with AA off (about 0.2 us), the concourse frame
+would drop about 4 ms (30 -> 34-35 fps with DLAA). Removing all of it would
+make the frame about 25 ms, 40 fps. The game's own ~25 ms remains the floor.
+
+Next: one profiling flight to name the functions before any change. Build
+with `EDVR_PROFILE_SYMBOLS=1`, then from an elevated console
+`python tools\cpu_profile.py --capture --target steam --start-key F9
+--stop-key F11 --max-seconds 100 --output build\concourse-dlaa`, standing in
+the concourse with DLAA, F9 then 75 s then F11; a second run with
+`--output build\concourse-off` after F7. The analyzer (tools\cpu_profile,
+.NET 8 SDK) then splits each leg's render thread by function, both legs,
+so the AA-on delta and the AA-off floor each get their owner.
+## 2026-11-01: the CPU profile
+
+Build v0.22.0-rc.4-3-g6ac3c0e5 with `EDVR_PROFILE_SYMBOLS=1`, same rig and
+concourse spot. Two 100 s `cpu_profile.py` captures: DLAA
+(`build\concourse-dlaa`, 2279 frames, 1.29M events lost) and F7 off
+(`build\concourse-off`, 2236 frames, none lost; the trace ends at 05:38:47
+UTC, before the F7 restore at 05:38:52). Two tool fixes were needed first:
+the analyzer self-test's thunk window still held the pre-334925 address,
+and the analyzer took an x86 `msdia140.dll` from a Build Tools install, so
+no EDVR frame resolved.
+
+Under the profiler both legs run about 41-42 ms a frame (`cycle`) and AA on
+costs only about 1 ms, so these traces price shares, not the AA delta; the
+unprofiled 2026-10-31 log stays the measure of that.
+
+Render-thread time by leaf module, R1 (game before first submit), ms a
+frame, DLAA / off: game 11.1 / 14.0, EDVR d3d11 6.3 / 4.7 (plus 1.2 / 1.3
+in R5), system d3d11 2.6 / 2.6, EDHM's 3Dmigoto 2.4 / 3.2, kernel 2.0 /
+2.1, NVIDIA user mode 1.3 / 1.3. EDVR's own code is about a quarter of the
+busy render thread in both legs.
+
+EDVR self time by function (R1, windows 5 and 12, uncapped exports; the
+split of innermost addresses into self and forwarded call sites agrees with
+the leaf count, 3.9 against 4.0 and 4.4 against 4.6 ms): the per-draw ladder
+(`beginPanelOverride`, `forwardWithVerdict` and its lambda,
+`hookedDrawIndexedInstanced`) is 1.15 ms with DLAA and 1.88 with AA off.
+AA-on extras are spread thinly (`uiLayerFamilyOf` 0.23, `viewIsSurface`
+0.10, `engineVelocityBeforeDraw` 0.09, `gpuCensusBegin` 0.08, ui-layer and
+depth notes about 0.07 each). AA off adds `f44::draw` (0.21 self, 0.64 in
+the calls it forwards) and the F100 marker-probe tee (about 0.34). The
+whole-trace list also shows `drawtag::streamLoad16` at 0.72-0.81 self.
+
+Every module ran slower in the AA-off capture (game +26%, EDHM +33%), so the
+larger AA-off ladder is mostly capture-to-capture variance. The marker-probe
+tee is the exception, and the code explains it.
+
+Code review (2026-11-01, read-only):
+- Why the AA-off fast path never runs in VR: the draw gate is held open
+  by shipped default-on features, not by instruments. These include
+  `fix.sun_glare` vivid, `particle_billboard`, `holo_pattern`,
+  `intro_backdrop`, `night_vision_stability`, `loading_dim` and the vscreen
+  footprint at `auto` (`drawGateSubscribed`, vscreen.cpp:1783).
+  `developer = on` adds nothing on the draw path.
+- `hookedDrawIndexedInstanced` is the one indexed draw thunk without
+  `drawPathFast` (5154, 5237 and 5317 have it).
+- The F100 tee needs both eyes' world rows for its fast path; with AA off the
+  UI layer that supplies them is absent, so every draw takes the slow path
+  (inferred).
+
+Ranked candidates for one test build (no rendering change, no new keys):
+1. Stand down the marker-fix tee while `fix.ui_quality` is not live (AA
+   off), since `markerFixed` needs the layered composite. Expected saving:
+   1.1-1.5 ms with AA off, 0 with AA on.
+2. Clear `NativeBenchmarkCollector` (16k entries a frame) only when dirty:
+   0.10-0.14 ms.
+3. Inline the reject tests of the out-of-line per-draw calls
+   (`screenMotion*Draw`, which also makes a COM `GetType` first,
+   `uiLayerCrispNoteEyeDraw`, `gpuCensusBegin`, `labelIssue`,
+   `starGlowAfterDraw`): about 0.3 ms with AA on.
+4. Memoise `uiDepthSampledSurfaceSlot` by PS SRV binding generation; it
+   runs twice an eye draw: 0.1-0.2 ms with AA on.
+5. Make the cross-profile per-bind atomic thread-local: 0.05-0.1 ms.
+
+Later, at higher risk:
+- The marker fix's AA-on stream copies and pool scans (0.3-0.8 ms).
+- A per-scene subscriber mask, with the fast path added to
+  `hookedDrawIndexedInstanced` (up to about 2 ms with AA off).
+- EDVR's own AA-on re-issues: about 3.6 ms of the 5.8 ms the hooks read
+  is not EDVR's own code, and those re-issues are the likely owner
+  (inferred).
+
+Out of EDVR's hands: EDHM's 2.4-3.2 ms on the game's own calls.

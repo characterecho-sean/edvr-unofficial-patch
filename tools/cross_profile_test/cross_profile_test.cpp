@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -34,6 +35,23 @@ void resetCounters() {
 
 bool startsWith(const char* text, const char* prefix) { return std::strncmp(text, prefix, std::strlen(prefix)) == 0; }
 bool contains(const char* text, const char* part) { return std::strstr(text, part) != nullptr; }
+
+// The whole file, read from the repo root (build.bat runs the rig from there); empty when it cannot be opened.
+std::string readSource(const char* path) {
+    std::string out;
+    std::FILE* f = std::fopen(path, "rb");
+    if (!f) return out;
+    char buf[65536];
+    size_t got;
+    while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, got);
+    std::fclose(f);
+    return out;
+}
+size_t countOf(const std::string& hay, const char* needle) {
+    size_t n = 0;
+    for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+    return n;
+}
 
 }  // namespace
 
@@ -73,6 +91,30 @@ int main(int argc, char** argv) {
     }
     check(g_sites[static_cast<size_t>(Site::FlatPsConstantBuffers)].calls.load() == 130, "every one of 130 calls is counted");
     check(timed == 3, "three of 130 calls are timed: the first and every 64th after it");
+
+    // Build 5, item 7: the plain-count begin, which the PS constant-buffer site uses. On one thread the count equals the calls and the sampling is begin()'s.
+    resetCounters();
+    int timedPlain = 0;
+    for (int i = 0; i < 130; ++i) {
+        Probe p = enterSitePlainCount(Site::FlatPsConstantBuffers, true);
+        if (p.timed()) ++timedPlain;
+        p.stop();
+    }
+    check(g_sites[static_cast<size_t>(Site::FlatPsConstantBuffers)].calls.load() == 130, "the plain-count begin counts every one of 130 calls on one thread");
+    check(timedPlain == 3, "the plain-count begin samples the first and every 64th call, as begin does");
+    resetCounters();
+    for (int i = 0; i < 5; ++i) enterSitePlainCount(Site::FlatPsConstantBuffers, false).stop();
+    check(g_sites[static_cast<size_t>(Site::FlatPsConstantBuffers)].calls.load() == 0, "an active call counts nothing through the plain-count begin either");
+    {
+        // The source pin: the one hot site counts plainly, and no other site does.
+        const std::string vs = readSource("src/d3d11/vscreen.cpp");
+        check(!vs.empty(), "src/d3d11/vscreen.cpp is readable from the repo root");
+        check(countOf(vs, "cross_profile::enterSitePlainCount(cross_profile::Site::FlatPsConstantBuffers, true).stop();") == 1 &&
+                  countOf(vs, "enterSitePlainCount(") == 1 && countOf(vs, "cross_profile::enterSite(cross_profile::Site::FlatPsConstantBuffers") == 0,
+              "hookedPSSetConstantBuffers' site counts with the plain begin, and it is the only one");
+        const std::string hook = readSource("src/d3d11/cross_profile_cost.h");
+        check(countOf(hook, "c.calls.fetch_add(1, std::memory_order_relaxed)") == 1, "every other site keeps the locked add: begin() still has the one fetch_add");
+    }
 
     // A default probe (an active call) counts nothing and times nothing.
     resetCounters();

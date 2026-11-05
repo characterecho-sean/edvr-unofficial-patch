@@ -20,6 +20,7 @@
 #include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
+#include "draw_mask_line.h"         // DrawMaskCounts
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -122,6 +123,8 @@ uint32_t vScreenEyeDrawsThisFrame();
 // VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
+// The may-want byte's counters since the start (draw_mask_line.h), for the perf window line.
+DrawMaskCounts vScreenDrawMaskCounts();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

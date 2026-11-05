@@ -691,9 +691,9 @@ void runOnFootArmTests(ID3D11Device* device) {
         v << vscreen.rdbuf();
         const std::string ps = p.str(), vs = v.str();
         const size_t tell = vs.find("depthProbeSetNativeOnFoot(nativeOnFootActive());\n            depthProbeFrameBoundary(g_state->ownerCtx);"), tick = vs.find("tkDepthProbe.run([&] {"),
-                     gate = vs.find("drawGateSet(drawGateSubscribed(s));", tell == std::string::npos ? 0 : tell);
+                     gate = vs.find("drawGateSample(s);", tell == std::string::npos ? 0 : tell);
         check(!ps.empty() && !vs.empty() && ps.find("depth probe: scene pair on for native on-foot VR, on foot only (Anti-aliasing off):") != std::string::npos && tick != std::string::npos && tell != std::string::npos &&
-              tell > tick && tell - tick < 200 && gate != std::string::npos && vs.find("witchspaceStarsHidden() || depthProbeWanted() ||") != std::string::npos,
+              tell > tick && tell - tick < 200 && gate != std::string::npos && vs.find("if (depthProbeWanted()) m |= gateHolderBit(GateHolder::DepthProbe);") != std::string::npos,
               "F207: the reason line says on foot only; vScreenFrameBoundary tells the probe nativeOnFootActive() just before the boundary rolls the counts and before it re-samples the draw gate, whose probe term is depthProbeWanted()");
     }
     edvr::depthProbeShutdown();

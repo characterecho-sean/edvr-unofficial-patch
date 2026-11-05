@@ -1,5 +1,5 @@
 // C1 DISCARD round trip; C2 passthrough; C3 failed maps; C4 interleaving
-// C5 cross-thread/context; C6 stale maps/Present; C7 bounds/alignment; C8 decision.
+// C5 cross-thread/context; C6 stale maps/Present; C7 bounds/alignment; C8 decision; D1-D2 the anyOpen() gate (build 4).
 #include "flat_map_bounce.h"
 #include <array>
 #include <cstdio>
@@ -112,6 +112,27 @@ static void stale() {
     { auto l=watchdog->beginUnmap(3,10); check(l.bounced() && real.data()[0]==0x11,"C6.present-late-flush"); }
     check(d.refs==0,"C6.present-refs");
 }
+static void anyOpenGate() {
+    // Build 4, item 4: anyOpen() is the acquire load of open_ that preMap and beginUnmap test first. The hooks skip both calls while it is false, so
+    // while it is false those calls must touch nothing, and a bounce left open across a flat-to-VR switch must still flush at the next Unmap.
+    FakeDriver d; auto core=std::make_unique<Core>(d); core->setMode(Mode::On);
+    check(!core->anyOpen(),"D1.fresh-nothing-open");
+    const auto before=core->counters(); const uint64_t clockBefore=d.clock;
+    core->preMap(2); { auto lease=core->beginUnmap(2,10); check(!lease.bounced(),"D1.empty-lease"); }
+    core->present(5);
+    const auto after=core->counters();
+    check(d.clock==clockBefore && d.refs==0 && core->decision()==State::On && core->tripReason()==Trip::None,"D1.nothing-open-touches-nothing-driver");
+    check(after.bounced==before.bounced && after.flushes==before.flushes && after.abandoned==before.abandoned && after.trips==before.trips &&
+          after.openAtPresent==before.openAtPresent && after.rowsChecked==before.rowsChecked,"D1.nothing-open-touches-nothing-counters");
+    // Open one, then switch away (the flat profile stands down and the VR profile is entered): the record stays and the next Unmap flushes it.
+    FakeDriver::Slice real(256); auto r=request(2,real); auto* p=static_cast<unsigned char*>(core->install(r)); std::memset(p,0x5A,256);
+    check(core->anyOpen() && p!=r.real,"D2.install-opens");
+    core->setMode(Mode::Off);
+    check(core->anyOpen(),"D2.open-across-switch");
+    { auto lease=core->beginUnmap(2,10); check(lease.bounced() && real.data()[0]==0x5A && real.data()[255]==0x5A,"D2.next-unmap-flushes");
+      check(core->anyOpen(),"D2.open-until-lease-finishes"); }
+    check(!core->anyOpen() && d.refs==0,"D2.closed-after-flush");
+}
 static void decisions() {
     for(unsigned test=0;test<4;++test) { FakeDriver d; auto core=std::make_unique<Core>(d);
       const uint64_t ticks=test==0 ? 0 : test==1 ? 255 : test==2 ? 256 : 257;
@@ -151,6 +172,6 @@ static void randomPrograms() {
 int main(int argc,char** argv) {
     if(argc<2 || (std::string(argv[1])!="--dry-run" && std::string(argv[1])!="--self-test")) return 2;
     if(std::string(argv[1])=="--dry-run") { std::puts("flat_map_bounce_test: C1-C8 fake-driver tests; no files or GPU device"); return 0; }
-    roundtrip(); passthrough(); failuresTest(); interleave(); contextAndMode(); stale(); decisions(); randomPrograms();
+    roundtrip(); passthrough(); failuresTest(); interleave(); contextAndMode(); stale(); anyOpenGate(); decisions(); randomPrograms();
     std::printf("flat_map_bounce_test: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures); return failures ? 1 : 0;
 }

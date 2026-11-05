@@ -66,7 +66,12 @@ inline bool objectProbeLedgerActive() { return detail::g_objectProbeLedgerOn; }
 // when unarmed or outside the run's 20 frames. `foreign` marks a deferred context.
 void objectProbeNoteDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y, uint32_t z, bool foreign);
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx);
-void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued);
+// Build 4, item 1: the note's first test, `g_objectProbeLedgerOn && ctx`, is inline here, so a draw with no ledger run makes no call. The out-of-line body keeps the
+// same test as its own first line. The three call sites in vscreen.cpp keep their text (their wiring pins read it).
+void objectProbeCandidateDrawIssuedLedgered(ID3D11DeviceContext* ctx,bool issued);
+inline void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
+    if (detail::g_objectProbeLedgerOn && ctx) objectProbeCandidateDrawIssuedLedgered(ctx,issued);
+}
 // Around only the native draw, after Begin substitutions and before private
 // depth/motion reissues. Inactive outside an explicitly armed eye capture.
 void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx);

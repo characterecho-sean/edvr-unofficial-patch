@@ -523,9 +523,9 @@ std::vector<Pin> wiringPins(const Sources& src) {
     // Off is one load: each of the four thunks asks vrStarGlowWanted() once (owner context only) and calls the module before and after the game's issue.
     pins.push_back({"thunks-ask-once",
                     countOf(vs, "constboolstarGlow=vrStarGlowWanted()&&self==g_state->ownerCtx;") == 4 && countOf(vs, "if(starGlow)vrStarGlowBeforeDraw(self);") == 4 &&
-                        has(vs, "if(starGlow)starGlowAfterDraw(self,'D',count,1,args,v);") && has(vs, "if(starGlow)starGlowAfterDraw(self,'I',count,1,args,v);") &&
-                        has(vs, "if(starGlow)starGlowAfterDraw(self,'N',perInstance,drawn,args,v);") &&
-                        has(vs, "if(starGlow)starGlowAfterDraw(self,'X',perInstance,instances,args,v);") && countOf(vs, "starGlowAfterDraw(self,'") == 4,
+                        has(vs, "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'D',count,1,args,v);") && has(vs, "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'I',count,1,args,v);") &&
+                        has(vs, "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'N',perInstance,drawn,args,v);") &&
+                        has(vs, "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'X',perInstance,instances,args,v);") && countOf(vs, "starGlowAfterDraw(self,'") == 4,
                     "the four draw thunks ask the one relaxed load (vrStarGlowWanted, owner context only), call the module before the game's issue and starGlowAfterDraw "
                     "after it, with the thunk's own arguments"});
     {
@@ -536,10 +536,10 @@ std::vector<Pin> wiringPins(const Sources& src) {
             const char* after;
         };
         const Thunk thunks[] = {
-            {"void STDMETHODCALLTYPE hookedDraw(", "hookedDraw", "}elseforwardWithVerdict(self,v,'D'", "if(starGlow)starGlowAfterDraw(self,'D'"},
-            {"void STDMETHODCALLTYPE hookedDrawIndexed(", "hookedDrawIndexed", "}elseforwardWithVerdict(self,v,'I'", "if(starGlow)starGlowAfterDraw(self,'I'"},
-            {"void STDMETHODCALLTYPE hookedDrawInstanced(", "hookedDrawInstanced", "}elseforwardWithVerdict(self,v,'N'", "if(starGlow)starGlowAfterDraw(self,'N'"},
-            {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "hookedDrawIndexedInstanced", "forwardWithVerdict(self,v,'X'", "if(starGlow)starGlowAfterDraw(self,'X'"},
+            {"void STDMETHODCALLTYPE hookedDraw(", "hookedDraw", "}elseforwardWithVerdict(self,v,flags,'D'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'D'"},
+            {"void STDMETHODCALLTYPE hookedDrawIndexed(", "hookedDrawIndexed", "}elseforwardWithVerdict(self,v,flags,'I'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'I'"},
+            {"void STDMETHODCALLTYPE hookedDrawInstanced(", "hookedDrawInstanced", "}elseforwardWithVerdict(self,v,flags,'N'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'N'"},
+            {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "hookedDrawIndexedInstanced", "forwardWithVerdict(self,v,flags,'X'", "if(starGlow&&vrStarGlowAfterMayAct())starGlowAfterDraw(self,'X'"},
         };
         bool all = true;
         for (const Thunk& t : thunks) {
@@ -561,7 +561,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.vscreen, "__declspec(noinline) void starGlowAfterDraw(", &body);
         body = afterui::squeeze(body);
         pins.push_back({"after-reissue",
-                        found && inOrder(body, {"if(vrStarGlowAfterDraw(self,v==DrawVerdict::kNone&&!uiLayerIssueBlocked())){", "pureDrawReissue(self,kind,count,instances,args);",
+                        found && inOrder(body, {"if(vrStarGlowAfterDraw(self,v==DrawVerdict::kNone&&!uiLayerIssueBlocked())){", "pureDrawReissue(ReissueCaller::StarGlow,self,kind,count,instances,args);",
                                                 "vrStarGlowReplayEnd(self);"}),
                         "starGlowAfterDraw issues the star pass once more between the module's Begin and End, with the game's arguments, and only for a draw no verdict altered "
                         "and the layer has not blocked"});
@@ -573,7 +573,9 @@ std::vector<Pin> wiringPins(const Sources& src) {
     // The module.
     pins.push_back({"hook-shape",
                     has(hdr, "inlinevoidvrStarGlowBeforeDraw(ID3D11DeviceContext*ctx){if(detail::g_vrStarGlowPending.load(std::memory_order_relaxed)||uiLayerHudGlowPending())vrStarGlowFirstLevel(ctx);}") &&
-                        has(hdr, "inlineboolvrStarGlowWanted(){returndetail::g_vrStarGlowWanted.load(std::memory_order_relaxed);}"),
+                        has(hdr, "inlineboolvrStarGlowWanted(){returndetail::g_vrStarGlowWanted.load(std::memory_order_relaxed);}") &&
+                        has(hdr, "inlineboolvrStarGlowAfterMayAct(){returndetail::g_vrStarT0Active||detail::g_vrStarMode==VrStarMode::kOn;}") &&
+                        has(afterui::squeeze(src.mod), "if(detail::g_vrStarT0Active)endFirstLevel(ctx);if(detail::g_vrStarMode!=VrStarMode::kOn)returnfalse;"),
                     "the draw hooks cost one relaxed load while off, and the first-level test runs only while some H holds light its first level has not read or an eye's HUD "
                     "layer holds a frame's light its first level has not taken"});
     {
@@ -581,7 +583,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.mod, "void vrStarGlowFirstLevel(ID3D11DeviceContext* ctx) {", &body);
         body = afterui::squeeze(body);
         pins.push_back({"first-level-by-shader",
-                        found && inOrder(body, {"vrStarIsFirstLevel(bindingShaderHash(BindSlot::Ps))", "if(g_t0.active)return;", "VrWorldInternalScopeinternal;",
+                        found && inOrder(body, {"vrStarIsFirstLevel(bindingShaderHash(BindSlot::Ps))", "if(detail::g_vrStarT0Active)return;", "VrWorldInternalScopeinternal;",
                                                 "guardedBudget(g_budget,[&]{bindFirstLevel(ctx);});"}),
                         "the first level is the draw whose pixel shader is the first level's, and the H' pass runs under the helper scope and the fault budget"});
     }
@@ -593,8 +595,8 @@ std::vector<Pin> wiringPins(const Sources& src) {
                         found && inOrder(body, {"si=g_table.find(info.resource);", "vrStarFirstLevel(known,", "Slot&s=g_slots[si];", "s.run.done=true;",
                                                 "star.srv=s.layer.srv.Get();", "uiLayerHeadsetGlowFeed(ctx,0,info.resource,starIn,&glow);",
                                                 "vrStarCountRefusal(w,VrStarRefusal::kFeedFail);",
-                                                "vScreenPSSetShaderResourcesRaw(ctx,0,1,&bound);", "g_t0.game=game;", "g_t0.active=true;", "++w.fed;"}) &&
-                            countOf(mod, "g_t0.active=true;") == 1,
+                                                "vScreenPSSetShaderResourcesRaw(ctx,0,1,&bound);", "g_t0.game=game;", "detail::g_vrStarT0Active=true;", "++w.fed;"}) &&
+                            countOf(mod, "detail::g_vrStarT0Active=true;") == 1,
                         "H' is built from the star layer of the H the first level reads (found by its resource), the H is marked fed first, a feed that fails is counted, "
                         "H' is bound at t0 through the raw setter and the game's view is held for the end"});
     }
@@ -603,8 +605,8 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.mod, "void endFirstLevel(ID3D11DeviceContext* ctx) {", &body);
         body = afterui::squeeze(body);
         pins.push_back({"game-view-back",
-                        found && inOrder(body, {"g_t0.active=false;", "guarded(\"vrStarGlow.restoreT0\"", "vScreenPSSetShaderResourcesRaw(ctx,0,1,&game);", "g_budget.charge();"}) &&
-                            has(mod, "if(g_t0.active)endFirstLevel(ctx);if(g_mode!=VrStarMode::kOn)returnfalse;++g_win.draws;"),
+                        found && inOrder(body, {"detail::g_vrStarT0Active=false;", "guarded(\"vrStarGlow.restoreT0\"", "vScreenPSSetShaderResourcesRaw(ctx,0,1,&game);", "g_budget.charge();"}) &&
+                            has(mod, "if(detail::g_vrStarT0Active)endFirstLevel(ctx);if(detail::g_vrStarMode!=VrStarMode::kOn)returnfalse;++g_win.draws;"),
                         "the game's view of H goes back at t0 through the raw setter under a guard of its own, before anything else looks at the draw"});
     }
     {
@@ -612,7 +614,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.mod, "bool vrStarGlowAfterDraw(ID3D11DeviceContext* ctx, bool plain) {", &body);
         body = afterui::squeeze(body);
         pins.push_back({"counted-before-classify",
-                        found && inOrder(body, {"if(g_t0.active)endFirstLevel(ctx);", "++g_win.draws;", "guardedBudget(g_budget,[&]{replay=classify(ctx,plain);})", "if(g_saved.active)restoreSaved(ctx);"}),
+                        found && inOrder(body, {"if(detail::g_vrStarT0Active)endFirstLevel(ctx);", "++g_win.draws;", "guardedBudget(g_budget,[&]{replay=classify(ctx,plain);})", "if(g_saved.active)restoreSaved(ctx);"}),
                         "every draw the hook sees is counted (draws) before it is classified, and a fault inside the classification puts the game's bindings back"});
     }
     {
@@ -647,7 +649,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.mod, "void vrStarGlowFrameBoundary() {", &body);
         body = afterui::squeeze(body);
         pins.push_back({"off-is-nothing",
-                        found && inOrder(body, {"if(runtimeFlatProfile()){", "standDown();", "if(g_mode==VrStarMode::kOn)foldFrame();", "starGlowPercent(cfg,&recognised)",
+                        found && inOrder(body, {"if(runtimeFlatProfile()){", "standDown();", "if(detail::g_vrStarMode==VrStarMode::kOn)foldFrame();", "starGlowPercent(cfg,&recognised)",
                                                 "constVrStarModemode=vrStarMode(g_percent,g_percent>100?menuStarGlowBloom():sgb::Bloom::Unknown);", "standDown();",
                                                 "if(mode==VrStarMode::kOn){", "g_vrStarGlowWanted.store(true,", "vrStarPausedLine(", "vrStarOffLine("}) &&
                             countOf(mod, "g_vrStarGlowWanted.store(true,") == 1 && has(mod, "voidstandDown(){detail::g_vrStarGlowWanted.store(g_hudMode==VrHudGlowMode::kOn,std::memory_order_relaxed);releaseAll();}"),
@@ -708,20 +710,21 @@ void testWiring() {
     const Control controls[] = {
         {"in-dll", 5, "\"src\\d3d11\\vr_star_glow.cpp\"", "\"src\\d3d11\\vr_nothing.cpp\""},
         {"thunks-ask-once", 0, "const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;", "const bool starGlow = self == g_state->ownerCtx;"},
-        {"thunks-ask-once", 0, "    if (starGlow) starGlowAfterDraw(self, 'D', count, 1, args, v);\n", ""},
-        {"thunks-ask-once", 0, "    if (starGlow) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);\n", ""},
-        {"thunk-order", 0, "    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);\n    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);",
-         "    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);\n    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);"},
-        {"after-reissue", 0, "        pureDrawReissue(self, kind, count, instances, args);\n        vrStarGlowReplayEnd(self);\n", "        vrStarGlowReplayEnd(self);\n"},
+        {"thunks-ask-once", 0, "    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'D', count, 1, args, v);\n", ""},
+        {"thunks-ask-once", 0, "    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);\n", ""},
+        {"thunk-order", 0, "    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);\n    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);",
+         "    if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);\n    if (starGlow && vrStarGlowAfterMayAct()) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);"},
+        {"after-reissue", 0, "        pureDrawReissue(ReissueCaller::StarGlow, self, kind, count, instances, args);\n        vrStarGlowReplayEnd(self);\n", "        vrStarGlowReplayEnd(self);\n"},
         {"after-reissue", 0, "if (vrStarGlowAfterDraw(self, v == DrawVerdict::kNone && !uiLayerIssueBlocked())) {", "if (vrStarGlowAfterDraw(self, true)) {"},
         {"boundary", 0, "tkVrStarGlow.run([&] { vrStarGlowFrameBoundary(); });", ""},
         {"boundary", 1, "tkMenu.run([] { menuTick(g_state->device); });", ""},
+        {"hook-shape", 3, "return detail::g_vrStarT0Active || detail::g_vrStarMode == VrStarMode::kOn;", "return detail::g_vrStarMode == VrStarMode::kOn;"},
         {"hook-shape", 3, "if (detail::g_vrStarGlowPending.load(std::memory_order_relaxed) || uiLayerHudGlowPending()) vrStarGlowFirstLevel(ctx);", "vrStarGlowFirstLevel(ctx);"},
         {"first-level-by-shader", 2, "vrStarIsFirstLevel(bindingShaderHash(BindSlot::Ps))", "true"},
         {"h-prime-for-one-draw", 2, "star.srv = s.layer.srv.Get();", "star.srv = g_slots[0].layer.srv.Get();"},
-        {"h-prime-for-one-draw", 2, "    g_t0.active = true;\n", ""},
+        {"h-prime-for-one-draw", 2, "    detail::g_vrStarT0Active = true;\n", ""},
         {"game-view-back", 2, "vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &game); });", "(void)game; });"},
-        {"game-view-back", 2, "    if (g_t0.active) endFirstLevel(ctx);   // only the first-level draw read H'; the game's view is back before anything else looks\n", ""},
+        {"game-view-back", 2, "    if (detail::g_vrStarT0Active) endFirstLevel(ctx);   // only the first-level draw read H'; the game's view is back before anything else looks\n", ""},
         {"counted-before-classify", 2, "    ++g_win.draws;\n    bool replay = false;", "    bool replay = false;"},
         {"star-pass-keyed", 2, "si = g_table.claim(t.res, g_frame, &fresh);", "si = 0;"},
         {"star-pass-keyed", 2, "facts.preSeen = g_pre.seen(dsv, g_frame);", "facts.preSeen = true;"},
@@ -732,7 +735,7 @@ void testWiring() {
         {"bracket", 2, "const bool ran = guarded(\"vrStarGlow.restore\", [&] {", "const bool ran = guardedBudget(g_budget, [&] {"},
         {"off-is-nothing", 2, "g_percent > 100 ? menuStarGlowBloom() : sgb::Bloom::Unknown", "sgb::Bloom::Unknown"},
         {"off-is-nothing", 2, "detail::g_vrStarGlowWanted.store(true, std::memory_order_relaxed);", "detail::g_vrStarGlowWanted.store(g_percent > 0, std::memory_order_relaxed);"},
-        {"off-is-nothing", 2, "    if (runtimeFlatProfile()) {\n        hudStandDown();   // the flat profile feeds its own HUD bloom (flat_ui_layer.h); nothing here runs\n        if (g_mode != VrStarMode::kOff) {\n            standDown();\n            g_mode = VrStarMode::kOff;\n        }\n        return;\n    }\n", ""},
+        {"off-is-nothing", 2, "    if (runtimeFlatProfile()) {\n        hudStandDown();   // the flat profile feeds its own HUD bloom (flat_ui_layer.h); nothing here runs\n        if (detail::g_vrStarMode != VrStarMode::kOff) {\n            standDown();\n            detail::g_vrStarMode = VrStarMode::kOff;\n        }\n        return;\n    }\n", ""},
         {"fold-counts", 2, "        if (s.run.lit && !s.run.done) vrStarCountRefusal(w, VrStarRefusal::kNoFirstLevel);\n", ""},
         {"star-via-headset-feed", 4, "glowFeedPass(ctx, hud, slot, hdr, v, star)", "glowFeedPass(ctx, nullptr, slot, hdr, v, nullptr)"},
         {"star-via-headset-feed", 4, "slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT && !runtimeFlatProfile()) {\n        uint64_t seq = 0;",

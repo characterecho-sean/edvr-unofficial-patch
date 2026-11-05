@@ -80,15 +80,16 @@ public:
 
     // Counts one call of c, and starts timing it when this is one of the sampled calls (every call when everyCall).
     static Probe begin(Counter& c, bool everyCall) noexcept {
-        const uint64_t n = c.calls.fetch_add(1, std::memory_order_relaxed);
-        Probe p;
-        p.counter_ = &c;
-        p.timed_ = everyCall || (n & (kSampleEvery - 1)) == 0;
-        if (p.timed_) {
-            p.start_ = qpcNow();
-            p.running_ = true;
-        }
-        return p;
+        return started(c, c.calls.fetch_add(1, std::memory_order_relaxed), everyCall);
+    }
+
+    // The same, with the count as a relaxed load and store in place of the locked add (build 5, item 7): for the one site whose every call is on the draw path from
+    // one thread (hookedPSSetConstantBuffers, about 3,200 a frame). Exact on one thread; a call from another thread at the same moment can lose one count, which the
+    // report tolerates. The sampling, the timing and the report are begin()'s.
+    static Probe beginPlainCount(Counter& c, bool everyCall) noexcept {
+        const uint64_t n = c.calls.load(std::memory_order_relaxed);
+        c.calls.store(n + 1, std::memory_order_relaxed);
+        return started(c, n, everyCall);
     }
 
     void stop() noexcept {
@@ -106,6 +107,17 @@ public:
     bool timed() const noexcept { return timed_; }
 
 private:
+    static Probe started(Counter& c, uint64_t n, bool everyCall) noexcept {
+        Probe p;
+        p.counter_ = &c;
+        p.timed_ = everyCall || (n & (kSampleEvery - 1)) == 0;
+        if (p.timed_) {
+            p.start_ = qpcNow();
+            p.running_ = true;
+        }
+        return p;
+    }
+
     Counter* counter_ = nullptr;
     uint64_t start_ = 0;
     bool timed_ = false;
@@ -124,6 +136,11 @@ constexpr bool inactiveFor(Owner owner, bool flatActive, bool vrActive) noexcept
 // the site's own work is counted.
 inline Probe enterSite(Site s, bool inactive) noexcept {
     return inactive ? Probe::begin(g_sites[static_cast<size_t>(s)], false) : Probe();
+}
+
+// enterSite for the one site that counts without the locked add (Probe::beginPlainCount): Site::FlatPsConstantBuffers, vscreen.cpp hookedPSSetConstantBuffers.
+inline Probe enterSitePlainCount(Site s, bool inactive) noexcept {
+    return inactive ? Probe::beginPlainCount(g_sites[static_cast<size_t>(s)], false) : Probe();
 }
 
 // Times one creation-time capture for the scope's life. inactive is the caller's gate, as above. Every call is timed.

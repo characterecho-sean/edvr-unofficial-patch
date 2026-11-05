@@ -173,6 +173,41 @@ inline void run100(Check&& check) {
                         f100::teeFast(7, 7, 0x1234ull) && !f100::teeFast(7, 8, 0x1234ull) && !f100::teeFast(f100::kNoFrame, f100::kNoFrame, 0x1234ull);
         check(ok && each && vs, "F100: the fast frame needs the frame turned, nothing pending or bound, no census, both eyes' rows and no measurement; HUD and marker draws always go slow");
     }
+    {   // #155: the tally names the first term that holds the fast frame back, in the cost line's order
+        f100::TeeState s;
+        s.polledFrame = 7;
+        s.worldOk[0] = s.worldOk[1] = 7;
+        const bool clear = f100::teeHeldBy(s, 7) == f100::kTeeHeldNone;
+        f100::TeeState m = s, p = s, b = s, c = s, k = s, t = s, w0 = s, w1 = s;
+        m.measure = true;
+        p.pending = true;
+        b.bound = true;
+        c.census = true;
+        k.check = true;
+        t.polledFrame = 6;
+        w0.worldOk[0] = 6;
+        w1.worldOk[1] = 6;
+        const bool alone = f100::teeHeldBy(m, 7) == f100::kTeeHeldMeasure && f100::teeHeldBy(p, 7) == f100::kTeeHeldPending &&
+                           f100::teeHeldBy(b, 7) == f100::kTeeHeldBound && f100::teeHeldBy(c, 7) == f100::kTeeHeldCensus &&
+                           f100::teeHeldBy(k, 7) == f100::kTeeHeldCheck && f100::teeHeldBy(t, 7) == f100::kTeeHeldPolled &&
+                           f100::teeHeldBy(w0, 7) == f100::kTeeHeldWorld0 && f100::teeHeldBy(w1, 7) == f100::kTeeHeldWorld1;
+        f100::TeeState all = s;
+        all.measure = all.pending = all.bound = all.census = all.check = true;
+        all.polledFrame = all.worldOk[0] = all.worldOk[1] = 6;
+        f100::TeeState late = s;   // the AA-off picture (#155): only the world rows are missing
+        late.worldOk[0] = late.worldOk[1] = f100::kNoFrame;
+        f100::TeeState mid = all;
+        mid.measure = mid.pending = mid.bound = false;
+        const bool earlier = f100::teeHeldBy(all, 7) == f100::kTeeHeldMeasure && f100::teeHeldBy(late, 7) == f100::kTeeHeldWorld0 &&
+                             f100::teeHeldBy(mid, 7) == f100::kTeeHeldCensus;
+        // Held exactly when the fast frame is not published, the unturned kNoFrame frame included (it is the polled term's).
+        f100::TeeState none;
+        bool agrees = (f100::teeHeldBy(none, f100::kNoFrame) == f100::kTeeHeldPolled) && f100::teeFastFrame(none, f100::kNoFrame) == f100::kNoFrame;
+        for (const f100::TeeState* x : {&s, &m, &p, &b, &c, &k, &t, &w0, &w1, &all, &late, &mid})
+            agrees = agrees && ((f100::teeHeldBy(*x, 7) == f100::kTeeHeldNone) == (f100::teeFastFrame(*x, 7) != f100::kNoFrame));
+        check(clear && alone && earlier && agrees,
+              "#155: the tee's tally reports each term alone (measure, pending, bound, census, check, polled, world 0, world 1), the earliest of several, none when all clear; held exactly when no fast frame");
+    }
     {   // the tee clock's arithmetic: 10 MHz QPC, 64 calls clocked at 20 ticks (2 us) each, 2,000,000 calls over 90 frames
         const double ns = f100::teeNsPerCall(64 * 20, 64, 10000000);
         const double ms = f100::teeMsPerFrame(64 * 20, 64, 2000000, 90, 10000000);

@@ -633,6 +633,12 @@ internal static class Report
             var bySignature = new Dictionary<string, long>();
             var edvrInnermost = new Dictionary<string, long>();
             var edvrChains = new Dictionary<(string Chain, string Site), long>();
+            // Own time: the samples whose innermost frame is in EDVR's d3d11.dll, the test behind callerSamplesTopFrameInEdvr. The rest of a chain's
+            // samples are below: EDVR's code was the innermost EDVR frame, and a call it forwarded (the game's, the system's or the driver's) is
+            // what was running. A function's cost EDVR can cut is its own; below belongs to whoever it called.
+            var edvrInnermostOwn = new Dictionary<string, long>();
+            var edvrChainsOwn = new Dictionary<(string Chain, string Site), long>();
+            long edvrOwn = 0;
             long total = 0, edvr = 0, system = 0, nvidia = 0, pipeline = 0, census = 0, scheduler = 0;
             long topUnresolved = 0, anyUnresolved = 0;
             foreach (var frame in frames)
@@ -641,6 +647,8 @@ internal static class Report
                     if (sampleGroup != group || stackId < 0) continue;
                     var stack = data.Stacks[stackId];
                     total++;
+                    var own = edvrModule >= 0 && stack.TopModuleId == edvrModule;
+                    if (own) edvrOwn++;
                     Numeric.Increment(byModule, data.Stacks.DisplayName(stack.TopModuleId));
                     Numeric.Increment(bySignature, data.Stacks.Signature(stack, 20, symbols));
                     if (stack.AnyEdvrD3d11) edvr++;
@@ -656,6 +664,11 @@ internal static class Report
                     if (chain.Count == 0) continue;
                     Numeric.Increment(edvrInnermost, chain[0]);
                     Numeric.Increment(edvrChains, (string.Join(" < ", chain), site));
+                    if (own)
+                    {
+                        Numeric.Increment(edvrInnermostOwn, chain[0]);
+                        Numeric.Increment(edvrChainsOwn, (string.Join(" < ", chain), site));
+                    }
                 }
             rows.Add(new Dictionary<string, object?>
             {
@@ -700,6 +713,10 @@ internal static class Report
                 ["distinctRvaCount"] = edvrInnermost.Count,
                 ["edvrChainTotal"] = edvrChains.Values.Sum(),
                 ["distinctChainCount"] = edvrChains.Count,
+                // EDVR's own code against the calls below it, over the same samples. edvrOwnTotal counts every sample whose top frame is in EDVR,
+                // so it equals the byTopModule count for "d3d11.dll [edvr]" and the export's callerSamplesTopFrameInEdvr.
+                ["edvrOwnTotal"] = edvrOwn,
+                ["edvrBelowTotal"] = edvrInnermost.Values.Sum() - edvrInnermostOwn.Values.Sum(),
                 ["edvrInnermostRvas"] = edvrInnermost.OrderByDescending(pair => pair.Value).Take(rvaCap)
                     .Select(pair =>
                     {
@@ -707,6 +724,8 @@ internal static class Report
                         {
                             ["rva"] = pair.Key,
                             ["count"] = pair.Value,
+                            ["own"] = edvrInnermostOwn.GetValueOrDefault(pair.Key),
+                            ["below"] = pair.Value - edvrInnermostOwn.GetValueOrDefault(pair.Key),
                         };
                         symbols?.Annotate(row, edvrModule, pair.Key);
                         return row;
@@ -720,6 +739,8 @@ internal static class Report
                             ["chain"] = chain,
                             ["gameCallSite"] = pair.Key.Site,
                             ["count"] = pair.Value,
+                            ["own"] = edvrChainsOwn.GetValueOrDefault(pair.Key),
+                            ["below"] = pair.Value - edvrChainsOwn.GetValueOrDefault(pair.Key),
                         };
                         if (symbols is { Enabled: true })
                             row["chainSymbols"] = chain.Select(rva =>
@@ -760,7 +781,7 @@ internal static class Report
             ["region"] = region,
             ["frames"] = covered.Count,
             ["module"] = "d3d11.dll in the game directory (EDVR)",
-            ["note"] = "RVAs are address minus that module's image base; chains run innermost outward",
+            ["note"] = "RVAs are address minus that module's image base; chains run innermost outward; own is the samples whose top frame is EDVR's, below the rest of the row's count",
             ["callerSamplesTopFrameInEdvr"] = topModule,
             ["callerSamplesAnyEdvrFrame"] = row?["anyFrameIn"] is Dictionary<string, object?> any
                 ? any["edvrD3d11"] : 0L,
@@ -768,6 +789,8 @@ internal static class Report
             ["distinctRvaCount"] = row?["distinctRvaCount"],
             ["edvrChainTotal"] = row?["edvrChainTotal"],
             ["distinctChainCount"] = row?["distinctChainCount"],
+            ["edvrOwnTotal"] = row?["edvrOwnTotal"],
+            ["edvrBelowTotal"] = row?["edvrBelowTotal"],
             ["capped"] = false,
             ["innermost"] = innermost,
             ["chains"] = chains,

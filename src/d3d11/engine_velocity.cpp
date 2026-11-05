@@ -3182,6 +3182,7 @@ static int quickFamilyForProfile(uint64_t hash, bool flat) {
 
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;
+    cache.evGen = bindingEvKeyGeneration();   // build 5, item 4: the inline half's one compare; read with the five below
     cache.vs = bindingGeneration(BindSlot::Vs);
     cache.ps = bindingGeneration(BindSlot::Ps);
     cache.rtv = bindingGeneration(BindSlot::Rtv0);
