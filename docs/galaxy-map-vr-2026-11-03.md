@@ -19,9 +19,10 @@ Open: what makes VR draw the small mesh variant of the System Map's atmosphere r
 
 Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. 12382D in `eye_draw_snapshot.h`'s watched list, for the System Map's markers, comes out when those sizes are read.
 
-Next (2026-11-05, see "The System Map"; everything below went to main that day): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). The markers' scale is FLOWN OK (fc05ee07, Sean: "Fixed the atmospheres"). The System Map's click is FLOWN OK (22eb5c87, Sean: "Clicks work now"). Sean called the click the only difference left from flat, so the map's plane out of the AA pass is flown with nothing against it. The close view's lines in the layer FLOWN (85e2fe00, Sean: "Seems better while zooming"). The arrow from its ray, the reticule at its height and the close view's history through a move FLOWN OK (852102d1, 11:17, Sean: "Looks good"). Its log: `arrow's depth` 1.96 to 2.02 in the close view, 16.62 zoomed out, and `reticule lifted` counting. The count of kept moving frames is written when the game exits, so it was not in the log when this was recorded, and no dump was taken. Still open: the small icons' break-up. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
+Next (2026-11-05, see "The System Map"; everything below went to main that day): the cursor with Anti-aliasing off and on the System Map is FLOWN OK (408e7636, Sean: "works the same"). The markers' scale is FLOWN OK (fc05ee07, Sean: "Fixed the atmospheres"). The System Map's click is FLOWN OK (22eb5c87, Sean: "Clicks work now"). Sean called the click the only difference left from flat, so the map's plane out of the AA pass is flown with nothing against it. The close view's lines in the layer FLOWN (85e2fe00, Sean: "Seems better while zooming"). The arrow from its ray, the reticule at its height and the close view's history through a move FLOWN OK (852102d1, 11:17, Sean: "Looks good"). Its log: `arrow's depth` 1.96 to 2.02 in the close view, 16.62 zoomed out, and `reticule lifted` counting. The count of kept moving frames is written when the game exits, so it was not in the log when this was recorded, and no dump was taken. Still open: the small icons' break-up. Fly "Flight card, the side buttons": the arrow's sticky edge, built after that merge and not on main. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
 
 Ruled out:
+- ruled out: the side buttons being missing from the panel mask, because they are part of the shells' textures, at least 83% opaque against a 10% threshold (dump 141733701001), with gaps the bridging closes ("The side buttons").
 - ruled out: the nearest of all known bodies as the arrow's depth, because in dump 103332590001 it read 0.78 units against 1.98 to the surface under the arrow: that body was behind the camera.
 - ruled out: taking the settlement icons into the UI layer as a change to make, because both their draws are already there (88DCF1 in `map plane icons`, 12382D in `map canvas`; 34 draws a frame with the reticule).
 - ruled out: a marker atlas with no mips as the small icons' break-up, because the log says 11 mip levels, anisotropic, bias 0.00.
@@ -322,6 +323,27 @@ FLOWN 10:33 (build 85e2fe00), Sean: better while zooming, but some textures on t
 | 13421 | 0.97 | 4.60 | 5.27 | 5.18 |
 
 The rows' figure stays flat as the move changes, and what is left of it is largely that same fine terrain, sampled again at another position. So in the close view (a body in front whose radius is at least 0.05 of its distance, galaxy_map_ui.h bodyFillsView) the split goes to a millimetre, as on foot, so every pixel with a depth takes the rows, and the history and the jitter stay through the move. The shader needed nothing. The far view still resets: its small moons (E79BF3) write no depth, and the rows would move them as though at infinity. A moon in view during a close-view drag can trail for the same reason. INFERRED: DLSS on these vectors will hold that terrain still. The warp shows the vectors are right, but only a flight shows DLSS is content with them.
+
+### The side buttons
+
+Sean, 2026-11-05, after the merge: on both maps the cursor falls off the columns of button icons at the left and right, and they are hard to click. He asked for the panel alpha mask there.
+
+**They are already in the mask. MEASURED, with one inference.** The System Map dump (103332590001) has only the panel shells (C4B4B3 and 5DAD41, n=360), a few n=6 quads and the arrow in the UI target, none of them per button, so the columns are part of the shells' textures. The button's fill is at least 83% opaque (Galaxy Map dump 141733701001: the backdrop's blue channel falls from 42 in a gap to 7 under the fill), against the mask's threshold of 10%. INFERRED: the mask's alpha is the alpha that gets drawn; no dump captures the mask. The gaps between buttons are about 24 pixels at 4032, which the bridging's reach of 95 closes.
+
+**What it most likely is. INFERRED from those sizes, not measured in play.** A button is about 165 pixels wide. The bridging needs mask on both sides, so at the column's outer edge nothing holds the arrow, and past that edge it goes to map depth and moves 50 to 100 pixels in each eye (the eye offsets of 0.03 to 0.055 over the arrow's distance of 1.04, at 1894 pixels per tan). At map depth the arrow is also not where the game draws it, and INFERRED, not where the game tests for a button.
+
+**The change.** While the arrow is on a panel, the probe is kMapProbeStickyPS: mask within the same reach on either side keeps it on, about 3 degrees. Getting on is still the exact test, so the arrow does not switch early as it approaches a panel. The sticky test says yes wherever the exact one does, so the two cannot alternate at one place. A star right beside a panel can still be hovered, since hover follows the arrow's direction, but the arrow reads at panel depth until it is clear. It applies to every panel on both maps, with Anti-aliasing on or off.
+
+If the buttons are still hard to click with the arrow steady, the next question is the game's own hit test for them, not the depth.
+
+## Flight card, the side buttons
+
+Build: see Status. VR, both maps.
+
+1. Slide up and down a button column, and overshoot it sideways by a little. The arrow should stay at the buttons' depth with no jump, and the buttons should click first time. Log: `probes made N (M with the sticky edge)`, with M above 0 once the arrow has been on a panel. M of 0 means the path never ran.
+2. Move well away from a panel: the arrow should drop to map depth about 3 degrees clear of it. Moving toward a panel, it should not switch until it reaches the panel.
+3. Hover and click a star or planet right beside a panel. Selection should work; say whether the arrow's depth there bothers you.
+4. Anti-aliasing off: the same on both maps.
 
 ## Flight card, the close view's surface (flown 11:17)
 

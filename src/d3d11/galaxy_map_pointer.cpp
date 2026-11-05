@@ -246,6 +246,7 @@ void thirtySecondLine(State& s, uint64_t now) {
     const uint64_t noPose = g_counters.noPose.exchange(0, std::memory_order_relaxed), camWrites = g_counters.camWrites.exchange(0, std::memory_order_relaxed);
     const uint64_t arrowKept = g_counters.arrowKept.exchange(0, std::memory_order_relaxed), maskLate = g_counters.maskLate.exchange(0, std::memory_order_relaxed);
     const uint64_t probes = g_counters.probes.exchange(0, std::memory_order_relaxed), answered = g_counters.answered.exchange(0, std::memory_order_relaxed);
+    const uint64_t stickyProbes = g_counters.stickyProbes.exchange(0, std::memory_order_relaxed);
     const uint64_t framesOver = g_counters.framesOver.exchange(0, std::memory_order_relaxed), framesClear = g_counters.framesClear.exchange(0, std::memory_order_relaxed);
     const uint64_t ringFull = g_counters.ringFull.exchange(0, std::memory_order_relaxed), perFrameFull = g_counters.perFrameFull.exchange(0, std::memory_order_relaxed);
     const uint64_t probeFaults = g_counters.probeFaults.exchange(0, std::memory_order_relaxed), unavailable = g_counters.maskUnavailable.exchange(0, std::memory_order_relaxed);
@@ -283,7 +284,7 @@ void thirtySecondLine(State& s, uint64_t now) {
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
     Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point (the System Map's held and answered unchanged %llu), %llu passed through%s%s%s; "
                     "cursor object %s; the System Map's markers scaled %llu (%u bodies known), arrow's depth %.2f units (0: at infinity), cut-outs behind its bodies %llu, reticule lifted %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
-                    "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
+                    "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu (%llu with the sticky edge), answered %llu (frames over a panel %llu, not over %llu);"
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
@@ -296,7 +297,7 @@ void thirtySecondLine(State& s, uint64_t now) {
                     static_cast<unsigned long long>(camWrites), static_cast<unsigned long long>(eyesValid), static_cast<unsigned long long>(eyeGenSteps),
                     camWrites && !eyesValid ? " -- NO write carried the eyes: the overlays use the game's rounded eye" : "",
                     static_cast<unsigned long long>(maskIssued[0]), static_cast<unsigned long long>(maskIssued[1]),
-                    static_cast<unsigned long long>(probes), static_cast<unsigned long long>(answered), static_cast<unsigned long long>(framesOver),
+                    static_cast<unsigned long long>(probes), static_cast<unsigned long long>(stickyProbes), static_cast<unsigned long long>(answered), static_cast<unsigned long long>(framesOver),
                     static_cast<unsigned long long>(framesClear), over() ? "yes" : "no", static_cast<unsigned long long>(declinesTotal), static_cast<unsigned long long>(ringFull),
                     static_cast<unsigned long long>(perFrameFull), static_cast<unsigned long long>(probeFaults), static_cast<unsigned long long>(unavailable),
                     static_cast<unsigned long long>(maskLate), static_cast<unsigned long long>(depthMade), static_cast<unsigned long long>(depthTested), static_cast<unsigned long long>(depthIssued),
