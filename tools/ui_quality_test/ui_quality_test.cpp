@@ -3068,7 +3068,7 @@ void testSupercruiseLines() {
         const std::string hook = slurp("src/d3d11/device_hook.cpp"), screen = slurp("src/d3d11/vscreen.cpp"), pointer = slurp("src/d3d11/galaxy_map_pointer.cpp");
         check(hook.find("tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });") != std::string::npos, "GP10: the map camera's tick runs mapPointerFrame right after mapCameraFrame");
         const size_t rollFree = screen.find("} rollFreeScope{self};"), swapScope = screen.find("} mapSwapScope{self};"), skip = screen.find("if (v == DrawVerdict::kSkip) {", rollFree);
-        check(rollFree != std::string::npos && swapScope > rollFree && swapScope < skip && screen.find("v != DrawVerdict::kSkip && mapui::vrOpen()") != std::string::npos &&
+        check(rollFree != std::string::npos && swapScope > rollFree && swapScope < skip && screen.find("v != DrawVerdict::kSkip && mapui::swapOpen()") != std::string::npos &&
                   screen.find("~MapSwapScope() { if (on) mapui::swapEnd(ctx); }") != std::string::npos,
               "GP11: forwardWithVerdict declares the map's shader swap scope after the roll-free scope (so it restores first), swaps only on a draw that is not skipped, and puts the game's shader back on every way out");
         check(pointer.find("gameRvasFound(kRvas") != std::string::npos && pointer.find("gamePinMatches(kProjectRva") != std::string::npos && pointer.find("gamePinMatches(kCursorRva") != std::string::npos && pointer.find("gamePinMatches(kPointerReturnRva") != std::string::npos && pointer.find("armed.store(true") != std::string::npos &&
@@ -3078,8 +3078,9 @@ void testSupercruiseLines() {
         check(pointer.find("logCheck") == std::string::npos && pointer.find("selfCheckDue") == std::string::npos && pointer.find("noteOtherCaller") == std::string::npos &&
                   pointer.find("otherReturn") == std::string::npos && pointer.find("kNearCamera") == std::string::npos,
               "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
-        check(pointer.find("if (caller != s.pointerReturn) return original(k, in, idx, out);") != std::string::npos,
-              "GP14: any caller but the pointer's goes straight to the original projector");
+        check(pointer.find("if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);") != std::string::npos && pointer.find("gamePinMatches(kSystemPointerReturnRva") != std::string::npos &&
+                  pointer.find("const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
+              "GP14: any caller but the two maps' pointer calls goes straight to the original projector; the System Map's is optional and pinned, and its gate opens the pointer alone, not the Galaxy Map's fixed icons");
         std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);
         check(!copyRoute.good() && screen.find("map_ui_depth.h") == std::string::npos && screen.find("mapuidepth") == std::string::npos && pointer.find("mapuidepth") == std::string::npos &&
                   pointer.find("map_ui_depth.h") == std::string::npos,
@@ -3093,6 +3094,14 @@ void testSupercruiseLines() {
                   screen.find("uiLayerMapMaskBegin(self, &issue)") != std::string::npos && screen.find("uiLayerMapProbeBegin(self, &issue)") != std::string::npos &&
                   screen.find("pureDrawReissue(ReissueCaller::UiLayerSecond, d.self, d.kind, 1, d.instances, *d.args);") != std::string::npos,
               "GP17: the second-issue path issues the panel into the mask and, for the arrow, one point (index count 1, the draw's own start index, base vertex and start instance) after the layer's own issues");
+        // Without the layer (Anti-aliasing off, UI quality off, stood down) the hover and the arrow still act, so the mask and the probe run from the game's own issue: the pointer's gate takes no term from the layer.
+        const size_t directCall = screen.find("} else if (originalIssued && owner && mapui::pointerOpen() && !uiLayerQualityLive()) {");
+        const std::string mapUi = slurp("src/d3d11/galaxy_map_ui.cpp");
+        check(directCall != std::string::npos && screen.find("mapDirectSecondIssues(self, kind, count, instances, args);", directCall) != std::string::npos &&
+                  screen.find("mapui::directPanelIssue(self, vs,") != std::string::npos && screen.find("mapui::directArrowProbe(self,") != std::string::npos && screen.find("uiLayerTargetKind() != 2") != std::string::npos &&
+                  pointer.find("uiLayerQualityLive") == std::string::npos &&
+                  mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &t, nullptr);") != std::string::npos && mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &rtv, dsv);") != std::string::npos,
+              "GP17b: with the layer not live the panel mask and the arrow's probe run after the game's own issue into its eye target, the game's targets go back, and the pointer's gate does not ask for the layer");
         // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
         const std::string layer = slurp("src/d3d11/ui_layer.cpp");
         check(layer.find("makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)") != std::string::npos && layer.find("if (e.maskSeq != seq) {") != std::string::npos &&

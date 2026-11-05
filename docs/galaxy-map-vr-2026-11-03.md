@@ -15,13 +15,15 @@ Evidence: flight 2, v0.22.0-rc.6-21-g7c1544a0, Frontier, Galaxy Map aboard, log 
 
 Decided (Sean, 2026-11-04, after flying it): panels at the game's depth, the arrow on a panel at the panel's depth and off it at star depth. This replaces the first decision (panels at star depth), which clipped through the map in stereo.
 
-Open: whether `SystemMapView` is the System Map's stage name (the `map camera:` lines name every stage 0, and no System Map was opened on the flight). The hover pointer block's class ([vis+0x110]) is now of no consequence. System Map and Orrery hover are not read, so fix 3 and the facing icons are Galaxy Map only.
+Open: why the System Map's thick blue ring and landable arc do not fit the body in VR ("The System Map", H1 to H3). The hover pointer block's class ([vis+0x110]) is now of no consequence. The System Map's hover is read and takes fix 3 (built 2026-11-05, not flown); the facing icons and the sprite depth stay Galaxy Map only. `SystemMapView` is the System Map's stage name (dump 050358167001).
 
-Temporary: none left. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone.
+Temporary: no keys. The self-check, the F111 map probe, the stillness bounds and `experimental.galaxy_map_icon_up` are gone. The four draws added to `eye_draw_snapshot.h` for the System Map's markers come out when those sizes are read.
 
-Next: nothing outstanding on the VR Galaxy Map. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera.
+Next (2026-11-05, see "The System Map"): fly the cursor with Anti-aliasing off and on the System Map, then one VR dump and one flat dump on the same body, which settle the two marker sizes static RE could not. The sprite depth stays: Sean asked for the order and the map holds 90 fps with it. RE notes wait for the `elite-analysis intake` session: analysis-inbox folders 20261103-202226-galaxy-map-pointer, 20261104-gm-hover, 20261104-gm-camera, 20261105-system-map.
 
 Ruled out:
+- ruled out: the atmosphere pass (9FFA5D, 8134D0) as the System Map's small blue shell, because in dump 050358167001 its camera constant cb1[3] equals the eye-relative body position over the outer radius to four digits and to 0.000 degrees, per eye, and its inner radius matches the planet's silhouette to the pixel in both eyes.
+- ruled out: making the pointer stand aside when the UI layer is not live (35a97739 on `claude/rc7-review-fixes`), because the hover then goes back to the game's near point and the cursor stops selecting stars with Anti-aliasing off (Sean, 2026-11-05). The hover needs no layer, and the mask and probe now run without it.
 - ruled out: the grid's vertical as the quads' up (key value `stems`), because with the camera 45 degrees down a quad at view tangents (x, y) has 1 + y times its height and shears by atan(x / (1 + y)). Flown 16:41 beside the camera's up; Sean prefers the camera's up.
 - ruled out: B10B032BDFD46700 as a panel, because its n=6 records sit in the UI frame at their own depth: the hover halo round the hovered star (dump 123832862001, record 1258) and the heading text. In the mask, the halo put the arrow at panel depth whenever a star was hovered.
 - ruled out: dropping the stencil write-backs as the whole frame-rate fix, because `restore()` still rebinds the game's D32S8 around every sprite issue (ui_layer.cpp:2217), so the private D16 and the game's depth-stencil still alternate 2,600 to 3,500 times a frame. The benchmark behind that fix had no restore. Flight 14:13: about 60 fps.
@@ -234,6 +236,48 @@ The card's reading of `of others` was wrong. It is 4394 of 4394 runs and 4636 of
 `app_gpu_timing` went back to commented in the Frontier ini after this flight.
 
 **The wobble.** Asked after the flight, Sean: "Wobble is gone". So `mapEyeRel` and the stems' swap stay. The flight cannot separate them from the shared axes, which landed between the report and this answer. The rig gives the mechanism: three steps of float32 noise in the game's eye move an icon 4 units away by 3.44e-3 NDC under the game's formula, about 7 pixels across the 4032-wide output, and by 0 with the precise parts (G11). A flight without them would only test that, so none is planned.
+
+## The System Map
+
+Evidence: dump 050358167001, build 80c56505, Frontier, native OpenXR, 2016x2017 in, 4032x4034 out, DLSS. Stage 0 is named `SystemMapView` (so the Open line above is answered), rows (1,0,0), (0,0.087,0.996), (0,-0.996,0.087), position (18.64, 16.19, -1.41). The bodies lie on the grid plane about 16 to 30 units from the camera.
+
+**The cursor. MEASURED.** The arrow is the Galaxy Map's: the same record shape (s = -0.422, |W| = 1.036) in a UI frame on the same axes. On 38 Lyncis 1 the near arrow's offset from the body is +0.066 NDC in the left eye and +0.021 in the right, 91 pixels apart at 4032. At star depth it is +0.035 and +0.038, 6 pixels apart, which is why a far arrow reads as being at the planets' level at 16 units too.
+
+The hover is K again, from a second call site (`docs/build-334925.md`, "VR Galaxy Map"). The System Map's per-frame step projects the same pointer block's +0x30 through the same K and hands the answer to the store's hover and select, and those compare it in viewport x, y with each body projected through K, radius at least 0.03 of the height. So a point far along the arrow's ray picks by direction alone, as on the Galaxy Map. Projecting that far point through the map camera gives (0.2487, 0.0032) left and (-0.1081, 0.0032) right, the star-depth arrow's NDC in each eye to four places, so the arrow and the hover agree. INFERRED: that K's view 0 is the head-free stage camera here too. If it is an eye, the error is that eye's offset over the distance, about 0.003 tan, far inside the pick's radius.
+
+The change: the pointer's gate opens on either map; K's detour takes both return addresses; the arrow's swap has its own load. The fixed icons, labels and sprite depth stay the Galaxy Map's. The Orrery shares the controller (INFERRED), and gets the same if its stage is named.
+
+**The cursor with Anti-aliasing off.** The regression was `35a97739` on `claude/rc7-review-fixes`, flown in 80c56505 and not on main: with the layer down the pointer stood aside, so the hover went back to the game's near point. Its reason stands: the mask and the probe ran only inside draws the layer took, so the arrow had nothing to say it was on a panel. Now both run from the game's own issue when the layer is not live (galaxy_map_ui.h, THE MASK WITHOUT THE LAYER), with a mask the size of the target, and the pointer's gate takes no term from the layer. That commit must not land as it is: merging that branch has to drop its `pointerWanted` gate.
+
+**The two markers. Sizes OPEN.** What the dump shows:
+
+| Marker | Measured | Draw | Standing |
+|---|---|---|---|
+| Atmosphere pass, faint, at the limb | Inner radius is the silhouette, in both eyes | 9FFA5D, 8134D0 | Correct |
+| Thick blue ring, inner 0.615 of outer | World radius about 0.57 on every body with one: 0.63 of the silhouette on 38 Lyncis 1 (surface 0.886), about the atmosphere's outer radius on moons (surface 0.43, outer 0.556). A circle far off axis, so parallel to the image. In the scene: it is in the left eye's frame 0, which loses the UI | E79BF3, 4724A8: INFERRED | Size OPEN |
+| Landable arc | Concentric, 0.87 of the silhouette on the planet at (15.35, 0, 0) (80 px against 92) | 338A85, BD801F: a ring mesh of radius cb2[0].w: INFERRED | Size OPEN |
+
+Static RE (analysis-inbox 20261105-system-map; addresses in `docs/build-334925.md`) found the assets by name and no reader of them: 25 `SystemMapPlanet_*` models in five variants each (`Atmospheric`, `LandableArc`, `LandableCity`, `PermitArc`, `PermitCity`), loaded in one switch into a set no code was found reading, so the choice and the scale may come from data. `gPlanetSystemMapUpScale` is written once per planet draw from a double behind the planet record, with no camera read at the write. Nothing on the path reads a camera or a viewport, and no stereo branch was found. One global byte tested in the planet draw is unread. None of that shows why flat and VR would differ.
+
+Hypotheses, and what splits them in one VR dump and one flat dump of the same body (the dump now keeps these draws' constants):
+
+| Hypothesis | Signature |
+|---|---|
+| H1. The marker's size is fixed by data and the body's is not: the planet is bigger in VR than in flat | E79BF3's cb0[9..11] scale and 338A85's cb2[0].w the same in both; cb1[126].x differs |
+| H2. A camera term in the marker's size | The marker's scale differs, cb1[126].x the same; the ratio is the projections' or the render sizes' |
+| H3. Same numbers in both, and the flat picture only looks right for another reason | All the same: the markers were never at the limb, and the ask becomes what they should be |
+
+No fix for the markers until this is read.
+
+## Flight card, System Map and Anti-aliasing off
+
+Environment: Frontier, native OpenXR, whichever headset; DLSS on unless the step says otherwise. First check the build: `python tools\edvr_log.py --dir <Frontier>\edvr_logs --expect-build HEAD`.
+
+1. System Map, AA on. Put the arrow on a planet, off the panels. Expect: the arrow reads at the planet's level in stereo, with one arrow and not two; the planet under the tip is the one hovered and selected; moving the head does not change which. Run onto a panel and off: one jump in depth at the edge. Log: `map pointer: a map opened (the System Map)`, and in the 30 s line the projector call about once a frame, replaced, and `arrow 4EF6DD` counted. A `0 replaced` means the System Map's call was not reached.
+2. Galaxy Map, AA off (F7, or the F8 menu). Expect: the cursor selects stars as with AA on, and the arrow is at panel depth on panels and star depth off them. Log: `galaxy map: the UI layer is not taking the panels`, and in the 30 s line panel draws issued into the mask and probes made and answered, all above zero. All zero means the path never ran.
+3. System Map, AA off: the same as step 1.
+4. Galaxy Map, AA on: 90 fps, and selection as before.
+5. The markers. System Map, AA on, on a body with the thick blue ring and a landable planet with the arc in view: Insert dump. Then switch to flat (the same session, the same body and as near the same zoom as you can): a screenshot, and F10 if you are willing. Those give the marker's size in both modes (H1 to H3 above).
 
 ## The merge with main
 

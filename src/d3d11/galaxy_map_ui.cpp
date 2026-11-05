@@ -45,8 +45,22 @@ struct EyeRing {
     uint64_t probedSeq = 0;   // the last eye-frame a probe was issued for
 };
 
+// A mask for the target the game draws the panels into, when the layer is not taking them (galaxy_map_ui.h, THE MASK WITHOUT THE LAYER).
+struct DirectMask {
+    ID3D11Resource* target = nullptr;   // identity only
+    ComPtr<ID3D11Texture2D> tex;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    UINT w = 0, h = 0;
+    uint64_t seq = 0;                   // the frame it was last cleared for
+};
+
 struct State {
     ID3D11Device* device = nullptr;   // identity only
+    DirectMask direct[2];
+    ComPtr<ID3D11BlendState> directBlend[2];   // maskBlendDesc, probeBlendDesc
+    uint64_t directFrame = 1;                  // stepped by the frame tick (setGates)
+    bool directSaid = false;
     ComPtr<ID3D11VertexShader> swapVs[kSwapCount];
     bool swapTried[kSwapCount] = {};
     ComPtr<ID3D11VertexShader> probeVs;
@@ -96,6 +110,8 @@ void bindDevice(State& s, ID3D11DeviceContext* ctx) {
     s.probeTried = false;
     for (auto& p : s.depthPs) p.Reset();
     s.depthPsTried = false;
+    for (DirectMask& m : s.direct) m = DirectMask{};
+    for (auto& b : s.directBlend) b.Reset();
     s.savedVs.Reset();
     s.bound = false;
     s.camBuf.Reset();
@@ -244,9 +260,14 @@ void drain(State& s, ID3D11DeviceContext* ctx, int eye, uint64_t seq) {
 void setGates(bool vr, bool pointer) {
     const bool wasPointer = g_pointerOpen.exchange(pointer, std::memory_order_relaxed);
     g_vrOpen.store(vr, std::memory_order_relaxed);
+    g_swapOpen.store(vr || pointer, std::memory_order_relaxed);
+    if (g_st) ++g_st->directFrame;
     if (wasPointer && !pointer) {
         g_over.store(false, std::memory_order_relaxed);
-        if (g_st) g_st->resetPending.store(true, std::memory_order_release);   // the render thread lets the queries go at its next probe
+        if (g_st) {
+            g_st->resetPending.store(true, std::memory_order_release);   // the render thread lets the queries go at its next probe
+            for (DirectMask& m : g_st->direct) m = DirectMask{};         // the frame tick is the render thread: the masks made without the layer go with the map
+        }
     }
 }
 
@@ -447,6 +468,152 @@ void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderRes
     }
     ++grp->n;
     g_counters.probes.fetch_add(1, std::memory_order_relaxed);
+}
+
+namespace {
+
+// The mask for the target `rtv` names, made or re-made to its size, and cleared at the frame's first use. Null when it cannot be made (the caller says so). `eye` is the mask's slot: the rings are per slot, and over reads both.
+DirectMask* directMaskFor(State& s, ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, int* eye) {
+    ComPtr<ID3D11Resource> res;
+    rtv->GetResource(&res);
+    ComPtr<ID3D11Texture2D> target;
+    if (!res || FAILED(res.As(&target))) return nullptr;
+    D3D11_TEXTURE2D_DESC game{};
+    target->GetDesc(&game);
+    if (game.SampleDesc.Count != 1) return nullptr;
+    int slot = -1;
+    for (int i = 0; i < 2 && slot < 0; ++i) if (s.direct[i].target == res.Get()) slot = i;
+    for (int i = 0; i < 2 && slot < 0; ++i) if (!s.direct[i].target) slot = i;
+    if (slot < 0) {
+        // A third target: the eyes' targets were made again. Both masks start over.
+        for (DirectMask& m : s.direct) m = DirectMask{};
+        slot = 0;
+    }
+    DirectMask& m = s.direct[slot];
+    m.target = res.Get();
+    if (!m.tex || m.w != game.Width || m.h != game.Height) {
+        m.tex.Reset();
+        m.rtv.Reset();
+        m.srv.Reset();
+        ComPtr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = game.Width;
+        td.Height = game.Height;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (!dev || FAILED(dev->CreateTexture2D(&td, nullptr, &m.tex)) || FAILED(dev->CreateRenderTargetView(m.tex.Get(), nullptr, &m.rtv)) || FAILED(dev->CreateShaderResourceView(m.tex.Get(), nullptr, &m.srv))) {
+            m = DirectMask{};
+            return nullptr;
+        }
+        m.w = game.Width;
+        m.h = game.Height;
+        m.seq = 0;
+        if (!s.directSaid) {
+            s.directSaid = true;
+            Log::get().note("galaxy map: the UI layer is not taking the panels (Anti-aliasing off, UI quality off or the layer stood down), so the panel mask and the arrow's probe run from the game's own draws, at %ux%u (A8_UNORM, %.1f MB an eye); let go when the map shuts.",
+                            game.Width, game.Height, static_cast<double>(game.Width) * game.Height / (1024.0 * 1024.0));
+        }
+    }
+    if (m.seq != s.directFrame) {
+        const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        vScreenClearRenderTargetViewRaw(ctx, m.rtv.Get(), zero);
+        m.seq = s.directFrame;
+    }
+    *eye = slot;
+    return &m;
+}
+
+ID3D11BlendState* directBlend(State& s, ID3D11DeviceContext* ctx, int which) {
+    ComPtr<ID3D11BlendState>& b = s.directBlend[which];
+    if (!b) {
+        ComPtr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        const D3D11_BLEND_DESC d = which == 0 ? maskBlendDesc() : probeBlendDesc();
+        if (dev) dev->CreateBlendState(&d, &b);
+    }
+    return b.Get();
+}
+
+// The game's targets and blend, held across a direct issue and put back on every way out.
+struct DirectBracket {
+    ID3D11DeviceContext* ctx;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    FLOAT factor[4] = {};
+    UINT sampleMask = 0xFFFFFFFFu;
+    explicit DirectBracket(ID3D11DeviceContext* c) : ctx(c) {
+        ctx->OMGetRenderTargets(1, &rtv, &dsv);
+        ctx->OMGetBlendState(&blend, factor, &sampleMask);
+    }
+    ~DirectBracket() {
+        guarded("galaxy map direct restore", [&] {
+            vScreenSetRenderTargetsRaw(ctx, 1, &rtv, dsv);
+            vScreenOMSetBlendStateRaw(ctx, blend, factor, sampleMask);
+        });
+        if (rtv) rtv->Release();
+        if (dsv) dsv->Release();
+        if (blend) blend->Release();
+    }
+};
+
+} // namespace
+
+void directPanelIssue(ID3D11DeviceContext* ctx, uint64_t vs, const ProbeDraw& draw) {
+    if (!ctx || !draw.draw) return;
+    State& s = st();
+    FlatComputeInternalScope internal;
+    bindDevice(s, ctx);
+    DirectBracket bracket(ctx);
+    if (!bracket.rtv) return;
+    int eye = 0;
+    DirectMask* m = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    const bool made = guarded("galaxy map direct mask", [&] {
+        m = directMaskFor(s, ctx, bracket.rtv, &eye);
+        blend = directBlend(s, ctx, 0);
+    });
+    if (!made || !m || !blend) {
+        noteUnavailable("the panel mask");
+        return;
+    }
+    const uint64_t seq = s.directFrame;
+    const bool ran = guarded("galaxy map direct mask issue", [&] {
+        ID3D11RenderTargetView* t = m->rtv.Get();
+        vScreenSetRenderTargetsRaw(ctx, 1, &t, nullptr);
+        vScreenOMSetBlendStateRaw(ctx, blend, nullptr, 0xFFFFFFFFu);
+        draw.draw(draw.user);
+    });
+    if (ran) noteMaskIssue(vs, eye, seq);
+}
+
+void directArrowProbe(ID3D11DeviceContext* ctx, const ProbeDraw& point) {
+    if (!ctx || !point.draw) return;
+    State& s = st();
+    FlatComputeInternalScope internal;
+    bindDevice(s, ctx);
+    DirectBracket bracket(ctx);
+    if (!bracket.rtv) return;
+    int eye = 0;
+    DirectMask* m = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    const bool made = guarded("galaxy map direct probe", [&] {
+        m = directMaskFor(s, ctx, bracket.rtv, &eye);   // a frame with no panel draw: cleared here, so the probe reads clear rather than last frame's
+        blend = directBlend(s, ctx, 1);
+        // The game's target stays bound at write mask 0, with no depth: nothing is written and nothing tests the point.
+        vScreenSetRenderTargetsRaw(ctx, 1, &bracket.rtv, nullptr);
+        if (blend) vScreenOMSetBlendStateRaw(ctx, blend, nullptr, 0xFFFFFFFFu);
+    });
+    if (!made || !m || !blend) {
+        noteUnavailable("the panel mask");
+        return;
+    }
+    probeIssue(ctx, eye, s.directFrame, m->srv.Get(), point);
 }
 
 } // namespace mapui

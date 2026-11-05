@@ -152,9 +152,11 @@ extern Counters g_counters;
 // mask). One relaxed load each on the draw path.
 inline std::atomic<bool> g_vrOpen{false};   // inline: ui_layer.cpp reads them and is linked whole into rigs that do not link galaxy_map_ui.cpp
 inline std::atomic<bool> g_pointerOpen{false};
+inline std::atomic<bool> g_swapOpen{false};   // either: the draw path's one load for swapBegin (the Galaxy Map, or the System Map's arrow)
 inline std::atomic<bool> g_over{false};
 inline bool vrOpen() noexcept { return g_vrOpen.load(std::memory_order_relaxed); }
 inline bool pointerOpen() noexcept { return g_pointerOpen.load(std::memory_order_relaxed); }
+inline bool swapOpen() noexcept { return g_swapOpen.load(std::memory_order_relaxed); }
 inline bool over() noexcept { return g_over.load(std::memory_order_relaxed); }
 
 // The draw is one of the swapped shaders and the map state wants it: the replacement vertex shader goes in for this draw and every re-issue (raw, so the binding shadow keeps
@@ -169,6 +171,12 @@ struct ProbeDraw {
     void* user = nullptr;
 };
 void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderResourceView* mask, const ProbeDraw& pd);
+
+// THE MASK WITHOUT THE LAYER. With Anti-aliasing off, UI quality off or the layer stood down the layer takes no panel, so its second issues above never run and nothing would say the tip is on a panel. The hover
+// does not need the layer, and the mask and the probe need only the game's own issue: after it, a panel draw goes once more into an A8_UNORM mask the size of the target the game drew it into (the game's viewport still
+// fits), and the arrow's draw once more as the probe's point. Keyed by the target, so the two eyes need no name here. All state changed is put back. `draw` issues the game's draw as it was (panel) or as one point (arrow).
+void directPanelIssue(ID3D11DeviceContext* ctx, uint64_t vs, const ProbeDraw& draw);
+void directArrowProbe(ID3D11DeviceContext* ctx, const ProbeDraw& point);
 
 // A panel draw reached the eye's mask (eye-frame seq): counted by shader, and noted late when the eye's probe of that frame already ran.
 void noteMaskIssue(uint64_t vs, int eye, uint64_t seq);
