@@ -73,7 +73,7 @@ void readBindings(Watch& w) {
     }
     const char* why = whyNot(w);
     Log::get().note("srv turret press: Elite's ToggleBuggyTurretButton in %s: %d bound slot(s)%s%s; %d watched, %d cannot be seen. %s", w.bind.file[0] ? w.bind.file : "(no file)", w.bind.count,
-                    w.bind.count ? ": " : "", slots, seen, blind, why[0] ? "The press cannot be relied on: the turret view keeps the gunner-sheet watch (the hold starts at the sheet)." : "The press starts the entry fade.");
+                    w.bind.count ? ": " : "", slots, seen, blind, why[0] ? "The press cannot be relied on: the turret view keeps the gunner-sheet watch (the hold starts at the sheet)." : "The press opens the window in which the gunner sheet raises the turret view.");
 }
 
 }  // namespace

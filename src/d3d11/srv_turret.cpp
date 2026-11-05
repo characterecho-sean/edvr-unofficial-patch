@@ -1002,7 +1002,6 @@ void srvTurretFrameTick(uint32_t frameNo) {
     {   // the press gate's words for the entry fade, which runs later in this frame
         SrvTurretPressWords w;
         w.ageMs = static_cast<double>(gate.pressAgeMs);
-        w.waiting = gate.waiting;
         w.sheetEdge = gate.sheetEdge;
         w.noPress = gate.noPress;
         w.fallback = static_cast<uint8_t>(gate.fallback);

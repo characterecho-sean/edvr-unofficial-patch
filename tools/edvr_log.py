@@ -25074,7 +25074,7 @@ def self_test_health():
               lacks=["UNPARSED"])
         check("srv turret: the press watcher's, the fallback's and the entry press lines are not this rule's: no UNPARSED, no change of verdict",
               st_ok + [(1, st_set()),
-                       (1, "srv turret press: Elite's ToggleBuggyTurretButton in Custom.4.2.binds: 1 bound slot(s): [0] GamePad:GamePad_FaceUp (xinput pad); 1 watched, 0 cannot be seen. The press starts the entry fade."),
+                       (1, "srv turret press: Elite's ToggleBuggyTurretButton in Custom.4.2.binds: 1 bound slot(s): [0] GamePad:GamePad_FaceUp (xinput pad); 1 watched, 0 cannot be seen. The press opens the window in which the gunner sheet raises the turret view."),
                        (2, st_view_early()), (3, st_cam()),
                        (3, "srv turret entry fade: entry 1: press at frame 4100; sheet +310 ms after the press; Status.json +430 ms after the press"),
                        (3, "srv turret entry fade: entry 2: no press was seen (the press watcher saw nothing before the view went on: fallback); the view was raised by Status.json"),

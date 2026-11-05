@@ -171,7 +171,6 @@ double srvTurretEntryFadeTick(uint32_t frameNo) {
     in.moveCount = g_moveCount;
     in.moveSerial = g_moveSerial;
     in.pressAgeMs = g_press.ageMs;
-    in.pressWaiting = g_press.waiting;
     in.sheetEdge = g_press.sheetEdge;
     in.noPress = g_press.noPress;
     in.fallback = g_press.fallback;
@@ -194,12 +193,6 @@ double srvTurretEntryFadeTick(uint32_t frameNo) {
             report(g_machine.prev());
         }
         if (ev.skipped) report(g_machine.run());   // no hold ran: its one line now
-    }
-    if (ev.pressTimedOut && g_reports < ef::kMaxReports) {   // the press raised no view: its one line (within the same cap as the run reports)
-        ++g_reports;
-        char line[240];
-        ef::formatPressNoView(line, sizeof(line), g_machine.pressFrame(), now - g_machine.pressStartMs());
-        say(line);
     }
     if (ev.ended) {
         g_pending.active = true;

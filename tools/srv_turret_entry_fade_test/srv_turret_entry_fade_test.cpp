@@ -12,8 +12,8 @@
 //   THE EARLY EDGE (srv_turret_sheet_latch.h): the gunner sheet's draw raises the view before Status.json does; Status.json taking over is no edge and says how long it lagged; a latch with no
 //   sheet draw for a second expires; a non-Scorpion never raises it; the off edge stays Status-driven (a sheet that stops does not turn a Status-on view off, a Status off edge with the sheet
 //   still drawing latches again on its next draw, but a draw from before the off edge does not: leaving the turret turns the view off at the Status.json edge); and the entry fade's hold starts on the early edge.
-//   THE PRESS (srv_turret_sheet_latch.h EntryGate): the player's turret key blacks the view over kPressRampMs before the view is known to be on, opens the draw gate for kPressWaitMs, and the
-//   first sheet draw in the window raises the view with the cap counted from the sheet; no sheet and the black fades back with no edge; presses outside the Scorpion's SRV seat, with GuiFocus
+//   THE PRESS (srv_turret_sheet_latch.h EntryGate): the player's turret key opens the draw gate for kPressWaitMs (it blacks nothing: the hold starts at the edge), and the
+//   first sheet draw in the window raises the view with the cap counted from the sheet; no sheet and the window closes with no edge and no black; presses outside the Scorpion's SRV seat, with GuiFocus
 //   above 0 or with the view on do nothing; Status.json ends the wait; a key that cannot be observed, or a view with no press seen before it, trips the fallback to the always-open gate,
 //   and a change of bindings resets it.
 //   THE WIRING: the module is called every frame after alignTick and before the mix, its level is a term of FadeMix's max, the move's publish is told to it, the luma probe's frame-by-frame mode
@@ -492,7 +492,7 @@ static void lineCases() {
     check(ef::kMaxReports * (1 + ef::kMaxTraceLines) <= 100, "the instrument's lines a session are bounded (entries times a run line and its trace lines)");
 }
 
-// ---- THE PRESS (srv_turret_sheet_latch.h EntryGate, srv_turret_entry_fade.h kPress phases) ---------------------------------------------------------------------------------------
+// ---- THE PRESS (srv_turret_sheet_latch.h EntryGate; the press opens the window, it blacks nothing) ---------------------------------------------------------------------------------------
 // The gate and the machine run as the frame tick and the module run them: the gate first (tick-domain milliseconds), then the machine fed the gate's words. A frame every 10 ms.
 struct PSim {
     sl::EntryGate g;
@@ -531,7 +531,6 @@ struct PSim {
         mi.moveSerial = serial;
         mi.appliedWord = applied;
         mi.pressAgeMs = static_cast<double>(go.pressAgeMs);
-        mi.pressWaiting = go.waiting;
         mi.sheetEdge = go.sheetEdge;
         mi.noPress = go.noPress;
         mi.fallback = static_cast<uint8_t>(go.fallback);
@@ -562,48 +561,30 @@ struct PSim {
 static bool nearly(double a, double b, double tol = 1e-9) { return std::fabs(a - b) <= tol; }
 
 static void pressCases() {
-    {   // the ramp from the press, and the gate open only in the window
+    {   // the press opens the gate for the window and does nothing else: the level stays 0 and no entry begins
         PSim s;
         s.run(100);
         check(!s.go.gateOpen && !s.go.waiting && s.level == 0.0, "in the Scorpion's SRV seat with the view off and no press the draw gate is CLOSED (the always-open gate is gone) and the level is 0");
         const uint64_t p = s.pressNow();
-        check(s.go.event == sl::GateEvent::kCounted && s.go.waiting && s.go.gateOpen && s.ev.pressStarted && s.m.phase() == ef::Phase::kPress, "a press with the Scorpion known, the SRV seat, the view off and GuiFocus 0 counts: the gate opens and the ramp begins");
-        check(s.level == 0.0, "... the ramp starts at 0 in the press's own frame");
-        while (s.tick - p < 50) s.step();
-        s.step();
-        check(nearly(s.level, 0.5), "50 ms after the press the level is 0.5 (a linear ramp over kPressRampMs = 100 ms)");
-        check(nearly(ef::kPressRampMs, 100.0) && sl::kPressWaitMs == 2000, "kPressRampMs is 100 ms and kPressWaitMs is 2000 ms");
-        bool monotone = true, open = true;
-        double prev = s.level;
+        check(s.go.event == sl::GateEvent::kCounted && s.go.waiting && s.go.gateOpen && s.m.phase() == ef::Phase::kIdle, "a press with the Scorpion known, the SRV seat, the view off and GuiFocus 0 counts: the gate opens and the machine stays idle");
+        check(sl::kPressWaitMs == 2000, "kPressWaitMs is 2000 ms");
+        bool open = true, black = false;
         while (s.tick - p < 1900) {
             s.step();
-            monotone = monotone && s.level >= prev - 1e-12;
-            prev = s.level;
             open = open && s.go.gateOpen && s.go.waiting;
+            black = black || s.level != 0.0;
         }
-        check(monotone && s.level == 1.0 && open, "the level rises to 1 by 100 ms and stays at 1 while the gate is open, to 1900 ms");
-        check(s.m.entries() == 0 && !s.m.run().published && s.m.phase() == ef::Phase::kPress, "no entry has begun and the camera move is not published: the camera is not moved by the press");
+        check(open && !black, "the gate stays open to 1900 ms and the view is never blacked by the press");
+        check(s.m.entries() == 0 && !s.m.run().published && s.m.phase() == ef::Phase::kIdle, "no entry has begun and the camera move is not published: the camera is not moved by the press");
         uint64_t closedAt = 0;
-        bool timedOut = false;
         for (int i = 0; i < 40 && !closedAt; ++i) {
             s.step();
+            black = black || s.level != 0.0;
             if (!s.go.gateOpen) closedAt = s.tick - PSim::kDt - p;
-            timedOut = timedOut || s.ev.pressTimedOut;
         }
-        check(closedAt > 2000 && closedAt <= 2000 + 2 * PSim::kDt && timedOut, "the gate closes kPressWaitMs (2000 ms) after the press and no sooner");
-        check(!s.go.waiting && s.m.phase() == ef::Phase::kPressBack && s.level == 1.0, "... the press did nothing: the fade back begins from 1");
-        // the no-sheet path: fades back over kFadeInMs, no edge, no camera move
-        double last = s.level;
-        bool down = true;
-        const uint64_t q = s.tick;
-        while (s.tick - q < 190) {
-            s.step();
-            down = down && s.level <= last + 1e-12 && s.level >= 0.0;
-            last = s.level;
-        }
-        check(down && s.level > 0.0 && s.level < 0.2, "the black fades back linearly: it never rises and is nearly gone 190 ms later");
-        s.run(30);
-        check(s.level == 0.0 && s.m.phase() == ef::Phase::kIdle && s.m.entries() == 0 && !s.go.gateOpen, "... and is exactly 0 and idle after kFadeInMs, with no entry, no view edge and the gate closed");
+        check(closedAt > 2000 && closedAt <= 2000 + 2 * PSim::kDt, "the gate closes kPressWaitMs (2000 ms) after the press and no sooner");
+        s.run(300);
+        check(!black && s.level == 0.0 && !s.go.waiting && s.m.phase() == ef::Phase::kIdle && s.m.entries() == 0 && !s.go.gateOpen, "... the press did nothing: no black at any point, idle, no entry, no view edge and the gate closed");
     }
     {   // the press with no camera move wanted does not black the view
         PSim s;
@@ -613,15 +594,17 @@ static void pressCases() {
         s.run(300);
         check(s.level == 0.0 && s.m.phase() == ef::Phase::kIdle && s.go.waiting, "with no camera move to wait for the press does not black the view (the gate still waits for the sheet)");
     }
-    {   // the sheet path: black from the press, the hold from the sheet edge to applied plus the margin, the fade-in; the cap counts from the sheet
+    {   // the sheet path: nothing from the press to the sheet, then the hold from the sheet edge to applied plus the margin, the fade-in; the cap counts from the sheet
         PSim s;
         s.run(100);
         const uint64_t p = s.pressNow();
         double minLevel = 1.0;
-        while (s.tick - p < 310) {   // the black from the end of the ramp to the sheet
+        bool blackBeforeEdge = false;
+        while (s.tick - p < 310) {   // from the press to the sheet: the game's own fade, EDVR adds nothing
             s.step();
-            if (s.tick - p > 110) minLevel = std::fmin(minLevel, s.level);
+            blackBeforeEdge = blackBeforeEdge || s.level != 0.0;
         }
+        check(!blackBeforeEdge, "from the press to the sheet draw EDVR's level stays 0");
         const uint64_t sheetTick = s.tick;
         s.sheet = sheetTick;
         s.publishNext = true;
@@ -649,7 +632,7 @@ static void pressCases() {
             s.step();
             minLevel = std::fmin(minLevel, s.level);
         }
-        check(minLevel == 1.0 && s.m.run().settle == ef::Settle::kApplied && s.m.run().settleMs >= appliedMs + ef::kSettleMarginMs, "the black holds from the press to the edge to the applied serial plus the margin");
+        check(minLevel == 1.0 && s.m.run().settle == ef::Settle::kApplied && s.m.run().settleMs >= appliedMs + ef::kSettleMarginMs, "the black holds from the edge to the applied serial plus the margin");
         while (s.m.phase() == ef::Phase::kFadeIn) {
             s.sheet = s.tick;
             s.status = true;
@@ -664,7 +647,7 @@ static void pressCases() {
         const double before = s.level;
         s.press = true;
         s.step();
-        check(s.go.event == sl::GateEvent::kNone && !s.ev.pressStarted && s.level == before && s.m.entries() == 1, "a press while the view is on (leaving the turret) does nothing");
+        check(s.go.event == sl::GateEvent::kNone && s.level == before && s.m.entries() == 1, "a press while the view is on (leaving the turret) does nothing");
     }
     {   // the cap counts from the sheet edge, not from the press: a signal that never comes ends the hold 800 ms after the sheet
         PSim s;
@@ -694,7 +677,7 @@ static void pressCases() {
             s.seat = c.seat;
             s.gui0 = c.gui0;
             s.pressNow();
-            check(s.go.event != sl::GateEvent::kCounted && !s.go.waiting && !s.go.gateOpen && !s.ev.pressStarted && s.level == 0.0, c.name);
+            check(s.go.event != sl::GateEvent::kCounted && !s.go.waiting && !s.go.gateOpen && s.level == 0.0, c.name);
             s.run(400);
             check(s.level == 0.0 && !s.go.gateOpen && s.m.phase() == ef::Phase::kIdle, "... and nothing follows: no black, the gate stays closed");
         }
@@ -791,11 +774,6 @@ static void pressCases() {
         s.step();
         check(!s.go.on && p > s.sheet, "... and a draw from before the press still does not");
     }
-    {   // the lines
-        char line[400];
-        ef::formatPressNoView(line, sizeof(line), 4321, 2013.0);
-        check(has(line, "srv turret entry fade: press at frame 4321: the press raised no view in 2000 ms") && noReadPhrase(line), "the line of a press that raised no view says so, in 2000 ms");
-    }
 }
 
 static void wiringCases() {
@@ -848,8 +826,8 @@ static void wiringCases() {
     check(has(jw, "g_eagerSrv.load(std::memory_order_relaxed)") && has(jw, "void journalWatchSetEagerStatusSrv(bool eager)"), "the journal watcher has the SRV cadence request and reads it in its wake-up");
     const std::string bat = readText("build.bat");
     check(has(bat, "\"src\\d3d11\\srv_turret_entry_fade.cpp\"") && has(bat, "\"src\\d3d11\\srv_turret_press.cpp\""), "build.bat compiles the module and the press watcher into d3d11.dll");
-    check(has(mod, "in.pressAgeMs = g_press.ageMs;") && has(mod, "ef::formatPressEntry") && has(mod, "ef::formatPressNoView") && has(mod, "void srvTurretEntryFadeNotePress("),
-          "the module feeds the machine the press gate's words and writes the press line of each entry and the line of a press that raised no view");
+    check(has(mod, "in.pressAgeMs = g_press.ageMs;") && has(mod, "ef::formatPressEntry") && has(mod, "void srvTurretEntryFadeNotePress("),
+          "the module feeds the machine the press gate's words and writes the press line of each entry");
 }
 
 int main(int argc, char** argv) {
