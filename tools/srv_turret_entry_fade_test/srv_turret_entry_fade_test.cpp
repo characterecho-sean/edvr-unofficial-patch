@@ -712,10 +712,30 @@ static void pressCases() {
         t.gui0 = false;
         t.pressNow();
         t.gui0 = true;
-        t.run(2500);
+        t.run(sl::kBlindWindowMs + 500);
         t.status = true;
         t.step();
-        check(t.go.event == sl::GateEvent::kFellBack && t.go.fallback == sl::FallbackWhy::kBlind, "... and the same raise 2500 ms after it is");
+        check(t.go.event == sl::GateEvent::kFellBack && t.go.fallback == sl::FallbackWhy::kBlind, "... and the same raise kBlindWindowMs plus 500 ms after it is");
+    }
+    {   // a slow entry: the counted press times out at kPressWaitMs, and the view that arrives after it still finds the press recent
+        static_assert(sl::kBlindWindowMs > sl::kPressWaitMs, "the blind window outlasts the press window");
+        check(sl::kBlindWindowMs == 5000, "kBlindWindowMs is 5000 ms");
+        PSim s;
+        s.run(100);
+        s.pressNow();
+        s.run(sl::kPressWaitMs + 200);   // the window ends with no view
+        check(!s.go.waiting && !s.go.gateOpen && s.m.entries() == 0, "a press whose view has not come in kPressWaitMs times out first");
+        s.run(800);                      // the view arrives 3 s after the press
+        s.status = true;
+        s.step();
+        check(s.go.on && s.go.noPress && s.go.event != sl::GateEvent::kFellBack && s.go.fallback == sl::FallbackWhy::kNone, "... and a view 3 s after the press is not a blind watcher");
+        s.run(100);
+        check(s.go.on && s.go.fallback == sl::FallbackWhy::kNone, "... and the watcher stays trusted afterwards");
+        PSim n;   // no press at all
+        n.run(100);
+        n.status = true;
+        n.step();
+        check(n.go.event == sl::GateEvent::kFellBack && n.go.fallback == sl::FallbackWhy::kBlind, "a view with no press ever seen is still a blind watcher");
     }
     {   // the blind fallback trips, behaves as a4ebcbec, and resets on a bindings change
         PSim s;
