@@ -2,44 +2,47 @@
 
 ## Status
 
-- **State:** a real defect is proven from one eye dump. Whether it is what Sean
-  saw is not yet proven; the flight below decides that. No code changed, nothing
-  installed, no ini edited.
-- **Report (Sean, 2026-11-05):** "just found my head flicking in Holo-Me, took an
-  eye dump".
-- **Evidence:** dump `120817532001` (12:08:17), log `edvr_gfx_20261105_120548`,
-  Frontier Odyssey install, `v0.22.0-rc.6-210-g852102d1`, profile `vr`, no
-  profile switch. DLSS preset K, 2016x2017 in, 4032x4034 out.
-- **Cause (proven as a defect):** the second skin stores a skinned character's
-  motion (E, from F2) in `R16G16B16A16_FLOAT` centimetres. In this dump the ship
-  is flying and the commander travels with the camera, so E holds that travel:
-  358 cm a frame at 90 Hz, 650 to 1500 cm during the capture. One half-float step
-  of its largest component is then 0.25 to 1 cm, while the head's own motion is
-  only about 0.05 to 0.3 cm a frame (from a palette fit). Rounding E puts the
-  face's motion vector up to 3.3 native px wrong, differently each frame.
-- **Why only the head:** only the skin and hair draws export E. The suit, helmet
-  and collar are not in the keyed families and take the head path, which is exact
-  here (chest error 0).
-- **Scope:** rare. Of 133 log windows with joined pixels in the Frontier and Epic
-  logs, six had a median |E| of 100 cm or more (two are this flight), and all but
-  one of the six were aboard a ship. 23 reach even 16 cm, where the step is a
-  harmless 0.016 cm. Every other dump with a skin map holds under 0.2 cm. A
-  character aboard a moving ship should have the same defect; no dump shows one.
-- **Ruled out:** see "Ruled out" below (DoF, the flat fix, the switch fix, jitter,
-  a flick in the game's pose).
-- **Open:** (1) is this what Sean saw; (2) the visor glint, which is real and in
-  the game's own image; (3) float32 position precision if the screen stays open
-  for minutes in flight.
-- **Next flight, no build (below):** Holo-Me with the ship stopped, then flying,
-  then F7. A flick that follows ship speed and goes with F7 is this defect.
-- **Proposed fix, waiting for Sean's approval:** target 7 becomes
-  `R32G32B32A32_FLOAT`, one line in `engine_velocity.cpp`, +65 MB for the two eye
-  targets. No key.
+- **State:** two separate defects, both measured, and together they fit Sean's
+  report. Neither is fixed. No code changed, nothing installed, no ini edited.
+  Main is merged into this branch (`4289884c`) ahead of any build, on Sean's word.
+- **Reports (Sean, 2026-11-05):** "just found my head flicking in Holo-Me"; after
+  the test flight, "definitely flickers more when the ship is flying. Though the
+  helmet frame still seems to at rest".
+- **Evidence:** dump `120817532001` (log `edvr_gfx_20261105_120548`, `852102d1`).
+  Test flight log `edvr_gfx_20261105_124851` (`dabfff15`, the second skin files
+  unchanged from `852102d1`): dumps `125144765001` stopped and `125253331002`
+  flying. All Frontier, profile `vr`, DLSS preset K, 2016x2017 in, 4032x4034 out.
+- **Defect 1, the face when flying (proven):** the second skin stores motion (E,
+  from F2) in `R16G16B16A16_FLOAT` centimetres. On a flying ship the commander's E
+  also holds the ship's travel, a median of 348 cm a frame in the test against
+  0.018 cm stopped, so one half-float step is 0.25 to 1 cm. The face's motion is up
+  to 5.0 native px wrong (8.3 in a hitch frame) when flying and at most 0.17 when
+  stopped.
+- **Defect 2, the helmet frame at rest (proven):** draw `01DA82F8`/`2C3ADCD2`
+  (helmet, headset, collar, suit) exports no E, so its motion leaves out the
+  avatar's own animation. Stopped, the helmet is up to 1.75 input px (3.5 native)
+  wrong, and that error tracks the head's motion in the same frames (r = 0.985,
+  slope 0.93). The same class as the NPC hair of 2026-11-01.
+- **Scope:** defect 1 needs a fast-moving frame: of 133 log windows with joined
+  pixels in the Frontier and Epic logs, six had a median |E| of 100 cm or more
+  (before this test), five of them aboard a ship. Defect 2 reaches any draw of this
+  pair in VR while the character animates; only Holo-Me is measured.
+- **Ruled out:** see "Ruled out" below (DoF, the flat fix, the switch fix, jitter, a
+  flick in the game's pose).
+- **Open:** the visor glint (real, in the game's own image, not what Sean named);
+  float32 position precision if the screen stays open for minutes in flight; how
+  much the helmet's thin lines shimmer from the input alone (see "After a fix").
+- **Proposed build, waiting for Sean's approval:** target 7 becomes
+  `R32G32B32A32_FLOAT` and the pair `01DA82F8`/`2C3ADCD2` is keyed as a VR-only
+  skinned family, in that order: keyed alone, it would spread the rounding to the
+  suit. No key.
+- **Next flight:** on that build, see "The fix's flight".
 - **Temporary keys:** none added. Frontier's `census_offscreen = 1` belongs to the
   lobby DoF work and was left alone.
 - **Issues:** none filed yet.
-- **Measuring script:** `face_mv_check.py` in the session notes folder, not in the
-  repo. It moves to `tools\` with a self-test if the fix goes ahead.
+- **Measuring scripts:** `face_mv_check.py` and `helmet_mv_check.py` in the session
+  notes folder, not in the repo. They move to `tools\` with a self-test if the fix
+  goes ahead.
 
 ## Environment
 
@@ -48,188 +51,213 @@ The per-eye output is 4032x4034 and DLSS runs in performance mode at 50% per axi
 The log does not read the DLSS runtime's version. E is VR only; flat does not use
 this path.
 
-The journal has the ship in normal space over Capoya 2, `Docked=false`, with the
-next `Docked` at 19:12:58Z. Its clock runs about 19 s ahead of the log (`LoadGame`
-is 19:07:16Z there, 12:06:57 in the log). The camera travels about 3.6 m a frame
-at 90 Hz, which is 325 m/s. That this is the ship's own flight is an inference;
-the flight below tests it.
+## How the error is measured
 
-## What the dump holds, and what contaminates it
+Warp the previous raw input (`C`) through the frame's own motion (`D`), remove the
+jitter difference taken from `motion.csv`, and find the extra offset that best
+matches this input. Zero means the motion is right. There is no DLSS response in
+this measure, because `C` is what DLSS is handed.
 
-The overview image shows the Commander Creator with the helmet set to always on.
-The head is inside the 1400 px crop in both eyes, and the run has no DLSS reset,
-with history on in all 16 frames.
+Correction: the first version subtracted a control region under the head rather than
+the jitter. That is safe only if the body is still. In the stopped dump the body
+moves, and the control reported 3.4 native px on a face that is exact. All numbers
+here use the jitter from `motion.csv`.
 
-- **The capture's hitch.** Camera travel per frame in metres, frames 0 to 15: 3.58,
-  3.62, 19.41, 33.20, 7.15, 6.50, 8.87, 7.44, 6.59, 7.00, 6.68, 8.48, 8.15, 8.45,
-  15.04, 8.81. Travel follows the time step, so frames 2 and 3 are 5 and 9 normal
-  steps, and from frame 4 the capture runs at about half speed. Frames 4 to 15 are
-  the ones to read. E, and so the error, is about twice what a 90 Hz frame has.
-- **A blink.** The eyelids are closed at frame 0 and open by frame 3. It is in the
-  raw input (`C` files), so it is the game's animation.
-- **A head turn.** Against the chest the head moves about 16 native px across
-  frames 1 to 3 (the hitch), then under 1 px a frame. It does not reverse.
+**Contamination.** Each capture has its own hitch: in the first dump the per-frame
+travel is 3.58, 3.62, 19.41, 33.20 m, then 6.5 to 8.9 with 15.04 at frame 14. Travel
+follows the time step, so from frame 4 the capture runs at about half speed and E,
+with its error, is about twice a 90 Hz frame's. Frames 4 to 15 are the ones to read.
+Frame 5 of the flying dump is a further hitch (2083 cm). The closed eyes in frames 0
+to 2 of the first dump are a blink, and they are in the raw input.
 
-## The measurements
+## Defect 1: E rounded to half float
 
-The method for "error": warp the previous raw input (`C`) through the frame's own
-motion (`D`) and find the extra offset that best matches this input. On the chest
-that offset equals the jitter difference, so it is subtracted from the face's. The
-remainder is the face's motion error, with no DLSS response in it.
+First dump, face only, frames 4 to 15:
 
 | Frame | Travel (m) | One E step in MV-x (input px) | Largest jump in MV-x inside the face | Face error (native px) |
 |---|---|---|---|---|
-| 4 | 7.15 | 0.52 | 0.52 | -0.25, -0.25 |
-| 5 | 6.50 | 0.52 | 0.51 | -0.25, +0.75 |
-| 6 | 8.87 | 1.04 | 1.02 | -1.00, 0.00 |
-| 7 | 7.44 | 0.52 | 0.02 | -1.00, -0.50 |
-| 8 | 6.59 | 0.52 | 0.01 | -0.25, 0.00 |
-| 9 | 7.00 | 0.52 | 0.53 | -1.75, +1.00 |
-| 10 | 6.68 | 0.52 | 0.54 | -2.00, +1.00 |
-| 11 | 8.48 | 1.04 | 0.02 | +1.25, 0.00 |
-| 12 | 8.15 | 1.04 | 0.04 | +0.75, +1.50 |
-| 13 | 8.45 | 1.04 | 1.05 | -0.25, +1.00 |
-| 14 | 15.04 | 1.04 | 1.05 | -1.75, +2.75 |
-| 15 | 8.81 | 1.04 | 1.01 | -1.50, +0.75 |
+| 4 | 7.15 | 0.52 | 0.52 | -0.25, +0.39 |
+| 5 | 6.50 | 0.52 | 0.51 | -0.75, -0.58 |
+| 6 | 8.87 | 1.04 | 1.02 | -0.50, +0.42 |
+| 7 | 7.44 | 0.52 | 0.02 | -1.00, -0.36 |
+| 8 | 6.59 | 0.52 | 0.01 | -0.25, +0.17 |
+| 9 | 7.00 | 0.52 | 0.53 | -1.88, +1.17 |
+| 10 | 6.68 | 0.52 | 0.54 | -1.88, +1.14 |
+| 11 | 8.48 | 1.04 | 0.02 | +1.00, +0.17 |
+| 12 | 8.15 | 1.04 | 0.04 | +0.50, +2.14 |
+| 13 | 8.45 | 1.04 | 1.05 | +0.25, +0.17 |
+| 14 | 15.04 | 1.04 | 1.05 | -1.50, +3.17 |
+| 15 | 8.81 | 1.04 | 1.01 | -1.50, +0.89 |
 
-**The proof is the fourth column.** A rigid face cannot have its motion step across
-a sharp line, and the frame 14 render of `D` shows exactly that, a band edge down
-the left of the face. Where a jump exists, it matches one half-float step of E's x
-component to within 4%, computed from the camera rows, the face's depth (1.96 m)
-and 947 input px per unit of tangent. Frames with no jump have no step crossing
-the face; their whole-face error (frames 11, 12) comes from the other components.
+A rigid face cannot have its motion step across a sharp line, and a render of
+frame 14's `D` shows exactly that. Where a jump exists it matches one half-float step
+of E's x component to within 4%, computed from the camera rows, the face's depth
+(1.96 m) and 947 input px per unit of tangent. Frames with no jump have no step
+crossing the face; their whole-face error comes from the other components.
 
-Supporting measurements:
+The test flight then separates it by speed, on the same screen and the same build:
 
-- **The stored E.** Frame 0's `SkinE`: 6270 valid pixels over the face, x -114.69
-  to -114.50 (4 values), y -283.5 to -283.25 (2 values), z 185.75 to 185.875 (2
-  values). The camera rows' travel for that frame is -114.61, -283.55, +185.91.
-  The log agrees: `|E| over the joined ones: median >= 562 cm, p99 >= 3.16e+03 cm`
-  at 12:08:20.
-- **The chest control.** On the DLSS output, warping by the frame's motion gives an
-  extra offset of 0 on the chest in 14 of 15 frames and -0.25 px in the other, with
-  residual 0.4 to 0.75. The face's residual is 2.7 to 3.4 on good frames and 13.0,
-  8.1 and 14.8 on frames 10, 12 and 14.
-- **Both eyes, in phase.** Final-image face residual, left/right: frame 8 2.83/2.97,
-  frame 9 4.96/5.04, frame 10 5.09/5.14, frame 12 4.85/5.42, frame 14 5.65/5.99.
-  Chest 0.35 to 1.5 in both, flat. E is a world-space value, so both eyes get the
-  same error.
-- **Corroboration, not proof.** Recomputing E from the game's palette ledger (a
-  rigid fit to one bone) and predicting each frame's error correlates 0.87 with the
-  table, on both axes, over frames 4 to 15, with a mean offset of (-0.12, +0.79)
-  native px. The rigid model is not exact: it misses the handed-over motion by about
-  1 input px, so it is only used for sign and trend.
-- **At 90 Hz.** Frames 0 and 1 have 3.6 m of travel and steps of 0.0625, 0.25 and
-  0.125 cm, which bounds the whole-face error at about 0.6 and 1.0 native px. Long
-  frames (one or two per 10 s, mostly 23 to 40 ms) raise it two to three times. So
-  the expected look is a fine constant wobble plus a jolt at each long frame. This
-  is computed, not measured: a dump cannot run at 90 Hz.
+| Frame | Stopped: face error (native px) | Flying: travel (cm) | Flying: face error (native px) | Flying: head motion E claims (input px) |
+|---|---|---|---|---|
+| 4 | 0.00, +0.17 | 485 | -0.25, +0.17 | -0.53, -0.45 |
+| 5 | 0.00, -0.11 | 2083 | -1.50, +8.14 | +0.60, -3.16 |
+| 6 | 0.00, -0.08 | 783 | -1.00, +1.67 | +0.21, -0.97 |
+| 7 | +0.12, -0.08 | 886 | +0.75, -3.58 | -0.30, +1.75 |
+| 8 | +0.12, -0.11 | 622 | -0.75, +2.64 | +0.43, -1.42 |
+| 9 | 0.00, +0.17 | 603 | +0.50, +1.67 | -0.27, -0.99 |
+| 10 | 0.00, -0.11 | 677 | -3.38, -2.83 | +1.61, +1.34 |
+| 11 | 0.00, -0.08 | 631 | -1.88, -0.11 | +0.51, +0.01 |
+| 12 | 0.00, -0.08 | 610 | +1.00, +0.17 | -1.17, -0.49 |
+| 13 | 0.00, +0.14 | 694 | -1.25, -3.11 | +1.20, +1.36 |
+| 14 | 0.00, -0.08 | 614 | 0.00, +1.92 | -0.45, -0.93 |
+| 15 | -0.12, -0.08 | 657 | -4.25, +2.67 | +1.77, -1.22 |
+
+The last two columns are the point. The head motion E claims when flying is almost
+exactly the opposite of the measured error (r = -0.93 in x, -0.99 in y, slopes -0.86
+and -1.14), so what it claims is noise: the head really moved 0.7 input px or less on
+every one of those frames. Frame 0's `SkinE` shows the cause directly: in the first
+dump x runs -114.69 to -114.50 (4 values), y -283.5 to -283.25 (2 values), and z
+185.75 to 185.875 (2 values), beside camera travel of -114.61, -283.55, +185.91.
+
+Both eyes share it. Final-image face residual, left/right, first dump: frame 8
+2.83/2.97, frame 10 5.09/5.14, frame 14 5.65/5.99. E is a world-space value, so the
+error is the same in each eye.
+
+At 90 Hz the first dump's frames 0 and 1 (3.6 m of travel) bound the whole-face error
+at about 0.6 and 1.0 native px, and long frames raise it two to three times. That is
+computed; a dump cannot run at 90 Hz.
+
+## Defect 2: the helmet frame has no skeletal motion
+
+Stopped dump, in input px. The helmet mask is the depth writer map's pixels for
+`01DA82F8` with 16122 indices, dilated 2 px, on the head path. Body is head-path
+pixels under the face.
+
+| Frame | Head motion (face minus body) | Helmet error | Body error | Helmet residual, then at the best offset | Face residual |
+|---|---|---|---|---|---|
+| 4 | +0.35, +0.13 | +0.38, +0.25 | +0.25, +0.12 | 5.53, 3.44 | 1.79 |
+| 5 | +0.27, +0.19 | +0.25, 0.00 | 0.00, +0.12 | 5.49, 4.93 | 1.92 |
+| 6 | +0.34, +0.17 | +0.12, +0.12 | +0.12, +0.12 | 3.89, 3.51 | 1.47 |
+| 7 | +0.52, +0.25 | +0.50, 0.00 | +0.25, 0.00 | 6.21, 3.64 | 1.87 |
+| 8 | +0.18, +0.06 | +0.25, 0.00 | +0.25, 0.00 | 3.79, 2.84 | 1.53 |
+| 9 | +0.35, +0.01 | +0.38, +0.12 | +0.25, +0.12 | 5.42, 3.81 | 1.77 |
+| 10 | +1.63, +0.30 | +1.50, 0.00 | +1.12, +0.25 | 12.02, 3.93 | 1.91 |
+| 11 | +1.81, +0.22 | +1.75, +0.25 | +1.62, +0.50 | 12.35, 4.32 | 1.78 |
+| 12 | +1.34, +0.03 | +1.25, -0.12 | +1.00, 0.00 | 9.61, 3.79 | 1.77 |
+| 13 | +1.05, +0.15 | +0.88, +0.12 | +0.75, +0.25 | 8.50, 4.43 | 2.30 |
+| 14 | +1.02, +0.13 | +0.75, -0.12 | +0.75, +0.25 | 8.60, 3.71 | 2.35 |
+| 15 | +1.35, +0.11 | +1.25, 0.00 | +1.12, +0.38 | 9.65, 3.88 | 1.79 |
+
+In x, helmet error against head motion: r = 0.985, slope 0.93. Body: r = 0.975, slope
+0.85. The face right beside it has zero error, because it has E. A frame-to-frame
+change map of the final image shows the helmet and suit edges bright and the face
+dark except the eyes and moustache. The helmet's error is therefore not noise: it is
+the avatar's real motion, missing from the vectors. Thin bright lines show that
+more than a broad surface does, which fits what Sean sees on the helmet frame.
+
+The first dump's small helmet error is consistent: its head really moved little in
+those frames, and most of its apparent head motion was defect 1's noise. The flying
+test dump is the same (helmet 0.5 input px or less).
+
+Why the pair is unkeyed: `kFamilies` and `kSkinPairs` hold D99A, 61AE, 114A, 7B0D, 8B58
+and A6A3 only, and no doc has looked at 01DA as a skinned character before. Aboard a
+ship these pixels fall inside the 10 m split and get the head path.
 
 ## The draws that paint the head
 
-From the census (frames 12789 to 12791, identical draw lists on the eye path) and
-the depth writer map of frame 12791.
+From the census and the depth writer map, first dump.
 
 | Draw (vs/ps) | Indices | Pass | What it is | Motion path |
 |---|---|---|---|---|
-| `D99AFDC2`/`E86271E4` | 22434 | G-buffer, instance 31 left, 215 right | face skin (owns 5210 px of the head box) | engine, E valid |
-| `114AF608`/`A17504A2` | 8145 | G-buffer | hair (1060 px) | engine |
-| `01DA82F8`/`2C3ADCD2` | 16122 | G-buffer | helmet, headset, collar (3316 px) | head, no E |
-| `01DA82F8`/`2C3ADCD2` | 23430 | G-buffer | suit (1400 px in the box) | head, no E |
-| `617C6E44`/`057F8E27` | 22434 | forward into the HDR target, additive | the face mesh a second time | not keyed |
-| `025B4B9F`/`C5A5C7E8` | 11904 | forward, alpha blended, no depth write | not identified; it changes probe points off the head, so it is not the visor alone | not keyed |
+| `D99AFDC2`/`E86271E4` | 22434 | G-buffer | face skin | engine, E valid |
+| `114AF608`/`A17504A2` | 8145 | G-buffer | hair | engine |
+| `01DA82F8`/`2C3ADCD2` | 16122 | G-buffer | helmet, headset, collar | head, no E |
+| `01DA82F8`/`2C3ADCD2` | 23430 and others | G-buffer | suit | head, no E |
+| `617C6E44`/`057F8E27` | 22434 | forward, additive | the face mesh a second time | not keyed |
+| `025B4B9F`/`C5A5C7E8` | 11904 | forward, alpha blended, no depth write | not identified; changes probe points off the head | not keyed |
 | `C171BD0C`/`08646D68` | 5244 | forward, additive, no depth write | not identified; a candidate for the visor | not keyed |
-| `68345701` and `C506D268`/`428F0731` | 22434 | shadow, five 512x512 and six 2048x2048 views | the face mesh in shadow | none |
 
-The eyes are holes in the engine-path mask; their draw was not named.
+## Ruled out
 
-## Causes considered
-
-| Cause | What would show it | Verdict |
-|---|---|---|
-| E rounded to half float | Motion steps inside the rigid face, sized to one step of E | **In: measured.** A defect. Not yet shown to be what Sean saw |
-| Visor glint | Bright streak in the raw input moving with the head; stays with F7 off and with the ship stopped | **Open.** Real: on its patch the raw input rises from 66 to 114 by frame 13, then falls to about 100 (the patch tracks the head only roughly). The game's content; its draw is not named |
-| Float32 position noise at large camera distance | Whole avatar wobbles, chest included, growing with time open | **Open, unmeasured.** Chest is steady at 2.1 to 2.3 km. At 325 m/s the distance reaches 16 km in under a minute, where a float32 step is about 0.1 cm |
-| Light, shadow or light grid | Face patches stepping or alternating in the raw input | **Not supported in these frames:** raw-input forehead 186 to 194 from frame 3 on, a slow drift, no alternation. Only 16 frames |
-
-### Ruled out
-
-- ruled out: depth of field in the Holo-Me scene, because the setting was 2 (the
-  next change is `e+0x7C 2->0` at 12:13:07) and FDB74215, 80631A09, E16E27A0 and
-  BF2302BC are in none of the three census frames, eye or offscreen. The tone pass
-  here is `6F4B7B60`/`3C031C88`, then the copy `DED87960`. The lobby's blur flicker
-  is a separate matter.
+- ruled out: depth of field in the Holo-Me scene, because the setting was 2 (the next
+  change is `e+0x7C 2->0` at 12:13:07) and FDB74215, 80631A09, E16E27A0 and BF2302BC
+  are in none of the first dump's three census frames, eye or offscreen.
 - ruled out: the flat Holo-Me upscale fix, because this is the VR profile with no
-  switch, there are no flat copy lines in the log, and `d933ebab` is not in
-  `852102d1`. The game's constant fill `E8FDC0D9`/`5D07ACB4` is in the census but
-  nothing of EDVR's reads it here.
-- ruled out: the second skin at the switch (`11ef91d5`), because this flight started
-  in VR and armed the skin at 12:05:48.606, so that path never ran. E's format dates
-  from F2 (`1c23352a`) and main has it unchanged.
-- ruled out: jitter as the cause, because the chest takes the same jitter with zero
-  error, and the face's error is not locked to the jitter phase (frames 6 and 14
-  share a phase and differ, as do 2 and 10).
-- ruled out: a flick in the game's pose, because the head bones' rotation per unit
-  of time is steady at 0.021 to 0.036 degrees over frames 4 to 15 with no sign
-  alternation, and the ledger's previous palette is bit for bit last frame's.
-- ruled out: the helmet and collar as the main error, on the evidence available:
-  the head-path pixels in the head box show 0.5 native px or less on all but frame
-  14 (0.75). Those pixels are mostly neck and shoulders, so the helmet rim alone was
-  not separated.
+  switch, there are no flat copy lines, and `d933ebab` is not in `852102d1`.
+- ruled out: the second skin at the switch (`11ef91d5`), because these flights started
+  in VR with the skin armed at load, so that path never ran. E's format dates from F2
+  (`1c23352a`).
+- ruled out: jitter as the cause, because the stopped face takes the same jitter with
+  no error.
+- ruled out: a flick in the game's pose, because the head bones' rotation per unit of
+  time is steady at 0.021 to 0.036 degrees over the first dump's frames 4 to 15, and
+  the ledger's previous palette is bit for bit last frame's.
+- ruled out, then reversed: "the helmet and collar are not the main error". The first
+  dump alone suggested it because the head barely moved there. The stopped dump
+  reverses it.
 
-## The next flight: no build, no install
+## The proposed build
 
-Frontier as it stands (`852102d1`). In normal space:
+**1. Target 7 at `engine_velocity.cpp:1292` becomes `DXGI_FORMAT_R32G32B32A32_FLOAT`.**
+The shaders read it as `float4` and do not change. The step at 33 m of travel falls to
+about 0.0002 cm. It reports `RENDER_TARGET` and `BLENDABLE` on this GPU; on one that
+refuses it, `makeSkinTarget` already logs that and the eye goes on without the second
+skin. Cost: the eye targets go from 32.5 to 65 MB each at 2016x2017, so +65 MB, plus
+their clear, and F2's on-foot source target doubles when live. The log strings, the
+`gpu_census.h` comment and `tools\eye_inputs.py`'s format note change with it, and the
+eye capture's handling of the format has to be read. The alternative, half float
+without the shared camera travel, costs no memory, but the skin clone needs the
+previous camera origin as new data: a wider patch for 65 MB.
 
-1. Throttle to zero, wait for the ship to stop. Open Holo-Me, watch the face for
-   20 s, press INSERT.
-2. Close it, throttle up to about 300 m/s, open Holo-Me again, watch for 20 s, press
-   INSERT. Then F7 off for 5 s and F7 on, still watching the face.
+**2. Key `01DA82F8`/`2C3ADCD2` in `kFamilies` (VR only, skinned) and `kSkinPairs`,** as
+A6A3 was. A static read looks right: it loads t33 at offsets 0 and 16 with the same two
+register-offset loads as 114A, has three t38 loads, and its pixel shader reads only
+v0..v3, so the vertex shader's next free register (o5) is not taken. The production
+patcher has not run on it; `skin_clone_test --corpus` (K9) qualifies the real pair, and
+both shaders are in `edvr_logs\shaders`.
 
-| What Sean sees | Reading |
-|---|---|
-| Flick only when flying, gone with F7 off | This defect. Approve the fix |
-| Flick when stopped too, gone with F7 off | The AA path but not E. Read the stopped dump's motion, then the DLSS response on the face |
-| Flick stays with F7 off | The game's own image: the visor glint comes first. Not EDVR |
+Risks to check on that build:
 
-The log and dumps check the same thing without eyes. The `skin join: second skin
-this window` line gives |E|: near 0 stopped, 316 cm or more flying.
-`face_mv_check.py <install> <stamp>` gives jump counts and error: none when stopped,
-as in the table when flying. To test the third open item, hold the second screen for
-over a minute before pressing INSERT and read the distance (`now3`, `now7`, `now11`)
-in `motion.csv` and the chest's residual.
+- The order: keyed without step 1, the suit takes on defect 1.
+- Other draws of the pair: the flat design doc lists it among a cockpit's main pairs,
+  so in VR it may also draw the cockpit. A keyed draw whose join fails has no history,
+  by design. The test windows show 4,705 to 11,801 `pose` failures in 35,000 to 46,000
+  jobs. Which jobs fail is not known.
+- The clone's cost on every draw of the pair.
 
-## The proposed fix
+**After a fix.** The helmet's residual at its best offset is still 2.8 to 4.9, against
+1.5 to 2.4 for the face. Thin lines at 50% render alias in the input, so some shimmer
+may stay. Whether DLSS resolves it once the motion is right is only measurable after.
 
-Target 7 at `engine_velocity.cpp:1292` becomes `DXGI_FORMAT_R32G32B32A32_FLOAT`. The
-shaders read it as `float4` and do not change. The step at 33 m of travel falls to
-about 0.0002 cm. `R32G32B32A32_FLOAT` reports `RENDER_TARGET` and `BLENDABLE` on this
-GPU. On a GPU that refuses it, `makeSkinTarget` already logs the failure and that eye
-goes on without the second skin.
+## The fix's flight
 
-- **Cost:** the eye targets double, 32.5 to 65 MB each at 2016x2017, so +65 MB, plus
-  their clear. F2's on-foot source target doubles too (65.3 to about 131 MB at
-  3808x2142) when it is live.
-- **Also changes:** the log strings at `engine_velocity.cpp:1302`, `:1306` and
-  `:1310`, the `gpu_census.h` comment, and `tools\eye_inputs.py`'s format note. The
-  eye capture's handling of the new format has to be read when the fix is built.
-- **The alternative:** keep half float and export E without the shared camera travel.
-  That costs no memory, but the skin clone needs the previous camera origin as new
-  data, and the compose changes with it. A wider patch for 65 MB.
-- **Acceptance:** repeat step 2 of the flight on the fix's build. `face_mv_check.py`
-  shows no jumps past 0.25 input px and error under 0.6 native px while |E| stays
-  large, and Sean says the flick is gone.
+On the fix's build, main merged: Holo-Me stopped and flying, INSERT in each, watching
+the face and the helmet frame. Then a look round the cockpit in flight, and an NPC on
+foot for the regression.
 
-No key: a fix that always helps gets none.
+- Face, flying: `face_mv_check.py` error under 0.6 native px on every frame from 4,
+  with travel still large.
+- Helmet, stopped: `helmet_mv_check.py` helmet error under 0.25 input px, also during a
+  head turn; the path is engine on those pixels.
+- Log: `engine motion: family vs_01DA82F8D0EA0C99: live`, no `takes no second skin` for
+  it, and `masked` near 0 in `skin join: second skin this window`.
+- Sean: the flick and the helmet frame.
 
 ## Journal
 
 ### 2026-11-05 flight 12:05:48 (`852102d1`)
 
-Diagnosis above, from dump `120817532001` alone. `skin_palette_check.py` on its ledger
-passes `recompute`, `prev`, `prev_alternation`, `runsum`, `list_identity` and `views`,
-and fails `bases` (434 of 681 record words are not a job's dst); the failure was not
-looked into, and nothing above depends on it. Dump `121353903002` (12:13) shows the
-lobby-like interior with the commander, not Holo-Me, with a median |E| of 0.01 cm, and
-`122537602001` (12:25, the next flight) the same at 0.11 cm, which fits. The only F7 in
-the log is at 12:14:02, just after that 12:13 dump, so it says nothing about Holo-Me.
+Dump `120817532001`. `skin_palette_check.py` passes `recompute`, `prev`,
+`prev_alternation`, `runsum`, `list_identity` and `views`, and fails `bases` (434 of
+681 record words are not a job's dst); not looked into, and nothing here depends on it.
+Dumps `121353903002` and `122537602001` are the lobby-like interior, with a median |E|
+of 0.01 and 0.11 cm, which fits.
+
+### 2026-11-05 flight 12:48:51 (`dabfff15`), the speed test
+
+Sean's report and the two dumps as above. Median |E| over `SkinE`: 0.018 cm stopped
+(48,900 pixels), 348 cm flying (48,804). The log's |E| line reads a median of at least
+0.0316 cm for the stopped window; the flying window was never written because the game
+closed first. F7 was not pressed (no `aa compare` line), and the dumps did not need it.
+One jump of 0.60 input px at frame 11 of the stopped dump (179 pairs) cannot be rounding
+with E this small; a real boundary between meshes is likely, and it was not located.
