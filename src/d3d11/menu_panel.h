@@ -217,10 +217,10 @@ void menuPanelSubmit(const MenuContent& c);
 #ifdef EDVR_MENU_TEST
 bool menuPanelWorkerReadyForTest();
 int  menuPanelLayoutHeightForTest(const MenuContent& c);
-// The left-text rect the line at `i` lays out to (pixels, the same frame layout() draws in).
-// The heading's is the ellipsis check: its split is the whole card (cardW - pad), and the
-// DrawTextW single-line path cuts it there, so a heading measured wider than this rect is
-// ellipsised on screen.
+// The rect layout() gives the text op for the line at `i`'s left text (pixels, the frame the
+// raster draws in), read from layout()'s own ops. The heading's is the ellipsis check: the
+// DrawTextW single-line path cuts text at the rect's right edge, so a heading measured wider
+// than this rect is ellipsised on screen. Zeroed when the line has no such op.
 void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int* x1, int* y1);
 #endif
 

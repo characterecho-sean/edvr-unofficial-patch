@@ -1637,38 +1637,33 @@ int menuPanelLayoutHeightForTest(const MenuContent& c) {
     layout(c, ops, lines, &h, 0, nullptr);
     return h;
 }
+// The rect layout() gives the text op it builds for line `i`'s left text: the
+// rect the raster draws that text into. A test measures against this and not
+// against a copy of how layout() derives it, so it fails when layout()'s split
+// changes. All four are zero when the line has no such op.
 void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int* x1, int* y1) {
     if (x0) *x0 = 0;
     if (y0) *y0 = 0;
     if (x1) *x1 = 0;
     if (y1) *y1 = 0;
     if (i < 0 || i >= c.lineCount) return;
-    // Mirror layout()'s own size constants and the row's y-derivation (pad,
-    // the overlay, the tabs, the tiles, the graphs, then the rows) so the
-    // rect this returns is the one the raster actually draws.
-    const int cap = c.capPx;
-    const int W = c.widthPx;
-    const int cardW = c.cardPx > 0 && c.cardPx <= W ? c.cardPx : W;
-    const int pad = cap * 8 / 10;
-    const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
-    const int tabH = c.toast ? 0 : cap * 24 / 10;
-    const int u = cap * 9 / 10;
-    const int tileH = u * 50 / 10;
-    const int tileGap = cap / 4;
-    const int columns = c.tileColumns > 0 ? c.tileColumns : 4;
-    const int tileRows = c.tileCount > 0 ? (c.tileCount + columns - 1) / columns : 0;
-    const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
-    const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
-    const MenuLine& l = c.lines[i];
-    const int yTop = pad + overlayH + tabH + tilesH + i * rowPitch;
-    const int split = l.style == kMenuNote || l.style == kMenuHeading ? cardW - pad
-                      : l.style == kMenuInfo                          ? cardW * 26 / 100
-                                                                      : cardW * 6 / 10;
-    const int leftX = l.style == kMenuHeading ? pad / 2 : pad;
-    if (x0) *x0 = leftX;
-    if (y0) *y0 = yTop;
-    if (x1) *x1 = split;
-    if (y1) *y1 = yTop + rowPitch;
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int h = 0;
+    layout(c, ops, lines, &h, 0, nullptr);
+    if (i >= static_cast<int>(lines.size())) return;
+    // layout() records each row as a fraction of the height; the line's own
+    // text op is the one that starts at that row's top.
+    const int rowTop = static_cast<int>(lines[i].y0 * h + 0.5f);
+    const std::wstring text = widen(c.lines[i].left);
+    for (const Op& o : ops) {
+        if (!o.text || o.rect.top != rowTop || o.str != text) continue;
+        if (x0) *x0 = o.rect.left;
+        if (y0) *y0 = o.rect.top;
+        if (x1) *x1 = o.rect.right;
+        if (y1) *y1 = o.rect.bottom;
+        return;
+    }
 }
 #endif
 

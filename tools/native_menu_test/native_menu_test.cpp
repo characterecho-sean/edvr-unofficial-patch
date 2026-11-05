@@ -174,10 +174,12 @@ int wmain(int argc, wchar_t** argv) {
         check(monitorH == plain - hintH,
               "a page that builds no hint line reserves none and is a hint box shorter than one that does");
         // The Debug tab's heading, against the rect layout() draws it into
-        // (menuPanelLineRectForTest, the same frame). Flat: cardPx 860,
-        // capPx 34 -- sizeContent's flat path, fixed. The heading's split
-        // is cardW - pad, its left is pad / 2, so its rect is the whole
-        // line minus a half pad on the right; DT_END_ELLIPSIS cuts it there.
+        // (menuPanelLineRectForTest reads it from layout()'s own text op).
+        // Flat: cardPx 860, capPx 34 -- sizeContent's flat path, fixed. The
+        // heading takes the whole line: its left is pad / 2 and its right is
+        // cardW - pad, so the rect is 820 px here; DT_END_ELLIPSIS cuts text
+        // at its right edge. Without the full-width arm in layout() the rect
+        // is the setting split's 503 px and the 805 px sentence is cut.
         edvr::MenuContent dbg{};
         dbg.widthPx = dbg.cardPx = 860;
         dbg.capPx = 34;
