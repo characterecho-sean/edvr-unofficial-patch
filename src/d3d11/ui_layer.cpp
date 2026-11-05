@@ -7958,6 +7958,17 @@ void releaseDeviceObjects() {
         g_csInPlace = nullptr;
     }
     g_csTried = false;
+    // The Galaxy Map's states and the tone's buffers (the per-eye mask and depth textures went with releaseLayers): states of the old device must not meet the new context.
+    for (int i = 0; i < 2; ++i) {
+        g_mapDss[i].Reset();
+        g_mapDssTried[i] = false;
+        g_mapBlend[i].Reset();
+    }
+    g_mapRsBias.Reset();
+    g_mapRsGame.Reset();
+    g_mapTone.copy.Reset();
+    g_mapTone.patch.Reset();
+    g_mapTone.width = 0;
     for (int i = 0; i < 2; ++i) g_fmtChecked[i] = g_fmtOk[i] = g_loadChecked[i] = g_loadOk[i] = false;
 }
 }  // namespace
