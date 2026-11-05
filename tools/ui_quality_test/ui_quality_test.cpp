@@ -2934,6 +2934,14 @@ void testSupercruiseLines() {
         hold = hold && h.step(3, 1) && h.step(4, 1) && h.step(3 + mapcam::kHoldFrames, 1) && !h.step(4 + mapcam::kHoldFrames, 1);
         hold = hold && h.step(20, 2) && h.step(21, 2);
         check(hold, "MC2: a counter that never advanced is not open; an advance opens it, it stays open for the hold's frames and then closes; the next advance reopens it");
+        {   // a reset (the flat profile's stand-down) while the publish counter is not 0: closed until the counter advances. A default Hold read it as a map opening.
+            mapcam::Hold stale;
+            const bool falseEdge = stale.step(100, 5);
+            mapcam::Hold seeded = mapcam::Hold::closedAt(5);
+            bool closed = !seeded.step(100, 5) && !seeded.step(101, 5) && !seeded.step(100 + mapcam::kHoldFrames + 5, 5);
+            const bool opens = seeded.step(200, 6) && seeded.step(200 + mapcam::kHoldFrames, 6) && !seeded.step(201 + mapcam::kHoldFrames, 6);
+            check(falseEdge && closed && opens, "MC2b: a hold reset with a non-zero publish counter stays closed until the counter advances (an unseeded one reads the counter's value as a map opening), then opens and holds as before");
+        }
         check(mapcam::viewOfName("GalaxyMapView") == mapcam::View::kGalaxy && mapcam::viewOfName("SystemMapView") == mapcam::View::kSystem && mapcam::viewOfName("") == mapcam::View::kNone &&
                   mapcam::viewOfName("GalaxyMapViewX") == mapcam::View::kNone && mapcam::viewOfName("galaxymapview") == mapcam::View::kNone && mapcam::viewOfName(nullptr) == mapcam::View::kNone,
               "MC3: the two stage names are exact; anything else is no view");
