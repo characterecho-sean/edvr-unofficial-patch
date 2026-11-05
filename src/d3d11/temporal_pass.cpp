@@ -890,7 +890,7 @@ uint64_t g_dlResetsHeld = 0, g_dlResetsReturned = 0, g_dlResetsUnjudged = 0, g_d
 // A map open (flags bit 8): eye-frames whose history was kept because the map camera's pose had not changed, and eye-frames reset because it had (or
 // no map view was named, or it was the eye's first look); written once by temporalPassLogMap() when the channel closes. g_mapMotion is each eye's
 // look at mapCameraChanges() (temporal_mode.h temporalMapMoved), cleared on every frame a map is not open. Render thread only.
-uint64_t g_mapKept = 0, g_mapReset = 0;
+uint64_t g_mapKept = 0, g_mapReset = 0, g_mapKeptMoving = 0;
 TemporalMapMotion g_mapMotion[2];
 
 void maybeLogPrice() {
@@ -3843,11 +3843,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // identical to the last digit at rest (docs\galaxy-map-vr-2026-11-03.md, Fix 2). Any change since this eye's last look, and the look after one, resets the
         // history, as does a map open by GuiFocus alone (no view named, so no signal); every map frame says which in temporalMapStillBits() (native_temporal's
         // begin() jitters the next frame only after a kept one).
+        // The System Map's close view is the exception (temporal_mode.h temporalMapCloseView): the body writes depth, so with the world path able to run the camera's rows move every pixel there.
+        bool mapRows = false;
         if ((flags & kTemporalFlagMapKeep) != 0) {
             const bool moved = temporalMapMoved(g_mapMotion[eye & 1], mapCameraChanges());
-            const bool still = mapCameraAnyOpen() && !moved;
+            mapRows = temporalMapCloseView().load(std::memory_order_relaxed) && motion == 3 && depthSrv != nullptr && headTrans != nullptr && g_curValid && g_prevValid && g_rowsFollow >= 0 &&
+                      depthProbeSceneDraws() >= kTemporalSceneDrawFloor;
+            const bool still = temporalMapKeeps(mapCameraAnyOpen(), moved, mapRows);
             if (still) {
                 ++g_mapKept;
+                if (moved) ++g_mapKeptMoving;
             } else {
                 ++g_mapReset;
                 flags |= 1u;
@@ -4201,6 +4206,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const bool srvSplit = g_foot.srv;   // set by footSplitNow() just above; never with footSplit (a seated verdict is not on foot)
         if (srvSplit) ++g_footSrvFrames;
         p.split[0] = temporalSplitMetres(kTemporalShipMetres, footSplit, srvSplit);
+        // A body 2 units away is inside the ship's radius, which would put it on the head's path alone: as on foot, every pixel with a depth takes the rows.
+        if (mapRows) p.split[0] = temporalSplitMetres(kTemporalShipMetres, true, false);
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -6269,9 +6276,9 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 void temporalPassLogMap() {
     if (g_mapKept == 0 && g_mapReset == 0) return;
     Log::get().note("temporal aa map: %llu eye-frames kept their history, %llu reset it; the signal is the map camera's pose "
-                    "(a publish that differs by one bit, or no map view named, resets).",
-                    static_cast<unsigned long long>(g_mapKept), static_cast<unsigned long long>(g_mapReset));
-    g_mapKept = g_mapReset = 0;
+                    "(a publish that differs by one bit, or no map view named, resets); %llu of those kept were the System Map's close view moving, on the camera's rows.",
+                    static_cast<unsigned long long>(g_mapKept), static_cast<unsigned long long>(g_mapReset), static_cast<unsigned long long>(g_mapKeptMoving));
+    g_mapKept = g_mapReset = g_mapKeptMoving = 0;
 }
 
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],

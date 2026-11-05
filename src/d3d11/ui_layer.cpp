@@ -435,6 +435,10 @@ struct Eye {
     DsDirect dsDirect[2];
     uint32_t dsDirectNext = 0;
     const void* dsDirectRefused = nullptr;
+    // The System Map's cut-out behind the bodies (mapBodiesPunch): the frame it was last made for and its view of the game's depth.
+    uint64_t mapPunchSeq = 0;
+    const void* mapPunchTex = nullptr;
+    Ptr<ID3D11ShaderResourceView> mapPunchSrv;
 
     // the crisp-HUD half's of fix.ui_quality HDR HUD layer: R16G16B16A16_FLOAT at the 8-bit layer's
     // size (the door's output x the same target), holding the cockpit HUD
@@ -1790,6 +1794,8 @@ bool releaseLayers() {
         for (Eye::DsDirect& d : e.dsDirect) d = Eye::DsDirect{};
         e.dsDirectNext = 0;
         e.dsDirectRefused = nullptr;
+        e.mapPunchTex = nullptr;
+        e.mapPunchSrv.Reset();
         e.out.Reset();
         e.outUav.Reset();
         e.outW = e.outH = 0;
@@ -2007,6 +2013,94 @@ uint32_t dsBytesPerPixel(DXGI_FORMAT f) { return f == DXGI_FORMAT_D32_FLOAT_S8X2
 // says the layer's depth plane is already what a fresh copy would write
 // (uiLayerSeedKeepsDepth), so `needDepth` is false and the depth pass is
 // skipped; the layer still counts as holding depth.
+// The System Map's cut-out behind the bodies (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES), once an eye-frame at the first draw that comes after them: the HDR layer goes back to clear wherever the game's depth holds anything. The grid and the stems,
+// which the game draws before most bodies and lets the bodies cover, are in the layer by then. Recorded on the seed's deferred context and executed with the context's state saved and restored, so the draw being taken is untouched. Small moons write no depth and are not cut out.
+struct MapPunch {
+    Ptr<ID3D11VertexShader> vs;
+    Ptr<ID3D11PixelShader> ps;
+    Ptr<ID3D11Buffer> cb;
+    bool tried = false;
+};
+MapPunch g_mapPunch;
+
+void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
+    e.mapPunchSeq = g_draw.seq;
+    if (!g_deferred || !g_draw.dsv || !e.hdrRtv) return;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    if (!g_mapPunch.tried) {
+        g_mapPunch.tried = true;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 32;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(dev->CreateVertexShader(kMapPunchVsBytecode, sizeof(kMapPunchVsBytecode), nullptr, &g_mapPunch.vs)) ||
+            FAILED(dev->CreatePixelShader(kMapPunchPsBytecode, sizeof(kMapPunchPsBytecode), nullptr, &g_mapPunch.ps)) ||
+            FAILED(dev->CreateBuffer(&bd, nullptr, &g_mapPunch.cb))) {
+            g_mapPunch.vs.Reset();
+            g_mapPunch.ps.Reset();
+            g_mapPunch.cb.Reset();
+            Log::get().note("ui quality: layer: the System Map's cut-out behind the bodies could not be made: the grid and the stems lie over the bodies.");
+        }
+    }
+    if (!g_mapPunch.vs) return;
+    Ptr<ID3D11Resource> res;
+    g_draw.dsv->GetResource(&res);
+    Ptr<ID3D11Texture2D> tex;
+    if (!res || FAILED(res.As(&tex))) return;
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (e.mapPunchTex != tex.Get()) {
+        e.mapPunchTex = tex.Get();
+        e.mapPunchSrv.Reset();
+        D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+        g_draw.dsv->GetDesc(&vd);
+        DXGI_FORMAT tf, df, sf;
+        if (dsFormats(vd.Format, &tf, &df, &sf) && td.Format == tf && td.SampleDesc.Count == 1 && (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC dvd{};
+            dvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            dvd.Texture2D.MipLevels = 1;
+            dvd.Format = df;
+            if (FAILED(dev->CreateShaderResourceView(tex.Get(), &dvd, &e.mapPunchSrv))) e.mapPunchSrv.Reset();
+        }
+    }
+    if (!e.mapPunchSrv) return;
+    ID3D11DeviceContext* c = g_deferred.Get();
+    const struct { UINT in[2], out[2]; float jitter[2], pad[2]; } constants{{td.Width, td.Height}, {e.hdrW, e.hdrH}, {g_draw.jx, g_draw.jy}, {0.0f, 0.0f}};
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(c->Map(g_mapPunch.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+    std::memcpy(m.pData, &constants, sizeof(constants));
+    c->Unmap(g_mapPunch.cb.Get(), 0);
+    c->RSSetState(nullptr);
+    c->IASetInputLayout(nullptr);
+    c->GSSetShader(nullptr, nullptr, 0);
+    c->HSSetShader(nullptr, nullptr, 0);
+    c->DSSetShader(nullptr, nullptr, 0);
+    c->SetPredication(nullptr, FALSE);
+    const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.hdrW), static_cast<float>(e.hdrH), 0.0f, 1.0f};
+    c->RSSetViewports(1, &vp);
+    ID3D11RenderTargetView* target = e.hdrRtv.Get();
+    c->OMSetRenderTargets(1, &target, nullptr);
+    c->OMSetDepthStencilState(nullptr, 0);
+    c->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    c->VSSetShader(g_mapPunch.vs.Get(), nullptr, 0);
+    c->PSSetShader(g_mapPunch.ps.Get(), nullptr, 0);
+    ID3D11Buffer* cb = g_mapPunch.cb.Get();
+    c->PSSetConstantBuffers(0, 1, &cb);
+    ID3D11ShaderResourceView* depth = e.mapPunchSrv.Get();
+    c->PSSetShaderResources(0, 1, &depth);
+    c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    c->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    c->PSSetShaderResources(0, 1, &none);
+    Ptr<ID3D11CommandList> list;
+    if (FAILED(c->FinishCommandList(FALSE, &list)) || !list) return;
+    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    mapui::g_bodyCutouts.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint32_t outW,
                     uint32_t outH, ID3D11DepthStencilView* gameDsv, uint8_t stencilMask,
                     bool needDepth, UiRouteStage stage, const char* who, const UiSeedPlan& seedPlan,
@@ -2849,6 +2943,9 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         }
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
+    if (which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq &&
+        (g_draw.family == UiLayerFamily::kMapPlane || g_draw.family == UiLayerFamily::kMapCanvas || g_draw.family == UiLayerFamily::kMapSprite))
+        mapBodiesPunch(ctx, e);
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
     if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
     if (mapRunIssue) {
@@ -4736,6 +4833,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         DXGI_FORMAT dsFmt = DXGI_FORMAT_UNKNOWN;
         dsState = dsStateOfNoted(ctx, dsv, &ref, &dsFmt);
         f.ds = uiLayerDsEffect(dsState, dsv != nullptr);
+        // The System Map's grid lies at viewport depth 0, drawn before most bodies: it takes no test in the layer, and the bodies are cut out of the layer after it (mapBodiesPunch).
+        if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;
         const bool markFamily = family == UiLayerFamily::kScopeMark;
         if (f.ds.tests()) {
             // The scope mark alone may test a view bound read-only, and only when the draw writes nothing (uiScopeMarkWritesNothing): its copy is then tested as the game's view was.
@@ -7820,6 +7919,7 @@ void releaseDeviceObjects() {
     g_rip.filter = 0;
     g_rip.gainZ = g_rip.gainY = 0.0f;
     g_seeder.reset();
+    g_mapPunch = MapPunch{};
     g_deferred.Reset();
     g_seederTried = false;
     g_crispDeferred.Reset();

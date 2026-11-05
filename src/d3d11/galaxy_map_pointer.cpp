@@ -28,14 +28,19 @@ using namespace mappointer;
 // Build 334925's addresses, each resolved through src\common\game_build.h (gameRva) so an unknown build finds them by signature or the pointer stands
 // down. kProjectRva is the projector's world-to-viewport function (vtable +0x18): uint64 f(void* k, const float* in, int idx, float* out). The hover
 // calls it through `call rbx` and returns to kPointerReturnRva (inside GalaxyMapVisualisation); the stars' calls go through the same function from
-// elsewhere. kCursorRva is the mouse cursor's per-frame update, rcx = the cursor object.
+// elsewhere. kCursorRva is the mouse cursor's per-frame update, rcx = the cursor object. kSystemPointerReturnRva is the same call in the System Map's per-frame step (docs/build-334925.md):
+// the same K and the same pointer block's +0x30, and its answer goes to the map's hover and select, which compare it in viewport x, y with each body projected through K. Optional: a build
+// where it is not found keeps the Galaxy Map's pointer, and the System Map stays as the game made it.
 constexpr uint32_t kProjectRva = 0x28948F0;
 constexpr uint32_t kPointerReturnRva = 0x3B91EE9;
+constexpr uint32_t kSystemPointerReturnRva = 0x3AF92A7;
 constexpr uint32_t kCursorRva = 0x474A740;
 constexpr uint32_t kRvas[] = {kProjectRva, kPointerReturnRva, kCursorRva};
+constexpr uint32_t kSystemRvas[] = {kSystemPointerReturnRva};
 constexpr uint8_t kProjectPrologue[10] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x40};
 constexpr uint8_t kCursorPrologue[12] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
 constexpr uint8_t kPointerReturn[4] = {0x84, 0xC0, 0x0F, 0x84};   // at the return address: test al, al; jz rel32 (the rel32 itself is not pinned)
+constexpr uint8_t kSystemPointerReturn[12] = {0x48, 0x8B, 0x7C, 0x24, 0x70, 0x48, 0x8B, 0x8E, 0x10, 0x04, 0x00, 0x00};   // at the return address: mov rdi, [rsp+0x70]; mov rcx, [rsi+0x410] (the map's store)
 // The cursor object's scene object is the pointer at +0x10; its position is three floats at +0x40 of that, in the UI frame (the arrow's drawn position).
 constexpr uintptr_t kCursorSceneOffset = 0x10;
 constexpr uintptr_t kScenePositionOffset = 0x40;
@@ -62,13 +67,16 @@ struct State {
     std::atomic<uintptr_t> cursorObject{0};  // the cursor object the capture stub stores, one write a frame
     std::atomic<uintptr_t> forward{0};       // the projector's trampoline
     uintptr_t pointerReturn = 0;             // the pointer call's return address in this process
+    uintptr_t systemReturn = 0;              // the System Map's, 0 when this build's was not found
     uintptr_t base = 0;
     std::atomic<bool> armed{false};
 
     // Counters, since the last 30 s line.
     std::atomic<uint64_t> pointerCalls{0};
     std::atomic<uint64_t> replaced{0};
+    std::atomic<uint64_t> heldCalls{0};
     std::atomic<uint64_t> passed[kPassCount] = {};
+    PointerHold held;                        // the System Map's held answer: the game's update thread only
 
     // Frame thread only.
     unsigned tries = 0;
@@ -78,6 +86,7 @@ struct State {
     unsigned edgeNotes = 0;
     bool openedInWindow = false;
     uint64_t openFrames = 0;   // frames with the map open since the last 30 s line
+    uint64_t galaxyFrames = 0; // of those, the Galaxy Map's: the run of sprites is its alone
     uint64_t lastLineMs = 0;
     bool cursorSaid = false;
     const char* why = "";
@@ -119,7 +128,7 @@ uint64_t pass(State& s, Project original, Pass why, void* k, const float* in, in
     return original(k, in, idx, out);
 }
 
-uint64_t pointerCall(State& s, Project original, void* k, const float* in, int idx, float* out) noexcept {
+uint64_t pointerCall(State& s, Project original, void* k, const float* in, int idx, float* out, bool hold) noexcept {
     s.pointerCalls.fetch_add(1, std::memory_order_relaxed);
     MapCameraPose pose;
     if (!mapCameraPose(pose)) return pass(s, original, kNoPose, k, in, idx, out);
@@ -134,8 +143,17 @@ uint64_t pointerCall(State& s, Project original, void* k, const float* in, int i
     if (!readMem(reinterpret_cast<uintptr_t>(in), game, sizeof(game))) return pass(s, original, kBadInput, k, in, idx, out);
     alignas(16) float farIn[4];
     if (farPoint(pose.rows, pose.position, arrow, game[3], farIn) != Why::kOk) return pass(s, original, kBadArrow, k, in, idx, out);
-    const uint64_t ret = original(k, farIn, idx, out);
     s.replaced.fetch_add(1, std::memory_order_relaxed);
+    if (!hold) return original(k, farIn, idx, out);
+    // The System Map's click wants the same bits at press and release (galaxy_map_pointer_core.h, THE HELD POINTER). Its call passes a 16-byte out.
+    const uint64_t changes = mapCameraChanges();
+    if (holdApplies(s.held, arrow, changes)) {
+        std::memcpy(out, s.held.out, sizeof(s.held.out));
+        s.heldCalls.fetch_add(1, std::memory_order_relaxed);
+        return s.held.ret;
+    }
+    const uint64_t ret = original(k, farIn, idx, out);
+    holdTake(s.held, arrow, changes, out, ret);
     return ret;
 }
 
@@ -144,8 +162,8 @@ __declspec(noinline) uint64_t projectDetour(void* k, const float* in, int idx, f
     const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     State& s = *g_s;
     const auto original = reinterpret_cast<Project>(s.forward.load(std::memory_order_acquire));
-    if (caller != s.pointerReturn) return original(k, in, idx, out);   // the stars' own calls and any other: the game's, untouched
-    return pointerCall(s, original, k, in, idx, out);
+    if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);   // the stars' and bodies' own calls and any other: the game's, untouched
+    return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);
 }
 
 // Allocates one hook's relay within reach of its target. A non-null reason on failure.
@@ -183,6 +201,12 @@ bool tryInstall(State& s, bool& transient) {
     }
     s.base = base;
     s.pointerReturn = returnAt;
+    {
+        // Optional, and written before the projector's hook goes in: without it the System Map stays the game's.
+        uint8_t systemFound[sizeof(kSystemPointerReturn)] = {};
+        const uint32_t systemRva = gameRvasFound(kSystemRvas, std::size(kSystemRvas), &missing) ? gameRva(kSystemPointerReturnRva) : 0;
+        s.systemReturn = systemRva && readMem(base + systemRva, systemFound, sizeof(systemFound)) && gamePinMatches(kSystemPointerReturnRva, systemFound, kSystemPointerReturn, sizeof(kSystemPointerReturn)) ? base + systemRva : 0;
+    }
     if (!s.cursor.hook.installed()) {
         if (const char* r = installSite(s.cursor, cursorAt, kCaptureStubBytes, kCaptureStubTrampolineAt)) { s.why = r; return false; }
         buildCaptureStub(s.cursor.relay, &s.cursorObject);
@@ -209,6 +233,7 @@ bool tryInstall(State& s, bool& transient) {
 
 void closeGate(State& s) noexcept {
     s.gate.store(0, std::memory_order_release);
+    mapui::setSystemOpen(false);
     mapui::setGates(false, false);
     s.open = false;
 }
@@ -240,7 +265,9 @@ void thirtySecondLine(State& s, uint64_t now) {
     const uint64_t runsEnded = g_run.ended.exchange(0, std::memory_order_relaxed), setsKept = g_run.setsKept.exchange(0, std::memory_order_relaxed);
     const uint64_t setsDropped = g_run.setsDropped.exchange(0, std::memory_order_relaxed), setsOwn = g_run.setsOwn.exchange(0, std::memory_order_relaxed), frames = s.openFrames;
     s.openFrames = 0;
-    if (wasOpen || runBinds || runsStarted)
+    const uint64_t galaxyFrames = s.galaxyFrames;
+    s.galaxyFrames = 0;
+    if (galaxyFrames || runBinds || runsStarted)
         Log::get().note("map pointer: render target binds for the map's sprites %.1f a frame (%llu in all over %llu map frames); runs of sprites started %.2f a frame (%llu), ended %.2f a frame (%llu); "
                         "the game's own sets of the saved targets inside a run kept %llu, of others %llu, of the layer's own read back %llu%s",
                         frames ? static_cast<double>(runBinds) / static_cast<double>(frames) : 0.0, static_cast<unsigned long long>(runBinds), static_cast<unsigned long long>(frames),
@@ -254,14 +281,16 @@ void thirtySecondLine(State& s, uint64_t now) {
     size_t n = 0;
     for (uint32_t i = 0; i < kPassCount && n + 40 < sizeof(reasons); ++i)
         if (passed[i]) n += static_cast<size_t>(std::snprintf(reasons + n, sizeof(reasons) - n, "%s%s %llu", n ? ", " : "", kPassNames[i], static_cast<unsigned long long>(passed[i])));
-    Log::get().note("map pointer: Galaxy Map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point, %llu passed through%s%s%s; "
-                    "cursor object %s; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
+    Log::get().note("map pointer: a map %s over the last 30 s; hover: the pointer's projector call ran %llu times, %llu replaced by the arrow's far point (the System Map's held and answered unchanged %llu), %llu passed through%s%s%s; "
+                    "cursor object %s; the System Map's markers scaled %llu (%u bodies known), arrow's depth %.2f units (0: at infinity), cut-outs behind its bodies %llu, reticule lifted %llu; draws swapped: icons C31238 %llu, labels 12382D %llu, arrow 4EF6DD %llu (arrow left the game's, tip on a panel or no answer: %llu), rings 94EA99 %llu, stems 3028E7 %llu (icons, labels, rings and stems left the game's for want of the map camera's pose: %llu; its constants written %llu times, %llu of them with the two eyes' offsets, which changed %llu times%s); "
                     "panel draws issued into the mask: C4B4B3 %llu, 5DAD41 %llu; probes made %llu, answered %llu (frames over a panel %llu, not over %llu); "
                     "tip on a panel now: %s; declines: %llu (ring full %llu, eye-frame full %llu, faulted %llu, no mask or query %llu, panel draws after the eye's probe %llu); "
                     "sprite depth: textures made %llu, sprite draws drawn with the depth tested %llu, depth issues made %llu, faulted %llu, not made (a texture, state or shader that could not be made) %llu, stencil write-backs of the map's sprites and canvases declined (off while the map is open in VR) %llu%s",
                     s.open ? "open now" : wasOpen ? "was open" : "not open", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
+                    static_cast<unsigned long long>(s.heldCalls.exchange(0, std::memory_order_relaxed)),
                     static_cast<unsigned long long>(passedTotal), passedTotal ? " (" : "", reasons, passedTotal ? ")" : "",
-                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapIconA]),
+                    s.cursorObject.load(std::memory_order_acquire) ? "seen" : "never seen", static_cast<unsigned long long>(swapped[kSwapMarker]), bodiesKnown(), static_cast<double>(arrowDepth()),
+                    static_cast<unsigned long long>(g_bodyCutouts.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(swapped[kSwapReticule]), static_cast<unsigned long long>(swapped[kSwapIconA]),
                     static_cast<unsigned long long>(swapped[kSwapIconB]), static_cast<unsigned long long>(swapped[kSwapArrow]), static_cast<unsigned long long>(arrowKept),
                     static_cast<unsigned long long>(swapped[kSwapRing]), static_cast<unsigned long long>(swapped[kSwapStem]), static_cast<unsigned long long>(noPose),
                     static_cast<unsigned long long>(camWrites), static_cast<unsigned long long>(eyesValid), static_cast<unsigned long long>(eyeGenSteps),
@@ -300,9 +329,25 @@ void mapPointerFrame() noexcept {
     }
     State& s = *g_s;
     const uint64_t now = GetTickCount64();
-    const bool open = mapCameraGalaxyOpen();
+    const bool galaxy = mapCameraGalaxyOpen();
+    const bool system = !galaxy && mapCameraAnyOpen();
+    mapui::setSystemOpen(system);
+    if (system) {
+        MapCameraPose pose;
+        if (mapCameraPose(pose)) {
+            // The arrow's ray in the map's axes, as pointerCall reads it. The camera's forward until the cursor is known.
+            float ray[3] = {pose.rows[2][0], pose.rows[2][1], pose.rows[2][2]};
+            const uintptr_t cursor = s.cursorObject.load(std::memory_order_acquire);
+            uintptr_t scene = 0;
+            float arrow[3], d[3];
+            if (cursor && readMem(cursor + kCursorSceneOffset, &scene, sizeof(scene)) && scene && readMem(scene + kScenePositionOffset, arrow, sizeof(arrow)) && arrowDirection(arrow, d))
+                for (int k = 0; k < 3; ++k) ray[k] = d[0] * pose.rows[0][k] + d[1] * pose.rows[1][k] + d[2] * pose.rows[2][k];
+            mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);
+        }
+    }
+    if (galaxy) ++s.galaxyFrames;
     if (!s.armed.load(std::memory_order_acquire)) {
-        mapui::setGates(open, false);   // the icons, labels and rings are fixed in the world whether or not the pointer's hooks can be had
+        mapui::setGates(galaxy, false);   // the icons, labels and rings are fixed in the world whether or not the pointer's hooks can be had
         if (s.stood) return;
         if (s.tries && now - s.lastTryMs < 1000) return;
         s.lastTryMs = now;
@@ -318,23 +363,27 @@ void mapPointerFrame() noexcept {
         }
         s.armed.store(true, std::memory_order_release);
         s.lastLineMs = now;
-        Log::get().note("map pointer: armed (VR profile): the cursor object capture is in at +0x%llX and the projector relay at +0x%llX, gate closed until the Galaxy Map opens; "
-                        "the pointer's call (the only one replaced) returns to +0x%llX",
+        Log::get().note("map pointer: armed (VR profile): the cursor object capture is in at +0x%llX and the projector relay at +0x%llX, gate closed until a map opens; "
+                        "the pointer's calls (the only ones replaced) return to +0x%llX on the Galaxy Map and +0x%llX on the System Map%s",
                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.cursor.hook.target()) - s.base),
-                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.project.hook.target()) - s.base), static_cast<unsigned long long>(s.pointerReturn - s.base));
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s.project.hook.target()) - s.base), static_cast<unsigned long long>(s.pointerReturn - s.base),
+                        static_cast<unsigned long long>(s.systemReturn ? s.systemReturn - s.base : 0),
+                        s.systemReturn ? "" : " (not found in this build: the System Map stays as the game made it)");
     }
+    // The hover and the arrow on either map: the arrow's direction is the same ray in both (docs/galaxy-map-vr-2026-11-03.md, "The System Map"). The fixed icons and the sprite depth stay the Galaxy Map's.
+    const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());
     if (open) ++s.openFrames;
     if (open != s.open) {
         if (open) s.openedInWindow = true;
         s.open = open;
         if (s.edgeNotes < 16) {
             ++s.edgeNotes;
-            Log::get().note("map pointer: the Galaxy Map %s: the hover reads the arrow's direction, the icons, labels and rings are fixed in the world, the arrow is at star depth off the panels and the game's on them, and the panel mask is %s",
-                            open ? "opened" : "closed", open ? "kept" : "let go");
+            Log::get().note("map pointer: a map %s (%s): the hover reads the arrow's direction, the arrow is at star depth off the panels and the game's on them, and the panel mask is %s",
+                            open ? "opened" : "closed", galaxy ? "the Galaxy Map" : open ? "the System Map" : "none now", open ? "kept" : "let go");
         }
     }
     s.gate.store(open ? 1 : 0, std::memory_order_release);
-    mapui::setGates(open, open);
+    mapui::setGates(galaxy, open);
     if (!s.cursorSaid && s.cursorObject.load(std::memory_order_acquire)) {
         s.cursorSaid = true;
         Log::get().note("map pointer: the cursor update ran: its object is at %p", reinterpret_cast<void*>(s.cursorObject.load(std::memory_order_acquire)));

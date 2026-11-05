@@ -3632,6 +3632,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
         celestialMotionConstantsMapped(res, mapped->pData);
     }
+    // The System Map's bodies (galaxy_map_ui.h, THE BODIES): one relaxed load off that map.
+    if (mapData0 && type != D3D11_MAP_READ && mapui::systemOpen()) mapui::bodyConstantsMapped(res, mapped->pData);
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (mapSub0 && res == s->compositeCb) {
@@ -3751,6 +3753,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // The planet-patch shadow reads the write BEFORE the real Unmap, like every tee here: after it the memory is
     // no longer ours to look at.
     if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
+    if (mapui::systemOpen()) mapui::bodyConstantsUnmapped(res);
     // The census CB watch reads the write BEFORE the real Unmap, exactly as
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
@@ -4288,7 +4291,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // shaders read their pixel shader's hash (ui_layer_math.h uiLayerMapFamilyOf names the pairs). Every other draw, and every draw with no map open, reads nothing more.
     if (f.targetKind == 1 && temporalMapGateFlag().load(std::memory_order_acquire)) {
         f.mapOpen = true;
-        if (uiVsIsMapOverlay(f.vs)) f.ps = bindingShaderHash(BindSlot::Ps);
+        f.mapSystem = mapui::systemOpen();
+        f.mapPlaneIcon = count == 6;
+        f.mapPlaneGrid = count == 1014;
+        if (uiVsIsMapOverlay(f.vs) || (f.mapSystem && uiVsIsSystemMapOnly(f.vs))) f.ps = bindingShaderHash(BindSlot::Ps);
     }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -4390,6 +4396,20 @@ void mapDepthSecondIssue(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     MapDepthDraw draw{self, kind, count, instances, &args};
     mapui::depthIssue(self, issue.ps, mapui::DepthDraw{&mapDepthDraw, &draw});
     uiLayerEnd(self);
+}
+
+// The panel mask and the arrow's probe when the UI layer is not taking the panels (galaxy_map_ui.h, THE MASK WITHOUT THE LAYER): after the game's own issue into its eye target, with the draw's state still bound.
+__declspec(noinline) void mapDirectSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args) {
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    const bool panel = mapui::isPanelVs(vs);
+    if ((!panel && vs != mapui::kVsArrow) || uiLayerTargetKind() != 2) return;
+    if (panel) {
+        MapDepthDraw draw{self, kind, count, instances, &args};
+        mapui::directPanelIssue(self, vs, mapui::ProbeDraw{&mapDepthDraw, &draw});
+    } else {
+        MapPointDraw point{self, kind, instances, &args};
+        mapui::directArrowProbe(self, mapui::ProbeDraw{&mapPointDraw, &point});
+    }
 }
 
 // A layered draw's second issues (ui_layer.h), each the game's draw exactly
@@ -4538,7 +4558,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
         bool                 on = false;
         ~MapSwapScope() { if (on) mapui::swapEnd(ctx); }
     } mapSwapScope{self};
-    if (owner && v != DrawVerdict::kSkip && mapui::vrOpen()) mapSwapScope.on = mapui::swapBegin(self, bindingShaderHash(BindSlot::Vs));
+    if (owner && v != DrawVerdict::kSkip && mapui::swapOpen()) mapSwapScope.on = mapui::swapBegin(self, bindingShaderHash(BindSlot::Vs));
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -4834,6 +4854,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
     if (layered) {
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
+    } else if (originalIssued && owner && mapui::pointerOpen() && !uiLayerQualityLive()) {
+        mapDirectSecondIssues(self, kind, count, instances, args);
     }
     if (markerFixed) nativeOnFootMarkerFixEnd(self);   // F47: the game's b0 back, after every issue of the draw
     // the crisp-HUD half of fix.ui_quality: the game's tonemap draw, admitted in the eye-draw branch

@@ -360,6 +360,33 @@ static void mayWantTests() {
     for (size_t i = 0; i < kWeaponPairCount; ++i) check(vsMayWantByte(kWeaponPairs[i].vs) & kVsMayUiFamily, "each weapons-fire vertex shader keeps the bit");
     for (uint64_t h : kHoloFamiliesTake) check(vsMayWantByte(h) & kVsMayUiFamily, "each take hologram keeps the bit");
     for (uint64_t h : {kUiVsMapCanvas, kUiVsMapSprite, kUiVsMapRings, kUiVsMapStems}) check(vsMayWantByte(h) & kVsMayUiFamily, "each of a map's four overlay vertex shaders keeps the bit");
+    // The System Map's flat plane: a general vertex shader, so it keeps the bit, and it is named only by its pair with the System Map's camera up.
+    for (uint64_t h : {kUiVsMapPlane, kUiVsMapLinesA, kUiVsMapLinesB}) check(vsMayWantByte(h) & kVsMayUiFamily, "the System Map plane's and lines' vertex shaders keep the bit");
+    {
+        UiFamilyFacts lines = hdrFacts(kUiVsMapLinesA, kUiPsMapLines);
+        lines.mapOpen = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "the System Map's lines are named only with its camera up");
+        lines.mapSystem = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "with its camera up they take the plane icons' family, at any count");
+        lines.vs = kUiVsMapLinesB;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "...and so does the other vertex shader");
+        lines.ps = kUiPsMapPlane;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "...with their own pixel shader only");
+    }
+    {
+        UiFamilyFacts plane = hdrFacts(kUiVsMapPlane, kUiPsMapPlane);
+        plane.mapOpen = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "the plane's pair is not named on the Galaxy Map, whose camera is not the System Map's");
+        plane.mapSystem = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "with the System Map's camera up, a draw at neither count stays in the scene");
+        plane.mapPlaneGrid = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kMapGrid, "n=1014 is the grid");
+        plane.mapPlaneGrid = false;
+        plane.mapPlaneIcon = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kMapPlane && uiLayerFamilyTakesHdr(UiLayerFamily::kMapPlane) && uiLayerFamilyTakesHdr(UiLayerFamily::kMapGrid), "n=6 is an icon on the plane, and both go to the HDR layer");
+        plane.ps = 0x494506A63091DF8Cull;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "another pixel shader with the same vertex shader (the laser rifle) is not named");
+    }
     check(!(vsMayWantByte(kUiVsGuiVector) & kVsMayUiFamily), "a GUI-direct shader is not named on the HDR target, so its bit is clear there");
     UiFamilyFacts ldr = hdrFacts(kUiVsGuiVector, 0);
     ldr.targetKind = 2;
@@ -624,8 +651,9 @@ static void ruleTests() {
               static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) == static_cast<int>(UiLayerFamily::kScopeMark) + 1 &&
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) &&
-              static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03) and the map marks (2026-11-04) last (no older number moved)");
+              static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) &&
+              static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03), the map marks (2026-11-04) and the System Map's plane icons and grid (2026-11-05) last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");

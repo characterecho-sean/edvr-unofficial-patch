@@ -2530,11 +2530,11 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
                                fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark ||
-                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks;
+                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks || fam == UiLayerFamily::kMapPlane || fam == UiLayerFamily::kMapGrid;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust and the VR map rings and stems");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust, the VR map rings and stems, and the System Map's plane icons and grid");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the two dusts have no width to give: they are exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
@@ -2837,8 +2837,8 @@ void testSupercruiseLines() {
     n.vs = kUiVsSupercruiseBars;
     n.ps = kUiPsSupercruiseBars;
     check(uiLayerFamilyFor(n) == UiLayerFamily::kSupercruiseBars, "ND1f: ...and the bars the bars");
-    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, last before kCount (no older family's number moved)");
+    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) && static_cast<int>(UiLayerFamily::kMapPlane) + 1 == static_cast<int>(UiLayerFamily::kMapGrid) && static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, and the System Map's plane icons and grid (2026-11-05) last before kCount (no older family's number moved)");
     check(uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, false, true) &&
               !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kNormalSpaceDust),
           "ND1h: fix.ui_quality's half governs it (not the weapons layer's)");
@@ -3037,6 +3037,25 @@ void testSupercruiseLines() {
         const float badPosition[3] = {position[0], std::numeric_limits<float>::infinity(), position[2]};
         check(edvr::mappointer::farPoint(badRows, position, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose && edvr::mappointer::farPoint(rows, badPosition, arrow, 1.0f, sink) == edvr::mappointer::Why::kBadPose,
               "GP6: a non-finite pose is refused");
+        // The System Map's click: the arrow's real positions over 19 frames of one dump, with the mouse still, all hold the first frame's answer bit for bit; a mouse step, a moved camera or a position that is not the arrow's does not.
+        {
+            using namespace edvr::mappointer;
+            PointerHold h;
+            const float frames[][3] = {{0.040855f, -0.007648f, 1.035048f}, {0.040847f, -0.007646f, 1.034886f}, {0.040868f, -0.00765f, 1.035324f}, {0.040837f, -0.007644f, 1.034665f}, {0.040860f, -0.007648f, 1.035147f}};
+            const float answer[4] = {812.5f, 433.25f, 0.0f, 0.0f};
+            check(!holdApplies(h, frames[0], 7), "GP6c: nothing is held before the first answer");
+            holdTake(h, frames[0], 7, answer, 1);
+            bool all = true;
+            for (const auto& f : frames) all = all && holdApplies(h, f, 7);
+            const float mouseStep[3] = {0.0420f, -0.007648f, 1.035048f};   // 1.1e-3 radians along x from the first frame
+            const float notArrow[3] = {0.0f, 0.0f, 0.01f};
+            check(all && h.ret == 1 && h.out[0] == 812.5f && h.out[1] == 433.25f, "GP6c: the arrow's drift with the mouse still holds the answer exactly");
+            check(!holdApplies(h, frames[0], 8), "GP6c: a moved map camera lets the answer go");
+            check(!holdApplies(h, mouseStep, 7) && !holdApplies(h, notArrow, 7), "GP6c: a mouse step, or a position that is not the arrow's, lets it go");
+            // The yaw case measured in dump 061416462001: 1.7e-4 radians of direction stays held.
+            const float yawed[3] = {0.040855f + 1.7e-4f * 1.035048f, -0.007648f, 1.035048f};
+            check(holdApplies(h, yawed, 7), "GP6c: the 1.7e-4 radians the arrow drifts while the head yaws 8.7 degrees is held");
+        }
         uint8_t gate[edvr::mappointer::kGateRelayBytes];
         std::memset(gate, 0xCC, sizeof(gate));
         int cell = 0, callback = 0;
@@ -3068,7 +3087,7 @@ void testSupercruiseLines() {
         const std::string hook = slurp("src/d3d11/device_hook.cpp"), screen = slurp("src/d3d11/vscreen.cpp"), pointer = slurp("src/d3d11/galaxy_map_pointer.cpp");
         check(hook.find("tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });") != std::string::npos, "GP10: the map camera's tick runs mapPointerFrame right after mapCameraFrame");
         const size_t rollFree = screen.find("} rollFreeScope{self};"), swapScope = screen.find("} mapSwapScope{self};"), skip = screen.find("if (v == DrawVerdict::kSkip) {", rollFree);
-        check(rollFree != std::string::npos && swapScope > rollFree && swapScope < skip && screen.find("v != DrawVerdict::kSkip && mapui::vrOpen()") != std::string::npos &&
+        check(rollFree != std::string::npos && swapScope > rollFree && swapScope < skip && screen.find("v != DrawVerdict::kSkip && mapui::swapOpen()") != std::string::npos &&
                   screen.find("~MapSwapScope() { if (on) mapui::swapEnd(ctx); }") != std::string::npos,
               "GP11: forwardWithVerdict declares the map's shader swap scope after the roll-free scope (so it restores first), swaps only on a draw that is not skipped, and puts the game's shader back on every way out");
         check(pointer.find("gameRvasFound(kRvas") != std::string::npos && pointer.find("gamePinMatches(kProjectRva") != std::string::npos && pointer.find("gamePinMatches(kCursorRva") != std::string::npos && pointer.find("gamePinMatches(kPointerReturnRva") != std::string::npos && pointer.find("armed.store(true") != std::string::npos &&
@@ -3078,8 +3097,10 @@ void testSupercruiseLines() {
         check(pointer.find("logCheck") == std::string::npos && pointer.find("selfCheckDue") == std::string::npos && pointer.find("noteOtherCaller") == std::string::npos &&
                   pointer.find("otherReturn") == std::string::npos && pointer.find("kNearCamera") == std::string::npos,
               "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
-        check(pointer.find("if (caller != s.pointerReturn) return original(k, in, idx, out);") != std::string::npos,
-              "GP14: any caller but the pointer's goes straight to the original projector");
+        check(pointer.find("if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);") != std::string::npos && pointer.find("gamePinMatches(kSystemPointerReturnRva") != std::string::npos &&
+                  pointer.find("return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);") != std::string::npos &&
+                  pointer.find("const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
+              "GP14: any caller but the two maps' pointer calls goes straight to the original projector; the System Map's is optional and pinned, and its gate opens the pointer alone, not the Galaxy Map's fixed icons");
         std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);
         check(!copyRoute.good() && screen.find("map_ui_depth.h") == std::string::npos && screen.find("mapuidepth") == std::string::npos && pointer.find("mapuidepth") == std::string::npos &&
                   pointer.find("map_ui_depth.h") == std::string::npos,
@@ -3093,6 +3114,28 @@ void testSupercruiseLines() {
                   screen.find("uiLayerMapMaskBegin(self, &issue)") != std::string::npos && screen.find("uiLayerMapProbeBegin(self, &issue)") != std::string::npos &&
                   screen.find("pureDrawReissue(ReissueCaller::UiLayerSecond, d.self, d.kind, 1, d.instances, *d.args);") != std::string::npos,
               "GP17: the second-issue path issues the panel into the mask and, for the arrow, one point (index count 1, the draw's own start index, base vertex and start instance) after the layer's own issues");
+        // Without the layer (Anti-aliasing off, UI quality off, stood down) the hover and the arrow still act, so the mask and the probe run from the game's own issue: the pointer's gate takes no term from the layer.
+        const size_t directCall = screen.find("} else if (originalIssued && owner && mapui::pointerOpen() && !uiLayerQualityLive()) {");
+        const std::string mapUi = slurp("src/d3d11/galaxy_map_ui.cpp");
+        check(directCall != std::string::npos && screen.find("mapDirectSecondIssues(self, kind, count, instances, args);", directCall) != std::string::npos &&
+                  screen.find("mapui::directPanelIssue(self, vs,") != std::string::npos && screen.find("mapui::directArrowProbe(self,") != std::string::npos && screen.find("uiLayerTargetKind() != 2") != std::string::npos &&
+                  pointer.find("uiLayerQualityLive") == std::string::npos &&
+                  mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &t, nullptr);") != std::string::npos && mapUi.find("vScreenSetRenderTargetsRaw(ctx, 1, &rtv, dsv);") != std::string::npos,
+              "GP17b: with the layer not live the panel mask and the arrow's probe run after the game's own issue into its eye target, the game's targets go back, and the pointer's gate does not ask for the layer");
+        // The System Map in the layer: the grid takes no test; the cut-out comes first at the first draw after the bodies, in the colour issue of the HDR layer; the markers' constants are read before the real Unmap.
+        {
+            const std::string layerText = slurp("src/d3d11/ui_layer.cpp");
+            const size_t cutout = layerText.find("mapBodiesPunch(ctx, e);"), blend = layerText.find("ctx->OMSetBlendState(layerBlend, factor, sampleMask);");
+            const size_t unmapTee = screen.find("mapui::bodyConstantsUnmapped(res);"), realUnmap = screen.find("s->realUnmap(self, res, sub);", unmapTee);
+            check(layerText.find("if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;") != std::string::npos && cutout != std::string::npos && blend != std::string::npos && cutout < blend &&
+                      layerText.find("which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq") != std::string::npos && unmapTee != std::string::npos && realUnmap != std::string::npos &&
+                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = !galaxy && mapCameraAnyOpen();") != std::string::npos,
+                  "GP17c: the System Map's grid takes no test in the layer, the bodies are cut out once an eye-frame before the first draw after them, the plane's icons are told from the grid by their count, and the markers' constants are read before the real Unmap");
+            const std::string passText = slurp("src/d3d11/temporal_pass.cpp");
+            check(passText.find("const bool still = temporalMapKeeps(mapCameraAnyOpen(), moved, mapRows);") != std::string::npos && passText.find("if (mapRows) p.split[0] = temporalSplitMetres(kTemporalShipMetres, true, false);") != std::string::npos &&
+                      mapUi.find("temporalMapCloseView().store(false, std::memory_order_relaxed);") != std::string::npos,
+                  "GP17d: the close view's history stays through a move only with the split that puts its body on the camera's rows, and the close view ends with the map");
+        }
         // The layer's side: the mask is A8_UNORM at the layer's size, cleared once an eye-frame, released once the map is shut; the issues take no depth.
         const std::string layer = slurp("src/d3d11/ui_layer.cpp");
         check(layer.find("makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_A8_UNORM, &e.maskTex, &e.maskRtv, &e.maskSrv)") != std::string::npos && layer.find("if (e.maskSeq != seq) {") != std::string::npos &&
@@ -3148,7 +3191,7 @@ void testSupercruiseLines() {
                   layer.find("vScreenSetRenderTargetsRaw(ctx, mapDepthIssue ? 0 : 1") == std::string::npos && layer.find("if (!target) return false;") != std::string::npos &&
                   pointer.find("stencil write-backs of the map's sprites and canvases declined") != std::string::npos && pointer.find("stems 3028E7") != std::string::npos &&
                   pointer.find("NO write carried the eyes") != std::string::npos && pointer.find("with the two eyes' offsets, which changed") != std::string::npos &&
-                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 5 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
+                  edvr::mapui::probeBlendDesc().RenderTarget[0].RenderTargetWriteMask == 0 && edvr::mapui::kSwapCount == 7 && edvr::mapui::kVsStem == 0x3028E7C6E0E097F9ull,
               "GP25: the write-back is declined for the map's sprites and canvases while the map is open in VR and before anything is bound, the depth issue keeps the layer's target under write mask 0, and the 30 s line counts the declined write-backs, the stems swapped and the eyes");
         // The run of sprites (map_run_core.h, docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): every way into a draw or an output-merger call ends or settles it.
         auto count = [](const std::string& hay, const char* needle) {

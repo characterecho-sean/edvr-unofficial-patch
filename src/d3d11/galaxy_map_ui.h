@@ -22,8 +22,12 @@
 
 #include <d3d11.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+
+#include "galaxy_map_vs.h"   // MapBodies's rows, and the shell and float the arrow and the reticule share
 
 namespace edvr {
 namespace mapui {
@@ -126,7 +130,7 @@ struct RunCounters {
 };
 inline RunCounters g_run;
 
-enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapCount };
+enum Swapped : uint32_t { kSwapIconA, kSwapIconB, kSwapArrow, kSwapRing, kSwapStem, kSwapMarker, kSwapReticule, kSwapCount };
 
 // Counters, since the last 30 s line (galaxy_map_pointer.cpp reads and clears them). Atomics: the line is said on the frame thread, the draws run on the render thread.
 struct Counters {
@@ -152,9 +156,74 @@ extern Counters g_counters;
 // mask). One relaxed load each on the draw path.
 inline std::atomic<bool> g_vrOpen{false};   // inline: ui_layer.cpp reads them and is linked whole into rigs that do not link galaxy_map_ui.cpp
 inline std::atomic<bool> g_pointerOpen{false};
+inline std::atomic<bool> g_swapOpen{false};   // any of these: the draw path's one load for swapBegin (the Galaxy Map, or the System Map's arrow and markers)
 inline std::atomic<bool> g_over{false};
+inline std::atomic<bool> g_systemOpen{false};   // the VR profile and the System Map's camera up: its flat plane in the UI layer, the cut-out, the markers' scale
+inline std::atomic<uint64_t> g_bodyCutouts{0};  // the cut-outs made since the last 30 s line (ui_layer.cpp mapBodiesPunch)
 inline bool vrOpen() noexcept { return g_vrOpen.load(std::memory_order_relaxed); }
 inline bool pointerOpen() noexcept { return g_pointerOpen.load(std::memory_order_relaxed); }
+inline bool swapOpen() noexcept { return g_swapOpen.load(std::memory_order_relaxed); }
+inline bool systemOpen() noexcept { return g_systemOpen.load(std::memory_order_relaxed); }
+
+// THE BODIES (docs/galaxy-map-vr-2026-11-03.md, "The System Map"). The game draws the atmosphere ring and the landable arc from a sprite whose world size does not follow the body in VR: 0.56 and 0.69 units on every body, against 1.14 and 1.42 in flat on planets of surface 0.886 and 0.79. No selector was found in
+// the executable, so the sprites are scaled here to the measured fit: k = surface radius / kMarkerFitRadius, never below 1, which puts the ring at the atmosphere's outer radius (1.30 times the surface, which is flat's on 38 Lyncis 1) and leaves the moons, whose surface is 0.43, as they are.
+// Each body's centre and surface radius come from the per-body constants at b1 (cb1[125].yzw, cb1[126].x), read at the Unmap of a constant buffer of that exact size, so a build with another size leaves the markers as the game drew them.
+constexpr float kMarkerFitRadius = 0.4355f;
+constexpr float kMarkerScaleMax = 4.0f;
+constexpr uint32_t kBodyConstantBytes = 5376;
+inline float markerScale(float surfaceRadius) {
+    if (!(surfaceRadius > 0.0f)) return 1.0f;
+    const float k = surfaceRadius / kMarkerFitRadius;
+    return k < 1.0f ? 1.0f : (k > kMarkerScaleMax ? kMarkerScaleMax : k);
+}
+void bodyConstantsMapped(ID3D11Resource* res, const void* data);
+void bodyConstantsUnmapped(ID3D11Resource* res);
+// The table's size, and the map's opening: a new system's bodies start a new table. Frame tick.
+uint32_t bodiesKnown();
+void setSystemOpen(bool system);
+// THE ARROW'S DEPTH on the System Map (kMapArrowDepthVS): just over what the arrow points at. Bodies there run from 80 units away to 2, so one fixed depth cannot do. The nearest body of all, the first cut, read 0.78 units in dump 103332590001 against 1.98 to the surface under the arrow: that body was behind the camera.
+// rayBodyDistance: along the ray from the camera, the nearest body's shell the ray hits; failing that, the point of closest approach to the body it passes closest to in angle, which meets the hit's distance at the limb, so the depth has no step as the arrow leaves a body. A body behind the camera is nobody's. 0: none in front.
+// The rows are MapBodies's (galaxy_map_vs.h kMapBodyRows).
+inline float rayBodyDistance(const float origin[3], const float ray[3], const float (*rows)[4], uint32_t n) {
+    float hit = 0.0f, passing = 0.0f, passingMiss = 0.0f;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float m[3] = {rows[i][0] - origin[0], rows[i][1] - origin[1], rows[i][2] - origin[2]};
+        const float along = m[0] * ray[0] + m[1] * ray[1] + m[2] * ray[2];
+        if (!(along > 0.0f)) continue;
+        const float shell = rows[kMapRadiusRow + i / 4][i % 4] * kMapBodyShell;
+        const float off2 = (std::max)(m[0] * m[0] + m[1] * m[1] + m[2] * m[2] - along * along, 0.0f);
+        if (off2 < shell * shell) {
+            const float t = (std::max)(along - std::sqrt(shell * shell - off2), kMapArrowMin);
+            if (hit == 0.0f || t < hit) hit = t;
+        } else {
+            const float miss = (std::sqrt(off2) - shell) / along;
+            if (passing == 0.0f || miss < passingMiss) { passing = along; passingMiss = miss; }
+        }
+    }
+    return hit > 0.0f ? hit : passing;
+}
+// 1 / depth, the MapBodies row's x; a distance of 0 has no depth to give.
+inline float arrowInverseDepth(float distance) { return distance > 0.0f ? 1.0f / (std::max)(distance, kMapArrowMin) + kMapArrowFloat : 0.0f; }
+// The eased step toward it: a depth that jumps from one body to the next would pop in stereo. No easing from 0, the arrow's first depth. A quarter of the way a frame settles in about 16 frames at 90 fps.
+constexpr float kArrowEase = 0.25f;
+inline float arrowDepthStep(float current, float target) {
+    if (current == 0.0f || target == 0.0f) return target;
+    const float next = current + (target - current) * kArrowEase;
+    return std::fabs(next - target) < 1e-4f * target ? target : next;
+}
+// The close view: a known body in the front of the view whose radius is at least this fraction of its distance, about 95 of the 2016 render pixels across. The far views measured stay below it (radius 0.44 at height 12.25, 0.036), the close views above (0.42 at 8.32, 0.05).
+constexpr float kCloseViewRatio = 0.05f;
+inline bool bodyFillsView(const float origin[3], const float forward[3], const float (*rows)[4], uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i) {
+        const float m[3] = {rows[i][0] - origin[0], rows[i][1] - origin[1], rows[i][2] - origin[2]};
+        const float distance = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+        if (rows[kMapRadiusRow + i / 4][i % 4] >= kCloseViewRatio * distance && m[0] * forward[0] + m[1] * forward[1] + m[2] * forward[2] > 0.5f * distance) return true;
+    }
+    return false;
+}
+// Frame tick, System Map only. ray: the arrow's, in the map's axes (the camera's forward when the cursor is not known yet).
+void updateArrowDepth(const float cameraPosition[3], const float ray[3], const float forward[3]);
+float arrowDepth();   // the last distance, for the 30 s line; 0 when none
 inline bool over() noexcept { return g_over.load(std::memory_order_relaxed); }
 
 // The draw is one of the swapped shaders and the map state wants it: the replacement vertex shader goes in for this draw and every re-issue (raw, so the binding shadow keeps
@@ -169,6 +238,12 @@ struct ProbeDraw {
     void* user = nullptr;
 };
 void probeIssue(ID3D11DeviceContext* ctx, int eye, uint64_t seq, ID3D11ShaderResourceView* mask, const ProbeDraw& pd);
+
+// THE MASK WITHOUT THE LAYER. With Anti-aliasing off, UI quality off or the layer stood down the layer takes no panel, so its second issues above never run and nothing would say the tip is on a panel. The hover
+// does not need the layer, and the mask and the probe need only the game's own issue: after it, a panel draw goes once more into an A8_UNORM mask the size of the target the game drew it into (the game's viewport still
+// fits), and the arrow's draw once more as the probe's point. Keyed by the target, so the two eyes need no name here. All state changed is put back. `draw` issues the game's draw as it was (panel) or as one point (arrow).
+void directPanelIssue(ID3D11DeviceContext* ctx, uint64_t vs, const ProbeDraw& draw);
+void directArrowProbe(ID3D11DeviceContext* ctx, const ProbeDraw& point);
 
 // A panel draw reached the eye's mask (eye-frame seq): counted by shader, and noted late when the eye's probe of that frame already ran.
 void noteMaskIssue(uint64_t vs, int eye, uint64_t seq);

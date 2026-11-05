@@ -234,6 +234,7 @@ constexpr char kMapArrowDepthVS[] =
     R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[8]; };
 cbuffer CB1 : register(b1) { float4 cb1[276]; };
+cbuffer MapBodies : register(b11) { float4 mapBody[32]; float4 mapArrow; };
 
 void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
           out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
@@ -245,7 +246,9 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, ui
     uint4 a = rec.a;
     v = mapSkin(a, v3.xy, v);
     float s = asfloat(a.y);
-    float3 center = rec.p.xyz - ((s < 0.0) ? float3(0.0, 0.0, 0.0) : cb1[275].xyz);
+    // The arrow's depth: W - eye is the arrow at |W|; W - eye * |W| / D is the same arrow, at the same size and on the same ray, at distance D. mapArrow.x is 1 / D: 0 on the Galaxy Map, whose stars are at infinity, and on the
+    // System Map just over the body it points at (galaxy_map_ui.h rayBodyDistance). Bodies there can be 2 units away, where an arrow at infinity sits a good way behind them in stereo.
+    float3 center = rec.p.xyz - ((s < 0.0) ? cb1[275].xyz * (length(rec.p.xyz) * mapArrow.x) : cb1[275].xyz);
     float4 q = mapQuat(a);
     float4 p = float4(mapRotate(q, v) * s + center, 1.0);
     o1 = float4(dot(cb0[4], p), dot(cb0[5], p), dot(cb0[6], p), dot(cb0[7], p));
@@ -351,6 +354,127 @@ void main(float4 v0 : TEXCOORD0, float v1 : TEXCOORD1, float3 v2 : POSITION0, fl
 )HLSL";
 
 // The probe: the arrow's record is the only one with a negative scale; every other record's point is put outside clip space (x = 2 > w = 1) and rasterizes nothing.
+// THE SYSTEM MAP'S MARKERS (docs/galaxy-map-vr-2026-11-03.md, "The System Map"). 12382D2EA45E9632 as the game has it, except that a record at a known body's centre is drawn k times larger about its own position, its vertices and its b span alike. MapBodies, vertex slot 11, holds the centres
+// and each k (galaxy_map_ui.cpp); a zero k ends the list, and a record at no known body is the game's. The match is 0.05 units: the records' positions and the bodies' constants round the same number apart.
+constexpr uint32_t kMapBodies = 32;
+// MapBodies, by row. kMapMarkerVS and kMapArrowDepthVS read only as far as the arrow's row.
+constexpr uint32_t kMapArrowRow = kMapBodies;        // x: 1 / the arrow's depth
+constexpr uint32_t kMapCameraRow = kMapBodies + 1;   // xyz: the map camera's position; w: 1 when it is known
+constexpr uint32_t kMapRadiusRow = kMapBodies + 2;   // the bodies' surface radii, four to a row
+constexpr uint32_t kMapBodyRows = kMapRadiusRow + kMapBodies / 4;
+// A body's shell: the settlements' records stand at 1.0157 of its surface radius (dump 103332590001: 0.425 on 0.4184). kMapArrowFloat is added to 1 / distance, which keeps it the same stereo step at any zoom: 3.8 pixels of disparity at 4032 per eye, measured at the dump's 96 pixels per 1 / unit.
+#define EDVR_MAP_BODY_SHELL 1.016
+#define EDVR_MAP_ARROW_FLOAT 0.04
+#define EDVR_MAP_ARROW_MIN 0.25
+constexpr float kMapBodyShell = static_cast<float>(EDVR_MAP_BODY_SHELL);
+constexpr float kMapArrowFloat = static_cast<float>(EDVR_MAP_ARROW_FLOAT);
+constexpr float kMapArrowMin = static_cast<float>(EDVR_MAP_ARROW_MIN);
+
+constexpr char kMapMarkerVS[] =
+    EDVR_MAP_COMMON_HLSL
+    R"HLSL(
+cbuffer CB0 : register(b0) { float4 cb0[12]; };
+cbuffer CB1 : register(b1) { float4 cb1[279]; };
+cbuffer CB2 : register(b2) { float4 cb2[2]; };
+cbuffer MapBodies : register(b11) { float4 mapBody[32]; float4 mapArrow; };
+
+void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
+          out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
+{
+    float3 v = mapVertex(v1.xyz);
+    float4 u = float4(v2.z & 0xFFFFu, v2.z >> 16, v2.x & 0xFFFFu, v2.x >> 16) * K32767 - 1.0;
+    float2 b = u.xy * 16.0;
+    o0 = (u.zw * cb2[1].xy) * 16.0 + cb2[1].zw;
+    Rec rec = T33[v0.x];
+    uint4 a = rec.a;
+    v = mapSkin(a, v3.xy, v);
+    float s = asfloat(a.y);
+    float3 W = rec.p.xyz;
+    float k = 1.0;
+    [loop] for (uint i = 0u; i < 32u; ++i) {
+        if (mapBody[i].w == 0.0) break;
+        float3 d = W - mapBody[i].xyz;
+        if (dot(d, d) < 0.0025) { k = mapBody[i].w; break; }
+    }
+    float4 p = float4(mapRotate(mapQuat(a), v) * (s * k) + (W - cb1[275].xyz), 1.0);
+    float3 pp = float3(dot(p, cb0[9]), dot(p, cb0[10]), dot(p, cb0[11]));
+    pp = cb1[277].xyz * (b.x * k) + pp;
+    pp = cb1[278].xyz * (b.y * k) + pp;
+    o1 = pp.y * cb1[271];
+    o1 = pp.x * cb1[270] + o1;
+    o1 = pp.z * cb1[272] + o1;
+    o1 = o1 + cb1[273];
+}
+)HLSL";
+
+// C31238331D8AC3D4 on the System Map: the reticule round the focused body, whose record stands at the body's centre, so in stereo it sat inside the planet. As the game has it, except that a record at a known body takes the eye term scaled, as the arrow's does:
+// rel - (eye - camera) * F is the same quad, at the same size and on the same ray, at distance |rel| / F. Here that is just over the body's shell, the arrow's height. A record at no known body, or no camera yet, is the game's.
+constexpr char kMapReticuleVS[] =
+    EDVR_MAP_COMMON_HLSL
+    "static const float kMapBodyShell = " EDVR_MAP_STR(EDVR_MAP_BODY_SHELL) ";"
+    "static const float kMapArrowFloat = " EDVR_MAP_STR(EDVR_MAP_ARROW_FLOAT) ";"
+    "static const float kMapArrowMin = " EDVR_MAP_STR(EDVR_MAP_ARROW_MIN) ";"
+    R"HLSL(
+cbuffer CB0 : register(b0) { float4 cb0[12]; };
+cbuffer CB1 : register(b1) { float4 cb1[279]; };
+cbuffer MapBodies : register(b11) { float4 mapBody[32]; float4 mapArrow; float4 mapCamera; float4 mapRadius[8]; };
+
+void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, uint4 v1 : PACKEDVERTEXDATAA, uint4 v2 : PACKEDVERTEXDATAB, uint4 v3 : PACKEDVERTEXDATAC,
+          out float2 o0 : TEXCOORD0, out float4 o1 : SV_POSITION)
+{
+    float3 v = mapVertex(v1.xyz);
+    float4 u = float4(v2.z & 0xFFFFu, v2.z >> 16, v2.x & 0xFFFFu, v2.x >> 16) * K32767 - 1.0;
+    float2 b = u.xy * 16.0;
+    o0 = u.zw * 16.0;
+    Rec rec = T33[v0.x];
+    uint4 a = rec.a;
+    v = mapSkin(a, v3.xy, v);
+    float s = asfloat(a.y);
+    float3 W = rec.p.xyz;
+    float3 center = W - cb1[275].xyz;
+    if (mapCamera.w != 0.0) {
+        [loop] for (uint i = 0u; i < 32u; ++i) {
+            if (mapBody[i].w == 0.0) break;
+            float3 d = W - mapBody[i].xyz;
+            if (dot(d, d) < 0.0025) {
+                float3 rel = W - mapCamera.xyz;
+                float dist = length(rel);
+                float surface = max(dist - mapRadius[i >> 2][i & 3u] * kMapBodyShell, kMapArrowMin);
+                center = rel - (cb1[275].xyz - mapCamera.xyz) * (dist * (1.0 / surface + kMapArrowFloat));
+                break;
+            }
+        }
+    }
+    float4 p = float4(mapRotate(mapQuat(a), v) * s + center, 1.0);
+    float3 pp = float3(dot(p, cb0[9]), dot(p, cb0[10]), dot(p, cb0[11]));
+    pp = cb1[277].xyz * b.x + pp;
+    pp = cb1[278].xyz * b.y + pp;
+    o1 = pp.y * cb1[271];
+    o1 = pp.x * cb1[270] + o1;
+    o1 = pp.z * cb1[272] + o1;
+    o1 = o1 + cb1[273];
+}
+)HLSL";
+
+// THE CUT-OUT BEHIND THE BODIES (ui_layer.cpp mapBodiesPunch). On the System Map the game draws the grid and the stems before most bodies and lets the bodies cover them. In the layer they would lie over the bodies, so at the first draw that comes after the bodies the layer goes back to clear wherever the
+// game's depth holds anything. The mapping is the seed's (fixed_shader_source.h kUiSeedPsDepthNoStencil), the jitter included; the clear is kUiLayerClear. The depth is reversed and cleared to 0.
+constexpr char kMapPunchVS[] = R"HLSL(
+float4 main(uint id : SV_VertexID) : SV_POSITION {
+    float2 p = id == 0u ? float2(-1.0, -1.0) : (id == 1u ? float2(-1.0, 3.0) : float2(3.0, -1.0));
+    return float4(p, 0.0, 1.0);
+}
+)HLSL";
+constexpr char kMapPunchPS[] = R"HLSL(
+cbuffer CB0 : register(b0) { uint2 inSize; uint2 outSize; float2 jitter; float2 pad; };
+Texture2D<float> D : register(t0);
+float4 main(float4 p : SV_POSITION) : SV_Target {
+    int2 q = int2(floor(p.xy * float2(inSize) / float2(outSize) + jitter));
+    q = clamp(q, int2(0, 0), int2(inSize) - 1);
+    if (D.Load(int3(q, 0)) <= 0.0) discard;
+    return float4(0.0, 0.0, 0.0, 1.0);
+}
+)HLSL";
+
 constexpr char kMapProbeVS[] = R"HLSL(
 struct Rec { uint4 a; float4 p; float4 pad[19]; };
 StructuredBuffer<Rec> T33 : register(t33);
