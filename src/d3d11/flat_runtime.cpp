@@ -711,6 +711,7 @@ struct State {
         return noSceneFlag && standDown.standing && standDown.standReason == FlatMonoReason::NoScene;
     }
     bool copyFirstLogged = false;    // the once-a-session first admission line
+    bool copyFillLogged = false;     // ... and its once-a-session repeat for the first admission whose image a constant fill followed (the Holo-Me screen)
     uint32_t copyDeclineLines = 0;   // bounded per-session decline lines, each cause once
     const char* copyDeclineSeen[12]{};
 
@@ -4190,8 +4191,9 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
     if (sceneW)
         g_sceneSizes.store(flatHdrPackSizes(sceneW, sceneH, s.prefix.width, s.prefix.height), std::memory_order_release);
     char text[1000];
-    if (diag.outcome == FlatCopyOutcome::Admitted && !s.copyFirstLogged) {
+    if (diag.outcome == FlatCopyOutcome::Admitted && (!s.copyFirstLogged || (diag.srcFills && !s.copyFillLogged))) {
         s.copyFirstLogged = true;
+        if (diag.srcFills) s.copyFillLogged = true;
         const auto route = flatResolveRoute(s.engine, out.renderWidth, out.renderHeight, out.outputWidth, out.outputHeight);
         flatCopyFormatFirstAdmission(text, sizeof(text), s.prefix.frame, diag, route.name);
         Log::get().note("%s", text);

@@ -145,6 +145,9 @@ struct Build {
     bool stockFamily = false;            // a pool-family draw left stock (no pixel shader the producer substitutes) into the scene's depth
     bool sExplicitWrite = false;         // a Clear, Copy, Update or Map into S after its pass (the prefix model marks S bad)
     bool sClearedBefore = false;         // ...and the game clearing S for its own use BEFORE its pass: not marked
+    uint32_t sFills = 0;                 // full-screen constant fills (the Holo-Me screen's) drawn into S after its writers
+    bool fillFirst = false;              // ...and one drawn into S before them
+    bool fillFullViewport = true, fillDepth = false;   // a fill that is not full viewport, or is drawn with a depth buffer, is no fill
 };
 struct Built {
     std::unique_ptr<hdr_route_test::Stream> stream;
@@ -169,7 +172,14 @@ inline Built build(const Build& b) {
         if (!b.sFullViewport) d.key.viewport[2] = float(w) - 8.0f;
         s.draw(d, nullptr, t1);
     };
+    const auto writeFill = [&]() {
+        FlatRuntimeDraw d = s.make(S, b.fillDepth ? s.sc.probe : nullptr, w, h, b.sFormat, flat_mono_detail::kConstantFillVs,
+                                   flat_mono_detail::kConstantFillPs, false, false);
+        if (!b.fillFullViewport) d.key.viewport[2] = float(w) - 8.0f;
+        s.draw(d, nullptr, nullptr);
+    };
     if (b.sClearedBefore) flatRuntimeWritten(*s.prefix, S);   // S has no draw yet: nothing to mark
+    if (b.fillFirst) writeFill();
     if (b.sBeforeConsumer) writeS();
     s.write(s.sc.h);
     s.sceneDraws(b.poolSources ? 4 : 0, b.sceneDraws - (b.poolSources ? 4 : 0));
@@ -183,6 +193,7 @@ inline Built build(const Build& b) {
     }
     if (!b.sBeforeConsumer)
         for (uint32_t i = 0; i < b.sWriters; ++i) writeS(b.consumer && b.consumerWritesS && i == 0 ? s.sc.h : nullptr);
+    for (uint32_t i = 0; i < b.sFills; ++i) writeFill();
     if (b.sExplicitWrite) flatRuntimeWritten(*s.prefix, S);   // the prefix model's own call for a Clear/Copy/Update/Map into a drawn target
     FlatRuntimeDraw c = s.make(s.sc.output, nullptr, b.sc.outW, b.sc.outH, 28, flat_mono_detail::kCopyVs,
                                flat_mono_detail::kCopyPs, false, false);
@@ -520,6 +531,26 @@ inline int flatCopyStructureTests() {
                diag.srcWidth == 3840 && diag.srcFormat == 27 && diag.srcDraws == 1 && !diag.menu,
                "the canonical unknown chain: the whitelist refuses (no-known-tone-pass), the structure admits S, H, its depth and camera");
 
+        // The Holo-Me screen (edvr_gfx_20261105_045527, flat_trace_185199.bin): the tone variant writes S, then a full-screen constant fill
+        // does. Offline, --trace-structure over that trace reads draws=2 and declines it; with the fill not counted it is the canonical chain.
+        for (const uint32_t fills : {1u, 2u}) {
+            Build filled; filled.sFills = fills;
+            Built f = build(filled);
+            FlatCopyDiag fd;
+            const FlatMonoFrame fsel = admit(f, policy(true, FlatMonoResolveMode::Dlss, true), &fd);
+            expect(f.whitelist.reason == FlatMonoReason::NoTonePass && fd.outcome == FlatCopyOutcome::Admitted && fsel.selected() &&
+                   fsel.color == f.stream->sc.tone && fsel.hdr == f.stream->sc.h && fd.srcDraws == 1u + fills && fd.srcFills == fills &&
+                   fsel.toneSequence != 0 && fsel.copySequence > fsel.toneSequence,
+                   fills == 1 ? "a constant fill after S's pass is no second pass: the chain is admitted, S the tone pass's, the fill counted"
+                              : "...and so are two, in a row");
+            char one[1000], none[1000];
+            flatCopyFormatFirstAdmission(one, sizeof(one), 1, fd, "trained-upscale");
+            FlatCopyDiag plain = fd; plain.srcFills = 0;
+            flatCopyFormatFirstAdmission(none, sizeof(none), 1, plain, "trained-upscale");
+            expect(std::strstr(one, "full-screen constant fill(s)") && !std::strstr(none, "constant fill"),
+                   "the first-admission line names the fills when there are some and reads as it always did when there are none");
+        }
+
         struct Row { const char* name; Build b; const char* why; };
         std::vector<Row> rows;
         auto add = [&](const char* name, const char* why, void (*edit)(Build&)) { Row r{name, Build{}, why}; edit(r.b); rows.push_back(r); };
@@ -540,6 +571,12 @@ inline int flatCopyStructureTests() {
             [](Build& b) { b.llmBefore = 2; b.consumerWritesS = false; });
         add("S is cleared, copied into or mapped after its pass", "the-copy-source-was-written-outside-a-draw",
             [](Build& b) { b.sExplicitWrite = true; });
+        // The Holo-Me screen's constant fill (flat_trace_185199.bin) is no second pass; anything else that writes S still is one.
+        add("a fill and a second image pass follow", "the-copy-source-is-not-written-by-one-pass",
+            [](Build& b) { b.sWriters = 2; b.sFills = 1; });
+        add("the fill is not full viewport", "the-copy-source-is-not-written-by-one-pass", [](Build& b) { b.sFills = 1; b.fillFullViewport = false; });
+        add("the fill is drawn with a depth buffer", "the-copy-source-is-not-written-by-one-pass", [](Build& b) { b.sFills = 1; b.fillDepth = true; });
+        add("the fill comes before S's pass", "the-copy-source-is-not-written-by-one-pass", [](Build& b) { b.fillFirst = true; });
         bool all = true;
         for (const Row& r : rows) {
             Built built = build(r.b);
