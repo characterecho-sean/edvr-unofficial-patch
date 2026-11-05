@@ -3116,7 +3116,7 @@ void testSupercruiseLines() {
               "GP13: the pointer's self-check, its second call of the projector and the other-caller note are gone");
         check(pointer.find("if (caller != s.pointerReturn && caller != s.systemReturn) return original(k, in, idx, out);") != std::string::npos && pointer.find("gamePinMatches(kSystemPointerReturnRva") != std::string::npos &&
                   pointer.find("return pointerCall(s, original, k, in, idx, out, caller == s.systemReturn);") != std::string::npos &&
-                  pointer.find("const bool open = galaxy || (s.systemReturn && mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
+                  pointer.find("const bool open = galaxy || system;") != std::string::npos && pointer.find("const bool system = mappointer::systemMapOn(galaxy, s.armed.load(std::memory_order_acquire), s.systemReturn, mapCameraAnyOpen());") != std::string::npos && pointer.find("mapui::setGates(galaxy, open);") != std::string::npos,
               "GP14: any caller but the two maps' pointer calls goes straight to the original projector; the System Map's is optional and pinned, and its gate opens the pointer alone, not the Galaxy Map's fixed icons");
         std::ifstream copyRoute("src/d3d11/map_ui_depth.h", std::ios::binary);
         check(!copyRoute.good() && screen.find("map_ui_depth.h") == std::string::npos && screen.find("mapuidepth") == std::string::npos && pointer.find("mapuidepth") == std::string::npos &&
@@ -3146,7 +3146,7 @@ void testSupercruiseLines() {
             const size_t unmapTee = screen.find("mapui::bodyConstantsUnmapped(res);"), realUnmap = screen.find("s->realUnmap(self, res, sub);", unmapTee);
             check(layerText.find("if (family == UiLayerFamily::kMapGrid) f.ds.depthTest = f.ds.stencilTest = false;") != std::string::npos && cutout != std::string::npos && blend != std::string::npos && cutout < blend &&
                       layerText.find("which == 0 && g_draw.hdr && mapui::systemOpen() && e.mapPunchSeq != g_draw.seq") != std::string::npos && unmapTee != std::string::npos && realUnmap != std::string::npos &&
-                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = !galaxy && mapCameraAnyOpen();") != std::string::npos,
+                      screen.find("f.mapPlaneIcon = count == 6;") != std::string::npos && screen.find("f.mapPlaneGrid = count == 1014;") != std::string::npos && pointer.find("mapui::updateArrowDepth(pose.position, ray, pose.rows[2]);") != std::string::npos && pointer.find("const bool system = mappointer::systemMapOn(galaxy, s.armed.load(std::memory_order_acquire), s.systemReturn, mapCameraAnyOpen());") != std::string::npos,
                   "GP17c: the System Map's grid takes no test in the layer, the bodies are cut out once an eye-frame before the first draw after them, the plane's icons are told from the grid by their count, and the markers' constants are read before the real Unmap");
             const std::string passText = slurp("src/d3d11/temporal_pass.cpp");
             check(passText.find("const bool still = temporalMapKeeps(mapCameraAnyOpen(), moved, mapRows);") != std::string::npos && passText.find("if (mapRows) p.split[0] = temporalSplitMetres(kTemporalShipMetres, true, false);") != std::string::npos &&
