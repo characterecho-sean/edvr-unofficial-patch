@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <string>
@@ -37,6 +39,52 @@ inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
     if (_stricmp(model.c_str(), "m") == 0) return {13, true};
     return {11, model.empty()};
 }
+
+// ---- A map is open (VR) -----------------------------------------------------------------------------------------------------
+// Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. Their lines, grid, stars and text write no depth, so the
+// temporal pass has no motion source for them and accumulates a ghost (the flat profile's finding, docs\design-flat-temporal-aa-2026-09-23.md,
+// 2026-10-10). The head's delta is the only motion the pass has for them, so the history is right while the game's camera moves as the head does
+// and wrong the moment the map itself pans, orbits or zooms. While one is open the VR pass keeps its jitter and history while the map camera is
+// at rest and resets the history, with no jitter, on any frame it is not (temporalMapMoved). The signal is the map camera's own pose, published
+// by the renderer hook (flat_stationary_camera_capture.h mapCameraChanges): head-free, and identical to the last digit at rest in three eye dumps
+// (docs\galaxy-map-vr-2026-11-03.md). No history at all (the first cut, 2026-11-03) left each frame a single un-antialiased upscale, and the head's
+// tremor, about a pixel a frame, made every thin stroke shimmer (the three eye dumps of 2026-11-04). The Full System Scanner (9) is not here: in VR
+// its own latch (fss_reveal) owns that screen.
+// `viewNamed`: the camera source's stage 0 is a map view (mapCameraAnyOpen), which opens the gate on its first frame instead of up to half a second
+// after the game, as the journal's reading does. `focusKnown` is false when the journal cannot say (the field is absent: on foot, in a menu).
+inline bool temporalMapOpen(bool viewNamed, bool focusKnown, unsigned focus) { return viewNamed || (focusKnown && focus >= 6u && focus <= 8u); }
+
+// The map camera moving, one instance per eye. `changes` is mapCameraChanges(): it advances on a publish that differs from the last by even one bit.
+// A look at a map frame is "moved" on the first one (no history to keep), when `changes` differs from the last look's, and on the look after a
+// change as well: the publisher runs on a game thread, so a frame's draws can be one publish behind the count the pass reads.
+struct TemporalMapMotion {
+    uint64_t seen = 0;
+    bool movedLast = false;
+    bool valid = false;
+};
+inline bool temporalMapMoved(TemporalMapMotion& m, uint64_t changes) {
+    const bool moved = !m.valid || changes != m.seen;
+    const bool result = moved || m.movedLast;
+    m.seen = changes;
+    m.movedLast = moved;
+    m.valid = true;
+    return result;
+}
+
+// The pass's verdict on the last map frame, one bit per eye (set: that eye's history was kept, the camera followed the head). native_temporal's begin()
+// reads both bits to decide whether the next frame is jittered; the flags bit 8 (kTemporalFlagMapKeep) on edvrTemporalAa hands the pass the decision.
+inline std::atomic<unsigned>& temporalMapStillBits() { static std::atomic<unsigned> bits{0}; return bits; }
+inline constexpr unsigned kTemporalFlagMapKeep = 256u;
+
+// THE SYSTEM MAP'S CLOSE VIEW: a body fills enough of the view that its surface's detail shows (galaxy_map_ui.cpp sets this each frame, galaxy_map_ui.h bodyFillsView). The scene there is the body, which writes depth, and the
+// backdrop; every line and icon went to the UI layer. The camera's rows move those exactly, so the history stays through the map camera's moves. A reset there leaves the surface's fine terrain an aliased half-resolution frame,
+// different on every frame of a move (docs\galaxy-map-vr-2026-11-03.md, "The close view's surface"). The far view still resets: its small moons write no depth, and the rows would move them as though at infinity.
+inline std::atomic<bool>& temporalMapCloseView() { static std::atomic<bool> v{false}; return v; }
+inline bool temporalMapKeeps(bool viewNamed, bool moved, bool rowsMoveTheScene) { return viewNamed && (!moved || rowsMoveTheScene); }
+
+// The VR map gate's answer for this frame (native_temporal's begin() stores it, once a frame), published so the draw thread loads one flag per draw: the
+// UI layer's family rule names the map's overlay pairs only while it is set (vscreen.cpp uiLayerFamilyOf, ui_layer_math.h UiFamilyFacts.mapOpen).
+inline std::atomic<bool>& temporalMapGateFlag() { static std::atomic<bool> flag{false}; return flag; }
 
 inline constexpr float kTemporalShipMetres = 10.0f;
 

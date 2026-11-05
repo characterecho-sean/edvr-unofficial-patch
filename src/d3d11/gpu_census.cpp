@@ -110,12 +110,12 @@ struct SectionState {
     // own totals are the per-section accumulator, not a label we would
     // otherwise have to attach and recover asynchronously, 3-4 frames later,
     // ourselves.
-    GpuIntervals<8> sampler;
+    GpuIntervals<8, GpuQueryOwner::GpuCensus> sampler;
     // The calibration pair: one empty begin/end, taken once per turn
     // alongside sampler's first timed call (gpuCensusBegin), from the same
     // place in the frame. A separate instance so a completed null sample is
     // never confused with a real one.
-    GpuIntervals<8> nullSampler;
+    GpuIntervals<8, GpuQueryOwner::GpuCensus> nullSampler;
     uint64_t occurrences = 0;        // every call this window, timed or not
     uint64_t issued = 0;             // of those, the calls that issued a real GPU pass (gpuCensusNoteIssued); the rest were empty scopes
     uint32_t skippedThisWindow = 0;  // timer begins that failed on the section's turn (not the K cap)
@@ -630,7 +630,7 @@ void gpuCensusEnd(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept {
 //     gpuCensusFrame closes the scope.
 // So the pair lies in the one scope. Two queries a frame, read back four frames later (GpuIntervals). The span includes GPU idle
 // inside the frame, not the idle between frames: a boundary-to-boundary span reads the frame period on a GPU with slack.
-GpuIntervals<kFrameSpanSlots> g_frameSpan;
+GpuIntervals<kFrameSpanSlots, GpuQueryOwner::GpuCensus> g_frameSpan;
 std::atomic<bool> g_frameWorkOpenFlag{false};   // a pair is open (begun, not yet ended)
 uint64_t g_frameSpanCompleted = 0;   // pairs read back, all time
 double g_frameSpanLastMs = 0.0;      // the last pair read back

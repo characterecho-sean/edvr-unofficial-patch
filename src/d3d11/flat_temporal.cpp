@@ -876,12 +876,24 @@ void flatTemporalStart(ID3D11Device* device) {
                     Config::get().requestedTemporalMode().c_str());
 }
 
-void flatTemporalArm(bool full) {
-    if (!runtimeFlatProfile() || !g.device) return;
+void flatTemporalArm(ID3D11Device* callerDevice, bool full) {
+    if (!runtimeFlatProfile()) {
+        Log::get().note("flat temporal: the capture key did not arm a capture: the flat profile is not active");
+        return;
+    }
+    // A session that began in VR never ran flatTemporalStart at device
+    // creation, so g.device is null until the first arm after a live switch.
+    ID3D11Device* device = g.device ? g.device : callerDevice;
+    if (!device) {
+        Log::get().note("flat temporal: the capture key did not arm a capture: no device is known yet");
+        return;
+    }
     const DWORD owner = detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire);
-    if (owner && owner != GetCurrentThreadId()) return;
+    if (owner && owner != GetCurrentThreadId()) {
+        Log::get().note("flat temporal: the capture key did not arm a capture: it was pressed on a thread other than the one that owns the flat window");
+        return;
+    }
     if (flatTemporalCapturing()) report(0, "rearmed");
-    ID3D11Device* device = g.device;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     flatTemporalStart(device);
     detail::g_flatTemporalManual.store(true, std::memory_order_release);

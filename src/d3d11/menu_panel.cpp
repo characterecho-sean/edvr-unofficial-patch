@@ -297,12 +297,26 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int tileH = u * 50 / 10;
     const int tileGap = cap / 4;
     const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
-    const int hintHUsed = c.hint[0] ? hintH : 0;
+    // The hint box is hintH tall on a page that holds it, and zero tall
+    // otherwise. On an entries page the row hints are row-dependent (the
+    // highlighted row's set one, the rest set none), so sizing the box to the
+    // hint's presence would make the whole panel grow and shrink by hintH as
+    // the highlight, and with it the scroll, moved over the rows that do and
+    // do not carry one -- the card changed size and shape while the page was
+    // scrolled. An entries page therefore sets reserveHint and the box keeps
+    // its height and is simply empty without a hint, the footer's own rule
+    // for the same reason (kFooterLines below). A page built without a hint
+    // line on purpose -- the Monitor, whose tiles spend the height better --
+    // leaves reserveHint clear and pays nothing for a box it never fills:
+    // the box is part of the bitmap's height, and a Pimax page that carries
+    // it for no reason would sit nearer the raster's 2048-px bound and stop
+    // updating sooner.
+    const bool hintReserved = !c.toast && (c.hint[0] || c.reserveHint);
     // A locked FPS readout sits above the tabs so it stays visible while
     // the menu is scrolled or a tooltip is up.
     const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
     const int H = pad + overlayH + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) +
-                  graphH + hintHUsed + footH + pad;
+                  graphH + (hintReserved ? hintH : 0) + footH + pad;
     *outH = H;
 
     // Background.
@@ -439,11 +453,15 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             ops.push_back(h);
         }
         // Information rows carry long values, so the split sits further
-        // left for them than for a setting's label and value; a note has
-        // the whole width.
-        const int split = l.style == kMenuNote   ? cardW - pad
-                          : l.style == kMenuInfo ? cardW * 26 / 100
-                                                 : cardW * 6 / 10;
+        // left for them than for a setting's label and value; a note and a
+        // heading have no value on the right and take the whole line. A
+        // heading that kept a setting's split was ellipsised where the label
+        // column ended -- the Debug tab's "For bug reports. Both are off
+        // unless you turn them on." read as "Both are off unl..." -- with
+        // half the card sitting empty beside the cut.
+        const int split = l.style == kMenuNote || l.style == kMenuHeading ? cardW - pad
+                          : l.style == kMenuInfo                          ? cardW * 26 / 100
+                                                                          : cardW * 6 / 10;
         Op left;
         left.text = true;
         left.str = widen(l.left);
@@ -598,7 +616,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             h.rgb = kHint;
             ops.push_back(h);
         }
-        y += hintHUsed;
+        y += hintReserved ? hintH : 0;
         if (c.footer[0]) {
             // One single-line op per '\n'-separated line, each in its own
             // slot of the two-line box, so the single-line draw path
@@ -1606,6 +1624,46 @@ void menuPanelSubmit(const MenuContent& c) {
 bool menuPanelWorkerReadyForTest() {
     std::lock_guard<std::mutex> lock(g_w.m);
     return g_w.hasReady && !g_w.hasPending;
+}
+// The bitmap height layout() produces for `c`, so the test can assert a
+// page's shape is independent of which rows carry a hint (where it
+// reserves the hint box) and that it reserves nothing on a page that does
+// not. The raster's aspect is a pure function of this height, so a constant
+// height here is a constant on-screen card size (halfH = halfW * aspect).
+int menuPanelLayoutHeightForTest(const MenuContent& c) {
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int h = 0;
+    layout(c, ops, lines, &h, 0, nullptr);
+    return h;
+}
+// The rect layout() gives the text op it builds for line `i`'s left text: the
+// rect the raster draws that text into. A test measures against this and not
+// against a copy of how layout() derives it, so it fails when layout()'s split
+// changes. All four are zero when the line has no such op.
+void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int* x1, int* y1) {
+    if (x0) *x0 = 0;
+    if (y0) *y0 = 0;
+    if (x1) *x1 = 0;
+    if (y1) *y1 = 0;
+    if (i < 0 || i >= c.lineCount) return;
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int h = 0;
+    layout(c, ops, lines, &h, 0, nullptr);
+    if (i >= static_cast<int>(lines.size())) return;
+    // layout() records each row as a fraction of the height; the line's own
+    // text op is the one that starts at that row's top.
+    const int rowTop = static_cast<int>(lines[i].y0 * h + 0.5f);
+    const std::wstring text = widen(c.lines[i].left);
+    for (const Op& o : ops) {
+        if (!o.text || o.rect.top != rowTop || o.str != text) continue;
+        if (x0) *x0 = o.rect.left;
+        if (y0) *y0 = o.rect.top;
+        if (x1) *x1 = o.rect.right;
+        if (y1) *y1 = o.rect.bottom;
+        return;
+    }
 }
 #endif
 

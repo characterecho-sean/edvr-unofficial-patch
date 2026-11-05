@@ -93,12 +93,12 @@ static bool wiredEarlyEdge(const std::string& vscreen, const std::string& module
            found(module.find("#include \"srv_turret_sheet_latch.h\"")) && found(module.find("gateIn.statusOn = turret;")) && found(module.find("gateIn.scorpion = scorpion;")) && found(module.find("gateIn.srvSeat = (journalSeatKind() & 4u) != 0;"));
 }
 static bool wiredVscreenGate(const std::string& t) {
-    const size_t fn = t.find("bool drawGateSubscribed(State* s) {");
+    const size_t fn = t.find("uint32_t drawGateHolders(State* s) {");
     if (!found(fn)) return false;
-    // the term sits inside the OR chain, after the blend probe's; the chain's tail (introCurveWants();) is pinned by other rigs and is not touched
-    const size_t term = t.find("srvTurretHudWantsDraws() ||", fn);
+    // the term sits among the gate's holders, after the blend probe's; each holder is pinned to its name by sharp_weapons_test
+    const size_t term = t.find("if (srvTurretHudWantsDraws()) m |= gateHolderBit(GateHolder::SrvTurretHud);", fn);
     const size_t end = t.find("\n}\n", fn);
-    return found(term) && found(end) && term < end && t.find("blendProbeWantsDraws() ||", fn) < term && t.find("introCurveWants();", fn) > term;
+    return found(term) && found(end) && term < end && t.find("if (blendProbeWantsDraws())", fn) < term;
 }
 static bool wiredVscreenBoundary(const std::string& t) {
     const size_t tick = t.find("tkSrvTurretHud.run([&] { srvTurretHudFrameBoundary(g_state->ownerCtx); });");
@@ -273,7 +273,7 @@ static bool wiredAccessors(const std::string& journal, const std::string& tempor
 // The first scope's state note (srv_turret.h srvTurretHudCountIssue): the issues are counted at the game's own issue and at the re-issues, and each family's first scope says its state at every issue
 // it makes; the line is the one tools/edvr_log.py --health reads.
 static bool wiredStateNote(const std::string& vscreen, const std::string& t) {
-    const size_t reissue = vscreen.find("void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,");
+    const size_t reissue = vscreen.find("void pureDrawReissue(ReissueCaller who, ID3D11DeviceContext* self, char kind, UINT count,");
     const size_t reissueCount = found(reissue) ? vscreen.find("srvTurretHudCountIssue(self);", reissue) : std::string::npos;
     const size_t reissueSwitch = found(reissue) ? vscreen.find("switch(kind) {", reissue) : std::string::npos;
     // the game's own issue is counted in the four draw thunks' lambdas (after the real call), not in observedDraw, whose text other rigs pin
@@ -516,7 +516,7 @@ static void wiringCases() {
     check(!wiredEarlyEdge(vscreen, replaced(module, "gateIn.scorpion = scorpion;", "gateIn.scorpion = true;"), mathText), "control: a latch that ignores the journal's Scorpion trips the pin");
     check(!wiredEarlyEdge(vscreen, module, replaced(mathText, "if (indexCount != kGunnerSheetIndices && indexCount != kGunnerCardsIndices) return -1;", "")), "control: the shader hash before the index count trips the pin");
     check(wiredVscreenGate(vscreen), "vscreen.cpp: the pass is a term of the draw gate (the AA-off fast path would otherwise skip forwardWithVerdict)");
-    check(!wiredVscreenGate(replaced(vscreen, "        srvTurretHudWantsDraws() || // issue 140", "        false || // issue 140")), "control: a gate without the term trips the pin");
+    check(!wiredVscreenGate(replaced(vscreen, "    if (srvTurretHudWantsDraws()) m |= gateHolderBit(GateHolder::SrvTurretHud);", "    if (false) m |= gateHolderBit(GateHolder::SrvTurretHud);")), "control: a gate without the term trips the pin");
     check(wiredVscreenBoundary(vscreen), "vscreen.cpp: the boundary tick settles a binding, and the shutdown releases the pass after the bars'");
     check(!wiredVscreenBoundary(replaced(vscreen, "    srvTurretShutdown();\n", "")), "control: no shutdown trips the pin");
 

@@ -211,8 +211,8 @@ MUTANTS = [
     M("key-case-sensitive", "R10a", [("        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');\n", "")], "AUTO is not auto"),
     M("key-prefix-matches", "R10a", [("    return *text == 0;\n}\n\nenum class RuntimeKind", "    return true;\n}\n\nenum class RuntimeKind")], "autox is auto"),
     # ---- R12: the wiring pins (edits of copies of the sources the pins read) --------------------------------------------------
-    M("pin-gate-term-gone", "R12g", [("        witchspaceStarsHidden() || depthProbeWanted() ||\n        vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n",
-                                      "        witchspaceStarsHidden() || depthProbeWanted() ||\n")], "the draw gate does not list the instrument", "src/d3d11/vscreen.cpp"),
+    M("pin-gate-term-gone", "R12g", [("    if (vscreenFootprintWanted()) m |= gateHolderBit(GateHolder::Footprint);   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n",
+                                      "")], "the draw gate does not list the instrument", "src/d3d11/vscreen.cpp"),
     M("pin-applied-distance-lost", "R12f", [("footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, baseVertex, startInstance);", "footprintEyeDraw(self, 1.0f, baseVertex, startInstance);")],
       "the instrument is not told the distance its constants carry", "src/d3d11/vscreen.cpp"),
     M("pin-hook-for-every-draw", "R12f", [("            if (eyeGeometry && vscreenFootprintWanted())\n", "            if (vscreenFootprintWanted())\n")], "the hook runs for draws that are not eye draws", "src/d3d11/vscreen.cpp"),

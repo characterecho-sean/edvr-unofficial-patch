@@ -28,10 +28,7 @@ bool g_targetSharpFailed = false;
 
 namespace {
 
-// The composite's shape, from the census A/B that named it.
-constexpr char     kKind = 'X';
-constexpr uint32_t kIndices = 6;
-constexpr uint32_t kInstances = 1;
+// The composite's shape, from the census A/B that named it, is targetSharpShape (target_sharp.h).
 
 // vs E508648660A352B2, measured on game build 332753. Matched by hash
 // because the alternative -- matching on shape alone -- would catch every
@@ -315,7 +312,7 @@ void targetSharpConfigure(Config& cfg) {
 bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances) {
     if (!targetSharpWantsDraws()) return false;
-    if (kind != kKind || count != kIndices || instances != kInstances) {
+    if (!targetSharpShape(kind, count, instances)) {
         return false;
     }
     // Slot 0 is the interface surface: a Texture2D that is NOT eye-sized.

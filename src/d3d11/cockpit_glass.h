@@ -27,6 +27,9 @@ inline bool cockpitGlassLegacyLive() { return detail::g_cockpitGlassLegacy.load(
 // unknown). Returns the shader to bind: the replacement for the intact quality-3 canopy shader, else `ps`. The replacement is made the first time it is
 // wanted; if that fails, `ps` comes back and the glass is drawn stock.
 ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, uint64_t hash);
+// The game's shader hash when `actual` is the replacement the swap above hands the real call, else 0. A check of the actual binding against what the game bound
+// asks this: the swap is EDVR's own, so the binding is still the game's canopy.
+uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual);
 
 // The ice and condensation draws (docs\cockpit-glass-legacy-port.md section 11). The game draws the canopy with its own ice or condensation shader while they show, so the replacement
 // is not bound and the legacy dirt would vanish. While `legacy`, the draw thunks (owner context) call cockpitGlassOverlayBegin() after the game's draw: when the bound pixel shader is the

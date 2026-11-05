@@ -184,6 +184,16 @@ bool missingConsumerLeavesCurrentDrawStock(ID3D11DeviceContext* ctx) {
     return ok;
 }
 
+// The eye-draw note's early exit (item 3 of the VR draw-path test build): the out-of-line body's first act is to clear the
+// pending tonemap record, so a record that survives a call is proof the body was not entered. Arm the record, with or
+// without the header flag, then ask whether it is still pending.
+void crispProbeArm(bool headerFlag) {
+    g_crispPending = CrispTonePending{};
+    g_crispPending.pending = true;
+    detail::g_uiLayerCrispPending = headerFlag;
+}
+bool crispProbeRecordPending() { return g_crispPending.pending; }
+
 // ---- The back-off of the HDR HUD path and the weapons layer (2026-11-03). Each returns null when every step held, else the step that did not.
 // They read the production state directly and move the production clock (g_backOffSkewMs) instead of waiting.
 

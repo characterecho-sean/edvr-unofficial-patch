@@ -94,8 +94,9 @@ const ShardUnit kUnits[]={
     {"mapEasuGpuTests",4},{"mapSmaaLookupLeakTests",3},{"uiLayerSmaaGpuTests",3},{"sdkForegroundSupersampleGpuTests",5},
     {"upscalerSlotGpuTests",2},{"firstPersonGpuTests",1},{"firstPersonPhaseGpuTests",1},
     {"refusalGpuTests",2},{"skinGpuTests",5},{"copyRefusalViewGpuTests",2},{"copyForegroundGpuTests",2},
-    {"steadyDepthGpuTests",4},{"taaHistoryDepthGpuTests",5},{"contextIsolationGpuTests",2},
+    {"steadyDepthGpuTests",4},{"staleRecordGpuTests",4},{"vehicleFrameGpuTests",5},{"taaHistoryDepthGpuTests",5},{"contextIsolationGpuTests",2},
     {"originOpticalGpuTests",4},
+    {"flatDofBlurGpuTests",1},
     {"flatCelestialGpuTests",5},
 };
 int shardIndex=0,shardCount=0;   // 0/0: no --shard, everything runs
@@ -285,6 +286,8 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_first_person_phase_gpu_tests.h"
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
+#include "flat_vehicle_frame_gpu_tests.h"   // near pixels with no certified record ride the ship's record (flat profile, in a ship)
+#include "flat_stale_record_gpu_tests.h"   // a stale slot's pixel asks the record under it first (flat profile only)
 #include "flat_skin_gpu_tests.h"
 #include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
@@ -297,6 +300,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_celestial_gpu_tests.h"   // planet patch motion in the prep: the tangents, and the shipped prep with a planet record bound and not (2026-10-15)
 #include "flat_origin_ambiguity_gpu_tests.h"
 #include "flat_origin_optical_gpu_tests.h"
+#include "flat_dof_blur_gpu_tests.h"   // the depth-of-field blur's average: the production shader over a jitter cycle of frames
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     const char* usage="usage: flat_mono_resolve_test --self-test [--shard I/N|--only UNIT,UNIT]|--list-shards N|--dry-run|--print-goldens";
@@ -371,7 +375,10 @@ int main(int argc,char** argv) {
         // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
         // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
         if(shardRuns("steadyDepthGpuTests"))timedSuite("steadyDepthGpuTests",[&]{return steadyDepthGpuTests(device.Get(),context.Get());});
+        if(shardRuns("vehicleFrameGpuTests"))timedSuite("vehicleFrameGpuTests",[&]{return vehicleFrameGpuTests(device.Get(),context.Get());});
+        if(shardRuns("staleRecordGpuTests"))timedSuite("staleRecordGpuTests",[&]{return staleRecordGpuTests(device.Get(),context.Get());});
         if(shardRuns("originOpticalGpuTests"))timedSuite("originOpticalGpuTests",[&]{return originOpticalGpuTests(device.Get(),context.Get());});
+        if(shardRuns("flatDofBlurGpuTests"))timedSuite("flatDofBlurGpuTests",[&]{return flatDofBlurGpuTests(device.Get(),context.Get());});
         // EDVR's own TAA's history depth check (section 104): the best of four texels, shared with the check above. A jittered silhouette keeps its
         // history, a true disocclusion still resets, and both tests against the kernel with the old single-texel rule (and others) in: they must fail.
         if(shardRuns("taaHistoryDepthGpuTests"))timedSuite("taaHistoryDepthGpuTests",[&]{return taaHistoryDepthGpuTests(device.Get(),context.Get());});

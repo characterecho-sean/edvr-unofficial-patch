@@ -118,3 +118,15 @@
 0x51AA500 data   #   PreviewIface
 0x51AA388 data   #   PreviewObject
 0x55999C0 data   # completed-mission surface model vtable (native_on_foot_menu_surface.h)
+#
+# VR Galaxy Map pointer (docs\galaxy-map-vr-2026-11-03.md, Fix 3; galaxy_map_pointer.cpp).
+0x28948F0 code   # the projector's world-to-viewport function (vtable +0x18); prologue mov [rsp+8],rbx, five bytes stolen
+0x3B91EE9 code   #   the Galaxy Map visualisation's pointer call returns here (call rbx at 0x3B91EE7 inside 0x3B91D80)
+0x3AF92A7 code   #   the System Map's per-frame step's pointer call returns here (call rbx at 0x3AF92A5 inside 0x3AF9060)
+0x474A740 code   # the mouse cursor's per-frame update; prologue push rbp,rsi,rdi,r12 (six bytes stolen)
+# Vehicle rig (issue 186): ICameraTargetShip::SetTarget, the vehicle-change event vehicle_rig.cpp hooks.
+0x1096640 code   # vehicle_rig.cpp: SetTarget(this, handle)
+0x5F05D38 data   # vehicle_rig.cpp: the IKinematicRig token (a u32)
+0x5F2F274 data   # the vehicle modules token (a u32)
+0x55956B0 data   # the IKinematicRig concrete vtable
+0x559CF58 data   # the vehicle modules concrete vtable

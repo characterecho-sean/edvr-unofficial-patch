@@ -679,11 +679,11 @@ enum class UiLayerFamily : uint8_t {
                  // uiLayerFamilyOf/uiLayerFamilyFor -- uiLayerNoteOther
                  // assigns it, with the eye already known from the taken
                  // target, not derived by family.
-    kMapCanvas,  // flat only (flat_ui_layer_math.h flatUiMapFamilyOf, while GuiFocus 6, 7 or 8 -- the Galaxy Map,
-                 // the System Map, the Orrery -- is open): the map's GUI canvas composite (vs 12382D2EA45E9632 with
-                 // ps 855C469156AB997F), drawn into the HDR scene and taken into the flat UI layer. No VR classifier
-                 // names it: uiLayerFamilyFor's HDR branch never returns it.
-    kMapSprite,  // flat only, the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, with
+    kMapCanvas,  // while a map is open (flat: flat_ui_layer_math.h flatUiMapFamilyOf, GuiFocus 6, 7 or 8 -- the Galaxy Map,
+                 // the System Map, the Orrery; VR: UiFamilyFacts.mapOpen, uiLayerFamilyFor's HDR branch, docs\galaxy-map-vr-2026-11-03.md):
+                 // the map's GUI canvas composite (vs 12382D2EA45E9632 with ps 855C469156AB997F), drawn into the HDR scene and taken
+                 // into the UI layer. Without mapOpen no VR classifier names it.
+    kMapSprite,  // the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, with
                  // ps 539A4858CE3A3477 on the System Map, or with ps 964221955A9E77E7 on the Galaxy Map since game build 334473)
     kOnFootHud,  // F26 (sharp on-foot HUD): the on-foot HUD's panels and flight HUD, VS 95D01BA609BF7500 and 46546443FD3C3F88 with their
                  // pixel shaders (uiOnFootHudMatch), named only while the facts say native stereo is on foot (UiFamilyFacts.nativeOnFoot)
@@ -703,6 +703,12 @@ enum class UiLayerFamily : uint8_t {
                        // quads (a 3072-vertex Draw) into the lit HDR scene target, taken into the HDR layer as they are, the way the supercruise space dust is (the
                        // vertex shader builds each speck's size itself, so nothing about the draw changes but where it lands). Not a scene LINE: exempt from the density
                        // rule. Governed by fix.ui_quality, like the rest of the layer's scene draws. Appended after kScopeMark (2026-11-03) so no older family's number moves.
+    kMapMarks,         // the Galaxy Map's rings (vs 94EA991C3A03DBD9 with ps 65DAC561B5613454) and stems (vs 3028E7C6E0E097F9 with ps 6C28D59784CC493D), additive
+                       // (SRC_ALPHA, ONE) with no depth and no stencil into the R11G11B10F scene, named only while a map is open (UiFamilyFacts.mapOpen) and only
+                       // in VR: flat leaves them in its scene (flatUiLayerTakesFamily does not name it). Appended after kNormalSpaceDust (2026-11-04) so no older
+                       // family's number moves (docs\galaxy-map-vr-2026-11-03.md, Fix 2).
+    kMapPlane,         // the System Map's flat icons (vs 88DCF1164C640EC3 with ps FEDE6C9825C3828E, n=6), drawn after the bodies with the depth test the game gave them, named only while the System Map's camera is up (UiFamilyFacts.mapSystem): the vertex shader is a general one, also drawn on the Galaxy Map and in the world.
+    kMapGrid,          // the System Map's grid: the same pair at n=1014, drawn before most bodies at viewport depth 0. In the layer it takes no depth test; the bodies are cut out of the layer after it (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES). Both appended after kMapMarks (2026-11-05).
     kCount
 };
 
@@ -728,6 +734,9 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kShieldRipple: return "shield ripple";
         case UiLayerFamily::kScopeMark: return "scope mark";
         case UiLayerFamily::kNormalSpaceDust: return "normal-space dust";
+        case UiLayerFamily::kMapMarks: return "map rings and stems";
+        case UiLayerFamily::kMapPlane: return "map plane icons";
+        case UiLayerFamily::kMapGrid: return "map grid";
         default: return "none";
     }
 }
@@ -735,15 +744,15 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
 // The families the crisp take draws into the eye's HDR layer when they are drawn into the lit HDR scene target (the
 // cockpit's holo panels, the flight HUD, the target sprite, the eight holograms, the three supercruise draws: the
 // orbit lines, the bars and the space dust, and the normal-space dust). The ONE list: ui_layer.cpp's decision and the rigs' routing model both ask it.
-// The two map families (kMapCanvas, kMapSprite) are in it too: the flat layer asks for them only while a map is open
-// (flat_ui_layer_math.h), and no VR family rule names them, so the VR take never reaches them.
+// The three map families (kMapCanvas, kMapSprite, kMapMarks) are in it too: both layers ask for the first two only while a map is open
+// (flat_ui_layer_math.h; VR through UiFamilyFacts.mapOpen), and the third is VR's alone.
 inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
            f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark ||
-           f == UiLayerFamily::kNormalSpaceDust;
+           f == UiLayerFamily::kNormalSpaceDust || f == UiLayerFamily::kMapMarks || f == UiLayerFamily::kMapPlane || f == UiLayerFamily::kMapGrid;
 }
 
 // The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
@@ -1010,6 +1019,37 @@ inline const char* uiMarkDepthName(UiMarkDepth p) {   // the press line's labels
     }
 }
 
+// THE MAP'S DRAWS (flat draw census 2026-10-10; the VR eye dumps of 2026-11-04, docs\galaxy-map-vr-2026-11-03.md): drawn into the R11G11B10F scene after the bloom
+// and before the tonemap, while the Galaxy Map (GuiFocus 6), the System Map (7) or the Orrery (8) is open. The canvas and the sprites are SRC_ALPHA/INV_SRC_ALPHA with
+// stencil write only and no depth test; the rings and stems are SRC_ALPHA/ONE with neither. flat_ui_layer_math.h's kFlatUiMap* are aliases of the first two.
+constexpr uint64_t kUiVsMapCanvas = 0x12382D2EA45E9632ull, kUiPsMapCanvas = 0x855C469156AB997Full;
+constexpr uint64_t kUiVsMapSprite = 0xC31238331D8AC3D4ull;
+constexpr uint64_t kUiPsMapSpriteA = 0xBD0FEB3276C8B2D7ull;  // the 64x64 / 128x128 BC3 / BC7 icons (Galaxy, Orrery)
+constexpr uint64_t kUiPsMapSpriteB = 0x539A4858CE3A3477ull;  // the System Map's sprites (n=12)
+constexpr uint64_t kUiPsMapSpriteC = 0x964221955A9E77E7ull;  // the Galaxy Map's icons since game build 334473
+constexpr uint64_t kUiVsMapRings = 0x94EA991C3A03DBD9ull, kUiPsMapRings = 0x65DAC561B5613454ull;
+constexpr uint64_t kUiVsMapStems = 0x3028E7C6E0E097F9ull, kUiPsMapStems = 0x6C28D59784CC493Dull;
+constexpr uint64_t kUiVsMapPlane = 0x88DCF1164C640EC3ull, kUiPsMapPlane = 0xFEDE6C9825C3828Eull;
+// The System Map's lines round a body in its close view (dump 100700560001): two vertex shaders with one pixel shader, drawn after the body with its depth test. They take the plane icons' family.
+constexpr uint64_t kUiVsMapLinesA = 0x1DEF9D1F9183B1B8ull, kUiVsMapLinesB = 0xBA16062A2EB66F1Full, kUiPsMapLines = 0x33758387B70944A1ull;
+inline bool uiVsIsSystemMapOnly(uint64_t vs) { return vs == kUiVsMapPlane || vs == kUiVsMapLinesA || vs == kUiVsMapLinesB; }
+// The map frame's tonemap (VR eye dumps, 2026-11-04): vs 6F4B7B60C6C15BBF with ps 5EC48683F6C86A42, the scene at PS t0 and a 1008x1008 R11G11B10F bloom at t1. Its constant
+// buffer b2 is declared CB2[11] (176 bytes).
+constexpr uint64_t kUiVsMapTone = 0x6F4B7B60C6C15BBFull, kUiPsMapTone = 0x5EC48683F6C86A42ull;
+// Does this draw's vertex shader belong to a map's overlay pairs (vscreen.cpp reads the pixel shader's hash only for these, and only with a map open).
+inline bool uiVsIsMapOverlay(uint64_t vs) {
+    return vs == kUiVsMapCanvas || vs == kUiVsMapSprite || vs == kUiVsMapRings || vs == kUiVsMapStems;
+}
+// The map pairs' family, asked for the HDR target while a map is open.
+inline UiLayerFamily uiLayerMapFamilyOf(uint64_t vs, uint64_t ps) {
+    if (vs == kUiVsMapCanvas && ps == kUiPsMapCanvas) return UiLayerFamily::kMapCanvas;
+    if (vs == kUiVsMapSprite && (ps == kUiPsMapSpriteA || ps == kUiPsMapSpriteB || ps == kUiPsMapSpriteC))
+        return UiLayerFamily::kMapSprite;
+    if ((vs == kUiVsMapRings && ps == kUiPsMapRings) || (vs == kUiVsMapStems && ps == kUiPsMapStems))
+        return UiLayerFamily::kMapMarks;
+    return UiLayerFamily::kNone;
+}
+
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
     uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
@@ -1018,6 +1058,10 @@ struct UiFamilyFacts {
     bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
     bool nativeOnFoot = false;    // F26: fix.native_on_foot_sharp_hud is on, VR, and native stereo on foot (only VR's on-foot path sets it)
     bool scopeMark = false;       // A2: the scope lens is armed for the frame and this draw is 6 indices in 1 instance with a learned surface (the readout atlas) bound
+    bool mapOpen = false;         // VR: a map is open (the map camera's stage is named, or GuiFocus is 6..8): the HDR branch names the map pairs first. Flat's rule leaves it false
+    bool mapSystem = false;       // VR: the System Map's camera is up, so its flat plane's pair is named
+    bool mapPlaneIcon = false;    // that pair's draw is one of the plane's icons (n=6)
+    bool mapPlaneGrid = false;    // or the grid (n=1014). Flat's census shows the pair at another count too, a mesh of 58416 indices: that stays in the scene
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -1048,6 +1092,16 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
     }
 }
 
+// Can any pixel shader and any runtime fact make uiLayerFamilyFor name a family for this vertex shader on the HDR target (kind 1)? The
+// vertex shaders the kind-1 branch above tests, plus the panel and loader pair (the family probe records them whatever the family) and the
+// two runtime-gated names (the scope mark, the on-foot HUD), and a map's four overlay vertex shaders. False means kNone for every pixel shader. Kind 2 has no such answer: a
+// panel-sized draw is the screen for any vertex shader. The sharp_weapons_test rig proves the implication and scans this list against the rule.
+inline bool uiLayerFamilyHdrVsMayWant(uint64_t vs) {
+    return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || vs == kUiVsMapPlane || vs == kUiVsMapLinesA || vs == kUiVsMapLinesB || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
+           vs == kUiVsOrbitLines || vs == kUiVsSupercruiseBars || vs == kUiVsSpaceDust || vs == kVsNormalSpaceDust || weaponsFireVs(vs) || shieldRefractVs(vs) ||
+           uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark;
+}
+
 inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why = nullptr) {
     UiFamilyWhy w = UiFamilyWhy::kOther;
     UiLayerFamily out = UiLayerFamily::kNone;
@@ -1076,7 +1130,14 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // here on the HDR target alone: the vertex shaders of the bars and of the dust
         // are also seen with another pixel shader (the flat recipes), and a draw of
         // theirs into the post-tonemap target is nothing this names.
-        out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
+        // The map's pairs come first while a map is open (UiFamilyFacts.mapOpen): none of the four vertex shaders is named by a rule below.
+        out = f.mapOpen ? uiLayerMapFamilyOf(f.vs, f.ps) : UiLayerFamily::kNone;
+        if (out == UiLayerFamily::kNone && f.mapSystem && f.vs == kUiVsMapPlane && f.ps == kUiPsMapPlane)
+            out = f.mapPlaneIcon ? UiLayerFamily::kMapPlane : f.mapPlaneGrid ? UiLayerFamily::kMapGrid : UiLayerFamily::kNone;
+        else if (out == UiLayerFamily::kNone && f.mapSystem && (f.vs == kUiVsMapLinesA || f.vs == kUiVsMapLinesB) && f.ps == kUiPsMapLines)
+            out = UiLayerFamily::kMapPlane;
+        if (out == UiLayerFamily::kNone)
+            out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
               : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
               : (f.vs == kUiVsOrbitLines && f.ps == kUiPsOrbitLines) ? UiLayerFamily::kOrbitLines

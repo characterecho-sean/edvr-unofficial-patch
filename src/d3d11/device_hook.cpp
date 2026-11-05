@@ -45,6 +45,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "native_on_foot.h"  // nativeOnFootFrameBoundary (the render-mode setter hook, flight F0)
+#include "flat_stationary_camera_capture.h"  // mapCameraFrame (the VR map camera's publisher)
+#include "galaxy_map_pointer.h"                // mapPointerFrame (the VR Galaxy Map's hover and panel depth)
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "store_hook.h"
 #include "flat_world_witness.h"
@@ -98,6 +100,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "mem_tick.h"        // memWatchTick: the process memory watch, once per owned Present (one atomic read; its thread does the sampling)
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
+#include "vehicle_rig.h"   // vehicleRigInstall at startup, vehicleRigPoll once a second (the vehicle frame's rigs, issue 186)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -1249,6 +1252,7 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // fix.black_void off, fix.panel_distance 1, no flash observation, advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs
 // transport-only): here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeOnFoot, "native_on_foot");
+EDVR_BOUNDARY_TICK(tkMapCamera, "map_camera");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 // A plugin's ownership of input is a lease spent here, once per Present, so it ends even when no eye is rendered (input_gate.h).
@@ -1349,7 +1353,7 @@ void tickHotkeys() {
         if (route == FlatDrawCaptureRoute::Passive) {
             flatTemporalArmPassive(g_state->device);
         } else if (route == FlatDrawCaptureRoute::General || route == FlatDrawCaptureRoute::Full) {
-            flatTemporalArm(route == FlatDrawCaptureRoute::Full);
+            flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);
             // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
             drawCensusFlatRequest();
         } else if (route == FlatDrawCaptureRoute::Vr) {
@@ -1633,6 +1637,9 @@ void presentFrameBoundary() {
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
+    // The VR map camera (flat_stationary_camera_capture.h): its watch on the renderer hook, installed and read here once a frame, on the render thread that installs the other hooks. Flat only stands it down.
+    // The Galaxy Map's pointer (galaxy_map_pointer.h) follows in the same tick: it reads the open state mapCameraFrame just decided.
+    tkMapCamera.run([] { mapCameraFrame(); mapPointerFrame(); });
     // Native on foot, after the journal's tick it reads (on foot, gameplay). The avatar hooks' boundary runs first: it acts on the want and the body
     // the previous frame's nativeOnFootFrameBoundary published (native_on_foot_hooks.h), which keeps their one-frame order.
     tkNativeOnFoot.run([] {
@@ -1712,6 +1719,8 @@ void presentFrameBoundary() {
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             lightGridCachePoll(stampMs());
+            // The vehicle rig's 30 s health line (issue 186).
+            vehicleRigPoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
             terrainCullCoverPoll(stampMs());
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
@@ -2991,6 +3000,8 @@ void hookDevice(ID3D11Device* device) {
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
             // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334925 is one log line.
             lightGridCacheInstall();
+            // The vehicle rig (vehicle_rig.cpp, issue 186): a hook on the camera's SetTarget that reads the player vehicle's rigs and supplies the flat profile's vehicle frame, both profiles; no key. A build that is not 334925 is one log line.
+            vehicleRigInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
             // profile passes through per call). A build that is not 334925 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());

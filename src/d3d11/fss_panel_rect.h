@@ -29,13 +29,6 @@ struct ID3D11DeviceContext;
 
 namespace edvr {
 
-// The composite's DrawIndexedInstanced arguments, stashed by the thunk
-// before recognition runs -- the capture windows use the very draw's own
-// values. (Inherited from the retired survey probe.)
-void fssPanelRectDrawArgs(int32_t baseVertex, uint32_t startInstance);
-uint32_t fssPanelRectStartInstance();
-int32_t fssPanelRectBaseVertex();
-
 // Called at EVERY recognised chrome composite while the heal is armed and
 // the mode latch is open. ordinal counts matched draws
 // within the frame (0-based); startInstance/baseVertex are the draw's

@@ -9,14 +9,21 @@
 //          with the instrument off, no call is made; on, every call is made.
 //   Cut E: classifier_memo.h (built 2026-10-27, the ui_depth eye-draw memo): a call hits only when something is stored, both halves
 //          of its key equal the stored key and the stored exit is a plain decline; a moved generation or epoch is a miss.
+//   Cut F: vs_may_want.h (build 2, #152): the byte stored beside the bound vertex shader's hash. A clear bit means the subscriber's own
+//          pure predicate rejects every pixel shader for that vertex shader; hash 0 and the shipped shaders are "may want".
+//   Cut H: draw_call_flags.h (build 6, item 3, #184): a draw's own flags and the pure "which second issues for these flags and this verdict" function vscreen.cpp's
+//          forwardWithVerdict calls: a skipped or blocked draw issues nothing, a layered draw issues neither coverage nor hologram, the planet coverage needs only the owner,
+//          and the pending clear is for the draw that set a pending flag alone.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/d3d11/classifier_memo.h"
+#include "../../src/d3d11/draw_call_flags.h"
 #include "../../src/d3d11/draw_fast_path.h"
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
 #include "../../src/d3d11/map_wait.h"
+#include "../../src/d3d11/vs_may_want.h"
 
 // The frame span holds at most kFrameSpanSlots pairs of two timestamps each (gpu_census.cpp); every one must fit the
 // clock's per-record lease budget (kLeases, 512), or a pair would be refused rather than held.
@@ -447,6 +454,82 @@ void usage() {
 
 }  // namespace
 
+// Cut F: the may-want byte against the subscribers' own predicates.
+void testVsMayWant() {
+    using namespace edvr;
+    check(vsMayWantByte(0) == kVsMayWantAll, "may want: hash 0 (a shader EDVR never hashed) wants every subscriber");
+    // The shipped shaders: each subscriber's vertex shader keeps its own bit set.
+    for (const ScreenMotionPair& p : kScreenMotionUiPairs) {
+        check((vsMayWantByte(p.vs) & kVsMayScreenUi) != 0, "may want: each screen motion UI vertex shader keeps its bit");
+        check(screenMotionUiPair(p.vs, p.ps), "may want: the pair table answers its own rows");
+    }
+    check((vsMayWantByte(kScreenMotionRecognizePair.vs) & kVsMayScreenRecognize) != 0, "may want: the recognised screen's vertex shader keeps its bit");
+    for (uint64_t vs : kWeaponMotionFamilyVs) check((vsMayWantByte(vs) & kVsMayWeaponMotion) != 0, "may want: each weapon motion vertex shader keeps its bit");
+    check((vsMayWantByte(kUiVsPanel) & kVsMayUiFamily) != 0 && (vsMayWantByte(kUiVsLoader) & kVsMayUiFamily) != 0,
+          "may want: the panel and loader vertex shaders always run the family check (its probe records them)");
+    check((vsMayWantByte(kUiVsScopeMark) & kVsMayUiFamily) != 0, "may want: the scope mark's vertex shader always runs the family check (runtime arming)");
+    check((vsMayWantByte(kUiVsOnFootHudA) & kVsMayUiFamily) != 0 && (vsMayWantByte(kUiVsOnFootHudB) & kVsMayUiFamily) != 0,
+          "may want: the on-foot HUD's vertex shaders always run the family check (runtime on-foot state)");
+    // Random shaders: a clear bit implies the subscriber's predicate rejects the vertex shader whatever the pixel shader.
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+    auto next = [&] { x ^= x << 13; x ^= x >> 7; x ^= x << 17; return x; };
+    unsigned clear[4] = {0, 0, 0, 0}, wrong = 0;
+    for (unsigned i = 0; i < 20000; ++i) {
+        const uint64_t vs = next(), ps = next();
+        const uint8_t m = vsMayWantByte(vs);
+        if (!(m & kVsMayScreenUi)) { ++clear[0]; wrong += screenMotionUiPair(vs, ps); }
+        if (!(m & kVsMayScreenRecognize)) { ++clear[1]; wrong += screenMotionRecognizePair(vs, ps); }
+        if (!(m & kVsMayWeaponMotion)) { ++clear[2]; wrong += weaponMotionFamilyHash(vs); }
+        if (!(m & kVsMayUiFamily)) ++clear[3];
+    }
+    check(wrong == 0, "may want: a clear bit never hides a vertex shader the subscriber's predicate accepts (random shaders)");
+    check(clear[0] == 20000 && clear[1] == 20000 && clear[2] == 20000 && clear[3] == 20000, "may want: an unknown shader clears every bit");
+    // One-token mutants of the shipped shaders: the bit is a function of the vertex shader alone, so a neighbour must not inherit it.
+    unsigned inherited = 0;
+    for (const ScreenMotionPair& p : kScreenMotionUiPairs)
+        for (int bit = 0; bit < 64; ++bit) inherited += ((vsMayWantByte(p.vs ^ (1ull << bit)) & kVsMayScreenUi) != 0) != screenMotionUiPairVs(p.vs ^ (1ull << bit));
+    check(inherited == 0, "may want: the bit tracks the predicate exactly (mutants of the screen motion shaders)");
+    // The skip helpers read one bit each.
+    check(!vsMaySkip(kVsMayWantAll, kVsMayScreenUi) && vsMaySkip(0, kVsMayScreenUi),
+          "may want: a bit set never skips, a bit clear always does");
+}
+
+// Cut H: a draw's own flags (draw_call_flags.h).
+void testDrawCallFlags() {
+    using namespace edvr;
+    DrawCallFlags none;
+    check(!none.uiDepth && !none.holoDepth && !none.composite && !none.planetPending && !none.worldScreenPending, "flags: a fresh DrawCallFlags is all false (what every early return of beginPanelOverride leaves)");
+    check(!drawCallOwnsPending(none), "flags: a draw that set no pending flag owns none (a foreign-context draw never clears the module's)");
+    DrawCallFlags planet; planet.planetPending = true;
+    DrawCallFlags screen; screen.worldScreenPending = true;
+    DrawCallFlags depth; depth.uiDepth = true; depth.holoDepth = true; depth.composite = true;
+    check(drawCallOwnsPending(planet) && drawCallOwnsPending(screen) && !drawCallOwnsPending(depth), "flags: only a planet or world-screen pending flag makes a draw the owner of the pending clear");
+    DrawCallFlags all; all.uiDepth = all.holoDepth = all.composite = all.planetPending = all.worldScreenPending = true;
+    // An ordinary owner draw with every flag set: every second issue is asked for.
+    DrawReissues r = drawReissuesFor(all, true, false);
+    check(r.uiDepthCoverage && r.hologram && r.planet && r.worldScreen, "reissues: an owner draw, not layered, issues the coverage, the hologram passes, the planet and the world screen");
+    // Layered: the take is not in the eye's colour, so the coverage, the hologram passes and the world screen are skipped; the planet coverage has no layered test.
+    r = drawReissuesFor(all, true, true);
+    check(!r.uiDepthCoverage && !r.hologram && r.planet && !r.worldScreen, "reissues: a layered draw skips the coverage, the hologram passes and the world screen, and keeps the planet's (as before)");
+    // A foreign-context draw: its flags are false, so nothing is issued on that context (#184's first stale consumer).
+    r = drawReissuesFor(none, false, false);
+    check(!r.uiDepthCoverage && !r.hologram && !r.planet && !r.worldScreen, "reissues: a draw with no flags of its own issues nothing (a foreign context never takes another draw's)");
+    // The planet and the world screen need the owner.
+    r = drawReissuesFor(all, false, false);
+    check(r.uiDepthCoverage && r.hologram && !r.planet && !r.worldScreen, "reissues: the planet and world-screen coverage need the owner context");
+    // Every combination of the five flags, the owner and layered: a second issue never appears without its own flag.
+    unsigned wrong = 0;
+    for (unsigned bits = 0; bits < 128; ++bits) {
+        DrawCallFlags f;
+        f.uiDepth = bits & 1; f.holoDepth = bits & 2; f.composite = bits & 4; f.planetPending = bits & 8; f.worldScreenPending = bits & 16;
+        const bool owner = bits & 32, layered = bits & 64;
+        const DrawReissues x = drawReissuesFor(f, owner, layered);
+        wrong += (x.uiDepthCoverage && !f.uiDepth) + (x.hologram && !f.holoDepth) + (x.planet && !(f.planetPending && owner)) + (x.worldScreen && !(f.worldScreenPending && owner && !layered));
+        wrong += (f.uiDepth && !layered && !x.uiDepthCoverage) + (f.holoDepth && !layered && !x.hologram) + (f.planetPending && owner && !x.planet);
+    }
+    check(wrong == 0, "reissues: over all 128 flag, owner and layered combinations a second issue is made exactly when its own flag and its conditions hold");
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) {
         std::puts("aa_off_test: dry run, nothing written");
@@ -470,6 +553,8 @@ int main(int argc, char** argv) {
     testOverlayLine();
     testMemoHit();
     testMemoRun();
+    testVsMayWant();
+    testDrawCallFlags();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

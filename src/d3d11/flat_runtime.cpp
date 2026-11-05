@@ -3,6 +3,8 @@
 #include "flat_origin_capture.h"
 #include "flat_runtime.h"
 #include "flat_star_glow.h"   // visual.star_glow
+#include "flat_dof_blur.h"    // the depth-of-field blur's average
+#include "flat_dof_blur_math.h"
 #include "ui_layer.h"          // UiGlowStar: the first level's star input
 #include "flat_sdk_bench_probe.h"
 #include "flat_capture_policy.h"
@@ -69,6 +71,9 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "cockpit_glass.h"
+#include "vehicle_frame.h"
+#include "vehicle_rig.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
@@ -109,6 +114,7 @@ bool FlatMapBounceD3DDriver::verify(void* real, const void* cached, size_t bytes
     return std::memcmp(real, cached, bytes) == 0;
 }
 std::atomic<bool> g_flatRuntimeLive{false};
+std::atomic<FlatMapBounce*> g_flatMapBounce{nullptr};   // flat_runtime.h: flatRuntimeMapBounceAnyOpen
 namespace {
 std::atomic<bool> nativeScale{false};
 std::atomic<uint64_t> mapBouncePresentEpoch{1};
@@ -456,10 +462,11 @@ struct State {
     // not; the draw that names the world then is the world's. worldReference is the last named world's, and the camera H selected for a
     // frame replaces it (the selector's choice is the world, naming's is a guess): a reference a first-person draw once set is put right by
     // the next H. A world camera that really changed would veto the world itself; three frames in a row that vetoed and never named give the
-    // reference up (kFlatNamingVetoFrames).
+    // reference up (kFlatNamingVetoFrames). A zoom fast enough to veto the world vetoes every world draw, and each is then captured, so a frame's
+    // kFlatNamingVetoDraws-th vetoed draw with the world's near plane gives the reference up at once and names the world (namingVetoed).
     bool namingVetoedThisFrame = false;
-    uint32_t namingVetoStreak = 0, namingVetoLogged = 0;
-    uint64_t namingVetoes = 0, namingVetoReleases = 0;
+    uint32_t namingVetoStreak = 0, namingVetoLogged = 0, namingVetoNearDraws = 0, namingVetoBoundLogged = 0;
+    uint64_t namingVetoes = 0, namingVetoReleases = 0, namingVetoBounded = 0;
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
     unsigned preset = ~0u;
@@ -707,6 +714,7 @@ struct State {
         return noSceneFlag && standDown.standing && standDown.standReason == FlatMonoReason::NoScene;
     }
     bool copyFirstLogged = false;    // the once-a-session first admission line
+    bool copyFillLogged = false;     // ... and its once-a-session repeat for the first admission whose image a constant fill followed (the Holo-Me screen)
     uint32_t copyDeclineLines = 0;   // bounded per-session decline lines, each cause once
     const char* copyDeclineSeen[12]{};
 
@@ -848,6 +856,25 @@ bool flatRuntimeMapOpenFrame() {
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
+// The vehicle frame (vehicle_frame.h, vehicle_rig.cpp's cockpit rig root; FlatMonoResolveFrame::vehicleFrame), at both treatment sites. The gate asks the FLAT journal reader,
+// journalFlatOnFoot: the VR-side known-status helper goes through journalWatchActive(), which is false in the flat profile, so a gate on it never opened. The frame is taken only in a vehicle
+// (known and not on foot); the last gate seen is what the 30 s line reports.
+static vframe::Gate g_vehicleGateSeen=vframe::Gate::kNoStatus;
+static void fillVehicleFrame(FlatMonoResolveFrame& f) {
+    bool onFoot=false;
+    const bool known=journalFlatOnFoot(&onFoot);
+    g_vehicleGateSeen=vframe::gate(known,onFoot);
+    f.vehicleFrame=false;
+    if(g_vehicleGateSeen!=vframe::Gate::kOn)return;
+    VehicleFrameRead frame;
+    if(vehicleRigFrameTake(engineVelocityPresentClock(),&frame)!=vframe::Why::kOk)return;
+    if(!vframe::useFrame(known,onFoot,true))return;
+    for(int i=0;i<3;++i){std::memcpy(&f.vehiclePosition[0][i],&frame.frame.now.pos[i],4);std::memcpy(&f.vehiclePosition[1][i],&frame.frame.prev.pos[i],4);}
+    for(int i=0;i<2;++i){f.vehicleQuat[0][i]=frame.frame.now.quat[i];f.vehicleQuat[1][i]=frame.frame.prev.quat[i];}
+    std::memcpy(f.vehicleSphere,frame.sphere,sizeof(f.vehicleSphere));
+    f.vehicleFrame=true;
+}
+
 static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
     if (f.reset) return;
     State::CameraOriginWindow& o = s.origin;
@@ -1088,11 +1115,11 @@ static void reportForegroundDomain(State& s) {
         (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified);
-    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s",
+    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu naming-veto-bounded=%llu last-refusal=%s",
         (unsigned long long)n.hCoveredFrames,
         (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
         (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
-        (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,
+        (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,(unsigned long long)s.namingVetoBounded,
         s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
     // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
     // "none" here even while every frame was refused (section 104, supersampled 4K).
@@ -1221,6 +1248,22 @@ template<class Draw,class Key>static bool namingVetoed(State& s,const Draw& d,co
     float rows[6][4];std::memcpy(rows,d.camera,sizeof(rows));
     FlatDomainWorldPrediction p;
     if(flatDomainPredictsWorld(rows,s.worldReference,&p))return false;
+    // More vetoed draws at the world's near plane than a first person makes: this camera is the world's, moved past the tolerance by a fast zoom.
+    // The reference goes now, not at the frame boundary, and false lets this draw name the world, so the rest of the frame is not captured.
+    if(flatNamingVetoBoundReached(p,s.namingVetoNearDraws)) {
+        ++s.namingVetoBounded;
+        if(s.namingVetoBoundLogged<12) {
+            ++s.namingVetoBoundLogged;
+            double p0=0,p1=0;const bool scale=flatCameraProjectionScale(rows,p0,p1);
+            Log::get().note("flat world naming bound %u/12: frame=%llu seq=%u VS=%016llX PS=%016llX camera=%016llX scale=%.6g,%.6g; world reference scale=%.6g,%.6g; %u vetoed draws this frame at the world's near plane are more than a first person makes, so this camera is the world's and this draw names it",
+                s.namingVetoBoundLogged,(unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,
+                (unsigned long long)k.cameraHash,scale?p0:0.0,scale?p1:0.0,s.worldReference.p0,s.worldReference.p1,s.namingVetoNearDraws);
+        }
+        s.worldReference=FlatDomainWorldReference{};
+        // The vetoed draws before this one were captured as first-person with the world's camera, so this frame cannot qualify. TAA captures nothing.
+        if(s.engine!=FlatMonoResolveMode::Taa)domainFail(s,"naming-bound","foreground-world-draws-captured-first-person",k);
+        return false;
+    }
     s.namingVetoedThisFrame=true;++s.namingVetoes;
     if(s.namingVetoLogged<12) {
         ++s.namingVetoLogged;
@@ -1342,7 +1385,11 @@ static void noteReplayQueryCheck(State& s,ID3D11DeviceContext* ctx,bool rejected
 }
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
-    static FlatMapBounce* bounce = new FlatMapBounce(*driver);
+    static FlatMapBounce* bounce = [] {
+        FlatMapBounce* made = new FlatMapBounce(*driver);
+        g_flatMapBounce.store(made, std::memory_order_release);
+        return made;
+    }();
     return *bounce;
 }
 struct MapBounceWindow {
@@ -1737,6 +1784,7 @@ bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
 // of that size, a full viewport. Names the scene HDR's resource at t0 for the model, as the menu copy's verification does.
 constexpr uint64_t kDofCompositeVs=0x20F383BBAC05C031ull;
 constexpr uint64_t kDofCompositePs=0xBF2302BCC7B434DBull;
+static_assert(kDofCompositePs==kFlatDofBlurCompositePs,"the blur's average names the same composite");
 bool verifyDofComposite(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kDofCompositeVs || k.ps!=kDofCompositePs || k.format!=26)return false;
@@ -2879,7 +2927,9 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     bool shadersMatch = false;
     if (cs) { s.context->CSGetShader(&actualCs,nullptr,nullptr); shadersMatch=lookupShaderHash(actualCs.Get())==cs; }
     else { s.context->VSGetShader(&actualVs,nullptr,nullptr); s.context->PSGetShader(&actualPs,nullptr,nullptr);
-        shadersMatch=lookupShaderHash(actualVs.Get())==vs && lookupShaderHash(actualPs.Get())==ps; }
+        // visual.cockpit_glass = legacy swaps the canopy's pixel shader at the bind, so the actual one is EDVR's: that is still the game's canopy. Without this the F10 audit, the one
+        // path that reaches here under Upstream ownership, took the swap for a modded context and held the route in observation for the whole 900-frame arm (issue 193).
+        shadersMatch=lookupShaderHash(actualVs.Get())==vs && (lookupShaderHash(actualPs.Get())==ps || cockpitGlassReplacedHash(actualPs.Get())==ps); }
     if (!shadersMatch) {
         if(audit) { ++s.projectionMissing;projectionDetail(s,vs,ps,cs,100,"actual-shader-mismatch"); }
         // Local refusal only on the draw path (cs==0); the dispatch path
@@ -3436,6 +3486,7 @@ void flatRuntimeResize() {
     // composited (none of them the back buffer, all of them released), and the door, so a fresh one arms the layer.
     flatUiLayerRelease();
     flatStarGlowRelease();   // visual.star_glow: the star layer is the scene target's size, made afresh by the next star frame
+    flatDofBlurRelease();    // the depth-of-field blur's average: made afresh by the next composite
     s.drawPackets.cancel();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
@@ -4161,8 +4212,9 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
     if (sceneW)
         g_sceneSizes.store(flatHdrPackSizes(sceneW, sceneH, s.prefix.width, s.prefix.height), std::memory_order_release);
     char text[1000];
-    if (diag.outcome == FlatCopyOutcome::Admitted && !s.copyFirstLogged) {
+    if (diag.outcome == FlatCopyOutcome::Admitted && (!s.copyFirstLogged || (diag.srcFills && !s.copyFillLogged))) {
         s.copyFirstLogged = true;
+        if (diag.srcFills) s.copyFillLogged = true;
         const auto route = flatResolveRoute(s.engine, out.renderWidth, out.renderHeight, out.outputWidth, out.outputHeight);
         flatCopyFormatFirstAdmission(text, sizeof(text), s.prefix.frame, diag, route.name);
         Log::get().note("%s", text);
@@ -4221,6 +4273,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // visual.star_glow: the setting (live), the new frame's state and the 5 s line, before any early return below -- a setting above 100 whose scope
     // never ran still prints its line, with every count zero.
     flatStarGlowFrame(frame + 1, s.frameLive);
+    flatDofBlurFrame(frame + 1);
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
@@ -4360,6 +4413,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // adopted after a resize cleared the old one) releases every device child the shared layer keeps; same device, nothing.
     flatUiLayerNoteDevice(s.device.Get());
     flatStarGlowNoteDevice(s.device.Get());
+    flatDofBlurNoteDevice(s.device.Get());
     // Stand-down (flat_standdown.h): what the frame that just ended showed about its
     // chain, and the mode of the frame that starts now. Before anything below reads s.work.
     bool engineConfiguredPaused = enginePausedThen;
@@ -4773,6 +4827,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
+    s.namingVetoNearDraws=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;
     s.producerRun.armed = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
@@ -4805,11 +4860,26 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat dof composite: accepted=%llu refused=%llu last-refusal-frame=%llu last-refusal-mask=%04X source-first-bad=%s",
             (unsigned long long)s.dofCompositesAccepted,(unsigned long long)s.dofCompositesRefused,(unsigned long long)s.dofLastFrame,
             s.dofLastMask,flatRuntimeConflictName(s.dofLastSourceBad));
+        flatDofBlurLogWindow();
         // The steady-detail rule (always on: the resolver is handed steadyDetail = true at both treatment call sites), every window while a
         // temporal mode runs, zeros included: the resolves whose prep ran the depth check against last frame's depth (ran) and the ones
         // that could not (skipped: a reset frame is neither). "depth-check=0/0" is no frame reaching the resolver in the window; ran=0 with
         // skipped above 0 is the check never having had a depth to check against. The token reads "on" in every build's log (the log
         // reader parses it, and older logs carried "off" for a rig that had set the retired key off).
+        {
+            // The vehicle frame (vehicle_frame.h; vehicle_rig.cpp's cockpit rig root): every 30 s (every sixth of these windows), zeros included, so a gate that never opens cannot hide.
+            // gate=off(no-status) is the journal watcher saying nothing about on foot (the flat reader is journalFlatOnFoot, never journalOnFootKnown, which
+            // is false in flat); gate=off(on-foot) is on foot, where the frame is never used. asked is the resolves that wanted a frame.
+            static unsigned vehicleWindows=0;
+            if(++vehicleWindows%6==0) {
+            VehicleFrameWindow vw;
+            vehicleRigFrameWindow(&vw);
+            Log::get().note("flat vehicle frame 30s: gate=%s rig=\"%s\" sphereR=%.3f asked=%llu with-frame=%llu from-older-rig=%llu no-frame[missing=%llu not-adjacent=%llu changed=%llu]%s",
+                vframe::gateName(g_vehicleGateSeen),vw.rigKnown?vw.name:"none",vw.rigKnown?vw.sphereRadius:0.0f,(unsigned long long)vw.asked,(unsigned long long)vw.with,(unsigned long long)vw.fromOlder,
+                (unsigned long long)vw.missing,(unsigned long long)vw.notAdjacent,(unsigned long long)vw.changed,
+                !vw.live?" hook=not-installed(a build other than 334925, or the SetTarget signature or a data address did not resolve; see the vehicle_rig: not installed line: no frame can exist)":"");
+            }
+        }
         {
             const FlatMonoRefusalCensus steady=flatMonoResolveTakeRefusalCensus();
             Log::get().note("flat steady detail 5s: steady-detail=on depth-check=%llu/%llu; a stale-slot pixel takes the camera term only where "
@@ -4832,12 +4902,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu vehicle-frame=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
-                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],"off",
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],(unsigned long long)steady.skinned,s.refusalView?"on":"off",
                     used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
@@ -5544,6 +5614,8 @@ void* flatRuntimeMapBounceInstall(ID3D11DeviceContext* context, ID3D11Resource* 
 }
 FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext* context,
                                                      ID3D11Resource* resource) {
+    // The open test first, so the flat CPU report's kShadows scope times only a call that can do something: beginUnmap returns at this same test.
+    if (!mapBounce().anyOpen()) return {};
     flatcpu::Scope shadows(flatcpu::kShadows);
     return mapBounce().beginUnmap(reinterpret_cast<uintptr_t>(resource),
                                   reinterpret_cast<uintptr_t>(context));
@@ -7001,6 +7073,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // the frame goes to the copy route, which runs the spatial recovery in place of it (flatRuntimeMapTemporalOff).
     if (hdrTrigger && s.hdrKey == FlatHdrKey::Auto && s.hdrSelected.selected() && !flatRuntimeMapTemporalOff())
         treatHdr(s.hdrSelected, s.hdr.trigger.srvSlot);
+    // The draw that lays the game's depth-of-field blur over the scene (flat_dof_blur.h): beginActualDraw binds the mean of the recent frames' blur, for this draw only.
+    if (flatDofBlurComposite(k.ps)) {
+        dofBlur = true;
+        dofBlurPs = k.ps;
+    }
     // fix.ui_quality's HUD bloom (flat_ui_layer.h flatUiGlowWanted): the trigger that writes a half-size target of H is the bloom chain's first level,
     // which reads the H the layer's HUD is not in. The route's resolve above has written H by now; beginActualDraw binds H' = H + the HUD's light at the
     // slot the trigger read H at, for this draw only. Asked on every route: the copy route's frames have the same first level.
@@ -7254,6 +7331,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm=true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -7343,6 +7422,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         f.mode, f.renderWidth, f.renderHeight, f.outputWidth, f.outputHeight,
         f.evalWidth, f.evalHeight);
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
+    flatDofBlurNoteCamera(s.prefix.frame, f.camera);   // for the next frame's composite: an average holds only while the camera is still
     const bool resetMissing = !s.havePrevious;
     const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
     const bool resetDepth = s.havePrevious && s.previous.depth != selected.depth;
@@ -7698,6 +7778,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.staleRecordTerm = true;   // a stale pixel asks the record under it before the camera term (flat only: the VR world route never sets this)
+    fillVehicleFrame(f);   // in a vehicle (journalFlatOnFoot): a near pixel with no motion of its own rides the cockpit rig's root
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {
@@ -7731,6 +7813,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         s.plannedResolve = plan; s.haveResolvePlan = true;
     }
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
+    flatDofBlurNoteCamera(s.prefix.frame, f.camera);   // for the next frame's composite: an average holds only while the camera is still
     const bool resetMissing = !s.havePrevious;
     const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
     const bool resetDepth = s.havePrevious && s.previous.depth != selected.depth;
@@ -7879,6 +7962,10 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         const bool haveStar=starFeed && flatStarGlowFeedInput(&star);
         const bool bound=flatUiGlowBegin(ctx,state().prefix.frame,glowSlot,glowHdr,glowVs,glowPs,glowHdrW,glowHdrH,glowTargetW,glowTargetH,&glowOriginal,haveStar?&star:nullptr);
         if(haveStar)flatStarGlowNoteFeed(star,bound,state().prefix.frame,glowSlot,glowVs,glowPs,glowHdrW,glowHdrH,glowTargetW,glowTargetH);
+    }
+    if(dofBlur && !dofBlurOriginal) {
+        auto& s=state();
+        flatDofBlurBegin(ctx,s.prefix.frame,s.phase.applied!=0,s.hdrTreated,s.phase.phaseCount,dofBlurPs,&dofBlurOriginal);
     }
     if(domainPlanned && !producer) {
         FlatComputeInternalScope internal;flatcpu::Scope captureCost(flatcpu::kForegroundCapture);
@@ -8167,6 +8254,7 @@ void FlatRuntimeDrawScope::endActualDraw() {
     if(uiBarsBound&&ctx){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
+    if(dofBlurOriginal){flatDofBlurEnd(ctx,dofBlurOriginal);dofBlurOriginal=nullptr;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
     if(drawPacketOnly)return;
     if(domainProtectedOverlay && !overlayStarted && !overlayReplayPending)
@@ -8219,6 +8307,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(uiBarsBound){flatUiLayerBarsEnd(ctx);uiBarsBound=false;}
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     if(glowOriginal){flatUiGlowEnd(ctx,glowSlot,glowOriginal);glowOriginal=nullptr;}
+    if(dofBlurOriginal){flatDofBlurEnd(ctx,dofBlurOriginal);dofBlurOriginal=nullptr;}
     FlatComputeInternalScope guard;
     if(domainStarted){
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;

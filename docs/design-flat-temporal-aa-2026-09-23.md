@@ -2,12 +2,13 @@
 
 ## Status
 
+- **State (2026-11-05, blurred highlights flicker in the operations lobby):** the game's depth-of-field blur reads the single jittered frame ahead of the copy route's resolve, so a highlight jitter hits or misses reaches DLSS as a real change; DoF off removes it (Sean, by eye). FIXED, FLOWN OK by eye on `5f868957` (DLSS K, FSR, XeSS at DoF 1): the composite reads the mean of the blur over the jitter's cycle while the camera is still (`flat_dof_blur.cpp`, no key). Not flown: the average at DoF 2 below native. Open: after a VR-to-flat switch DLSS runs preset K while the ini says M. See the entries "2026-11-05, flight 05:11", "the blur's average", "flight 06:42" and "flight 07:32".
+- **State (2026-11-05, Holo-Me stands the flat upscale down):** DIAGNOSED from Sean's `edvr_gfx_20261105_045527` (`v0.22.0-rc.6-210-g80c56505`, flat, DLSS, a 1920x1080 scene on a 3840x2160 output) and the Shift+NumLock trace it wrote; FIX FLOWN (Sean: fixed; the log agrees), ON MAIN. On the Holo-Me screen the game's final copy reads an image written twice, by the tone variant `CFA91824129ECBBC`/`2427BEBC2082175D` and then by a full-screen constant fill `E8FDC0D92EEBA6D7`/`5D07ACB4D5D5D92A` that reads nothing. The copy structure's one-pass rule declined every frame (`the-copy-source-is-not-written-by-one-pass`), flat stood down for `no-known-tone-pass` for the whole screen, and the commander got the game's own stretch. The rule now lets constant fills follow the first writer. Flight `edvr_gfx_20261105_062523` (`v0.22.0-rc.6-205-gf379c288`, `--expect-build HEAD` passed): the first-admission line carries the fill sentence at 06:27:22, no decline in any census window, no `no-known-tone-pass` stand-down, no F8 warning. Last entry.
+- **State (2026-11-04, cockpit pixels with no motion of their own, issues #186, #189):** FLOWN on `v0.22.0-rc.6-62-gef407e9c`, on a branch, not merged: the live-switch family loss, the capture key and the vehicle frame (near pixels ride the cockpit rig root's pose, read from the game, where last frame's depth confirms it). Sean: cockpits held up in a Cobra, Vulture, Sidewinder and an SRV, on foot good, stars gone (by eye). The temporary key is gone and the frame is permanent (`687e51c1`). Pink on the body in the FSD countdown and the tunnel: FIXED and flown (the camera target names the next instance's rig ahead of it being drawn, so the four most recent rigs are kept and the newest emitting one answers). The capture stall (#193) is fixed and flown. Flat to VR and back flown once, clean in the log. The second skin after a flat start (no skin join from the switch until an F7 restart): FIXED at the switch, ON MAIN `11ef91d5`, FLOWN once on foot (flight 13:38): armed 22 ms after the switch, E written on foot, EDVR's CPU the same as a VR start with the skin; the picture was not judged (entries "2026-11-04, the second skin at the switch to VR" and "2026-11-04, flight 13:38"). A flat start also carries `edvr-flat.ini`'s headset width (100%, 4508x4510) into VR where a VR start reads `edvr.ini` (4032): its own task, open. Open: the Options flicker (its own issue). See the entries "2026-11-04, flight 12:03", "2026-11-04, flight 12:48", "2026-11-04, flight 13:03" and the two second skin entries, last in this file.
 - **State (2026-10-29, a tool in hand over bare terrain, issue #145):** a tester's `edvr_gfx_20261029_180522` (v0.22.0-rc.3, Steam, DLSS, copy route): on foot, scanner out, panned to bare terrain: 238 frames refused `hdr-camera-changed`, the tool's glow pass (025B4B9F/46F92DC7, first-person camera) against the terrain's first camera. The October pool-less admission needs no source and no first-person draw, and a tool is both (`sources=1 first-person=3`; `overlays-without-named-world=0` all flight). Fix `ebd8c755` on branch `claude/aa-terrain-disengagement-793fa4`: admit when the target's first camera is the last world's and the drawing camera is not. FLOWN OK 2026-10-29 16:29 on Steam (`edvr_gfx_20261029_162800`): 1,478 frames on the path, all treated and selected source-free on the world camera, zero `hdr-camera-changed`. Last entry.
 - **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
 - **State (2026-10-22 3D main menu, render below output):** FLOWN with the cause logger (`edvr_gfx_20261022_121507`): the stand-down is `missing-depth-or-dsv`, the DoF composite `20F383BB/BF2302BC` writing the f26 image the tone reads with no depth; DoF off fixed it (user). MERGED (CI green, 618f1454): the composite taken as the scene HDR's alias (`dofCompositeVerified`, `flat dof composite:` line); the user reports it works with DoF on (no log read yet). See "2026-10-22: the 3D main menu at render below output".
-- **State (2026-10-21 shuttle, supercruise/planetary):** `edvr_gfx_20261021_133402` (`v0.20.1-13-gdb52d367`, Arc B390, XeSS, 960×600) is the first paired capture of the deferred `forward-mismatch`: in all 31 witnesses CB2 rows 10..16 are the donor camera with the requested phase removed, so every nonzero frame is refused and AA runs unjittered. Whole-camera omission repair `6b8f62c1`: FLOWN 2026-10-21 14:10 in supercruise, PASS (`edvr_gfx_20261021_141041`; last entry). Planetary flight not yet flown on it. Why the game drops the phase there: open. Suit/weapon loadout screen (`edvr_gfx_20261021_143902`): no deferred donor (source-free scene, only `vrOnly`/unkeyed G-buffer pairs), fixed by the source-free camera witness, the b1-free pairs and the lit-scene rule, FLOWN 2026-10-21 18:00 PASS on `5ffb3644` (last entries).
-- **State (2026-10-19 rc.5 flight):** `edvr_gfx_20261019_062037` (build 6AD4E0C0, RTX 3070 Ti Laptop, DLSS 1920×810 to 2560×1080) has 2,117 spatial fallbacks, 2,124 history resets and zero DLSS backend failures. All 35 complete deferred-camera captures are inverse-mismatch, and the strict matcher accepts them after the existing inverse-ray correction. The repair rejected them because its float reverse proof bounded the cancelled value. That proof now carries the reversed madd's pre-cancellation magnitude. Mouse timing and the delayed shipyard preview are not in this log. Confirmation flight of the Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed. (The 2026-10-17 RC4 state moved to Status detail below, 2026-10-21, unchanged.)
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -61,6 +62,9 @@
 
 ## Status detail (moved out of Status 2026-09-29)
 
+- **Moved out of Status 2026-11-05:**
+  - **State (2026-10-21 shuttle, supercruise/planetary):** `edvr_gfx_20261021_133402` (`v0.20.1-13-gdb52d367`, Arc B390, XeSS, 960×600) is the first paired capture of the deferred `forward-mismatch`: in all 31 witnesses CB2 rows 10..16 are the donor camera with the requested phase removed, so every nonzero frame is refused and AA runs unjittered. Whole-camera omission repair `6b8f62c1`: FLOWN 2026-10-21 14:10 in supercruise, PASS (`edvr_gfx_20261021_141041`; last entry). Planetary flight not yet flown on it. Why the game drops the phase there: open. Suit/weapon loadout screen (`edvr_gfx_20261021_143902`): no deferred donor (source-free scene, only `vrOnly`/unkeyed G-buffer pairs), fixed by the source-free camera witness, the b1-free pairs and the lit-scene rule, FLOWN 2026-10-21 18:00 PASS on `5ffb3644` (last entries).
+  - **State (2026-10-19 rc.5 flight):** `edvr_gfx_20261019_062037` (build 6AD4E0C0, RTX 3070 Ti Laptop, DLSS 1920×810 to 2560×1080) has 2,117 spatial fallbacks, 2,124 history resets and zero DLSS backend failures. All 35 complete deferred-camera captures are inverse-mismatch, and the strict matcher accepts them after the existing inverse-ray correction. The repair rejected them because its float reverse proof bounded the cancelled value. That proof now carries the reversed madd's pre-cancellation magnitude. Mouse timing and the delayed shipyard preview are not in this log. Confirmation flight of the Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed. (The 2026-10-17 RC4 state moved to Status detail below, 2026-10-21, unchanged.)
 - **Moved out of Status 2026-10-21:**
   - **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
     Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
@@ -18793,3 +18797,532 @@ The log says why: the new path ran and every frame on it was treated.
 The open question from the entry above is answered: the selector takes these frames source-free on the world camera. The `sources=1` record is not one the selector counts (`supported-draws=0`): another depth or another extent.
 
 The instruments stay: the 5 s fields cost nothing, and the detail line is six lines a session at most.
+
+
+## 2026-11-03: stars on dark cockpit surfaces (issue #186), DIAGNOSIS ONLY, nothing built
+
+Sean, Epic, flat, DLAA/FSR/XeSS/DLSS (model M): stars show on very dark cockpit surfaces and look like history; F7 (AA off) clears it. Log `edvr_gfx_20261103_201453` (`v0.22.0-rc.6-20-g8e189cd3`), draw census #1 at 20:18:25 (frame 17892, NumLock), screenshot 20:19:30.
+
+**Measured**
+
+- Engagement is not the problem: `flat hdr route 5s` treated 450 of 450, no declines; `flat source 5s` no-source-frames 0; `render-source=game-SS`, scene 3840x2160 = output (R=D). The configured backend is DLSS M and the artifact is the same under all four, so the common input is EDVR's: depth, motion, rejection, exposure, or a layer composited after the upscale.
+- The stars are census draws 175/176: vs 68DDDEF04D9894AF and F7A6E916F14A3B1A, ps 06332CA168B6DA63, 6977 and 19 instances, blend SRC_ALPHA/ONE (`15,2`), depth test GREATER_EQUAL, write off (`17wZ`), into the HDR target (`@77`) after the G-buffer. The cockpit's opaque surfaces are G-buffer draws 45-139 (`@66`, depth `@65`, write on). A star therefore fails the depth test on an opaque cockpit pixel in the game's own frame, which is what F7 shows. The stars on a surface come through history, or through a post-upscale layer.
+- Flat UI layer (30 s line 20:18:16): holo-panels asked 25,545, taken 25,512 (925ACEDA/738A98ED is a holo-panel family, `uiVsIsHoloPanel`); flight-hud and target-sprite taken; normal-space dust taken 2,304; `holograms asked=0`, so no kHoloGeneric row. The 2CECEC30/A4D03619 draws (14) are the stencil-only writer (docs\perf-audit-edvr-001-2026-10-23.md, G03), no colour.
+- `flat steady detail`: the depth-checked rule is always on (its key is retired), so it is not an A/B.
+- Neither star_glow nor smooth_bloom runs (`smooth_bloom = off`, no star_glow key).
+
+**Left in the frame, no depth write, in no layer family** (census draw numbers, frame 0): 165-169 (7E38A6AA, 8289669D, 963B52C7, 0357BBB2: the ring family of build-332753.md), 174 F8FA801F, 179-181 (D95905C1 billboard, D1281DF4 corona, 5E417E9D thruster smoke), 182-189 (B12F7A61/203DF517, the 5334-index shells), 195-196 (6DB587D2, 0B5981F2), 197 the canopy glass 8C091FFD (`15,6`, 5,994 indices), 214-215 the target sphere 5559BD94, 223-230 the radar group (DF3503CD, 5453D19B, A2C2D551, 9B34C331, 9611A454, B932058F, 94D5C556). A pixel one of these covers and that writes no depth takes the depth, and so the motion vector, of what is behind it (docs\dlss-blur-elements-2026-10-14.md "Mechanism", docs\hologram-depth-2026-09-24.md "The defect"). Flat has no hologram depth pass; the radar group and the target sphere were never routed.
+
+**Hypotheses, ranked.** Each names what the one flight reads.
+
+1. H1, a layer composite of a dark fill is wrong. The layer takes the holo panels out of H and composites them after the upscale as transmittance, testing against a seeded copy of the game's depth-stencil (the 925ACEDA line: depth GE no write, stencil ref 4). If the seed lacks what the game's own test saw (the stencil the 2CECEC30 writer lays down, or the cockpit's depth), a dark fill covers less than in the game and stars show through it. Reads: the stars are shaped like panel quads and are there with the ship still. `fix.ui_quality = off` removes them (a panel needs a relayout to change, so reopen the panel or switch panel tab).
+2. H2, unkeyed cockpit pixels take the world camera term. The prep (`flat_mono_shader_source.h` `prep`, `engineBefore`) gives a pixel with no certified record `cameraBefore(rawUv, depth)`, which treats it as a world point; a cockpit pixel moves with the camera, so a ship rotation gives it a motion it does not have and the history it reads is sky. Reads: the Motion source view paints those pixels blue (camera term, class 3/9) or white, and the stars appear only while the ship pitches, yaws or rolls.
+3. H3, the left-in-frame translucents above. Reads: the stars sit inside the footprint of canopy 197, the radar group or the sphere, and the Motion source view paints that footprint as it paints the sky.
+4. H4, history clamp on near-black pixels beside HDR stars (every backend, no motion error). Reads: the view paints the dark pixels green (exact record) or cyan, the ship is still, and `fix.ui_quality = off` changes nothing. Last because it needs the other three false.
+
+Discriminating pairs: H1 vs the rest by `ui_quality off` and by still-versus-rotating; H2 vs H3 by where the stars sit and what colour the view gives them.
+
+**Flight (Epic, flat, no build; one session).** Read the log with `python tools\edvr_log.py --target "C:\Program Files\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64" --expect-build HEAD` (Epic is a path, not a name). 1) In `edvr-flat.ini` set `flat_refusal_view = on` (Edit tool; live, the log prints `flat runtime: refusal view on` and the legend). 2) Find the artifact, ship still: screenshot (view on) then F8/ini view off, same spot, screenshot. 3) Same with the ship rolling slowly. 4) Press NumLock once with the artifact on screen (census plus the 600-frame class census, `flat capture general`). 5) Set `fix.ui_quality = off`, repeat 2. 6) F7 on and off once. Read: the screenshots' colours on the starred pixels, the class counts, and whether step 5 changes anything. Also note `fix.particle_billboard = steady` is set in this ini; `billboard roll-free ... none of the 16 vertex shaders drew` at 20:15:54, so it is not in play there, and `stock` is a free control if H1-H4 all fail.
+
+**Ruled out here:** route dropout (450/450 treated); star_glow and smooth_bloom (not running); the stars being drawn onto an opaque cockpit pixel by the game (depth test fails, and F7 is clean); steady detail as an A/B (always on).
+
+**Not yet known:** whether the screenshot's starred pixels are an opaque cockpit surface or a panel/glass footprint (the crop is ambiguous), and whether the ship was moving. No pixel dump of depth or motion exists in flat; if the first flight leaves H2 and H3 undecided the next step is a depth and motion readback of a 96x96 window at the screen centre, built as a log-only instrument, not a fix.
+
+
+## 2026-11-04: why the panels are pink, and what the 20:19 screenshot says (issue #186), no code changed
+
+Corrections to the 2026-11-03 entry, which read the screenshot as a plain frame. The log shows otherwise: `menu: advanced.flat_refusal_view off -> on` at 20:19:16, off at 20:22:03; the screenshot is 20:19:30. So the first half of that entry's flight has already flown: the view on, then at 20:21 DLSS to FSR to XeSS to off to TAA. No-slot pixels are dimmed by the view, not painted blue (blue is a pool surface that is not a rig record), and the view paints H before the tone pass, so the bloom chain carries the pink too: the purple halos on the cockpit are that. `smooth_bloom` was on at the census (20:18:25) and off at the screenshot (off at 20:19:08), and it only touches the tone pass; `star_glow` ran in the VR stretch and has no flat line. The entry's "no pixel dump exists in flat" is wrong: Shift+`hotkey.dump_draws` (NumLock) arms `flat pixels` and the resolve inputs (`flat_mono_resolve.cpp` `flatMonoResolveArmPixels`), read with `tools\flat_pixels.py` and `tools\flat_resolve_inputs.py`. "F10" in the source's comments and log lines is that key's old name; F10 itself is the game's screenshot key. `temporal_aa_engine_motion` is in the ini's comments but in no source: it is no A/B.
+
+**Why they are pink.** Pink is the view's colour for a stale slot it refused: `refusalPaint`, `(y, .4y, .7y)` with `y = 2 * max(luma, .02)`, shown raw. The panels are flat because their luma is under the .02 floor, so every one paints the same (measured plateau sRGB 145,80,118, linear ratio G/R .28, B/R .64 through the tone pass). Green is an exact record, white any other refusal, dim no engine slot. Measured over the frame: pink 6.55%, green .47%, the rest of the cockpit dim. There is no yellow to speak of (.02%, and that is HUD amber), so nothing is being kept: with the ship moving, the depth check refuses them all. The log has the speed: `prev-step=4.98` m a frame at 20:19:23.
+
+**Which draws (inference from the census and the code; F10's slot plane proves it).** A stale slot is a keyed draw that wrote its slot and a depth that is not the pixel's final depth. In the census two keyed pairs write no depth: vs_BBE5 / ps_DB3E (draw 159, `17wZ`, colour mask 6) and vs_5B4D / ps_4375 (155 and 157, `17wZ`, mask 1). docs\kinematic-motion-injection-2026-09-19.md names the first as the stale writer on a VR hull. The overlay guard covers BBE5 / DB3E here (`flat overlay guard: ... guarded draws 431920, declined state 0`), but only where the base slot's record is the decal's own. The cockpit body is dim, meaning no slot, so a decal on it has no base to match and keeps its own depth. vs_5B4D has no guard at all. Either way these are decals on an unkeyed body.
+
+- ruled out: the flat cockpit missing the overlay guard, because `flat overlay guard active` and its counters run through the whole flat stretch.
+
+**Sean's report: where it was pink, the skybox smeared over it. The screenshot agrees, and it changes the diagnosis.** The pink areas hold star-like specks, one pixel wide and spread over two rows, which is a one-pixel sprite through the jittered bilinear `Color.SampleLevel` of `finishHdr`. Density by the same test (a local maximum over 1.25 times the 7x7 median plus 12, at most six bright pixels in the window): sky 324 per Mpx (453 in 1.40 Mpx), pink 288 per Mpx (61 in .21 Mpx), dim cockpit 27 per Mpx (10 in .37 Mpx, several of them at window edges). A pink pixel is refused, and a refused pixel shows `Color`, the copy of H, with no history read. So these specks are in H itself.
+
+- ruled out: H2, H3 and H4 of the 2026-11-03 entry as how stars reach a PINK pixel, because a refused pixel reads no history and has its motion zeroed. They stay open for dim pixels.
+- ruled out: H1, a dark fill lost in the layer composite, as the cause over the pink, because the paint reaches the screen at one level across every panel, which a transmittance under 1 would not leave. Open for panel footprints elsewhere.
+
+**How does a star get into H there?** Draw 175 is at z 0 with `GREATER_EQUAL`, so it passes only on depth 0, and the prep says these pixels' final depth is above 0 (depth 0 is the sentinel, painted white). After draw 175 only two draws write depth: 178 (atmosphere, vs 41E245D4) and 190 (the laser, vs 88DCF116). The candidates:
+
+1. S1, the pixels have no opaque surface when the sky and stars draw, so depth is 0 at draws 174-176, and something later writes a depth above 0. Draw 178 is the candidate if the shell covers them. Reads: F10's depth at pink pixels is tiny (under about 1e-4), not a cockpit's (.01 or more).
+2. S2, the specks are not stars: they are the decal's own detail or specular sparkle, which only shows here because these pixels bypass the upscaler. Reads: cockpit depth at pink pixels, and the specks stay put on the panel when the ship rotates. Against it: Sean saw them move with the sky, and F7 clears them, though without jitter a sparkle would hold still and could be missed.
+3. S3, a route-only change to H. F7 stops the route (`mode=off`), so a difference between AA-on and AA-off H would have to come from what the route does to the game's draws: PS substitution, MRT6, the taken draws. Reads: S1's depth with F7 still clean. Only the route's own wrappers can then be it, and the next step is the depth writer map, ported to flat.
+
+Separately, and unmeasured: **dim cockpit pixels take the world camera term with no depth check** (`engineBefore` returns 0 on no slot, so `prep` never asks `historyDepthMatches`). The term treats the cockpit as fixed in the world. At 5 m a frame, a surface 1.5 m away solves to 6.5 m a frame ago, so a pixel r from the screen centre gets a vector about .77 r long, pointing inward, onto what is usually sky. A near-black pixel cannot reject near-black history by colour, which fits "very dark" and "looks like history" under every upscaler. VR's joined hull reads motion 0 for this reason. The stale pixels of the VR entry measured 18 to 200 px off. F10's motion plane gives the real figure.
+
+**Why the pink pixels are refused: the path is certain from the code, the cause is calculated from the log.** One route in `prep` ends at class stale with the refused bit. `engineBefore` finds a slot whose depth is not the pixel's and returns 3 (`flat steady detail` reads `depth-check=450/0`, so the check ran). `cameraBefore` gives a position in range (out of range paints white, as does behind the camera). `historyDepthMatches` then says no: last frame's depth at that position does not hold the depth the camera term expects. The term treats the surface as fixed in the world, and the cockpit rides the camera. The `flat camera origin 5s` lines give the step around the screenshot: smallest .1357 and .1821 m a frame in the two windows, largest 7.3 apart from the origin rebases. A surface 1.5 m away at .18 m a frame expects a depth 11% off against the check's 1% tolerance, and it passes only under about 1.5 cm a frame. So a moving ship refuses all of them, and that is the check doing its job: keeping them would send their history to the wrong place. Refusal is what shows the raw H; it does not put the stars there. The test is already in the flight: the step reads 0 from about 20:20:06 to 20:20:46 with the view on, when the camera term is exact and these panels should have turned yellow (stale, kept). No screenshot holds that. Why the slots are stale at all stays the inference above.
+
+**The Shift+NumLock of that flight captured nothing.** The log has `flat draw census: armed by NumLock` at 20:18:25 and then neither `flat temporal: dump_draws started`, nor `flat capture general:`, nor any `flat pixels:` line, and `edvr_logs\flat_pixels` does not exist. `flatTemporalArm` returns at once when `g.device` is null, and only `flatTemporalStart` sets it. That runs once, at device creation, and returns unless the flat profile is already active. This session started in VR and switched at 20:17:16, so the key reached only the draw census, whichever tier was asked: no pixel capture, no draw capture, no 600-frame class census. The census cannot say whether Shift was held, and nothing in the log says the rest did nothing. The 2026-11-03 entry's step 4 assumed otherwise.
+
+**Next flight (Epic, no build).** Launch the game in flat, with 3D off before it starts, not switched from VR; the log then has `flat temporal: passive discovery armed`.
+
+1. Whether the stars show at all in a session that was never VR is the first result: the flight this all came from was a switched one.
+2. At the place of the screenshot, ship moving, F8, Motion source view on. Shift+NumLock once with the pink panels on screen (slow and large: `flat temporal: dump_draws ... tier=full`, then `flat pixels: completed`).
+3. Stop the ship: pink should turn yellow. That is the refusal reading's own test.
+4. Roll slowly while still: do the specks hold on the panel or move with the sky?
+5. View off, F7 on and off once at the same spot.
+
+Read: `tools\flat_pixels.py <capture>` for depth, motion and rejection at the pink pixels and at dim cockpit pixels (its ROI is the centred 2048x1152, which holds the console); `tools\flat_resolve_inputs.py` for the slot codes. Fix only on that.
+
+
+## 2026-11-04, later: a live switch loses the flat families; a stale pixel asks the record under it (issues #186, #189), BUILT, NOT FLOWN
+
+Flight `edvr_gfx_20261104_054216` (`v0.22.0-rc.6-22-geddfe035`), launched in flat, HDR route until 05:53:12, then the copy route at 1920x1080. Sean could not produce the stars. The screenshot of 05:54:37 has the view on and shows a different picture from the switched flight: the cockpit is green, and the commander's body and the flight controls are pink.
+
+**Why the two sessions differ.** `engineVelocityRememberVs` and `engineVelocityRememberPs` decided at shader creation with the profile active then, and a shader the game creates once is not created again by a live switch. The switched flight logs `family vs_BFE51414CC3024B4: not created by the game this session` while the census has that vertex shader drawing every frame, and `vs_DE545DC8...: refused [ps_? (pixel shader bytecode not kept)]`. The flat launch logs the family live, and has `vs_7B0DC42D` not created for the same reason in the other direction. So a session that starts in VR has an unkeyed cockpit shell in flat: that is the dim cockpit of the 20:19 screenshot, with its decals as the only slots. Not yet shown: that this explains the stars in H. An unkeyed shell does not change a depth test. The flight below decides it.
+
+**Why the body and the controls are pink.** vs_7B0D / ps_0DF0 is `vrOnly`, and vs_EB52 / ps_B7D5 is keyed in no profile. Both draw over the keyed shell, so their pixels are stale. The camera term holds them still in the world, and the depth check refuses them at the flight's 2 to 3.9 m a frame. `flat refusal census 5s` at the NumLock of 05:54:19: refused 11.69%, stale 13,781,061 of 13,812,995 refused, `stale-kept=0`. Which pixels belong to which draw is inference: that press was the general tier.
+
+**Not done: keying those pairs.** A skinned record carries no marker, so a keyed vs_7B0D pixel would land on the unchecked camera term and smear at flight speed, where today it shows raw. `vrOnly` also keeps the first-person families out of flat's foreground routing.
+
+**Built** (three commits on this branch; `tools\flat_temporal_test`, `tools\engine_velocity_test` and `tools\flat_mono_resolve_test` hold them):
+
+1. #189: `flatTemporalArm` takes the caller's device and starts the window when none exists, and every early return says so in the log.
+2. The remember gates keep a shader that any profile's family keys; draw-time gating is unchanged. `deriveFamily` derives again when the profile differs from the one it derived under, because the second skin and the patches differ. A session that started flat takes no second skin after a switch to VR, since `armSkinLocked` never ran.
+3. `staleRecordBefore`, `debug.w` bit 16, set only by the flat treatment (`FlatMonoResolveFrame::staleRecordTerm`). A stale pixel first asks the record its slot names, certified as the exact path certifies it, and keeps that motion only if last frame's depth confirms it. Anything else runs today's camera-term path. No key: it is the behaviour.
+
+**Flight (Epic, no ini edits).**
+
+1. Launch in flat, ship moving, Motion source view on. Body and controls turn yellow (stale, kept), and `flat refusal census` shows `stale-kept` in the millions per window with refused far below 11%. A fast hand may still flash pink, which is the check refusing a real mover. Refuted if they stay pink: either the slot's record is not certified or last frame's depth disagrees, and Shift+NumLock then gives the slot codes and depth.
+2. Start in VR and switch to flat at the place the stars showed: `family vs_BFE51414...: live`, no `bytecode not kept`, the cockpit green, and no stars on the dark surfaces. Stars still there means the unkeyed shell was not the cause, and S1 to S3 above stand.
+3. Shift+NumLock in that switched session: `flat temporal: dump_draws started ... tier=full`, then `flat pixels: completed`. Read with `tools\flat_pixels.py` for any pink left.
+4. Switch flat to VR once: `family vs_7B0DC42D...: live`, and the on-foot and cockpit views as before.
+
+**Still open, seen in the same screenshot:** the blue area at the bottom centre is a pool surface on the camera term, and dim pixels of the body over no slot take it too, both unchecked at flight speed. That is the dim-pixel question of the entry above; the Shift+NumLock capture gives the motion to judge it.
+
+
+## 2026-11-04, flight 06:43: the families and the key hold, the stars are gone; near pixels with no record ride the ship (issue #186), BUILT, NOT FLOWN
+
+Flight `edvr_gfx_20261104_064304` (`v0.22.0-rc.6-55-gc310d61c`, `--expect-build HEAD` passed), started in VR, switched to flat at 06:45:30. Two Shift+NumLock captures: `flat_pixels\20261104_134553_523_36592_1` (HDR route, 3840x2160) and `20261104_134653_651_36592_5` (copy route, 1920x1080, full frame), and `resolve_inputs_406878125_36592_2`.
+
+**Confirmed by this flight.**
+
+- The key after a live switch: `flat temporal: dump_draws started ... tier=full`, `flat pixels: completed`.
+- The families: the cockpit shell is green in a session that started in VR, and the first capture's stale pixels on it are a few small yellow bars.
+- Sean: the stars on dark cockpit surfaces did not come back in this VR-then-flat flight (one flight, by eye). How a star got into H there was never explained: an unkeyed shell does not change a depth test. If it returns, Shift+NumLock with it on screen gives the depth at those pixels.
+- The stale record term: `stale-kept` rose from 0 to 25,640,178 of 928,972,800 sampled pixels in the HDR route's 06:46:00 window.
+
+**Not fixed: Sean, "still not upscaling the character body/pilot seat controls".** Second capture, frame 19691, ship moving 4.35 m a frame. Points read from the depth, slot, motion and rejection planes:
+
+| Where | State | \|mv\| |
+|---|---|---|
+| Gloves, stick base | stale over joined record 43, kept by the record term | 19-21 px, right |
+| Cockpit dome, radar | joined record 43 | 18 px |
+| Forearm, right controls | no slot, camera term, unchecked | 852, 768 px |
+| Seat | slot 3, record 1 (skinned, no marker), camera term, unchecked | 644 px |
+| Legs | stale over that record 1, camera term fails its check, refused | raw |
+
+- ruled out: the upscaler not running on these pixels, because they are not refused and the backend gets them; it gets a vector hundreds of pixels long.
+- Record indices are not stable: record 43 is the ship in frames 14401, 19691 and 19692; in frame 14418 it has no shell pixels and another pose. So the ship's record has to be found per frame.
+
+**Replay on the real frame pair 19691 to 19692 before building** (depth, slots, pool and rows from the capture, the shader's depth check in Python, sampled every 4th pixel, depth at or above .0025). Record 43 owns 727,934 near pixels against 17,996 for record 46.
+
+| Pixels | Kept today, camera term | Kept, record 43 | Median \|mv\| camera, record 43 |
+|---|---|---|---|
+| No slot | 0% | 99.5% | 762, 22.5 |
+| Stale over the skinned record | 0% | 100% | 637, 22.9 |
+| Skinned record's slot | 0% | 100% | 651, 23.5 |
+
+**Built** (one commit; `tools\flat_mono_resolve_test` `shipRecordGpuTests`, 7 of 7 mutations caught, WARP only). Kernels `shipCount` and `shipPick` pick, per frame with no read-back, the fresh joined record that owns the most near pixels on a 16-pixel grid (at least 32 samples), bound at t19. `debug.w` bit 32, set only with `FlatMonoResolveFrame::shipRecordTerm`, which flat sets when the journal says not on foot; the VR world route never does. A pixel within 10 m (`depth*10 >= now[3].z`) with no motion of its own rides that record where last frame's depth confirms it (class skinned, teal in the view, `ship-record=` in the census). Otherwise a kind-0 pixel within 10 m keeps the camera term only if last frame's depth confirms that too, and is refused as class camera if not, so a vector that long no longer reaches the backend. Kernel cost not measured: about 8,100 threads at 1080p, one 1024-thread pick, one 64 KB clear.
+
+**Flight (Epic; start in VR, switch to flat; ship moving; view on).** Body, seat and controls paint teal, and the upscaled picture holds there with the view off. `flat refusal census 5s` shows `ship-record=` in the millions and `range` far below the 06:46:00 window's 40,886,271 of 928,972,800. A fast hand may flash white (class camera), which is the check refusing a real mover. Refuted if forearm and seat are still long vectors or refused: Shift+NumLock again and read the same points.
+
+**Do not merge on its own. The 10 m test is a guess, with one known failure:** a station wall within 10 m while the ship turns can pass as riding the ship, because the depth on a flat wall still roughly matches at the same pixel, and then smears. Check that in a hangar. A measured box was offered and declined: there are 20+ cockpits plus SRVs and fighters, so the bound is to come from the game's data for whatever vehicle is loaded. That RE is running on build 334925. Measured for it, one Cobra Mk V: the eye reads (0, -0.839, 2.787) in the ship record's frame in two captures with different head angles, so that frame is real; the shell, eye-centred in vehicle axes, spans x -6.37..6.18, y -2.35..0.25, z 0.33..5.67, and the body and seat x -0.87..0.87, y -1.03..-0.37, z 0.32..2.0.
+
+
+## 2026-11-04, later still: the vehicle rig, from the game's data, and a read-only probe to prove it (issue #186), BUILT, NOT FLOWN
+
+A bound fitted to one ship was declined: there are 20+ cockpits plus SRVs and fighters. RE on build 334925 (`analysis\decomp\verify_20261104_vehicle_rig.txt`, in the intake inbox as `20261104-072719-vehicle-rig` until filed) found a route with no per-ship table. Everything here is READ from the code, labelled in the note; no flight has checked any of it.
+
+- **Identity.** `ICameraTargetShip::SetTarget` names the ship and its "ShipCockpit" and "Turret" module entities. It is the vehicle-change event. Each has an `IKinematicRig`, and a rig's records are one array, so a record belongs to a part of the vehicle by exact membership. Interior and hull are two rigs. The SRV takes the same route by the code beside it. Fighters and a multicrew guest's target were not read.
+- **Bound.** Per model, a sphere culling reads (centre and radius in node-local space), with the rig-wide sphere on the root record. A box exists too, inferred to come from collision shapes rather than drawn meshes.
+- **Eye.** `CockpitChair_Bone_Rig!Camera` is not the pilot's eye: only the Module_Cam activity uses it. The eye's derivation is inferred from 332841 notes.
+- **Limits on "all vehicles".** The avatar, crew and the skinned seat record may sit outside these rigs, so the body probably still needs a bound test, with membership naming the ship's record. The emit does not know the pool slot; a record-to-slot map needs a further join through the pool copier's items.
+
+ruled out: "no bound is mapped" (an earlier pass over the notes), because culling's sphere was in the September kinematic doc and is READ here.
+
+The note first had `R = I+0x2F0`; the disassembly shows `R = *(u64*)(I+0x2F0)`, and the module handle table is a pointer too. The implementer caught it against the exe before writing code, and the note is corrected.
+
+**Probe built:** `src\d3d11\vehicle_rig_probe.cpp`, `vehicle_rig_core.h`, `tools\vehicle_rig_test`, key `advanced.vehicle_rig_probe` (TEMPORARY, this arc; off installs no hook). It hooks `SetTarget`, reads, and logs. It writes nothing into the game and changes no draw, state or shader; the one game code it calls is GetComponent, on the thread SetTarget ran on. Emit counts run only while engine motion has the gate open.
+
+**Flight (Epic; ship-record term and probe in one build; no ini edits).** Any vehicle change prints `vehicle_rig target`.
+
+1. Start in VR, switch to flat, ship moving, view on. Body, seat and controls paint teal, and hold upscaled with the view off (the entry "flight 06:43").
+2. Shift+NumLock with the body on screen. `vehicle_rig_pose` lines then join the capture's pool records by exact pose bits. Expect the capture's ship record to join a rig record with `eye_in_rec` (0, -0.839, 2.787) on a Cobra Mk V, the measured boxes to fall inside the sphere union on `ready_box`, and `rig role=` names to match the ship.
+3. Change ship at least once, and deploy an SRV. Each gets `vehicle_rig target` and `ready` lines; the SRV is the first flight evidence for it.
+4. Check a station wall within 10 m while turning, for the known failure of the 10 m test.
+
+Refuted, by stage: no `vehicle_rig target` line (`no target seen` on the 30 s line) means SetTarget is not the route; a `VTABLE-MISMATCH` flag means the token or handle read is wrong; `status=not-ready` for good means the wrong entity; `absurd-count` means the record read is wrong; `vehicle_rig emits` all `other` means the records are not in those arrays or the target is not what is drawn; the ship's pool record joining nothing means the identity is incomplete; several `distinct_this` leaves open which camera target to trust.
+
+
+## 2026-11-04, flight 08:25: the rigs read true, the gate was dead, and the vehicle frame replaces the vote (issue #186), BUILT, NOT FLOWN
+
+Flight `edvr_gfx_20261104_082541` (`v0.22.0-rc.6-59-gd6edf197`, build matched), started in VR, switched to flat at 08:29:13, Cobra Mk V then a training SRV.
+
+**Measured.**
+
+- The probe reads the game's rigs with `faults_caught=0` and `vtable_mismatch=0`: `CobraMkV` (34 records), `CobraMkV_Cockpit` (7), `Buggy` (94), `TestBuggy_Cockpit` (89), `Vehicle_TurretGun` (11). `SetTarget` is the change event.
+- Root spheres: SRV ship 4.51, SRV cockpit 4.69, Cobra ship 29.97, Cobra cockpit 29.95. The sphere is tight on the SRV and not on a big ship.
+- In the parked SRV capture (`flat_pixels\20261104_153700_738_25956_1`) rig records join the pool by exact pose bits: ship 84 of 94, cockpit 85 of 89, both roots included. Parked, so this says nothing about timing under motion. The eye did not move in that pair.
+- In that frame 99.0% of near pixels have no slot. One joined record owns the rest, 7,774 pixels, about 30 grid samples against the vote's minimum of 32. The cabin's main pairs are `6A19A6E5/E5B29066`, `4435F2E5/026709B5` and `01DA82F8/2C3ADCD2`, which are in no keyed family.
+- Replay of the logged root sphere on that frame: of the near pixels sampled, 66.7% are inside; the rest reach 14 m and include the ground, so the sphere does exclude terrain.
+- Stencil, Cobra frame 14401 (`resolve_inputs_406878125_36592_2`, the depth plane is 8 bytes a texel): 0x05 57.7% (1.1% with depth), 0x90 22.9%, 0x94 10.6%, 0x10 6.6% (the nearest, depth p50 .0299), 0x95 2.0%, 0x14 .13%. Every surface with depth but that 1.1% has bit 0x10. A lead for "is this pixel the vehicle's": this frame has no other ship or station, and older notes say NPCs carry the bit too.
+- Sean moving in the SRV: artifacts in the cockpit. `flat refusal census` refused about .03-.05%, all `range`, with `ship-record=0`.
+
+**The gate was dead.** `shipRecordTerm` asked `journalOnFootKnown()`, which goes through `journalWatchActive()`, false in the flat profile by design. So the ship record term of the 06:43 entry never ran in flat, and the artifacts are the unchecked camera term, not a verdict on the term. The 11-04 message saying it ran on foot was wrong as well. The flat reader is `journalFlatOnFoot`. Rigs set the field directly, which is how every test passed.
+
+- ruled out: "not much green" as the upscaler not running, because the parked SRV's census has refused 0.0000%: green marks an exact record, and a dim pixel is still resolved by the backend.
+
+**Capture defect, not fixed.** Shift+NumLock in the moving SRV stops the route for the capture's life: at 08:45:36 `flat runtime: treated=` froze at 86175 until `flat pixels: summary status=expired-arm` at 08:45:49, then a reset with `delta-ms=12625`; at 08:41:51 the same, `cancelled-resize-or-stop`, `delta-ms=9984`. Presses in a moving ship and in the parked SRV worked. Cause unknown. So no moving SRV frames exist. Also, resolve inputs came back `expired-arm` on the copy route twice, so the stencil plane needs the HDR route.
+
+**Open, not diagnosed.** The game's Esc menu flickers after the live switch, perhaps only with the Motion source view on; Sean is to check with the view off. Nothing in the log explains it.
+
+**Built** (one commit; `tools\flat_mono_resolve_test` `vehicleFrameGpuTests`, 7 of 7 mutations caught; WARP and synthetic frames only). The vote and its kernels are gone.
+
+1. The gate reads `journalFlatOnFoot` (`vframe::gate`, pinned in `tools\flat_temporal_test`), and `flat vehicle frame 5s: gate=.. rig=.. sphereR=.. asked=.. with-frame=.. no-frame[..]` prints every window, so a dead gate shows.
+2. The emit tap records the current cockpit rig root's position and packed quaternion in a ring keyed by the present-frame clock; the resolve takes this frame's and the previous stamp's, and passes the pair and the root's sphere in the prep's constants.
+3. A pixel inside the sphere and within 10 m with no motion of its own rides that pose where last frame's depth confirms it (class skinned, teal, `vehicle-frame=` in the census). A kind-0 pixel in that volume that does not keep it needs the check on the camera term too, or is refused as class camera. With no frame this resolve, the old path exactly.
+4. `vehicle_rig record role=cockpit i= c= r=` logs each cockpit record's sphere, to show what makes the Cobra's 30 m.
+
+Temporary key: `advanced.vehicle_rig_probe`, which now also gates the frame.
+
+**Flight (Epic, flat, view on; no capture key in the moving SRV).**
+
+1. SRV moving: `flat vehicle frame 5s` reads `gate=on`, `with-frame` close to `asked`. Cabin, body and controls paint teal and the artifacts are gone with the view off. `no-frame[missing]` high means the root is not emitted before the resolve; refuted if it stays near `asked`.
+2. Ship moving, looking down: body, seat and controls teal; `vehicle-frame=` in the millions, `range` far below the 06:46:00 window's. Shift+NumLock there gives the pose join under motion.
+3. A station wall within 10 m while turning, on a big ship: the known risk of the loose sphere.
+4. Go on foot in flat: `gate=off(on-foot)` and on-foot as before.
+
+**Not to merge until flown:** the frame is unproven under motion.
+
+
+## 2026-11-04, flight 10:00: the vehicle frame holds on four vehicles (issue #186), FLOWN
+
+Flight `edvr_gfx_20261104_100057` (`v0.22.0-rc.6-62-gef407e9c`, `--expect-build HEAD` passed), started in VR, switched to flat at 10:02:45. Sean: cockpits held up in the ships and SRV tested, on foot looked good, and the only pink was on the commander's body while hyperspacing. The stars on dark surfaces are not reported back. That is by eye; no capture holds a moving vehicle on this build.
+
+**Measured.**
+
+| Rig | Sphere r | Resolves with a frame |
+|---|---|---|
+| `TestBuggy_Cockpit` | 4.691 | 9,431 of 9,431 |
+| `Vulture_Cockpit` | 21.192 | 6,141 of 6,141 |
+| `CobraMkV_Cockpit` | 29.950 | 4,306 of 7,504 |
+| `Sidewinder_Cockpit` | 11.455 | 11,947 of 15,327 |
+
+- `gate=on` in a vehicle and `gate=off(on-foot)` on foot from 10:12:00. `faults_caught=0`, `vtable_mismatch=0`, `rigs_not_ready=0`, across 20 targets. Emit tap 126 ns (sampled), refresh .8 us.
+- The Cobra's misses fall in windows with camera step 0 (a ship swap or hangar, `no-scene-spatial` nearby). The moving windows read 450 of 450.
+- The Sidewinder's misses, and so the hyperspace pink: `vehicle_rig emits` shows ship, cockpit and module all at 0 from 10:10:35 to 10:10:45 and 10:10:55 to 10:11:00, with `missing` near 450 a window. The rig is not evaluated through the emit in those windows, so there is no frame, and a stale pixel falls back to a camera term that fails. Inferred to be the jump from Sean's report and the near-zero camera step; no line in the log names it. It shows raw, not smeared, for as long as it lasts. Not fixed.
+- A cockpit rig's largest record is about the whole ship, and the next is a fraction of it: Cobra 29.95 then 4.52, Vulture 21.19 then 4.19, Sidewinder 11.45 then 2.13, SRV 4.69 twice. So a tighter bound from the game's data looks available if the wall case needs it: inference from the radii alone, centres not checked.
+- Sean's station screenshot 10:09:17 (view on, inside a station): the dim wall is no slot on the camera term, the blue truss a pool surface on the camera term, and he reports it looked fine. Those classes are upscaled; a smear there is what to watch, in a rotating station.
+
+ruled out: the debug view as the Options flicker, because the view was off during the recording at 10:03:03 (issue filed separately).
+
+**Not shown by this flight.** `flat refusal census` ran only at 10:09:40-45 and read `vehicle-frame=0` there, looking ahead in a station, so no number confirms the term keeping pixels; the evidence is Sean's eye. The pose join under motion is still unmeasured: Shift+NumLock at 10:09:36 ended `expired-arm` with the route stopped. Flat-to-VR live was not flown. A wall within 10 m while turning was not called out.
+
+**Temporary key:** `advanced.vehicle_rig_probe` gates the hook and the frame. Proposed for removal, with the probe's log volume trimmed, before merging.
+
+## 2026-11-04, cleanup and review: the frame is permanent (issue #186), flat-to-VR NOT FLOWN
+
+Sean approved removing the key. `advanced.vehicle_rig_probe` and the per-target and emit-count logging are gone (`687e51c1`). The hook and the frame are on for every session on build 334925, and the `flat vehicle frame 30s` line and `vehicle-frame=` in the census remain to read them. A review of the branch against main then gave ten findings, each checked against the code and the 10:00 log.
+
+**Fixed (`7509763f`).**
+
+- The generation moved before the root did, and the tap read the root first, so a tap could stamp the old rig's pose with the new generation, and a resolve could read a half-written sphere under a generation that matched at both ends. The old root now goes to zero before the generation moves, the tap reads the generation first, and the new root goes last.
+- A rig whose root sphere did not read was described on every refresh and took a status line each time, up to the cap. It is now tried once a second and reported once.
+- Stale comments, the build-mismatch line, and the signature list's names for the probe's old files.
+
+**Checked and left.**
+
+- A `SetTarget` from a second camera-target object replaces the tracked rigs. On this log that is not a wrong rig: every ready line from 10:04 names a ship flown, and the second object carried ordinary flight, including the Cobra at 10:11:27. Filtering by object would lose real targets.
+- A root matched by address alone could hit a reused record for at most one refresh, and that answer still has to pass last frame's depth.
+- The tap and the refresh run in VR with no consumer. They cost .8 us a refresh and 126 ns a tap, and the targets must stay tracked across a live switch.
+- The stale record term runs ahead of the vehicle frame, and the volume is 10 m plus a whole-ship sphere. Last frame's depth validates both, and nothing was seen by eye. The radii in the 10:00 entry remain the lead for a tighter bound if the wall case shows.
+
+ruled out: filtering `SetTarget` by its object to restore the frame in the jump, because the second window with no emits (10:10:55 to 10:11:00) sits on the object that carried ordinary flight.
+
+**Open, and needing evidence first.**
+
+- A resolve with no frame has no near check, so a near kind-0 pixel keeps an unchecked camera vector. At 10:10:10, 403 of 450 resolves had no frame, with the camera moving up to 3 m a frame. This matches main and nothing was seen by eye, but no capture covers it. A check there would turn those pixels raw.
+- A session started flat never arms the second skin, and the skinned families are now remembered in either profile, so after a switch to VR they are keyed with no target 7. Before this branch a flat start did not key them at all. The flat-to-VR flight decides whether the body shows it.
+
+## 2026-11-04, flight 11:32: the capture stall explained, the frame missing in normal space (issues #186, #193)
+
+Flight `edvr_gfx_20261104_113230` (`v0.22.0-rc.6-66-g3505d042`, `--expect-build HEAD` passed), launched flat, Cobra Mk V, Motion source view on from 11:33:07. Sean sees pink in the FSD countdown to hyperspace and to supercruise, and in the jump. Shift+NumLock was pressed around the first jump. The journal gives the times this time (its clock is the log's plus 7 hours).
+
+**The capture stall (#193): cause found.** The capture armed at 11:35:09 and ended `expired-arm`, copied 0. One frame later: `flat coverage: returned to observation ... reason=actual-shader-mismatch VS=8C091FFD08644E02 PS=4E4FF61E8A08FC7E`. That pair is the canopy. Under Upstream ownership only the F10 audit reaches `qualifyProjection`'s shader check, and `visual.cockpit_glass = legacy` has swapped the canopy's pixel shader at the bind, so the audit read EDVR's own shader as a modded context. The refusal holds the route in observation for the 900 frames of the arm, and a capture needs treated frames. Every capture in today's logs fits: the three made before their session's replacement shader was ready worked (06:45, 06:46, 08:37), and the four made after it failed (08:41, 08:45, 10:09, 11:35). The check now knows the swap (`cockpitGlassReplacedHash`), and `flat_temporal_test` pins it.
+
+ruled out: the vehicle rig as the capture stall, because the stall tracks the canopy swap across builds and the refusal names the canopy pair.
+
+**The census line's `view=` was a literal "off"**, so it said nothing about the view. It now reports the view.
+
+**The refusal census happened to catch the jump**, because it ran from the press and the route came back at 11:35:23, inside the tunnel (`StartJump` 11:35:15, `FSDJump` 11:35:36):
+
+| Window | Sampled | Refused | stale (pink) | range | camera | sentinel | Vehicle frame kept | Stale kept |
+|---|---|---|---|---|---|---|---|---|
+| 11:35:21-26 | 86 | 0.34% | 37,324 | 486,588 | 42,647 | 36,508 | 24.5% | 5.7% |
+| 11:35:26-31 | 64 | 0.39% | 24,401 | 409,672 | 53,419 | 36,855 | 21.9% | 4.7% |
+
+Pink is about 400 pixels a frame at 1920x1080 in that stretch, so what Sean sees there is small patches, or else it peaks in the part this does not cover: the countdown and the first seconds of the tunnel. Most refusals are `range`, pixels whose last position is off screen as the cockpit swings, and those paint white. Over this stretch the camera sits about 13 m from the ship's origin and circles it, at up to .07 m a frame.
+
+**The vehicle frame by journal time.** From the 30 s counts, so the edges are worked out, not measured:
+
+| Stretch | Frame |
+|---|---|
+| Supercruise | present (11:35:56 to 11:36:26: 5,375 of 5,397) |
+| The second jump, `StartJump` 11:37:15 to `FSDJump` 11:37:33 | present from about 11:37:14 |
+| After `SupercruiseExit` 11:36:33, flying at 4 m a frame, until 11:37:14 | missing (11:36:26 to 11:36:56: 543 of 2,677) |
+| After `SupercruiseExit` 11:38:07, for about 14 s | missing |
+| From about 11:38:21, also normal space at 4 m a frame | present (2,490 of 2,699) |
+| The first load in, 11:34:29 to about 11:35:05 | missing |
+
+This corrects the 10:00 entry: the jump is not simply where the frame goes missing. That entry's jump was inferred, and that flight's journal has no jump event in it. The frame is missing for stretches of ordinary flight, and Sean reported nothing wrong in them. So far the frame's absence and the pink do not line up.
+
+**Candidates for the pink, and what separates them.**
+
+1. The body really moves against the rig. It is skinned, and if the FSD shake rocks it against the cockpit, last frame's depth refuses the frame's answer, and it is right to: nothing here knows the body's own motion. Signature: `with-frame` near `asked`, pink up only in those windows, cockpit shell not pink.
+2. The frame is missing in the countdown. Signature: `no-frame[missing]` high in the 5 s window around `StartJump`, with pink.
+3. The frame is present but wrong there. The rig's root is not what the cockpit rides in those frames. Signature: the shell turns pink as well, and `vehicle-frame=` falls.
+
+**Candidates for the missing frame.** The tap sees only FUN_144315A20.
+
+1. The rig goes through the primary producer (42B6D50) in those stretches. Signature: `root[primary]` above 0, and if so the frame simply comes back on this build, because that path now fills the ring too. Its pose is the same canonical record pose, which the primary emit's own check already compares.
+2. The root is culled while the rest of the rig draws. Signature: `root[direct]` 0, `rig[direct]` above 0.
+3. `SetTarget` named a rig that is not the one drawn. Signature: rig counts 0 and `last-rig-root` above 0.
+4. The rig is evaluated with no emit. Signature: all counts 0, `root-pose[moved]` above 0.
+
+**Temporary, off before merging:** `flat vehicle frame` every 5 s with the path counts in it, and the refusal census running whenever the view is on, so the colours are counted without a key press.
+
+## 2026-11-04, flight 12:03: the pink is the rig the target names ahead of time (issue #186), cause found
+
+Flight `edvr_gfx_20261104_120340` (`v0.22.0-rc.6-67-g0b55c935`, `--expect-build HEAD` passed), launched flat, a Sidewinder, Motion source view on. The journal has no jump events, so this is a scenario outside its record. Sean: the body went pink twice, in the 4 second countdown to supercruise from normal space and in the hyperspace tunnel, and he pressed Shift+NumLock each time. Both captures worked (`byte-cap`, copied 3, 12:07:53 and 12:08:55), which is the #193 fix flown: the route did not stop.
+
+**Measured, 5 s windows.** Rig names `Sidewinder_Cockpit` throughout.
+
+| Window ends | Stage | `asked` | `with-frame` | `root[direct]` | `last-rig-root` | Pink share of pixels | Vehicle frame kept | Camera step max |
+|---|---|---|---|---|---|---|---|---|
+| 12:07:51 | normal space | 450 | 450 | 450 | 0 | 0.1% | 12.4% | 2.9 m |
+| 12:07:56 | target #3 at 12:07:51.5, countdown | 413 | 41 | 42 | 368 | 4.6% | 0.2% | 51.8 m |
+| 12:08:01 | supercruise | 426 | 404 | 405 | 21 | 0.4% | 3.0% | rebase |
+| 12:08:41 | target #4 at 12:08:33.4, still supercruise | 450 | 0 | 0 | 450 | 0.03% | 0.0% | .0007 m |
+| 12:08:56 | target #5 at 12:08:54.0 | 417 | 38 | 40 | 373 | 3.5% | 0.3% | rebase |
+| 12:09:01 | tunnel | 447 | 0 | 0 | 447 | 8.7% | 0.0% | 6.2 m |
+| 12:09:06 | tunnel | 450 | 0 | 0 | 450 | 7.6% | 0.0% | 2.5 m |
+| 12:09:11 | arrival | 447 | 383 | 384 | 63 | 1.3% | 10.0% | rebase |
+
+Across the flight 3,313 resolves had no frame and `last-rig-root` counted 3,299. `root[primary]` and `rig[primary]` were 0 in every window. `rig[direct]` is 16 records per frame with the root and 0 without it.
+
+ruled out: the primary producer carrying the rig, because `root[primary]` and `rig[primary]` are 0 in all windows.
+
+ruled out: the root being culled while the rest of the rig draws, because `rig[direct]` falls to 0 with it.
+
+ruled out: a rig evaluated with no emit, because the earlier rig's root emits on those frames.
+
+**Cause.** `SetTarget` names the rig of the instance coming next, seconds before it is drawn, and the rig named before it goes on being drawn until then. Between the two, the frame looked only at the named rig and found nothing. The switch to the named rig is at the instance change: #3 starts emitting about half a second before 12:07:56, and #4 about half a second before #5 is named. The stretches of ordinary flight with no frame in flight 11:32 may be the same thing, but that log has no count of the earlier rig, and this flight has no supercruise exit, so that part is unmeasured. In 11:32 the missing stretch after `SupercruiseExit` 11:36:33 begins nine seconds before the next target change, so it needs more than this one step back, or another cause.
+
+So candidate 2 of the 11:32 entry, and candidate 3 of the missing frame. Candidate 1, the body rocking against the rig, is not what this is.
+
+**The captures agree.** In both, the refused pixels are 10% to 12% of the screen, all within 10 m (median .62 m), along the bottom from y 531 and 573 down, which is the body. Their depth at the same screen position last frame is within .5% for 97% (countdown) and 91% (tunnel), so they ride the camera, and a frame's answer would pass the depth check. Near pixels that were kept had a 95th percentile motion of 600 and 520 pixels: those are kind-0 pixels on the unchecked camera term, the hole the review named, at the speed of the ship. They are the same missing frame.
+
+Why the pink needs the camera to move: at 12:08:41 the frame is equally missing, but the camera step is .0007 m, so the camera term stands and pink is .03%. In the tunnel the step is up to 6.2 m and the camera term cannot explain a body that rides along.
+
+**Fix, built, not flown.** The four most recent cockpit rigs are kept, each with its own ring, and the newest with this frame's entry and last frame's answers (`vframe::selectRecent`). In a steady state that is the rig the target names, even with another of them on screen, like a parked ship seen from an SRV. A rig leaves the list when its entity goes or a newer one takes its slot. The primary tap and the path counts are gone again. `flat vehicle frame 5s` now reads `with-frame` and `from-older-rig`.
+
+**What the next flight should show.** In the same two moments: `with-frame` near `asked`, `from-older-rig` near `asked`, the pink share under 1%, and `vehicle-frame=` around 10%. Pink that stays with the frame present would be candidate 1 after all. It should also drop out of supercruise and fly on for 20 s: `no-frame[missing]` there says whether four rigs cover the 11:32 stretches.
+
+## 2026-11-04, flight 12:48: the recent rigs hold (issue #186), FLOWN
+
+Flight `edvr_gfx_20261104_124801` (`v0.22.0-rc.6-68-g657dc38a`, `--expect-build HEAD` passed), launched flat, the same Sidewinder scenario, view on. Sean: "That fixed it."
+
+**Measured.** 14,607 of 14,610 resolves had a frame, 3,370 of them from an older rig, 3 missing, no faults. The older rig answers exactly where the last flight had nothing:
+
+| Window ends | Stage | `with-frame` / `asked` | `from-older-rig` | Pink share | Vehicle frame kept | Pink last flight |
+|---|---|---|---|---|---|---|
+| 12:50:28 | target #3 at 12:50:25, countdown | 450 / 450 | 278 | 0.000% | 0.0% | |
+| 12:50:33 | countdown ends | 431 / 432 | 148 | 0.002% | 15.0% | 4.6% |
+| 12:50:58 | target #4 at 12:50:48, supercruise | 450 / 450 | 450 | 0.022% | 17.1% | 0.03% |
+| 12:51:13 | target #5 at 12:51:09 | 447 / 448 | 405 | 0.000% | 0.0% | 3.5% |
+| 12:51:18 | tunnel | 448 / 448 | 448 | 0.000% | 0.0% | 8.7% |
+| 12:51:23 | arrival | 448 / 449 | 316 | 0.000% | 0.0% | 7.6%, 1.3% |
+
+The countdown is confirmed by the numbers: 15% of the pixels ride the frame and pink is 1,208 pixels across the window. The tunnel rests on Sean's eye: those windows have neither pink nor frame pixels, so the body was not on screen in the sampled frames. The frame was there throughout them.
+
+**Not shown.** No supercruise exit into normal flight, so whether four rigs cover the stretches of flight 11:32 is still unmeasured. Normal space before the countdown had the frame in every window, at up to 4.5 m a frame, from the named rig. Flat-to-VR live is still unflown.
+
+**Since this flight.** The temporary 5 s line went back to 30 s, keeping `from-older-rig`, and the refusal census no longer follows the view. A rig the target names again now moves up to newest, which the flown build did not do (it kept its old place), so that newest is always the named one. That change is not flown on its own; whether any flight names a rig twice is unchecked.
+
+## 2026-11-04, flight 13:03: flat to VR and back (issue #186), FLOWN
+
+Flight `edvr_gfx_20261104_130306` (`v0.22.0-rc.6-69-g0ffd3c2d`, `--expect-build HEAD` passed), launched flat, the Sidewinder scenario. Flat to VR at 13:06:46 (`live-rise`), VR to flat at 13:08:45. A second VR leg was not flown. F7 was pressed in VR at 13:07:12 and `visual.cockpit_glass` changed three times there, which restarted engine motion once.
+
+**The VR leg.** Two minutes with no fault, `frames dropped: none`, and temporal AA running at 4508x4510 with a prep of .20 ms a pair. The body's family `vs_61AE` is live with `ps_FC43E42710010343` patched.
+
+ruled out: a flat start giving the body a worse answer in a ship's VR cockpit than a VR start, because `ps_FC43E42710010343` is patched and exports no E either way: `binds writing E 0` here and in the VR-started session at 10:01:57, with `writing no history` 5,105 and 23,556.
+
+**The second skin after a flat start.** There is no `second skin is live` line from the switch until 13:07:14, when the F7 restart armed it: `armSkinLocked` declines in the flat profile and nothing asks again at the switch. Elsewhere that is what gives skinned characters their motion on foot, so an on-foot flight after a flat start would have none until F7. On foot was not flown here, and main behaves the same, so this is not new on the branch.
+
+**Back in flat.** Treatment resumed at the switch, `treated` climbing by 450 a window, with `refused` going from 5 to 6.
+
+**The frame.** 14,493 of 14,496 resolves had one, 871 from an older rig: 1 missing, 2 not adjacent, no faults. Normal flight after leaving supercruise, at up to 6.7 m a frame, had it in 2,534 of 2,535, only 11 of them from an older rig. The gap seen in flight 11:32 did not recur, though that flight's cause for it is still not measured.
+
+## 2026-11-04, the second skin at the switch to VR (issue #186 follow-up), BUILT, ON MAIN 11ef91d5 (flown: the next entry)
+
+Branch `claude/admiring-leakey-2a6065`, from `eed72819` (main, with the vehicle-frame branch merged: the `derivedFlat` re-derive this builds on).
+
+**Hypothesis.** A session that goes live in the flat profile declines the second skin (`armSkinLocked` returns when `runtimeFlatProfile()`). The switch to VR calls `engineVelocityConfigure(true)` again through the forced configure sweep (`temporal_pass.cpp`, `engineVelocityConfigure(engineMotionOn)`), but engine motion is already live, so `on == live` returns before anything can arm. Only a shutdown and a new start, which an F7 pair does, reaches `armSkinLocked` under VR. The commit of the switch (`mode_watch.cpp`, `commitPosted`) calls `engineVelocityFlatAbandon` and neither it nor any other teardown touches `g_skinWanted`.
+
+**Evidence.** The signature is no `skin join: the second skin is live (VR)` from `profile switch: flat -> vr` until something restarts engine motion.
+- `edvr_gfx_20261104_130306` (Epic): the switch is at line 6446 (13:06:46), the first `skin join:` line of the whole log is line 8541 (13:07:14), right after the F7 restart.
+- `edvr_gfx_20261025_111730` (Epic, `v0.21.1-261`): flat start, switch at 11:18:32, a minute in VR, zero `skin join:` lines in the whole log. The second skin never armed.
+- The control: the eight Steam logs of 12 and 13 October that switch profiles all start in VR and have `hook armed` and `the second skin is live (VR)` at line 95-96. None of them starts in flat.
+
+**What it costs on foot: not measured.** No log has a flat start, a switch and time on foot with a character in view: the 25 October log is in VR for a minute with `skinned-joined=0` in all 15 of its `vr world route refusal 5s:` lines, and nothing says a character was in view. From the F15 entry (kinematic-motion-injection, 2026-10-09), without target 7 a skinned character seen through the first-person panel and the eyes keeps the camera term: its limbs and hair have no motion of their own. That is inferred from the F15 design and F12's "it works where it runs", not read off a flat-start flight.
+
+ruled out: the profile switch's teardown (`commitPosted`, `engineVelocityFlatAbandon`) as what leaves the second skin off, because neither writes `g_skinWanted` or the hook's gate; only `armSkinLocked` and `engineVelocityShutdown` do.
+
+ruled out: a family derived after the switch picking the skin up on its own, because the `g_skinWanted` guard in `deriveFamily` (added with the `derivedFlat` re-derive) is what denies it, and that flag was never set.
+
+**The change** (`engine_velocity.cpp`, VR only; the flat profile and a VR start are untouched):
+1. `armSkinLocked` remembers that it declined for flat (`g_skinDeclinedFlat`).
+2. `engineVelocityConfigure(true)` with engine motion already live now calls `armSkinForProfileLocked`: if the decline is owed and the profile is VR and the emit is live, it logs `skin join: the session started in the flat profile and is now in VR: arming the second skin at the switch.` and arms. It arms once and only for that decline. The sweep runs at the frame boundary of the switch, before the first VR draw.
+3. `deriveFamily` derives a skinned family again when it was derived with the second skin unarmed (`derivedSkin`) and the skin is armed now. The `derivedFlat` re-derive already covers a family last derived under flat; this covers one a VR draw derived between the switch and the sweep.
+No key: a session started in flat gets what a session started in VR gets.
+
+**Rig.** `profile_switch_tests.h` W4 (ten checks, each starting `profile switch W4:`): a flat start declines (no arm, gate closed); a skinned family drawn in VR before the sweep derives without the skin; the next configure arms it once, opens the gate and logs both lines; the family is derived again with the skin; further configures do not arm again; a VR start arms once at the start and says nothing about a flat start; a flat start left before any switch arms once at the next VR start. Four mutations in `tools\engine_velocity_test\mutants.py`, each required to fail a W4 check: the configure never asks, the decline is not remembered, the ask ignores the decline, a family derived before the arm is kept.
+
+**Built.** `build.bat --wait-lock` on native Windows, 591 s, every gate passed; `engine_velocity_test: 19027 checks passed`, W4 included. `mutants.py --run --only` the four: each killed by a `profile switch W4` check, so the rig fails on the old behaviour (the first mutation is the old early return exactly).
+
+**Flight (Epic, no ini edits, one flight decides it).** Launch in flat, step out on foot near characters (a station concourse or a settlement), then turn 3D on in the game so the profile goes flat to VR. Stay on foot with a character in view for a minute, then board or leave as you like.
+1. In the log, at the `profile switch: flat -> vr` line and within the same second: `skin join: the session started in the flat profile and is now in VR: arming the second skin at the switch.`, then `skin join: hook armed: EliteDangerous64.exe+0x4C56BA0 ...`, then `skin join: the second skin is live (VR)`. All three absent, or only the `live` line absent after an `engine motion: ... stood down`, means the sweep did not reach the call or engine motion was down at the switch: nothing else in this change would have run.
+2. With a character in view on foot: `skin join: on-foot source target 7 created ...` once and `vr world route refusal 5s: ... skinned-joined=N` with N above 0. N = 0 with a character in view means the route did not read E, which would be a defect in the F15 path and not in this change (a VR start would show it too).
+3. `python tools\edvr_log.py --target <epic game dir> --expect-build HEAD --health` first: the version line must match this branch's build.
+Refuted if the arm line shows but no character has motion: then the cost on foot is not what the F15 entry says, and this change is parity with a VR start and nothing more.
+
+## 2026-11-04, flight 13:38: the second skin at the switch to VR, on foot (issue #186 follow-up), FLOWN
+
+Flight `edvr_gfx_20261104_133846` (Epic, `v0.22.0-rc.6-71-g11ef91d5`, `--expect-build HEAD` passed), launched flat, a training scenario on foot with an assault rifle. 3D turned on at 13:43:29.8, `profile switch: flat -> vr` at 13:43:30.110 (`live-rise`, settings `edvr.ini`), two minutes in VR on foot. Pimax Crystal Super, DLSS.
+
+**The arm.** 22 ms after the switch: `skin join: the session started in the flat profile and is now in VR: arming the second skin at the switch.`, `hook armed: EliteDangerous64.exe+0x4C56BA0`, `the second skin is live (VR)`, and at 13:43:30.698 target 7 for both eyes (2254x2255, 40.7 MB each). The whole of the 13:03 flight's 28 s gap is gone.
+
+**The skin on foot.** Four 30 s windows with `binds writing E` 28,592, 35,219, 9,268 and 11,904, `writing no history` 2,762, 1,708, 0 and 0, `eye-frames with target 7` 3,708, 4,628, 4,634 and 4,582, and views given equal to views live in each. The first window joined 382,249 of 419,755 jobs, hook source, 0 hook/t0 disagreements, 1,861 hook calls with 1,861 usable lists. Sean did not judge the picture in this flight.
+
+**CPU.** EDVR's render-thread hooks (`engine motion CPU`, total p50/p95 ms per frame): 0.12/0.20, 0.10/0.20, 0.09/0.17, 0.09/0.15. Draw hook CPU per sampled frame: 1.37, 1.35, 0.79, 0.89, 0.82. Five VR-start on-foot sessions with the skin armed from the start: p50 0.07 to 0.17 and draw hook 0.56 to 2.17 (Frontier `20261031_080600`, `20261031_105749`, `20261101_175204`, `20261102_191605`; Epic `20261029_193916`); `20261102_191605`, with 30 windows writing E, is 0.10 and 0.96. The same scene in a VR start on Frontier (`edvr_gfx_20261104_134816`, `v0.22.0-rc.6-28-g759ec617`) settled the same way: 0.19/0.48 and about 1.95 while settling, 0.08 to 0.09 / 0.14 to 0.15 and 0.71 to 0.82 settled, with fps 88, 81, 85, 90, 90 over its first 200 s. No switched on-foot session without the skin exists, so there is no literal before and after. Long frames: 18 in 121 s, all one missed 90 Hz frame (22 to 31 ms) with 5 to 7 game buffer creations each; the pre-fix switched leg of 13:03 had 15 in 119 s with a 143 ms and a 257 ms hitch.
+
+ruled out: the second skin as the cause of the 76 to 78 fps, because the render-thread CPU matches the VR-start sessions that have it and the render size differed: 4508x4510 here against 4032x4034 on the Frontier run that held 90 (25% more pixels). That is a GPU difference by inference; GPU time per frame was not measured.
+
+ruled out: `skinned-joined=N` above 0 as the on-foot check for the second skin (the flight plan of the entry above named it), because it is 0 in every VR-start on-foot log compared, the world route having treated 0 frames in all of them. The compose's `skinned pixels on the trained path (joined N)` is 0 here and in 6 of 14 recent Frontier VR-start logs, so it does not decide it either. The `second skin this window:` line (E binds, eye-frames with target 7, views live) is the check.
+
+**Why the size differed (not this change).** The headset's width is resolved once, at runtime start, through whichever settings file is active, and cached until the runtime session tears down. This flight began in flat, so `edvr-flat.ini` answered: `openxr resolution: ... edvr-flat.ini has no entry for it, so it runs at 100% = 4508x4510 per eye` (log line 328, 13:38:48), and the switch did not ask again: no second `openxr resolution:` line, and `fix.openxr_resolution` is not among the switch line's `kept until restart` keys. The 3D-on apply runs about 0.5 s before the profile commit that picks `edvr.ini`. The same install launched in VR (`edvr_gfx_20261104_135406`) read `edvr.ini`: 4032x4034, 2016x2017 per eye submitted. Started as its own task (session `flat-start-vr-resolution`, from `main`).
+
+Not shown: how the characters look. Merged to main as `11ef91d5` after this flight.
+
+## 2026-11-05, flight 05:11: blurred highlights flicker in the operations lobby, and the game's depth of field carries it, no code changed
+
+Sean, flat, in the operations lobby: bright out-of-focus highlights flicker with AA on and hold still with AA off. Log `edvr_gfx_20261105_045527` (Frontier, `v0.22.0-rc.6-210-g80c56505`, a branch, not `main`), VR to flat at 05:11:05, DLSS performance, R 1920x1080, D 3840x2160, Elite `DOFEnabled=1`. So the copy route: `hdr-route-needs-render-at-least-output` on every frame, capture `route: sdr`.
+
+**The clip.** 6 s at 30 fps. The left console's highlights carry most of the change, with a few small spots elsewhere. F7 is off from 05:12:34.92 to 05:12:37.28 in the log (2.35 s), and the clip is steady for 70 frames (2.33 s). Mean brightness of the console's top strip jumps among the same few levels between 77 and 136 with AA on, and holds at 104 with AA off.
+
+**The capture.** Shift+NumLock at 05:12:05 (`flat_pixels\20261105_121205_501_44496_1`, frames 82490 and 82491, adjacent). In DLSS's input the same highlight is a round spot in one frame and a long strip in the next. DLSS averages jitter almost everywhere (a typical cell: input change 10.5, output 0.2) and follows these highlights (input 14.2, output 8.6). The map of output change between the two frames has the same spots as the clip.
+
+**The chain** (census 05:12:05, frame 0): scene HDR with depth to half size (FDB74215), two half-size passes (80631A09, E16E27A0), composite of the 960x540 blur over the scene (20F383BB/BF2302BC), bloom from that composite, tone (F9CFC798/E8948389), then the copy to D where the copy route resolves. Every blur pass reads the single jittered frame, ahead of the resolve.
+
+**Cause.** With Depth of Field off in Elite's options Sean sees no flicker (`edvr_gfx_20261105_055017`, `DOFEnabled=0`, by eye, no clip), so the blur carries it. Reading of how: a very small, very bright glint in the scene is hit or missed by jitter, and the blur spreads it into a large blob, a change DLSS takes as real. The scene HDR itself was not captured, so the glint is inferred.
+
+ruled out: motion vectors or history resets as the flicker, because the camera is still (`moved=0`), motion is under 0.001 across the frame, `accepted-reset-5s=0`, and the capture's rejection image is empty.
+
+ruled out: DLSS making the shape change, because the shape already differs in its input across two adjacent frames.
+
+Not separated: the two flights also differ in preset. The clip and capture ran preset K, the DoF-off flight preset M (a fresh launch). The blobs come before DLSS, so this does not touch the cause; how much of them M passes through is unmeasured.
+
+**Where the composite runs.** `flat dof composite` refused every frame in the menus and the lobby, stopped at 17,442 at 05:17 when the game loaded, and did not move again through undocking, a jump, supercruise, docking and on foot, to 05:36. In this flight at this setting the blur is a menu and lobby effect.
+
+**Options.**
+- Average the blur image over recent frames just before the composite reads it, a small half-size pass. In-focus pixels and the frame's other passes are untouched, every resolver on the copy route gets it, and scenes without the composite pay nothing. Recommended. A camera cut restarts the average.
+- Resolve before the blur. The HDR route does this at R >= D; below that the blur's targets cannot take an upscaled image, so it needs a second resolve or a re-issued chain.
+- Clamp bright pixels ahead of the blur: compensation, changes the look.
+- Stop jitter while the composite runs: loses AA on the in-focus subject.
+
+**Open.**
+- R >= D with DoF 1: the route should resolve ahead of the blur (its trigger here is FDB74215), but `verifyDofComposite` asks for a blur of the scene's size and this one is 960x540, hence `last-refusal-mask=0007` on every frame. Harmless on the copy route, untested on the HDR route. To check in the fix's flight: `flat hdr route 5s` `treated`.
+- Depth of Field 2 and the tone variant DE65BFFF2F12ECC6 have their own chains, no census from this flight.
+- After a VR-to-flat switch DLSS runs K while `edvr-flat.ini` says M: `dlss:` lines give M at 04:55:53 and K at 05:11:05, and `flat_runtime.cpp` re-applies the preset only when the flat runtime's own copy changes.
+- `main-menu-lights-flicker` (AA off clean, DLAA clean, DOF 2) may share this cause; a different scene, and its SS 1.0 report does not name the backend.
+
+## 2026-11-05, the blur's average, BUILT, NOT FLOWN
+
+Right before the game's issue of a draw that lays the blur over the scene (20F383BB/BF2302BC, or the tone DE65BFFF2F12ECC6, the blur at t1 in both), the frame's blur is copied into a ring of 8 and t1 reads their mean for that one draw; the game's view goes back after it. The window is the jitter's cycle, so a still scene's blur sums to the same image every frame. EDVR's raw PS entry point is used, so the binding shadow keeps describing the game's bindings. No key: it only runs with AA on, and a frame with no composite pays for two integer compares on the draw.
+
+Left to the game's blur, with the run restarted: no jitter this frame, the HDR route resolved the frame first, no camera comparison from last frame, or the camera moved. Moved is over 0.001 radians or 5 mm a frame, about half a pixel of a 540-row blur, read from rows 4 and 5 of the camera, which carry no jitter. The 3D menu's sway is about a hundredth of that. The comparison comes from the previous frame's resolve, so a cut shows one frame of the old average.
+
+Memory: nine images at the blur's size (37 MB at 960x540), made at the first composite and let go 450 frames after the last. The pass is not in the GPU census yet, so its cost is unmeasured in flight.
+
+Reading it: `flat dof blur 5s: composites=N averaged=N runs-started=N window-now=N blur=WxH; left to the game: ...`, once a window while composites run. A window where `flat dof composite` climbs with no such line means the path was never reached. `averaged` near `composites` in a still lobby is the code doing what it says; the picture is judged from a clip of the same console strip (77 to 136 before, 104 with AA off).
+
+Next flight, Epic, Depth of Field on, same lobby. (1) A clip with AA on, F7 off and back, as the first clip. (2) Supersampling 1.0: `flat hdr route 5s` `treated`, and `hdr-route` in the blur's line. (3) The higher Depth of Field setting and the main menu, with a NumLock census at each.
+
+## 2026-11-05, flight 06:42: the average never ran, and M was clean without it
+
+Flight `edvr_gfx_20261105_064231` (Epic, `v0.22.0-rc.6-205-g3bdb3212`, `--expect-build` passed), DLSS performance, DoF 1, the lobby. Sean: no flicker on preset M; it stays on K, on FSR, and less on XeSS.
+
+The code did not run. `flat dof composite` climbs to 4,730 refused and there is no `flat dof blur` line of any kind. The hooks call `beginActualDraw` only when `needsActualDraw()` says so, and the scope set `dofBlur` without that function naming it. Fixed, and the rig now pins it.
+
+So this flight is a baseline of the game's blur with no average. By eye: M clean, K flickers, FSR flickers, XeSS flickers less. The first clip's K is why it showed on the Frontier install after the VR-to-flat switch, and the DoF-off flight changed the preset as well.
+
+The jitter cycle differs by backend: `flat jitter` says phases=8 for DLSS and FSR and phases=32 for XeSS at this size. The ring holds 8, so XeSS's average spans a quarter of its cycle and will not sum to a constant.
+
+ruled out: "the average fixes M", because the average never ran on M.
+
+## 2026-11-05, flight 07:32: the average runs and the flicker is gone, by eye
+
+Flight `edvr_gfx_20261105_073255` (Epic, `v0.22.0-rc.6-206-g5f868957`, `--expect-build` passed), the lobby, DoF 1, R 1920x1080, D 3840x2160. Sean went through DLSS K, L and M, FSR, XeSS, AA off and EDVR's TAA, and called it fixed. By eye: this flight has no clip, census or capture, so the strip's numbers were not measured again.
+
+**The average ran.** `flat dof blur:` at 07:33:28 names composite BF2302BC, window 8, blur 960x540, view format 10. In the lobby's full windows `averaged` against `composites` is 397/400, 445/449, 370/374, 440/449, 441/449, 438/438, with `failed=0` and `shape=0`. Left to the game there: `not-jittered` 0 to 9 a window around the backend switches, and `camera-moved` once each in two windows. Two windows at 07:33:37 and 07:33:42 have `not-jittered` 103 and 22; what the game was doing then was not read.
+
+**Supersampling 1.0, DoF 1.** R = D = 3840x2160 from 07:36:34. `flat hdr route 5s` has `treated=443` in the 07:36:39 window and the blur's line has `hdr-route=437` of 443, so the route resolves ahead of the blur and the average stands aside.
+
+ruled out: `verifyDofComposite`'s refusal of the half-size blur blocking the HDR route at DoF 1, because the route treated every frame of those windows with `last-refusal-mask=0007` still climbing. The refusal is left as it is.
+
+**DoF 2, Supersampling 1.0.** From 07:37:15: `hdr-route=450` of 450, and `flat dof composite` stops climbing (`accepted=4 refused=3410`), so the draw the blur's line counts there is its other name, the tone DE65BFFF2F12ECC6. Taken by elimination, there is no census.
+
+Not flown: the average at DoF 2 below native, and the main menu with it. XeSS's cycle is 32 phases against the window of 8; Sean named no backend as still flickering, and no number separates it. The pass is still not in the GPU census, and the K-after-switch preset is still open.
+
+### 2026-11-05 the Holo-Me screen is not upscaled (flat, the copy source has a second writer)
+
+Report (Sean, flat, the Frontier Odyssey install, SS 0.5 so the game renders 1920x1080 for a 3840x2160 output): on the Holo-Me screen the 3D commander is not upscaled. His evidence is the Shift+NumLock he took on the screen, `flat_trace_185199.bin` (05:33:42, frames 185196 to 185198). Flight `edvr_gfx_20261105_045527`, `v0.22.0-rc.6-210-g80c56505` (a branch build, not main's HEAD, so `--expect-build HEAD` does not apply; the version line is the check), profile flat, DLSS.
+
+What the log says, in order:
+
+- 05:33:13.499 `flat copy structure 5s`: `admitted=188 declined=176 no-scene=82`, and from then on every probe declines with `the-copy-source-is-not-written-by-one-pass`. Before it every window admitted all 300 to 450 copies with the source written by the stock tone pass `F9CFC798F21E9AEA`/`E8948389387DA083`. After it `last=declined ... VS=CFA91824129ECBBC PS=2427BEBC2082175D`.
+- 05:33:15.602 `flat stand-down: entered at frame=182742: every frame for 5.0 s (440 frames) was refused for no-known-tone-pass, none treated`, with the F8 warning `DLSS is not active: Elite's post-processing is not recognised`. The stand-down re-probes once per 1.5 s (`copies=3` or `4` in the windows after), and every probe declined the same way.
+- 05:33:42.857 `flat stand-down: ended ... after 27.2 s stood down (18 probes): an F10 audit asked for everything`. The key's own captures then read `flat pixels: summary status=expired-arm copied=0` and `resolve inputs ... "status":"expired-arm"`: no treated frame to copy, which is the same finding from the other side, not a broken capture.
+- 05:35:50 a second stand-down, `no-known-output-copy`, is a different reason, two minutes after this capture; not examined here and not this report.
+
+What the trace says (`flat_temporal_test --trace-structure`, then a scratch reader of the draws, `scratchpad\trace_draws.py`, offsets from flat_trace.h and flat_temporal_model.h): all three frames read `whitelist=no-known-tone-pass admission=declined why=the-copy-source-is-not-written-by-one-pass scene=1920x1080 src=1920x1080 fmt=27 draws=2 ldr-before=0/0`. Frame 185198, 233 draws:
+
+| event | target | pair | what it is |
+|---|---|---|---|
+| 437 to 498 | H `DE90A0` 1920x1080 fmt 26, depth `DCE3A0` | 13 draws | the commander and its lights: the scene |
+| 500 | `BC3460` 960x540 fmt 26 | `DFED8E1C9E191BEC`/`143AAE0597E2F7BF` | the first consumer of H (the bloom chain's first step) |
+| 521 | S `82C360` 1920x1080 fmt 27, no depth, full viewport | `CFA91824129ECBBC`/`2427BEBC2082175D` | the tone pass of this screen |
+| 525 | S again | `E8FDC0D92EEBA6D7`/`5D07ACB4D5D5D92A` | a full-screen fill |
+| 526 | the 3840x2160 output | `20F383BBAC05C031`/`DED8796049C7BB4A` | the game's final copy, reading S |
+
+The two pixel shaders, disassembled from the dumped blobs (`tools\dxbc_disasm.py`): `2427BEBC` samples the HDR (t1) and the bloom (t2), clamps, lerps or adds by `cb2[1].w`, applies a rational filmic curve, gamma 2.2, a 3D LUT (t0) and a grade: a tone variant, the stock tone's family, in no whitelist. `5D07ACB4` is `o0.xyz = cb1[0].xyz * cb1[90].y; o0.w = cb1[0].w`, no inputs at all. A normal cockpit frame (`flat_trace_82493.bin`, frame 82492) has S written once, by the stock pair, and no `5D07ACB4` draw.
+
+The mechanism. The HDR route needs R >= D and the scene is half the output (`hdr-route-needs-render-at-least-output`, by design), so this frame is the copy structure's: it admits a source written by one full-viewport pass, whatever the pass is. Here the source has two writers, the structure declines, the whitelist does not know `2427BEBC`, and the frame is refused as `no-known-tone-pass`, which stands the work down. The game's own copy then stretches the 1920x1080 image to 3840x2160, bilinearly, under a UI that is drawn at the display's size. That is the soft 3D commander.
+
+ruled out: the HDR route as the cause, because R < D is its documented decline and the structure is the route for it.
+ruled out: the render size, because the scene is on-shape (`flat scene candidates ... winner 1920x1080 on-shape draws=13`, 25, 8; the admission's own `scene=1920x1080`).
+ruled out: the whitelist as the thing to extend, because the structure exists so that a tone variant needs no entry, and it admitted the stock pair's frames to 05:33:13 without one.
+ruled out: a broken capture key, because `expired-arm` is what an armed capture reads when no frame is treated.
+
+The fix (`flat_mono_frame.h`, `flat_runtime_model.h`, `flat_copy_structure.h`, `flat_runtime.cpp`): the runtime model counts, per target, the writes after the first that are a full-viewport, no-depth draw of the pair `E8FDC0D92EEBA6D7`/`5D07ACB4D5D5D92A` (`constantFillPass`, `FlatRuntimeTarget::constantFills`), and the copy structure's rule reads "one image-making pass, then only those fills" (`oneDrawThenFills`) in place of "one draw". The fill reads nothing, so what it leaves is a function of the image before it and constants: the resolve at the copy still sees the scene's own image. The pair is named, not shaped: only a pass whose bytecode was read is let through, and the first writer of S is never a fill. Nothing else changed: the whitelist, the contract hash and the trace replay do not read the count. Observability: the first admission whose source had fills logs the first-admission line once more, with a sentence naming them (`N full-screen constant fill(s) (VS=... PS=...) follow that pass and read nothing`); the 5 s census then reads `admitted=N` and `last=admitted ... VS=CFA91824129ECBBC PS=2427BEBC2082175D` in the Holo-Me windows. If the fill path never ran, the old `the-copy-source-is-not-written-by-one-pass` decline is what the log keeps saying, so the two are distinguishable.
+
+Not known from the trace: the fill's blend state and the value of `cb1[0]` (the trace carries neither), so what the fill does to the image (a fade, a dim, or an alpha of zero) is unread. The rule does not depend on it: whatever it writes is a function of the image and constants.
+
+Prediction for the flight, Holo-Me open for 30 s on the branch build: no `flat stand-down: entered` with `no-known-tone-pass` at the screen, no F8 warning; one more `flat copy structure: first admission` line carrying `1 full-screen constant fill(s)`; `flat copy structure 5s` windows with `admitted` near the frame count and `declines=none`; the GPU census `upscaler` non-zero in those windows (it reads `-` at 05:33:28). Refuted if the screen is still declined for a different reason (the decline line names it: the next gates are the trigger, the selector and the camera, which the trace replay below does not exercise on a live run), or if it is admitted and the commander still reads soft: then the upscale ran and the softness is the UI compose's, a different report.
+
+Validation (build): full `build.bat --wait-lock` on native Windows, exit 0, `build\full_build_receipt.json` written. The first run stopped at one source pin in `flat_copy_structure_tests.h` (the whitelist's selector, `flat_mono_frame.h`, may not name `flatCopyAdmit`, and my comment did); the comment was reworded and the second run passed every gate. New rig cases in `flat_copy_structure_tests.h`: a constant fill after S's pass is admitted (one and two fills; `srcDraws` 2 and 3, `srcFills` 1 and 2) and the first-admission line names them only when there are some; and four declines that stay declines with the same reason (a fill plus a second image pass, a fill that is not full viewport, a fill drawn with a depth buffer, a fill before S's pass). The real trace, offline, with the built rig: `--trace-structure flat_trace_185199.bin` now reads `admission=admitted result=observed-mono-input-candidate ... draws=2` for frames 185196 to 185198, the same result class as the healthy cockpit frames of `flat_trace_82493.bin` (`draws=1`), where before it read `declined ... the-copy-source-is-not-written-by-one-pass`. The trace itself is not added to `tools\flat_temporal_test\traces` (it would change the corpus counts several tests pin); it stays in the game's `edvr_logs\traces` and the rig's synthetic rows carry the case. What the replay cannot say: the live gates after the structure (the resolver, the DLSS dispatch, the UI composite) are the flight's to read.
+
+Flight (Sean, same day, the fix installed in the Odyssey Frontier directory, scope both): "Fixed". `edvr_gfx_20261105_062523`, `v0.22.0-rc.6-205-gf379c288` (build 6AEC82B3), flat, `--expect-build HEAD` passed. The log, read after he said so: one `flat copy structure: first admission` line at 06:27:22.245 (frame 9671) ends with `1 full-screen constant fill(s) (VS=E8FDC0D92EEBA6D7 PS=5D07ACB4D5D5D92A) follow that pass and read nothing, so the image is still the scene's alone`, which is the fill path having run; no `flat copy structure 5s` window has `declined` above 0; no `flat stand-down: entered` names `no-known-tone-pass` and there is no `flat settings warning`. The two stand-downs in the log (06:25:30 and 06:25:58, `no-3d-scene`) are the startup and loading screens and resumed on a recognised chain. Not measured: how much sharper the commander is (by eye, his word), and the GPU census figure for the upscaler on the screen (the prediction's last item, not read).

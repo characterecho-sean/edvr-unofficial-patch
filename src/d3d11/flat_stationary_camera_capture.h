@@ -29,4 +29,25 @@ void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callN
                                  // Already observed against the loaded module; never resolve as a build binding.
                                  uint64_t observedCallerOffset, uint32_t kind) noexcept;
 
+// The VR map camera (docs/galaxy-map-vr-2026-11-03.md, Fix 2). In the VR profile the renderer hook stays installed and reads only stage 0 of each camera
+// source ("GalaxyMapView", "SystemMapView"), publishing its head-free pose across threads. mapCameraFrame runs once a frame on the render thread that
+// installs the other hooks (device_hook.cpp, its own tick, tkMapCamera, in presentFrameBoundary): it installs the hook (bounded retries), decides "open" (a view published this frame
+// or within the last 8) and says the stage names it saw. The readers below are safe from any thread. In the flat profile the watch is off and they say
+// closed, 0 changes and no pose.
+struct MapCameraPose {
+    float rows[3][3];
+    float position[3];
+};
+void mapCameraFrame() noexcept;
+bool mapCameraGalaxyOpen() noexcept;
+bool mapCameraAnyOpen() noexcept;
+// Publishes that moved the map: a different view, or a different bit in the rows or position of the same view's last publish.
+uint64_t mapCameraChanges() noexcept;
+bool mapCameraPose(MapCameraPose& out) noexcept;
+// Each eye's offset from stage 0's position, in the map frame's axes' coefficients (o.x along rows[0], o.y rows[1], o.z rows[2]): the UI frame's two cameras' origins at camera+0x50,
+// float32 near zero where the game's own eye position at about 50000 units is not (docs/galaxy-map-vr-2026-11-03.md, "The wobble"). mapCameraNoteEye is the refresh hook's offer of one
+// camera (any thread, cheap); mapCameraEyes is true once two distinct offsets have been seen, with the count of changes to them.
+void mapCameraNoteEye(uintptr_t camera) noexcept;
+bool mapCameraEyes(float out[2][3], uint64_t* generation) noexcept;
+
 } // namespace edvr

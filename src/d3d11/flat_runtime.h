@@ -28,6 +28,14 @@ void flatRuntimeMapBounceNoteMap(ID3D11DeviceContext*, ID3D11Resource*, UINT,
 void* flatRuntimeMapBounceInstall(ID3D11DeviceContext*, ID3D11Resource*, UINT,
                                   D3D11_MAP, void* real);
 FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext*, ID3D11Resource*);
+// The bounce, published once it is constructed (flat_runtime.cpp mapBounce(), release store inside the static initialiser) so the Map and Unmap hooks can
+// test "anything open" inline, from any thread. Null before the first mapBounce(): nothing can be open then, because open_ rises only in install, which
+// reaches the bounce through mapBounce(). The object is never freed, so the pointer never dangles.
+extern std::atomic<FlatMapBounce*> g_flatMapBounce;
+inline bool flatRuntimeMapBounceAnyOpen() {
+    const FlatMapBounce* bounce = g_flatMapBounce.load(std::memory_order_acquire);
+    return bounce && bounce->anyOpen();
+}
 bool flatRuntimeMapBounceSamplePending(uint32_t width);
 void flatRuntimeMapBounceObserveCopy(uint32_t width, uint64_t ticks);
 void flatRuntimeMapBounceTrackedMap(D3D11_MAP type);
@@ -169,6 +177,11 @@ struct FlatRuntimeDrawScope {
     const void* glowHdr=nullptr;
     uint64_t glowVs=0,glowPs=0;
     ID3D11ShaderResourceView* glowOriginal=nullptr;
+    // The depth-of-field blur (flat_dof_blur.h): this draw lays the blur over the scene. Begin binds the mean of the recent frames' blur for the game's issue
+    // (dofBlurOriginal holds the game's view then), End puts the game's view back.
+    bool dofBlur=false;
+    uint64_t dofBlurPs=0;
+    ID3D11ShaderResourceView* dofBlurOriginal=nullptr;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
@@ -184,7 +197,7 @@ struct FlatRuntimeDrawScope {
     forward_light::Issue forwardIssue{};
     uint64_t lightPayloadToken=0;
     const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
-    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow ||
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow || dofBlur ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's

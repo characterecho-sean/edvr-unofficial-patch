@@ -46,6 +46,8 @@ void temporalPassMarkerPre(uint64_t,uint32_t,ID3D11Texture2D*,const uint32_t[4],
 void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;doorSeq=seq;doorEye=eye;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the VR world route's re-issued world or, with
 // the on-foot maps gate, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.
+namespace detail { bool g_uiLayerMapRunHeld=false; } // the Galaxy Map's run of sprites is never held in this rig; the doors only ask (src/d3d11/ui_layer.h)
+void uiLayerMapRunEndSlow(ID3D11DeviceContext*){}
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&layerOnlyEye[eye]&&seq!=0&&layerOnlySeq==seq;}
 // The door's answer to "is the frame that arrived the temporal pass's own output" (src/d3d11/ui_layer.h uiLayerDoorFromPass) and the `ownedFrame` the
 // composite was handed: the door may let the layer composite IN PLACE only on a frame EDVR owns.

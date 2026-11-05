@@ -192,6 +192,28 @@ inline int flatCoveredDrawWiringTests() {
            "mutation control: a veto that refuses the world's own draw fails the wiring");
     expect(!vetoValid(without(vetoBody, "s.namingVetoedThisFrame=true;")), "mutation control: a veto the frame boundary never hears of fails the wiring");
 
+    // -- the veto's bound inside one frame: a fast zoom vetoes the world itself, and every vetoed draw is captured --
+    const auto boundValid = [&](const std::string& text) {
+        return ordered(text, {"if(flatDomainPredictsWorld(rows,s.worldReference,&p))returnfalse;",
+                              "if(flatNamingVetoBoundReached(p,s.namingVetoNearDraws)){", "++s.namingVetoBounded;",
+                              "flat world naming bound %u/12", "s.worldReference=FlatDomainWorldReference{};",
+                              "if(s.engine!=FlatMonoResolveMode::Taa)domainFail(s,\"naming-bound\",\"foreground-world-draws-captured-first-person\",k);",
+                              "returnfalse;}", "s.namingVetoedThisFrame=true;++s.namingVetoes;"});
+    };
+    expect(boundValid(vetoBody), "the bound is asked before the draw is vetoed; reaching it counts, says so, drops the reference, refuses the frame's captures and lets this draw name the world");
+    expect(!boundValid(without(vetoBody, "s.worldReference=FlatDomainWorldReference{};")),
+           "mutation control: a bound that keeps the reference, so the next frame vetoes against the stale camera, fails the wiring");
+    expect(!boundValid(without(vetoBody, "if(s.engine!=FlatMonoResolveMode::Taa)domainFail(s,\"naming-bound\",\"foreground-world-draws-captured-first-person\",k);")),
+           "mutation control: a bound that lets a frame with world draws captured as first-person qualify fails the wiring");
+    expect(!boundValid(replaced(vetoBody, "++s.namingVetoBounded;", "")),
+           "mutation control: a bound the 5 s line cannot see fails the wiring");
+    {
+        const std::string bodyText = vetoBody;
+        const size_t boundAt = bodyText.find(compact("if(flatNamingVetoBoundReached(p,s.namingVetoNearDraws)){"));
+        const size_t vetoAt = bodyText.find(compact("s.namingVetoedThisFrame=true;++s.namingVetoes;"));
+        expect(boundAt != std::string::npos && vetoAt != std::string::npos && boundAt < vetoAt, "the draw that reaches the bound is not counted as vetoed");
+    }
+
     const auto selectionValid = [&](const std::string& text) {
         return ordered(text, {"s.untrustedSupportedAlternate=sel.selected()&&sel.mixedCamera;", "if(sel.selected()){",
                               "constautoreference=flatDomainWorldReference(sel.camera);", "if(reference.valid())s.worldReference=reference;nameSourceFree(s,sel);}",
@@ -205,17 +227,21 @@ inline int flatCoveredDrawWiringTests() {
         return ordered(text, {"if(s.namingVetoedThisFrame){", "if(s.namedDepth)s.namingVetoStreak=0;",
                               "elseif(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};",
                               "++s.namingVetoReleases;}", "s.namingVetoedThisFrame=false;", "}elses.namingVetoStreak=0;",
-                              "s.namedDepth=s.namedConstants=nullptr;"});
+                              "s.namingVetoNearDraws=0;", "s.namedDepth=s.namedConstants=nullptr;"});
     };
     expect(boundaryValid(runtime), "a frame that vetoed and never named counts toward giving the reference up; one that named resets the count; both before the naming resets");
     expect(!boundaryValid(without(runtime, "elseif(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};")),
            "mutation control: a veto that can never release a reference that is wrong fails the wiring");
     expect(!boundaryValid(replaced(runtime, "if(s.namedDepth)s.namingVetoStreak=0;", "if(false)s.namingVetoStreak=0;")),
            "mutation control: a frame that named after a veto counted as a failed one fails the wiring");
+    expect(!boundaryValid(without(runtime, "s.namingVetoNearDraws=0;")),
+           "mutation control: a bound's count that carries across frames fails the wiring");
     expect(slurp("src/d3d11/flat_domain_admission.h").find("constexpr uint32_t kFlatNamingVetoFrames = 3;") != std::string::npos,
            "three frames in a row give the reference up");
-    expect(report.find(compact("naming-vetoes=%llu naming-veto-releases=%llu")) != std::string::npos &&
-               report.find(compact("(unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,")) != std::string::npos,
-           "the 5 s line counts the vetoes and the releases");
+    expect(slurp("src/d3d11/flat_domain_admission.h").find("constexpr uint32_t kFlatNamingVetoDraws = 128;") != std::string::npos,
+           "128 vetoed draws at the world's near plane in one frame give the reference up");
+    expect(report.find(compact("naming-vetoes=%llu naming-veto-releases=%llu naming-veto-bounded=%llu")) != std::string::npos &&
+               report.find(compact("(unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,(unsigned long long)s.namingVetoBounded,")) != std::string::npos,
+           "the 5 s line counts the vetoes, the releases and the bound");
     return failures;
 }

@@ -23,6 +23,7 @@
 //   debug layer reports nothing.
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -43,13 +44,17 @@
 #include <wrl/client.h>
 
 #include "../../src/d3d11/crisp_reticle.h"   // C1a: the crisp reticle's arming gate (pure)
+#include "../../src/d3d11/draw_gate_holders.h"   // build 2: the gate holders' names
+#include "../../src/d3d11/draw_mask_line.h"
 #include "../../src/d3d11/draw_state_describe.h"
 #include "../../src/d3d11/flat_ui_layer_math.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/menu_schema.h"
 #include "../../src/d3d11/sharp_weapons.h"
 #include "../../src/d3d11/sharp_weapons_shaders.h"
+#include "../../src/d3d11/target_sharp.h"   // build 4: targetSharpShape
 #include "../../src/d3d11/ui_layer_math.h"
+#include "../../src/d3d11/vs_may_want.h"   // build 2: the may-want byte the family check is skipped by
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
@@ -319,6 +324,286 @@ static void scopeMarkTests() {
     check(uiLayerDecide(d) == UiLayerDecision::kBlendRefused, "the same draw with the blend as the game states it is refused: the rewrite is the family's alone");
 }
 
+// Build 2 (#152): the may-want byte's UI-family bit against the rule. A clear bit must mean kNone on the HDR target (kind 1) for every pixel shader and
+// every runtime fact. It does NOT hold on the post-tonemap target (kind 2: a panel-sized draw is the screen for any vertex shader), which is why the skip
+// is taken on kind 1 only.
+static void mayWantTests() {
+    std::vector<uint64_t> vss = {kUiVsPanel, kUiVsLoader, kUiVsHolo, kUiVsHoloGuiFxOff, kUiVsFlightHud, kUiVsSprite, kUiVsOrbitLines, kUiVsSupercruiseBars,
+                                 kUiVsSpaceDust, kUiVsGuiVector, kUiVsGuiText, kUiVsGuiIcons, kUiVsOnFootHudA, kUiVsOnFootHudB, kUiVsScopeMark,
+                                 kUiVsShieldRefract, kHoloTargetSphere, 0};
+    for (size_t i = 0; i < kWeaponPairCount; ++i) vss.push_back(kWeaponPairs[i].vs);
+    for (uint64_t h : kHoloFamiliesTake) vss.push_back(h);
+    std::vector<uint64_t> pss = {0, kUiPsOrbitLines, kUiPsSupercruiseBars, kUiPsSpaceDust, kUiPsScopeMark, kUiPsShieldRefract, 0xEA02FAC2BD6C643Cull, 0xE95634B0F61D218Full};
+    for (size_t i = 0; i < kWeaponPairCount; ++i) pss.push_back(kWeaponPairs[i].ps);
+    uint64_t x = 0x2545F4914F6CDD1Dull;
+    for (unsigned i = 0; i < 200; ++i) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; pss.push_back(x); vss.push_back(x); }
+    const size_t named = vss.size();
+    for (size_t i = 0; i < named && i < 40; ++i)
+        for (int bit = 0; bit < 64; bit += 7) vss.push_back(vss[i] ^ (1ull << bit));   // one-token mutants of the shipped shaders
+    unsigned cleared = 0, wanted = 0;
+    for (uint64_t vs : vss) {
+        const bool may = (vsMayWantByte(vs) & kVsMayUiFamily) != 0;
+        (may ? wanted : cleared) += 1;
+        if (may) continue;
+        for (uint64_t ps : pss)
+            for (unsigned flags = 0; flags < 16; ++flags) {
+                UiFamilyFacts f = hdrFacts(vs, ps);
+                f.nativeOnFoot = (flags & 1) != 0;
+                f.scopeMark = (flags & 2) != 0;
+                f.learnedSurface = (flags & 4) != 0;
+                f.mapOpen = (flags & 8) != 0;
+                check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "a clear UI family bit is kNone on the HDR target for every pixel shader and fact");
+            }
+    }
+    check(cleared > 100 && wanted >= 20, "the check ran over cleared and wanted shaders both");
+    // The exact family the rule names keeps its bit, and the probe's two shaders and the runtime-gated two do too, whatever the facts.
+    for (size_t i = 0; i < kWeaponPairCount; ++i) check(vsMayWantByte(kWeaponPairs[i].vs) & kVsMayUiFamily, "each weapons-fire vertex shader keeps the bit");
+    for (uint64_t h : kHoloFamiliesTake) check(vsMayWantByte(h) & kVsMayUiFamily, "each take hologram keeps the bit");
+    for (uint64_t h : {kUiVsMapCanvas, kUiVsMapSprite, kUiVsMapRings, kUiVsMapStems}) check(vsMayWantByte(h) & kVsMayUiFamily, "each of a map's four overlay vertex shaders keeps the bit");
+    // The System Map's flat plane: a general vertex shader, so it keeps the bit, and it is named only by its pair with the System Map's camera up.
+    for (uint64_t h : {kUiVsMapPlane, kUiVsMapLinesA, kUiVsMapLinesB}) check(vsMayWantByte(h) & kVsMayUiFamily, "the System Map plane's and lines' vertex shaders keep the bit");
+    {
+        UiFamilyFacts lines = hdrFacts(kUiVsMapLinesA, kUiPsMapLines);
+        lines.mapOpen = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "the System Map's lines are named only with its camera up");
+        lines.mapSystem = true;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "with its camera up they take the plane icons' family, at any count");
+        lines.vs = kUiVsMapLinesB;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kMapPlane, "...and so does the other vertex shader");
+        lines.ps = kUiPsMapPlane;
+        check(uiLayerFamilyFor(lines) == UiLayerFamily::kNone, "...with their own pixel shader only");
+    }
+    {
+        UiFamilyFacts plane = hdrFacts(kUiVsMapPlane, kUiPsMapPlane);
+        plane.mapOpen = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "the plane's pair is not named on the Galaxy Map, whose camera is not the System Map's");
+        plane.mapSystem = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "with the System Map's camera up, a draw at neither count stays in the scene");
+        plane.mapPlaneGrid = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kMapGrid, "n=1014 is the grid");
+        plane.mapPlaneGrid = false;
+        plane.mapPlaneIcon = true;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kMapPlane && uiLayerFamilyTakesHdr(UiLayerFamily::kMapPlane) && uiLayerFamilyTakesHdr(UiLayerFamily::kMapGrid), "n=6 is an icon on the plane, and both go to the HDR layer");
+        plane.ps = 0x494506A63091DF8Cull;
+        check(uiLayerFamilyFor(plane) == UiLayerFamily::kNone, "another pixel shader with the same vertex shader (the laser rifle) is not named");
+    }
+    check(!(vsMayWantByte(kUiVsGuiVector) & kVsMayUiFamily), "a GUI-direct shader is not named on the HDR target, so its bit is clear there");
+    UiFamilyFacts ldr = hdrFacts(kUiVsGuiVector, 0);
+    ldr.targetKind = 2;
+    check(uiLayerFamilyFor(ldr) == UiLayerFamily::kGuiDirect, "...while the post-tonemap target names it (kind 2 is never skipped)");
+    UiFamilyFacts screen = hdrFacts(0x1234567812345678ull, 0);
+    screen.targetKind = 2;
+    screen.panelSized = true;
+    check(uiLayerFamilyFor(screen) == UiLayerFamily::kScreen && !(vsMayWantByte(screen.vs) & kVsMayUiFamily),
+          "a panel-sized draw is the screen for any vertex shader on kind 2, with the bit clear: the implication holds for kind 1 alone");
+    // The list against the rule's own text: every shader the kind-1 branch tests is in the may-want function.
+    const std::string math = readFile("src/d3d11/ui_layer_math.h");
+    const size_t b0 = math.find("} else if (f.targetKind == 1) {"), b1 = math.find("} else if (f.excluded) {");
+    const size_t w0 = math.find("inline bool uiLayerFamilyHdrVsMayWant"), w1 = math.find("inline UiLayerFamily uiLayerFamilyFor");
+    check(b0 != std::string::npos && b1 > b0 && w0 != std::string::npos && w1 > w0, "the rule and its may-want function are found in ui_layer_math.h");
+    const std::string rule = math.substr(b0, b1 - b0), want = math.substr(w0, w1 - w0);
+    const char* tokens[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
+                            "uiHoloGenericHash", "weaponPairIndex", "shieldRefractPair", "uiOnFootHudMatch", "uiLayerMapFamilyOf"};
+    const char* mapped[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
+                            "uiHoloGenericHash", "weaponsFireVs", "shieldRefractVs", "uiOnFootHudVs", "uiVsIsMapOverlay"};
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i)
+        if (rule.find(tokens[i]) != std::string::npos)
+            check(want.find(mapped[i]) != std::string::npos, (std::string("the rule tests ") + tokens[i] + " and the may-want function names it").c_str());
+    // Every kUiVs name the rule mentions is one of the tokens above (a new vertex shader in the rule must be added to both).
+    size_t pos = 0;
+    while ((pos = rule.find("kUiVs", pos)) != std::string::npos) {
+        size_t end = pos;
+        while (end < rule.size() && (std::isalnum(static_cast<unsigned char>(rule[end])) || rule[end] == '_')) ++end;
+        const std::string name = rule.substr(pos, end - pos);
+        check(want.find(name) != std::string::npos, (std::string("the rule's ") + name + " is in the may-want function").c_str());
+        pos = end;
+    }
+}
+
+// The text of a function from its signature to the matching close brace (braces in strings and comments are balanced in this tree's sources).
+static std::string bodyFrom(const std::string& text, const std::string& signature) {
+    const size_t at = text.find(signature);
+    if (at == std::string::npos) return std::string();
+    const size_t open = text.find('{', at + signature.size() - 1);
+    if (open == std::string::npos) return std::string();
+    int depth = 0;
+    for (size_t i = open; i < text.size(); ++i) {
+        if (text[i] == '{') ++depth;
+        else if (text[i] == '}' && --depth == 0) return text.substr(at, i - at + 1);
+    }
+    return std::string();
+}
+static size_t countIn(const std::string& t, const std::string& s) {
+    size_t n = 0;
+    for (size_t at = t.find(s); at != std::string::npos; at = t.find(s, at + s.size())) ++n;
+    return n;
+}
+static bool beforeIn(const std::string& t, const std::string& a, const std::string& b) {
+    const size_t x = t.find(a), y = t.find(b);
+    return x != std::string::npos && y != std::string::npos && x < y;
+}
+static bool hasIn(const std::string& t, const std::string& s) { return t.find(s) != std::string::npos; }
+
+// Build 2 (#151, #152, #168): the draw gate's holders, the may-want byte's call sites, the instanced thunk's fast path, the deleted stash.
+static void build2WiringTests() {
+    // Every gate holder has a name, and the names are distinct.
+    for (size_t h = 0; h < kGateHolders; ++h) {
+        const char* n = gateHolderName(h);
+        check(n && n[0] && std::strcmp(n, "unknown") != 0, "every draw-gate holder has a name");
+        for (size_t k = h + 1; k < kGateHolders; ++k) check(std::strcmp(n, gateHolderName(k)) != 0, "holder names are distinct");
+    }
+    char line[512];
+    formatGateHolders(line, sizeof(line), 0);
+    check(std::strcmp(line, "draw gate holders: 0 of 29 terms hold the gate open: none (the gate is closed).") == 0, "the line for an empty set says so");
+    formatGateHolders(line, sizeof(line), gateHolderBit(GateHolder::UiDepth) | gateHolderBit(GateHolder::IntroCurve));
+    check(std::strcmp(line, "draw gate holders: 2 of 29 terms hold the gate open: ui_depth, intro_curve.") == 0, "the line names the holders in order");
+    DrawMaskCounts mc;
+    mc.draws = 14000;
+    mc.skips[1] = 7;
+    formatDrawMaskWindow(line, sizeof(line), 3600, mc);
+    check(std::strstr(line, "draw mask: 1800-frame window ending 3600; 14000 draws through the full path;") &&
+              std::strstr(line, "ui_family 0, screen_motion_ui 7, screen_motion 0, weapon_motion 0, hologram_depth 0."),
+          "the mask line prints every bit's count, zeros included");
+
+    const std::string vscreen = readFile("src/d3d11/vscreen.cpp"), holders = readFile("src/d3d11/draw_gate_holders.h"), motion = readFile("src/d3d11/screen_motion.cpp");
+    // The gate is the holder set: one `if` and one `|=` per holder, each name used once, and the gate reads nothing but the set. A term added to the
+    // gate without a holder bit has no name to add and fails here.
+    const std::string gate = bodyFrom(vscreen, "uint32_t drawGateHolders(State* s) {");
+    check(!gate.empty(), "drawGateHolders is found");
+    const size_t enumAt = holders.find("enum class GateHolder"), enumEnd = holders.find("Count", enumAt);
+    const std::string names = holders.substr(enumAt, enumEnd - enumAt);
+    size_t listed = 0;
+    for (size_t i = names.find('{') + 1; i < names.size();) {
+        while (i < names.size() && !std::isalpha(static_cast<unsigned char>(names[i]))) ++i;
+        size_t e = i;
+        while (e < names.size() && std::isalnum(static_cast<unsigned char>(names[e]))) ++e;
+        if (e == i) break;
+        check(countIn(gate, "GateHolder::" + names.substr(i, e - i) + ")") == 1, "each holder is set by exactly one term of the gate");
+        ++listed;
+        i = e;
+    }
+    check(listed == kGateHolders, "the scan read every holder in the enum");
+    check(countIn(gate, "\n    if (") == kGateHolders && countIn(gate, "m |= gateHolderBit(") == kGateHolders && hasIn(gate, "return m;"),
+          "the gate is one statement per holder and nothing else");
+    check(hasIn(vscreen, "drawGateSet(m != 0);") && countIn(vscreen, "drawGateSample(s);") == 2, "the gate is sampled from the holder set at both places");
+
+    // The instanced thunk has no fast exit (#151, held back until #152 makes it reachable): forwardWithVerdict always runs, with the body cull's and the intro curve's ends after it.
+    const std::string x = bodyFrom(vscreen, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
+    check(!hasIn(x, "drawPathFast") && !hasIn(x, "fast") && hasIn(x, "    forwardWithVerdict(self, v, flags, 'X'"), "the instanced thunk has no fast branch: forwardWithVerdict always runs");
+    check(beforeIn(x, "nativeOnFootBodyCullBegin(", "forwardWithVerdict(self, v, flags, 'X'") && beforeIn(x, "forwardWithVerdict(self, v, flags, 'X'", "if (bodyCull) nativeOnFootBodyCullEnd(self);") &&
+              beforeIn(x, "if (bodyCull) nativeOnFootBodyCullEnd(self);", "introCurveEndDraw();"),
+          "the body cull begins before and ends after the verdict forward, and the intro curve ends after it");
+    check(hasIn(x, "if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {"), "engine velocity's call is behind the verdict alone");
+
+    // The UI family check is skipped inside the branch that calls it and never reaches the probe branch after it.
+    const std::string fwd = bodyFrom(vscreen, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
+    check(countIn(fwd, "uiLayerFamilyOf(g_state, kind, count, instances)") == 1 && hasIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily) && uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1") &&
+              beforeIn(fwd, "if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {", "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)") &&
+              beforeIn(fwd, "vsMaySkip(bindingVsMayWant(), kVsMayUiFamily)", "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {") &&
+              hasIn(fwd, "compositeCounted = uiDepthScope.composite;"),
+          "the family skip sits inside the live branch, on kind 1 only, before the probe branch, with the composite census untouched");
+    check(hasIn(x, "vsMaySkip(mayWant, kVsMayScreenUi)") && hasIn(x, "vsMaySkip(mayWant, kVsMayScreenRecognize)") && hasIn(x, "vsMaySkip(bindingVsMayWant(), kVsMayWeaponMotion)") &&
+              hasIn(x, "screenMotionLive() && !uiLayerRedirecting() && !uiLayerWorldReissuePending()"),
+          "the instanced thunk skips each motion call on its own bit, behind the same runtime terms");
+    check(vscreen.find("fssPanelRectDrawArgs") == std::string::npos && vscreen.find("fssPanelRectStartInstance") == std::string::npos &&
+              readFile("src/d3d11/fss_panel_rect.h").find("fssPanelRectDrawArgs") == std::string::npos,
+          "the panel-rect stash and its getters are gone");
+    check(hasIn(vscreen, "args.startInstance,\n                                    args.base);") || hasIn(vscreen, "args.startInstance,\r\n                                    args.base);"),
+          "the rect deriver takes the draw's own arguments");
+    const std::string uiDraw = bodyFrom(motion, "void screenMotionUiDraw(");
+    check(beforeIn(uiDraw, "screenMotionUiPair(", "GetType()"), "screen motion's UI draw tests the shader pair before its virtual context-type call");
+    check(hasIn(readFile("src/d3d11/weapon_motion.cpp"), "weaponMotionFamilyHash(hash)") && hasIn(motion, "screenMotionRecognizePair("), "the subscribers read the same lists as the byte");
+}
+
+// Build 4 (#185, #157): the draw path's own cost. Every change is the same test or the same data, moved; these hold the moves to the sources. The headers' inline
+// predicates are held to the callee's own first test by reading both, since the callees live in translation units a pure rig does not link.
+static void build4WiringTests() {
+    // Item 6: targetSharpShape is the callee's shape, over a grid that includes every near miss.
+    for (char kind : {'X', 'I', 'N', 'D', '?'})
+        for (uint32_t count : {0u, 3u, 5u, 6u, 7u, 100u})
+            for (uint32_t instances : {0u, 1u, 2u})
+                check(targetSharpShape(kind, count, instances) == (kind == 'X' && count == 6 && instances == 1), "targetSharpShape is exactly (X, 6, 1)");
+    const std::string vscreen = readFile("src/d3d11/vscreen.cpp");
+    const std::string sharpCpp = readFile("src/d3d11/target_sharp.cpp");
+    const std::string sharpOn = bodyFrom(sharpCpp, "bool targetSharpOnEyeDraw(");
+    check(hasIn(sharpOn, "if (!targetSharpShape(kind, count, instances))") && !hasIn(sharpCpp, "constexpr char     kKind"),
+          "the callee tests the shape through the shared helper and the constants have one definition");
+    check(hasIn(vscreen, "if (targetSharpShape(kind, count, instances) && targetSharpWantsDraws() &&") &&
+              hasIn(vscreen, "if (holoPatternShape(kind, count, instances) && holoWantsDraws() &&") &&
+              hasIn(vscreen, "if (backdropCompositeShape(kind, count, instances) && backdropWantsDraws() &&") &&
+              hasIn(vscreen, "scrimWantsDraws() && scrimWashShape(kind, count, instances)"),
+          "item 6: the (X, 6, 1) shapes go before the flag loads, and scrim keeps its own order (its shape is count >= 100)");
+    // Item 6: the hash test goes before the guard.
+    check(beforeIn(vscreen, "const uint64_t fssVs = bindingShaderHash(BindSlot::Vs);", "guardedBudget(g_panelCbBudget, [&] {") &&
+              beforeIn(vscreen, "if (fssVs == 0xA888D51024D9798Eull || fssVs == 0xB018D143700AB803ull) guardedBudget(g_panelCbBudget, [&] {", "const uint64_t h = fssVs;"),
+          "item 6: the FSS chrome tracker tests the two vertex shader hashes before it sets the guard up");
+
+    // Item 1: each callee keeps its own first test, and each call site tests it first.
+    const std::string station = readFile("src/d3d11/optimized_station.h");
+    check(hasIn(station, "inline bool optimizedStationSunOff() noexcept { return detail::g_sunOff.load(std::memory_order_acquire); }") &&
+              hasIn(readFile("src/d3d11/optimized_station.cpp"), "if (!optimizedStationSunOff() || vs != kSunVs || ps != kSunPs) return false;") &&
+              hasIn(vscreen, "if (optimizedStationSunOff() && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;"),
+          "item 1: the sun skip's acquire load is tested before its two hash arguments are read, by the same accessor the callee uses");
+    const std::string temporalH = readFile("src/d3d11/temporal_pass.h");
+    check(hasIn(temporalH, "inline bool temporalPassRigidDrawMayWant(int eye) { return detail::g_temporalPassWantedFssChrome && eye >= 0 && eye <= 1; }") &&
+              hasIn(readFile("src/d3d11/temporal_pass.cpp"), "if (!temporalPassRigidDrawMayWant(eye)) return false;") &&
+              countIn(vscreen, "temporalPassRigidDrawMayWant(") == 3,
+          "item 1: the temporal pass's rigid-draw first test is one inline predicate used by the callee and by both call sites");
+    const std::string gpuH = readFile("src/d3d11/gpu_frame_timing.h");
+    check(beforeIn(gpuH, "detail::g_gpuFrameCommandLive.load(std::memory_order_relaxed) &&", "!detail::g_gpuFrameInternal;") && hasIn(gpuH, "__forceinline void gpuFrameCommandIfLive("),
+          "item 1: the relaxed load goes before the thread-local, and the draw thunks' call is forced inline");
+    const std::string flatH = readFile("src/d3d11/flat_temporal.h");
+    check(beforeIn(flatH, "__declspec(noinline) inline bool flatTemporalCapturingSlow() {", "__forceinline bool flatTemporalCapturing() {") &&
+              beforeIn(flatH, "if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;", "return flatObserveAsOwner(") &&
+              hasIn(flatH, "if (!detail::g_flatTemporalCapturing.load(std::memory_order_relaxed)) return false;" + std::string("\n") + "    return flatTemporalCapturingSlow();"),
+          "item 1: flatTemporalCapturing inlines its first load and keeps the other tests, in order, out of line");
+    check(hasIn(readFile("src/d3d11/ui_layer.h"), "return rtv0Gen == detail::g_uiLayerTargetGen ? detail::g_uiLayerTargetKindCache : uiLayerTargetKind();") &&
+              hasIn(readFile("src/d3d11/ui_layer.cpp"), "if (gen == detail::g_uiLayerTargetGen) return detail::g_uiLayerTargetKindCache;") &&
+              hasIn(vscreen, "uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0)) == 1"),
+          "item 1: the target kind's generation compare is inline at the draw path and is the callee's first test");
+    check(hasIn(readFile("src/d3d11/object_probe.h"), "if (detail::g_objectProbeLedgerOn && ctx) objectProbeCandidateDrawIssuedLedgered(ctx,issued);") &&
+              hasIn(readFile("src/d3d11/object_probe.cpp"), "void objectProbeCandidateDrawIssuedLedgered(ID3D11DeviceContext* ctx,bool issued) {" + std::string(1, char(10)) + "    if(detail::g_objectProbeLedgerOn && ctx){") &&
+              countIn(vscreen, "objectProbeCandidateDrawIssued(self,") == 3,
+          "item 1: the candidate-draw note's ledger test is inline in its header, the body keeps it, and the three call sites are unchanged");
+    const std::string blendH = readFile("src/d3d11/blend_probe.h");
+    check(hasIn(blendH, "return detail::g_blendProbePhase.load(std::memory_order_relaxed) == detail::kBlendProbeCollecting;") &&
+              hasIn(readFile("src/d3d11/blend_probe.cpp"), "static_assert(kCollecting == detail::kBlendProbeCollecting"),
+          "item 1: the blend probe's gate is one inline relaxed load, held to the phase enum by a static_assert");
+    check(hasIn(vscreen, "__forceinline bool pixelProbeLive(State* s) { return depthWriterWantsDraws() || (pixelProbeWantsDraws() && s->rtv0Eye); }") && countIn(vscreen, "pixelProbeLive(g_state)") == 12,
+          "item 1: the pixel and depth writer probes' first tests are inline at all twelve thunk sites (six before, six after)");
+
+    // Item 2: one 64-byte block at the head of State, size pinned, and glareClamp is not in it.
+    const std::string block = bodyFrom(vscreen, "struct alignas(64) DrawHot {");
+    check(!block.empty() && hasIn(vscreen, "static_assert(sizeof(DrawHot) == 64 && alignof(DrawHot) == 64") && hasIn(vscreen, "struct State : DrawHot {") && !hasIn(block, "glareClamp"),
+          "item 2: the per-draw State fields are one 64-byte-aligned block at the head of State, without glareClamp");
+    for (const char* field : {"ownerCtx", "rtv0Eye", "rtv0EyeGen", "rtv0Cand", "curveThisDraw", "introCurveThisDraw", "eyeDrawsThisFrame", "bindAuditSeq", "censusSkipCount",
+                              "censusSkipRangeCount", "censusSkipOffCount", "censusAutoW", "quadSkipArmed", "distanceEnabled", "fssBodyFrame", "frameNo"})
+        check(hasIn(block, std::string(" ") + field + " =") || hasIn(block, std::string("* ") + field + " ="), "item 2: every named field is in the block");
+
+    // Item 4: both hooks test "anything open" first; Install needs an active flat runtime; the Scope sits below the open test.
+    check(hasIn(vscreen, "if (flatRuntimeMapBounceAnyOpen()) flatRuntimeMapBouncePreMap(res);") &&
+              hasIn(vscreen, "flatRuntimeMapBounceAnyOpen() ? flatRuntimeMapBounceBeginUnmap(self,res) : FlatMapBounce::Lease{}") &&
+              hasIn(vscreen, "if (mapData0 && flatRuntimeActive()) mapped->pData=flatRuntimeMapBounceInstall(") &&
+              !hasIn(vscreen, "if (!runtimeVrProfile()) flatRuntimeMapBounceBeginUnmap"),
+          "item 4: Map and Unmap skip the bounce while nothing is open, by its own test and not by the profile (a bounce open across a switch still flushes)");
+    const std::string runtime = readFile("src/d3d11/flat_runtime.cpp");
+    const std::string beginUnmap = bodyFrom(runtime, "FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(");
+    check(beforeIn(beginUnmap, "if (!mapBounce().anyOpen()) return {};", "flatcpu::Scope shadows(flatcpu::kShadows);") &&
+              hasIn(runtime, "g_flatMapBounce.store(made, std::memory_order_release);") &&
+              hasIn(readFile("src/d3d11/flat_runtime.h"), "g_flatMapBounce.load(std::memory_order_acquire)"),
+          "item 4: the flat CPU scope is below the open test, and the bounce is published with release and read with acquire");
+
+    // Item 9: the hologram pass is skipped on the may-want bit, counted, with the callee's one store made inline.
+    const std::string maskH = readFile("src/d3d11/draw_mask_line.h");
+    check(hasIn(vscreen, "if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {") && hasIn(vscreen, "uiDepthHologramSkippedDraw();") &&
+              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "uiDepthHologramSkippedDraw();", "flags.holoDepth = false;") &&
+              beforeIn(vscreen.substr(vscreen.find("if (vsMaySkip(bindingVsMayWant(), kVsMayHoloDepth)) {")), "flags.holoDepth = false;", "maskNoteSkip(MaskSkip::HoloDepth);") &&
+              hasIn(maskH, "\"weapon_motion\", \"hologram_depth\"}") && hasIn(maskH, "WeaponMotion, HoloDepth, Count"),
+          "item 9: a clear bit skips the hologram pass, sets the eye to -1 inline, clears the flag and counts it; the enum and names end with hologram_depth");
+    check(hasIn(readFile("src/d3d11/binding_shadow.cpp"), "s.mayWant = 0xFF;   // a cleared shader slot must not keep a stale may-want byte"),
+          "item 9: bindingInvalidate resets the may-want byte");
+}
+
 static void ruleTests() {
     check(kWeaponPairCount == 3, "three weapons-fire pairs");
     for (size_t i = 0; i < kWeaponPairCount; ++i) {
@@ -365,8 +650,10 @@ static void ruleTests() {
               static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
               static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) == static_cast<int>(UiLayerFamily::kScopeMark) + 1 &&
-              static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03) last (no older number moved)");
+              static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) &&
+              static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) &&
+              static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03), the map marks (2026-11-04) and the System Map's plane icons and grid (2026-11-05) last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -909,8 +1196,8 @@ static bool wiredVscreen(const std::string& t) {
     const size_t ps = t.find("else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", fn);
     if (skip == std::string::npos || vs == std::string::npos || ps == std::string::npos || !(skip < vs) || !(vs < ps)) return false;
     // the steps loop: after the game's tonemap draw is re-issued once, before the layer's End
-    const size_t loop = t.find("while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);");
-    const size_t first = t.rfind("pureDrawReissue(self, kind, count, instances, args);", loop);
+    const size_t loop = t.find("while (uiLayerCrispToneNext(self)) pureDrawReissue(ReissueCaller::Tonemap, self, kind, count, instances, args);");
+    const size_t first = t.rfind("pureDrawReissue(ReissueCaller::CrispHud, self, kind, count, instances, args);", loop);
     const size_t end = t.find("uiLayerCrispToneEnd(self);", loop);
     return loop != std::string::npos && first != std::string::npos && end != std::string::npos && first < loop && loop < end &&
            has(t, "} else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {");
@@ -968,7 +1255,7 @@ static void wiringTests() {
     check(wiredVscreen(vscreen), "vscreen.cpp: the pixel shader is read for the weapons' vertex shaders, the post-tonemap rules wait for fix.ui_quality, the steps are issued");
     check(!wiredVscreen(replaced(vscreen, "else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", "else if (f.targetKind == 1 && false)")), "control: no pixel shader read for the pairs trips the pin");
     check(!wiredVscreen(replaced(vscreen, "if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", "")), "control: post-tonemap rules that run for the weapons trip the pin");
-    check(!wiredVscreen(replaced(vscreen, "while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);", "")), "control: no loop over the steps trips the pin");
+    check(!wiredVscreen(replaced(vscreen, "while (uiLayerCrispToneNext(self)) pureDrawReissue(ReissueCaller::Tonemap, self, kind, count, instances, args);", "")), "control: no loop over the steps trips the pin");
 
     check(wiredSnapshot(snap), "eye_draw_snapshot.h: the next eye dump watches the three weapons-fire vertex shaders (their constant buffers settle W3)");
     check(!wiredSnapshot(replaced(snap, "case 0x939D01F28D1FEEA8ull: // multicannon rounds\n", "")), "control: an unwatched pair trips the pin");
@@ -1915,6 +2202,9 @@ int main(int argc, char** argv) {
     }
     try {
         ruleTests();
+        mayWantTests();
+        build2WiringTests();
+        build4WiringTests();
         scopeMarkTests();
         keyTests();
         planTests();

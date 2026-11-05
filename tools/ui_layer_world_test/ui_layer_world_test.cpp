@@ -289,6 +289,10 @@ void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* c, ID3D11BlendState* s, cons
     rawNote();
     c->OMSetBlendState(s, f, m);
 }
+void vScreenOMSetDepthStencilStateRaw(ID3D11DeviceContext* c, ID3D11DepthStencilState* s, uint32_t ref) {   // the Galaxy Map sprites' depth state (galaxy_map_ui.h); the rig draws no map
+    rawNote();
+    c->OMSetDepthStencilState(s, ref);
+}
 void vScreenPSSetShaderRaw(ID3D11DeviceContext* c, ID3D11PixelShader* s, ID3D11ClassInstance* const* ci, uint32_t n) {
     rawNote();
     c->PSSetShader(s, ci, n);

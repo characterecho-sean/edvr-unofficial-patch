@@ -2,6 +2,8 @@
 
 ## Status
 
+- **Flat start switched to VR (2026-11-04):** the launch query read "off" under
+  flat, so the eyes ran at 100%. Fixed (the VR file's value), NOT FLOWN; last entry.
 - **Current fix (2026-09-15):** Widened-only alignment missed the menu's odd
   output height. Initial and live game-facing recommendations now align both
   axes, including inactive guard states. Full build and desktop checks pass;
@@ -2291,3 +2293,67 @@ binary hashes. Both user INIs were preserved. Installation records are in
 the same attempt directory. The next flight should retain HMD quality 0.5
 and confirm DLSS feature creation for 1982x1957 to 3964x3914 at the current
 menu setting, no render-range rejection, normal cockpit rendering and exit.
+
+## 2026-11-04: a flat start switched to VR sized the eyes at 100%
+
+Epic, Pimax Crystal Super, Pimax OpenXR, build `v0.22.0-rc.6-71-g11ef91d5`. The
+flat start `edvr_gfx_20261104_133846` was switched to VR on foot at 13:43:30;
+the VR start `edvr_gfx_20261104_135406` of the same install, the same
+`edvr.ini` and the same headset was not.
+
+| Log | Launched | `openxr resolution:` line | Per eye the game submitted |
+|---|---|---|---|
+| 133846 | flat | 13:38:48.693, `ignored "off"`, then "edvr-flat.ini has no entry for it, so it runs at 100% = 4508x4510" | 2254x2255, 76-78 fps |
+| 135406 | VR | 13:54:08.366, "edvr.ini sets it to 4032 wide = 4032x4034" | 2016x2017 (4032 at HMD Quality 0.5) |
+
+There is no second `openxr resolution:` line after the switch in 133846. The
+runtime logs are in UTC, seven hours ahead of the graphics log's clock; the
+times here are the graphics log's.
+
+**Cause.** `Config::getString` answers "off" for a key the active profile does
+not list (`runtimeProfileAllowsKey`), and the flat profile does not list
+`fix.openxr_resolution`. The OpenXR runtime is up from launch in a flat session
+(its session is created at 13:38:48.695, `runtime_startup_steps` at
+13:38:49.219), and the graphics half's `edvrQueryNativeRenderSettings` runs
+once there, under the flat profile, and reads "off". The host caches that scale
+until the runtime session closes (`renderSettingsCaptured`), so a live switch
+never re-asks.
+
+**When Elite reads the size.** The runtime log's `system_geometry_query,slot=0`
+lines are `GetRecommendedRenderTargetSize`. Elite asks at launch (13:38:49.219
+and .221) and again at the 3D-on apply: three asks on the render thread (tid
+44628, the thread of the `vr window` hooks) at 13:43:29.850, .851 and .855, 65
+ms after the first Supersampling getter read (13:43:29.785) and 260 ms before
+`profile switch: flat -> vr` (13:43:30.110). All answered
+`recommended=4508x4510`, and the game's eye targets are that times HMD Quality
+0.5. The size has to be right when the runtime session is created; nothing done
+at the commit reaches the targets built 260 ms earlier.
+
+**Fix.** `readOpenxrResolutionValue()` (`native_render_settings.cpp`): under
+the VR profile it is `Config::getString`, as before; under any other profile it
+reads the VR file's `fix.openxr_resolution` on its own
+(`Config::vrSettingsPath`: beside the module, then beside the .exe; `iniValue`,
+the reader's own rules) and the log line names that file. A flat launch and a
+VR launch now resolve one size from one file. `native_render_settings_test`
+holds it (a flat-profile fixture with a different entry for the same headset in
+the flat file; four checks fail without the fix: the flat query answers
+1824x1968 where the VR file says 3283).
+
+Other VR-only per-headset keys: only `fix.openxr_resolution` is cached for the
+session. The field-of-view trims (`experimental.fov_trim_*`,
+`native_frame.cpp`) are re-resolved every frame and cached by the text of the
+three keys, so they follow the profile that is active: under flat they read
+"off" (three `fov trim: ignored "off"` lines at 13:38:49.133, a false report
+with the same root, cosmetic) and the switch changes the text, so they
+re-resolve from `edvr.ini` at the commit. They are not stale.
+
+- ruled out: re-resolving and republishing at the profile commit, because the
+  3D-on apply asks 260 ms before the commit, the game has built its eye
+  targets by then, and a republish would also need a swapchain rebuild
+  mid-session.
+- ruled out: naming `fix.openxr_resolution` under "kept until restart" on its
+  own, because it only reports the stale value and does not size the eyes.
+
+Not flown. Flight: launch Epic in flat with 3D off, turn 3D on; expect
+`openxr resolution: ... edvr.ini sets it to 4032 wide = 4032x4034 per eye` at
+the launch (about 5 s in), and 2016x2017 per eye submitted after the switch.

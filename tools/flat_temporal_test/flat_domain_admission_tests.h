@@ -507,6 +507,37 @@ inline int flatDomainWorldPredictionTests() {
         check(!flatDomainPredictsWorld(noScale, ref, &detail) && detail.nearEqual && detail.ratio0 == 0, "a draw at the reference's near plane with no projection scale is not predicted");
     }
 
+    // ---- the naming veto's bound inside one frame (the scoped zoom's stall) ----------------------------------------------------
+    {
+        float world[6][4];
+        loggedRows(world, false);
+        const FlatDomainWorldReference ref = flatDomainWorldReference(world);
+        // The flight's frame 106042: the world's own next frame, 15.2% zoomed. Near equal, scale rejected, so it is vetoed and it counts.
+        float zoomed[6][4]; std::memcpy(zoomed, world, sizeof(world)); scaled(zoomed, 1.152, 1.152);
+        FlatDomainWorldPrediction zoom;
+        check(!flatDomainPredictsWorld(zoomed, ref, &zoom) && zoom.nearEqual, "the world zoomed 15.2% in a frame is not predicted, and its near plane is the reference's");
+        uint32_t draws = 0;
+        bool reached = false;
+        for (uint32_t i = 1; i < kFlatNamingVetoDraws; ++i) reached = flatNamingVetoBoundReached(zoom, draws) || reached;
+        check(!reached && draws == kFlatNamingVetoDraws - 1, "the draws before the bound keep the veto");
+        check(flatNamingVetoBoundReached(zoom, draws), "the draw that reaches the bound ends it");
+        // The grenade: a camera at its own near plane never counts, however many draws it makes.
+        float weapon[6][4]; loggedRows(weapon, true);
+        FlatDomainWorldPrediction own;
+        check(!flatDomainPredictsWorld(weapon, ref, &own) && !own.nearEqual, "the first person at its own near plane is vetoed without the near test");
+        draws = 0;
+        reached = false;
+        for (uint32_t i = 0; i < 13000; ++i) reached = flatNamingVetoBoundReached(own, draws) || reached;
+        check(!reached && draws == 0, "a camera at its own near plane is never taken for the world by the count");
+        // A first person aiming down sights shares the world's near plane: the bound must clear what it draws. Flight 4's frames that never named
+        // vetoed about 30; the bench's grenade hold draws 70.
+        draws = 0;
+        reached = false;
+        for (uint32_t i = 0; i < 70; ++i) reached = flatNamingVetoBoundReached(zoom, draws) || reached;
+        check(!reached, "70 vetoed draws at the world's near plane keep the veto");
+        check(kFlatNamingVetoDraws == 128, "the bound is 128 draws a frame: 1.5 ms at the flight's 12 us a draw, against 160 ms a frame without it");
+    }
+
     // ---- an aiming-down-sights frame through the pending-null witnesses -----------------------------------------------------------
     // The frame's pre-naming draws, as the 13:18 flight saw them: the world's depth prepass (F516BF02/B40B0462, the world's own rows) and the
     // weapon's, at the world's near plane with its own projection scale. The near-only classification takes both for the world, so the

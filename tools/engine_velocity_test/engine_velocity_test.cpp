@@ -65,6 +65,7 @@
 #include "pin_tests.h"
 #include "copier_tests.h"
 #include "unkeyed_tests.h"
+#include "profile_switch_tests.h"
 #include "remember_cap_tests.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/engine_velocity_families.h"   // kSelfMarking
@@ -447,6 +448,7 @@ int wmain(int argc, wchar_t** argv) {
     pin_tests::run({device.Get(), context.Get(), &check});
     copier_tests::run({device.Get(), context.Get(), &check});
     unkeyed_tests::run({&check});
+    profile_switch_tests::run({device.Get(), context.Get(), &check});
     if (!realLinkRoot.empty()) {
         const Pair edge{L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false};
         check(onePair(device.Get(), context.Get(), realLinkRoot, edge, &check),

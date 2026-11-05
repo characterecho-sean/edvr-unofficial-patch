@@ -660,7 +660,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" ^
+    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" "src\d3d11\galaxy_map_pointer.cpp" "src\d3d11\galaxy_map_ui.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" "src\d3d11\vr_star_glow.cpp" ^
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -697,7 +697,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" "src\d3d11\vehicle_rig.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -724,7 +724,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_star_glow.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_star_glow.cpp" "src\d3d11\flat_dof_blur.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -1062,6 +1062,7 @@ if not exist "%OBJ%\native_menu" mkdir "%OBJ%\native_menu"
     /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native menu test build failed & exit /b 1 )
 "%BUILD%\native_menu_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_menu_test.exe" --layout || exit /b 1
 "%BUILD%\native_menu_test.exe" --self-test || exit /b 1
 exit /b 0
 
@@ -1077,7 +1078,7 @@ if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe fixture assembly bui
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
@@ -2590,6 +2591,19 @@ if errorlevel 1 ( echo [edvr] ERROR: light grid cache test build failed & exit /
 "%BUILD%\light_grid_cache_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_vehicle_rig_test
+echo [edvr] === vehicle_rig_test.exe ===
+REM The vehicle rig's pure half (src\d3d11\vehicle_rig_core.h, issue 186): a rig with a zero count, a rig torn down between frames, a vtable mismatch, a fault in a guarded read,
+REM an absurd count, the name and root sphere, the two largest record radii, the pose math against tools\flat_pixels_engine.py's, and the corrected reads
+REM (R = *(I+0x2F0)). No DLL and no game.
+if not exist "%OBJ%\vehiclerig" mkdir "%OBJ%\vehiclerig"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vehiclerig\\" ^
+    /Fe"%BUILD%\vehicle_rig_test.exe" "tools\vehicle_rig_test\vehicle_rig_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vehicle rig test build failed & exit /b 1 )
+"%BUILD%\vehicle_rig_test.exe" --self-test || exit /b 1
+exit /b 0
 :rig_pad_state_test
 echo [edvr] === pad_state_test.exe ===
 REM The pad-state probe's pure half (src\d3d11\pad_state_core.h): the identity and prologue decision, change detection, the exact line texts, the
@@ -3223,7 +3237,7 @@ REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
 %CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_render_settings\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
     "tools\native_render_settings_test\native_render_settings_test.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )
@@ -3887,6 +3901,38 @@ if not exist "%OBJ%\billboardfacing" mkdir "%OBJ%\billboardfacing"
 if errorlevel 1 ( echo [edvr] ERROR: billboard facing test build failed & exit /b 1 )
 "%OBJ%\billboardfacing\billboard_facing_test.exe" --dry-run || exit /b 1
 "%OBJ%\billboardfacing\billboard_facing_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_galaxy_map_vs_test
+echo [edvr] === galaxy_map_vs_test.exe ===
+REM The VR Galaxy Map's replacement shaders (src\d3d11\galaxy_map_vs.h; docs\galaxy-map-vr-2026-11-03.md Fix 3) on a WARP device with the D3D debug layer, through
+REM stream output: the icons' two transcriptions against the formula on every class of record (the UI frame's, the galactic plane, the identity quaternion, the map's
+REM facing records, both position encodings, a bone-indexed record), the faces case against the game's own maths with the eye equal to the map camera, the arrow
+REM transcription for both signs of the scale, and the probe on the GPU (the occlusion query, the mask blend, write mask 0). The comparison with the game's own bytecode
+REM is made by hand with a one-off program that includes the test (the bytecode is not in the repository).
+if not exist "%OBJ%\galaxymapvs" mkdir "%OBJ%\galaxymapvs"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\galaxymapvs\\" /Fe"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" ^
+    "tools\galaxy_map_vs_test\galaxy_map_vs_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: galaxy map vs test build failed & exit /b 1 )
+"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" --dry-run || exit /b 1
+"%OBJ%\galaxymapvs\galaxy_map_vs_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_map_run_test
+echo [edvr] === map_run_test.exe ===
+REM The VR Galaxy Map's run of sprites (src\d3d11\map_run_core.h; docs\galaxy-map-vr-2026-11-03.md "After the fifth flight"): the state machine's binds (one begin and one end for a run of
+REM sprites, the test fails above two), the game's own sets of the same or other targets, the draws and calls that end a run, and a WARP run with the sprites' real depth-stencil states that
+REM leaves the game's targets bound again after the end (OMGetRenderTargets).
+if not exist "%OBJ%\maprun" mkdir "%OBJ%\maprun"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\maprun\\" /Fe"%OBJ%\maprun\map_run_test.exe" ^
+    "tools\map_run_test\map_run_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: map run test build failed & exit /b 1 )
+"%OBJ%\maprun\map_run_test.exe" --dry-run || exit /b 1
+"%OBJ%\maprun\map_run_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_visor_axis_test

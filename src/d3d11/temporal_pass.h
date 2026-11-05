@@ -163,6 +163,9 @@ namespace detail {
 extern bool g_temporalPassWantedFssChrome;
 }  // namespace detail
 inline bool temporalPassWantsFssChrome() { return detail::g_temporalPassWantedFssChrome; }
+// The first test of temporalPassWantsRigidDraw, inline for the draw path: while it is false the call returns false at once. The callee keeps it as its own
+// first line, so an inline caller that tests this first changes nothing.
+inline bool temporalPassRigidDrawMayWant(int eye) { return detail::g_temporalPassWantedFssChrome && eye >= 0 && eye <= 1; }
 
 // For the periodic totals line: eye-submits treated, the measured price,
 // and the share of pixels whose history was rejected (off the image or
@@ -280,6 +283,9 @@ float temporalPassDepthAt(float metres);
 
 void temporalPassShutdown();
 
+// The map's counters (flags bit 8): one log line, then the counters clear; nothing when no map frame ran. Called when the native channel closes.
+void temporalPassLogMap();
+
 // Both raw eye-to-head matrices from the native temporal channel. Internal to
 // d3d11.dll; the established exported head-pose ABI stays unchanged.
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],
@@ -336,7 +342,11 @@ extern "C" {
 //            is clear. Bit 7 -- with bit 1 set and bit 6 clear, the external
 //            engine is Intel's XeSS-SR. Bits 2-5 are reset's own sub-reasons,
 //            read by the pass's own diagnostics; native_temporal.cpp's treat()
-//            (the ABI's one caller) never sets them.
+//            (the ABI's one caller) never sets them. Bit 8 -- a map is open
+//            (temporal_mode.h temporalMapOpen): the pass resets this eye's
+//            history itself on a frame where the map camera's pose changed
+//            (temporalMapMoved over mapCameraChanges()), or no map view is
+//            named, and says which in temporalMapStillBits().
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

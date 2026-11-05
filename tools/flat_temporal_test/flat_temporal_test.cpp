@@ -47,6 +47,7 @@
 #include "flat_hdr_route_tests.h"
 #include "flat_offscreen_tests.h"
 #include "flat_discovery_policy_tests.h"
+#include "flat_dof_blur_tests.h"
 #include "flat_laser_scene_tone_tests.h"
 #include "flat_deferred_camera_tests.h"
 #include "flat_deferred_failure_capture_tests.h"
@@ -3162,7 +3163,7 @@ void testFlatWitnessWiring() {
           temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
           temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
           "ordinary discovery avoids compute/manual projection arms and propagates explicit full tier");
-    check(hookCpp.find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
+    check(hookCpp.find("flatTemporalArm(g_state->device, route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
           "configured flat census key still gives Shift its explicit full tier");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
@@ -4174,6 +4175,7 @@ int main(int argc, char** argv) {
     failures += flatLogLineTests();
     failures += flatHistoryDepthTests();
     flat_discovery_policy_tests::run(check);
+    flat_dof_blur_tests::run(check);
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

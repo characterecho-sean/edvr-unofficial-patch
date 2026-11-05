@@ -1,6 +1,7 @@
 #include "screen_motion.h"
 #include "native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "weapon_motion.h"
+#include "motion_vs.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdio>
@@ -94,7 +95,7 @@ constexpr unsigned kPanelKinds=7;   // joined, masked, not a rig record, stale, 
 constexpr uint64_t kGpuWindowFrames=1800;
 constexpr unsigned kGpuDrainFrames=120;
 struct GpuMetric {
-    GpuIntervals<16> timer;
+    GpuIntervals<16, GpuQueryOwner::ScreenMotion> timer;
     uint64_t calls=0,selected=0,submitted=0,budgetSkipped=0;
     unsigned lastSelectedFrame=~0u;
     bool begin(ID3D11DeviceContext* ctx,unsigned stride,uint64_t scope,unsigned frame) {
@@ -231,8 +232,7 @@ void screenMotionConfigure(Config& cfg) {
     weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
 }
 bool screenMotionRecognize() {
-    bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
-        bindingShaderHash(BindSlot::Ps)==0xCFE84157BC76E921ull;
+    bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && screenMotionRecognizePair(bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
     if(matched){g.seen=true;g.lastScreen=g.frame;}return matched;
 }
 // A pool family draw into a depth of the screen's size, counted for this
@@ -315,14 +315,10 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
     // A GUI composite the UI layer took (ui_layer.h) is not in the pass's
     // input and its bound target is the layer: no source-UI mask from it.
     if(uiLayerRedirecting())return;
-    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || g.sourceFrame!=g.frame || !draw || !ctx ||
-       ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
-    const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
-    // Flight 14:40:54, final LDR draws 932..938. These are GUI composites,
-    // not the earlier HDR cockpit/world effects or the GUI atlas builders.
-    if(!((vs==0xB10B032BDFD46700ull && ps==0xDB899F4BD577F2E5ull) ||
-         (vs==0xC4B4B334B26E81A9ull && ps==0x0146ABCC53240479ull) ||
-         (vs==0xA888D51024D9798Eull && ps==0x015EF9349EC097E8ull)))return;
+    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || g.sourceFrame!=g.frame || !draw || !ctx)return;
+    // The pair test comes before the virtual GetType call: the common draw is no interface composite (motion_vs.h: the pairs, flight 14:40:54).
+    if(!screenMotionUiPair(bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps)))return;
+    if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     Ptr<ID3D11RenderTargetView> rt;ctx->OMGetRenderTargets(1,&rt,nullptr);if(!rt)return;
     Ptr<ID3D11Resource> res;rt->GetResource(&res);Ptr<ID3D11Texture2D> tex;if(FAILED(res.As(&tex)))return;
     D3D11_TEXTURE2D_DESC td{},depth{};tex->GetDesc(&td);g.depth->GetDesc(&depth);

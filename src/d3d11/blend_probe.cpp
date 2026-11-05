@@ -30,12 +30,15 @@
 #include "vscreen.h"
 
 namespace edvr {
+namespace detail {
+std::atomic<int> g_blendProbePhase{0};   // blend_probe.h reads it inline; the values are Phase below (0 = kIdle)
+}  // namespace detail
 namespace {
 
 using namespace blend;
 
 enum Phase : int { kIdle = 0, kArmed = 1, kCollecting = 2, kReading = 3 };
-std::atomic<int> g_phase{kIdle};
+static_assert(kCollecting == detail::kBlendProbeCollecting && kIdle == 0, "blend_probe.h reads the phase inline");
 std::atomic<bool> g_gridNeeded{false};
 bool g_installed = false;
 bool g_flat = false;
@@ -647,7 +650,7 @@ void writeReport() {
 void finishCapture() {
     writeReport();
     releaseAll();
-    g_phase.store(kIdle, std::memory_order_release);
+    detail::g_blendProbePhase.store(kIdle, std::memory_order_release);
 }
 
 }  // namespace
@@ -669,7 +672,7 @@ void blendProbeRequest(const char* trigger) {
         return;
     }
     int expected = kIdle;
-    if (!g_phase.compare_exchange_strong(expected, kArmed, std::memory_order_acq_rel)) {
+    if (!detail::g_blendProbePhase.compare_exchange_strong(expected, kArmed, std::memory_order_acq_rel)) {
         Log::get().note("blend probe: refused (%s): the capture is %s (trigger %s)", refusalText(Refusal::kBusy), phaseName(expected),
                         trigger ? trigger : "");
         return;
@@ -679,7 +682,7 @@ void blendProbeRequest(const char* trigger) {
 }
 
 void blendProbeFrameBoundary(uint32_t gameFrame) noexcept {
-    const int p = g_phase.load(std::memory_order_acquire);
+    const int p = detail::g_blendProbePhase.load(std::memory_order_acquire);
     if (p == kIdle) return;
     try {
         if (p == kArmed) {
@@ -693,13 +696,13 @@ void blendProbeFrameBoundary(uint32_t gameFrame) noexcept {
             g_probeFaults = 0;
             g_gridWhy.clear();
             g_gridNeeded.store(true, std::memory_order_release);
-            g_phase.store(kCollecting, std::memory_order_release);
+            detail::g_blendProbePhase.store(kCollecting, std::memory_order_release);
             Log::get().note("blend probe: collecting %u frames from game frame %u.", kFrames, g_startFrame);
         } else if (p == kCollecting) {
             ++g_cur;
             if (g_cur >= kFrames) {
                 g_gridNeeded.store(false, std::memory_order_release);
-                g_phase.store(kReading, std::memory_order_release);
+                detail::g_blendProbePhase.store(kReading, std::memory_order_release);
                 g_readTicks = 0;
                 pollQueries();
                 pollGrids();
@@ -717,16 +720,12 @@ void blendProbeFrameBoundary(uint32_t gameFrame) noexcept {
         Log::get().note("blend probe: the capture faulted at a frame boundary and was abandoned.");
         releaseAll();
         g_gridNeeded.store(false, std::memory_order_release);
-        g_phase.store(kIdle, std::memory_order_release);
+        detail::g_blendProbePhase.store(kIdle, std::memory_order_release);
     }
 }
 
-bool blendProbeWantsDraws() noexcept {
-    return g_phase.load(std::memory_order_relaxed) == kCollecting;
-}
-
 void blendProbeDraw(ID3D11DeviceContext* ctx, const BlendDrawInfo& info, BlendReplayFn replay, void* arg) noexcept {
-    if (g_phase.load(std::memory_order_relaxed) != kCollecting) return;
+    if (detail::g_blendProbePhase.load(std::memory_order_relaxed) != kCollecting) return;
     try {
         drawImpl(ctx, info, replay, arg);
     } catch (...) {
@@ -735,7 +734,7 @@ void blendProbeDraw(ID3D11DeviceContext* ctx, const BlendDrawInfo& info, BlendRe
 }
 
 void blendProbeNoteIndirect() noexcept {
-    if (g_phase.load(std::memory_order_relaxed) == kCollecting && g_cur < kFrames) ++g_slots[g_cur].counts.indirect;
+    if (detail::g_blendProbePhase.load(std::memory_order_relaxed) == kCollecting && g_cur < kFrames) ++g_slots[g_cur].counts.indirect;
 }
 
 bool blendProbeGridWanted() noexcept {
@@ -743,7 +742,7 @@ bool blendProbeGridWanted() noexcept {
 }
 
 void blendProbeGridRefuse(const char* why) noexcept {
-    if (g_phase.load(std::memory_order_acquire) != kCollecting) return;
+    if (detail::g_blendProbePhase.load(std::memory_order_acquire) != kCollecting) return;
     try {
         if (g_gridWhy.empty()) g_gridWhy = why ? why : "";
         if (g_cur < kFrames) g_slots[g_cur].grid.offered = true;
@@ -781,7 +780,7 @@ bool stageOne(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* src,
 }  // namespace
 
 void blendProbeGridOffer(ID3D11DeviceContext* ctx, const BlendGridIn& in) noexcept {
-    if (g_phase.load(std::memory_order_acquire) != kCollecting || g_cur >= kFrames) return;
+    if (detail::g_blendProbePhase.load(std::memory_order_acquire) != kCollecting || g_cur >= kFrames) return;
     try {
         g_gridNeeded.store(false, std::memory_order_release);
         Grid& g = g_slots[g_cur].grid;

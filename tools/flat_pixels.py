@@ -132,6 +132,10 @@ def load_manifest(path):
     static_scene = manifest.get("static_scene", False)
     if type(static_scene) is not bool:
         raise CaptureError(f"{path}: static_scene must be a boolean")
+    # The frame carried the vehicle frame (FlatMonoResolveFrame::vehicleFrame; absent in older captures: off). The replay cannot redo it.
+    vehicle_frame = manifest.get("vehicle_frame", False)
+    if type(vehicle_frame) is not bool:
+        raise CaptureError(f"{path}: vehicle_frame must be a boolean")
     if manifest.get("mode") not in ("dlss", "dlaa"):
         raise CaptureError(f"{path}: mode must be dlss or dlaa")
     for field in ("binary_version", "binary_compiled"):
@@ -275,7 +279,7 @@ def load_manifest(path):
         "path": path, "version": version, "frame_id": frame, "jitter": jitter,
         "previous_jitter": previous_jitter, "reset": manifest["reset"],
         "rows_jitter": rows_jitter, "previous_rows_jitter": previous_rows_jitter,
-        "static_scene": static_scene, "mode": manifest["mode"],
+        "static_scene": static_scene, "vehicle_frame": vehicle_frame, "mode": manifest["mode"],
         "binary_version": manifest.get("binary_version"),
         "binary_compiled": manifest.get("binary_compiled"),
         "configured_dlss_preset": preset,
@@ -983,7 +987,9 @@ def self_test():
         branches = analyze(complete_meta, [("whole", (0, 0, rw, rh))])["engine_analysis"]["rois"][0]["branch_counts"]
         assert branches["engine_joined"] == 1 and branches["camera_unmarked_record"] == 1
         assert branches["rejected_masked_record"] == 1 and branches["rejected_corrupt_code"] == 1
-        assert branches["rejected_stale_or_depth"] == 1 and branches["camera_no_slot"] == 1
+        # The stale pixel's captured rejection byte says kept and the joined record under it (slot code 3) reproduces its zero motion, so the
+        # replay now calls it the stale record term (flat_pixels_engine: staleRecordBefore); with a rejected byte it stays rejected_stale_or_depth.
+        assert branches["engine_stale_record"] == 1 and "rejected_stale_or_depth" not in branches and branches["camera_no_slot"] == 1
         assert "camera_stale_static" not in branches and complete_meta["static_scene"] is False
         rgba = np.concatenate((slots, np.full((rh, rw, 2), [7, 19], dtype="<f4")), axis=2)
         rgba_manifest = json.loads(json.dumps(complete))

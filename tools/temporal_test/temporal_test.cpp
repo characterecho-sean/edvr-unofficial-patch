@@ -103,6 +103,38 @@ int main() {
     }
     check(edvr::temporalModeEnabledFor("XeSS", true) && edvr::temporalModeEnabledFor("XeSS", false),
           "XeSS producers arm in flat and VR, including mixed-case ini value");
+    // The VR map gate: the Galaxy Map, System Map and Orrery (GuiFocus 6, 7, 8) and nothing else; an unknown focus (on foot, a menu) is no map.
+    check(edvr::temporalMapOpen(false, true, 6) && edvr::temporalMapOpen(false, true, 7) && edvr::temporalMapOpen(false, true, 8),
+          "the Galaxy Map, the System Map and the Orrery are maps");
+    check(!edvr::temporalMapOpen(false, true, 0) && !edvr::temporalMapOpen(false, true, 5) && !edvr::temporalMapOpen(false, true, 9) &&
+          !edvr::temporalMapOpen(false, true, 10) && !edvr::temporalMapOpen(false, true, 4294967295u),
+          "no focus, station services, the Full System Scanner and anything past the orrery are not maps");
+    check(!edvr::temporalMapOpen(false, false, 6) && !edvr::temporalMapOpen(false, false, 0),
+          "a focus the journal cannot state is never a map, whatever the stale value");
+    check(edvr::temporalMapOpen(true, false, 0) && edvr::temporalMapOpen(true, true, 0) && edvr::temporalMapOpen(true, true, 9) && !edvr::temporalMapOpen(false, false, 0),
+          "a map view named by the camera source opens the gate whatever the journal says (or does not)");
+    // The System Map's close view keeps its history through a move, on the camera's rows; everything else resets on one, and a map with no view named never keeps.
+    check(edvr::temporalMapKeeps(true, false, false) && edvr::temporalMapKeeps(true, false, true) && edvr::temporalMapKeeps(true, true, true) && !edvr::temporalMapKeeps(true, true, false) &&
+              !edvr::temporalMapKeeps(false, false, true) && !edvr::temporalMapKeeps(false, true, true),
+          "a named map keeps at rest, and through a move only where the rows move its scene");
+    // The map camera moving (docs\galaxy-map-vr-2026-11-03.md, Fix 2): rest keeps, one change resets twice, the first look resets, no threshold.
+    {
+        edvr::TemporalMapMotion m;
+        check(edvr::temporalMapMoved(m, 7), "the first look at a map has no history to keep");
+        check(edvr::temporalMapMoved(m, 7), "the look after the first still resets (the publisher can be one publish behind a frame's draws)");
+        check(!edvr::temporalMapMoved(m, 7) && !edvr::temporalMapMoved(m, 7) && !edvr::temporalMapMoved(m, 7), "a map at rest keeps frame after frame");
+        check(edvr::temporalMapMoved(m, 8), "one publish that changed the pose resets");
+        check(edvr::temporalMapMoved(m, 8), "and the look after it resets as well (a frame's draws can be one publish behind)");
+        check(!edvr::temporalMapMoved(m, 8), "then it keeps again");
+        check(edvr::temporalMapMoved(m, 9) && edvr::temporalMapMoved(m, 10) && edvr::temporalMapMoved(m, 11) && edvr::temporalMapMoved(m, 11) && !edvr::temporalMapMoved(m, 11),
+              "a map that keeps moving resets every look, and the one after its last change");
+        m = edvr::TemporalMapMotion{};
+        check(edvr::temporalMapMoved(m, 11), "cleared state (the map closed) makes the next look a first look");
+        edvr::TemporalMapMotion other;
+        check(edvr::temporalMapMoved(other, 11) && edvr::temporalMapMoved(m, 11) && !edvr::temporalMapMoved(m, 11) && edvr::temporalMapMoved(other, 11),
+              "each eye has its own state: the second eye's first look does not spend the first eye's reset");
+    }
+    check(edvr::temporalMapStillBits().load() == 0u, "no word from the pass is no kept frame");
     check(edvr::temporalEngineFor("XeSS") == edvr::TemporalEngine::Intel &&
           edvr::temporalExternalEngine("xess") && edvr::temporalEngineFor("dlss") == edvr::TemporalEngine::Nvidia,
           "xess maps to the Intel engine, an external one, in VR");

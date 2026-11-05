@@ -19,9 +19,15 @@ cbuffer Mono : register(b0) {
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
                  // the VR world route sets it, never the flat profile). Bit 3 (value 8): the flat profile's planet records are bound at
-                 // t18 and the celestial tangents below are set (celestialBefore; the VR world route never sets it). Zero leaves the old shader path unchanged.
+                 // t18 and the celestial tangents below are set (celestialBefore; the VR world route never sets it). Bit 4 (value 16): a stale slot's pixel
+                 // asks the record under it first (staleRecordBefore; flat only). Bit 5 (value 32): the vehicle frame is set (flat, in a vehicle, with the
+                 // steady-detail depth check): the player vehicle's cockpit rig root, its pose this frame and last and its sphere, below; a near pixel inside the
+                 // sphere with no motion of its own rides it (vehicleBefore). Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
     float4 celestialTanNow; float4 celestialTanPrev; // the planet records' tangents (l, r, b, t) now and last frame: only read with debug.w bit 3
+    float4 vehiclePosNow; float4 vehiclePosPrev; // the vehicle's cockpit rig root position (xyz, world, as the pool holds it) at this frame's emit and last frame's
+    uint4 vehicleQuat;   // its packed quaternion words: now x y, last frame z w (the pool's own encoding; the scale is 1)
+    float4 vehicleSphere; // the root's sphere in its own frame: centre xyz, radius w. All four only read with debug.w value 32
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -303,6 +309,86 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     }
     return 1;
 }
+// THE STALE SLOT'S OWN RECORD (debug.w bit 4, value 16; the flat profile's treatment alone, FlatMonoResolveFrame::staleRecordTerm). A pixel
+// whose slot a later draw overdrew (engineBefore's return 3) is an unkeyed surface drawn over a keyed one, and what is drawn over a joined
+// record is nearly always attached to the same thing: the commander's body and the flight controls over the cockpit shell ride the camera
+// with it. The camera term holds the surface still in the world, which is wrong for those, so the slot under the pixel is asked first: the
+// record it names, certified exactly as the exact path certifies it (a rig record with this frame's marker, never a skinned one), moves
+// this pixel's own depth the way the record moved. Returns false, leaving the camera term, for anything else: the bit clear, a slot code
+// that is no record, a masked, non-rig or stale-marker record, a skinned one, or one the rows cannot reproject. The caller validates the
+// answer against last frame's depth (historyDepthMatches) exactly as it validates the camera term.
+bool staleRecordBefore(int2 q,float2 uv,float depth,out float4 before) {
+    before=0;
+    if((debug.w&16)==0)return false;
+    float2 es=Slots.Load(int3(q,0));
+    if(!(es.x>=1) || es.x>=4294967296.0)return false;
+    uint code=uint(es.x);
+    if(float(code)!=es.x || (code&1)==0)return false;
+    uint count,stride; Pool.GetDimensions(count,stride);
+    uint slot=code>>1;
+    if(slot>=count || stride!=336)return false;
+    EnginePoolRecord r=Pool[slot];
+    if((debug.w&4)!=0 && r.data[0].x!=0u)return false;
+    uint kind=engineRecordKind(r,asuint(EN[276].x));
+    if(kind==3)kind=engineStaleStampKind(r,asuint(EN[276].x));
+    if(kind!=1)return false;
+    if(r.data[18].x!=(0x7FC0ED01u^engineMarkerHash(r,asuint(EN[276].x))))return false;
+    return engineReprojectRows(r,uv*float2(2,-2)+float2(-1,1),depth,
+        unjitterRow(EN[270],rowsJitter.xy),unjitterRow(EN[271],rowsJitter.xy),
+        unjitterRow(EN[272],rowsJitter.xy),unjitterRow(EN[273],rowsJitter.xy),EN[275].xyz,
+        unjitterRow(EB[270],rowsJitter.zw),unjitterRow(EB[271],rowsJitter.zw),
+        unjitterRow(EB[272],rowsJitter.zw),unjitterRow(EB[273],rowsJitter.zw),EB[275].xyz,before);
+}
+// THE VEHICLE FRAME (debug.w value 32; FlatMonoResolveFrame::vehicleFrame; flat, in a vehicle). The cockpit's body, seat and controls are near
+// surfaces that ride the vehicle, and some carry no certified record of their own (no slot, an unmarked or skinned one, or a stale slot over one).
+// The game's own rig names what they ride: the root record of the player vehicle's cockpit rig, whose pose (as the emit saw it, so as the pool holds
+// it) comes in the constants, this frame's and last frame's, with the root's sphere in its own frame. A pixel qualifies only inside that sphere and
+// within 10 m (depth*10 >= now[3].z, the depth being near/z). vehicleBefore moves it the way the root moved, through the same reprojection the pool
+// records use (a local record filled from the constants); the prep validates the answer against last frame's depth as it validates any record
+// term, and keeps the camera term as it was where this declines or fails.
+bool vehicleNear(float depth) { return depth>0 && isfinite(depth) && depth*10.0>=now[3].z; }
+// 0: not taken (the bit is clear, the pixel is far, or outside the sphere); 1: inside the volume but the rows cannot reproject it; 2: inside, `before` is its position last frame.
+uint vehicleBefore(float2 uv,float depth,out float4 before) {
+    before=0;
+    if((debug.w&32)==0 || !vehicleNear(depth))return 0;
+    EnginePoolRecord r=(EnginePoolRecord)0;
+    r.data[0].y=asuint(1.0); r.data[0].zw=vehicleQuat.xy;
+    r.data[1].xyz=asuint(vehiclePosNow.xyz);
+    r.data[19].y=asuint(1.0); r.data[19].zw=vehicleQuat.zw;
+    r.data[18].yzw=asuint(vehiclePosPrev.xyz);
+    const float4 n0=unjitterRow(EN[270],rowsJitter.xy), n1=unjitterRow(EN[271],rowsJitter.xy), n2=unjitterRow(EN[272],rowsJitter.xy), n3=unjitterRow(EN[273],rowsJitter.xy);
+    // The pixel's point in the root's frame (the first half of engineReprojectRowsE, with the scale 1): world less the camera, less the root's
+    // position less the camera, turned by the inverse of the root's rotation. Inside the sphere or declined.
+    if(n0.z!=0.0 || n1.z!=0.0 || n2.z!=0.0 || n3.w!=0.0 || !(n3.z>0.0) || !(depth>0.0))return 0;
+    const float2 ndc=uv*float2(2,-2)+float2(-1,1);
+    const float z=n3.z/depth;
+    const float3 a=float3(n0.x,n1.x,n2.x), b=float3(n0.y,n1.y,n2.y), c=float3(n0.w,n1.w,n2.w);
+    const float3 ca=cross(b,c), cb=cross(c,a), cc=cross(a,b);
+    const float det=dot(a,ca);
+    if(!(abs(det)>1e-12) || !isfinite(det))return 0;
+    const float3 rhs=float3(ndc*z-n3.xy,z);
+    const float3 world=(ca*rhs.x+cb*rhs.y+cc*rhs.z)/det;
+    float4 q=engineQuat(vehicleQuat.xy); q.xyz=-q.xyz;
+    const float3 local=engineTurn(q,world-(vehiclePosNow.xyz-EN[275].xyz));
+    const float3 d=local-vehicleSphere.xyz;
+    if(!all(isfinite(d)) || !(dot(d,d)<=vehicleSphere.w*vehicleSphere.w))return 0;
+    if(!engineReprojectRows(r,ndc,depth,n0,n1,n2,n3,EN[275].xyz,
+        unjitterRow(EB[270],rowsJitter.zw),unjitterRow(EB[271],rowsJitter.zw),
+        unjitterRow(EB[272],rowsJitter.zw),unjitterRow(EB[273],rowsJitter.zw),EB[275].xyz,before))return 1;
+    return 2;
+}
+// The range tests and the foreground scale of a record's answer, then last frame's depth: the same rule the camera term and the stale record
+// term are held to. Motion and expected are written either way; only a true return means they stand.
+bool recordTermKeeps(float4 b,float2 uv,out float2 motion,out float expected) {
+    const float2 p=b.xy/b.w*float2(.5,-.5)+.5;
+    motion=(p-uv)*float2(size.xy);
+    expected=b.z/b.w;
+    const bool inRange=all(isfinite(motion)) && all(abs(motion)<=65504) && all(p>=0) && all(p<=1) && isfinite(expected) && expected>=0 && expected<=1;
+    if((debug.w&2)!=0)expected*=foregroundDepth.x;
+    bool kept=false;
+    if(inRange)kept=historyDepthMatches(p,expected);   // an if, not &&: no short-circuit
+    return kept;
+}
 )HLSL"
 R"HLSL(
 [numthreads(8,8,1)]
@@ -390,12 +476,47 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // HLSL logical operators do not short-circuit: putting cameraBefore's
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
-        if(kind==0||kind==3) {
+        // A stale slot (kind 3) asks its own record first (staleRecordBefore, debug.w bit 4): the record's motion stands where last frame's depth
+        // confirms it, exactly as the camera term's would, and the camera term below is what runs where it does not. The class stays
+        // kClassStale, so a pixel kept this way is a stale pixel the rule kept. The range tests are the camera term's own.
+        bool recordKept=false;
+        if(kind==3) {
+            float4 recordBefore;
+            const bool recordOk=staleRecordBefore(q,rawUv,depth,recordBefore);
+            if(recordOk) {
+                const float2 recordPrev=recordBefore.xy/recordBefore.w*float2(.5,-.5)+.5;
+                const float2 recordMotion=(recordPrev-rawUv)*float2(size.xy);
+                float recordExpected=recordBefore.z/recordBefore.w;
+                const bool inRange=all(isfinite(recordMotion)) && all(abs(recordMotion)<=65504) &&
+                                   all(recordPrev>=0) && all(recordPrev<=1) && isfinite(recordExpected) && recordExpected>=0 && recordExpected<=1;
+                if((debug.w&2)!=0)recordExpected*=foregroundDepth.x;
+                if(inRange)recordKept=historyDepthMatches(recordPrev,recordExpected);   // an if, not &&: no short-circuit
+                if(recordKept){motion=recordMotion;expected=recordExpected;reject=0;}
+            }
+        }
+        // The vehicle frame (debug.w value 32): a near pixel inside the cockpit rig root's sphere that reached the camera path (no slot, an unmarked or
+        // skinned record, or a stale pixel whose own record declined or failed its check) first rides the root, where last frame's depth confirms it.
+        // It is classed kClassSkinned, the one accepted class the census counts (slot 24), which flat otherwise never produces. A pixel inside the
+        // volume that does not keep it has its camera term checked below.
+        uint vehicleState=0;
+        bool vehicleKept=false;
+        if(!recordKept && (kind==0||kind==3)) {
+            float4 vehicleFrom;
+            vehicleState=vehicleBefore(rawUv,depth,vehicleFrom);
+            if(vehicleState==2) {
+                float2 vehicleMotion; float vehicleExpected;
+                vehicleKept=recordTermKeeps(vehicleFrom,rawUv,vehicleMotion,vehicleExpected);
+                if(vehicleKept){motion=vehicleMotion;expected=vehicleExpected;reject=0;cls=kClassSkinned;}
+            }
+        }
+        if(recordKept || vehicleKept) {
+        } else if(kind==0||kind==3) {
             // A planet's pixel takes the body's own motion (celestialBefore); anywhere else, or with no records bound, the camera term stands.
             uint celestial=celestialBefore(rawUv,depth,before);
             if(celestial==0)valid=cameraBefore(rawUv,depth,before); else valid=celestial==1;
         }
-        if(valid) {
+        if(recordKept || vehicleKept) {
+        } else if(valid) {
             float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives
             // the actual current phase separately and tracks its own history.
@@ -408,6 +529,14 @@ void prep(uint3 id:SV_DispatchThreadID) {
             // the check refuses stays a stale-slot pixel (cls kClassStale, refused): the census counts it as stale-refused.
             if((debug.w&2)!=0)expected*=foregroundDepth.x;
             if(valid && kind==3)valid=historyDepthMatches(prev,expected);
+            // With the vehicle frame in play (value 32) a kind-0 pixel inside the volume (the rig root's sphere, within 10 m) has its camera term checked
+            // against last frame's depth too: a near surface that rides the vehicle has an unchecked camera vector hundreds of pixels long (the cockpit at
+            // metres a frame), and that must not reach the backend.
+            if(valid && kind==0 && vehicleState!=0) {
+                const bool nearConfirmed=historyDepthMatches(prev,expected);
+                valid=nearConfirmed;
+                if(!nearConfirmed)cls=kClassCamera;
+            }
             reject=valid?0:1;
         } else if(kind!=2)cls=kClassCamera;
     }
@@ -426,7 +555,7 @@ R"HLSL(
 // group column, so the atomics of 220 000 groups do not queue on sixteen addresses). Slot 15 counts a stale pixel the prep did NOT
 // refuse (the steady-detail rule kept it: the camera term, confirmed by last frame's depth); a stale pixel it did refuse stays in the
 // stale slot. Accepted pixels are not counted. No early return: every thread reaches both barriers.
-// Slot 24 counts the ACCEPTED skinned pixels (class kClassSkinned: F2 on foot, exact motion from target 7), the one accepted class counted.
+// Slot 24 counts the ACCEPTED skinned pixels (class kClassSkinned: in the VR world route F2 on foot, exact motion from target 7; in the flat profile a near pixel that rode the vehicle frame, debug.w value 32), the one accepted class counted.
 // Slots 16..23 count the refused first-person pixels (class kClassWeaponRefused) by the reason in bits 4-6 of their byte, so the 24
 // counters of a stripe are the class counters and then the reasons' (and the skinned slot, 25 in all). The weapon-refused pixels are in slot 13 as well: a reason slot is a
 // split of that one, never an addition to the refused total.

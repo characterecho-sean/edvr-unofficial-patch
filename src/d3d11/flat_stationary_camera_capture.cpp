@@ -17,6 +17,7 @@
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "flat_stationary_camera_core.h"
+#include "map_camera_core.h"
 #include "flat_camera_inject.h"
 #include "eye_camera_capture_core.h"
 #include "vr_camera_census_core.h"
@@ -107,6 +108,18 @@ struct State {
     stationcam::Game game;
     uintptr_t mainViewCaller = 0, imageSize = 0;
     std::atomic<bool> profileDropped{false};
+    // The VR map camera's watch (mapCameraFrame): on while the VR profile runs, it keeps the gate open for stage 0's observation. mapWatchEver stays set
+    // once it has been on, so a straggler after a live switch to flat is not read as a capture's profile drop. Nothing in this file closes the gate or sets
+    // profileDropped on the watch's account.
+    std::atomic<bool> mapWatch{false}, mapWatchEver{false};
+    mapcam::Publisher map;
+    mapcam::Eyes mapEyes;
+    std::atomic<bool> mapGalaxyOpen{false}, mapAnyOpen{false};
+    // Frame thread only.
+    mapcam::Hold mapGalaxyHold, mapSystemHold;
+    uint64_t mapFrame = 0, mapLastTryMs = 0;
+    unsigned mapTries = 0, mapNamesSaid = 0, mapEdgeNotes = 0;
+    bool mapStood = false, mapOnSaid = false, mapNamesFullSaid = false, mapWasOpen = false;
     std::atomic<uint32_t> inflight{0}, sourceOverflow{0}, refreshOverflow{0};
     std::atomic<uint64_t> captures{0}, refreshes{0};
     std::atomic<uint64_t> rendererCalls{0};
@@ -212,6 +225,23 @@ void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_
     s.captures.fetch_add(1, std::memory_order_relaxed);
 }
 
+// The VR map camera's watch (docs/galaxy-map-vr-2026-11-03.md, Fix 2): after the game's renderer returns, stage 0 of its camera source only: the
+// stack's identity and name and its output pose. No activity walk, no other stage. Game threads, possibly several at once; the publisher's
+// try-lock skips a busy call.
+void mapObserve(State& s, uintptr_t source) noexcept {
+    if (source < 0x70) return;
+    const uintptr_t child = source - 0x70;
+    if (!stationcam::childGuard(&sehCopy, nullptr, s.game, child)) return;
+    uintptr_t stack = 0, vtable = 0;
+    if (!stationcam::get(&sehCopy, nullptr, child + 0x30, stack) || !stack ||
+        !stationcam::get(&sehCopy, nullptr, stack, vtable) || vtable != s.game.at[stationcam::kStackVtable]) return;
+    char name[stationcam::kNameBytes]{};
+    if (!stationcam::readName(&sehCopy, nullptr, stack, name)) return;
+    float pose[16]{};
+    if (!stationcam::pose(&sehCopy, nullptr, child + 0x70, pose) || !stationcam::finitePoseXYZ(pose)) return;
+    s.map.observe(name, pose);
+}
+
 void rendererDetour(uintptr_t owner, uintptr_t source, uintptr_t helper) {
     State& s = *stateOrNull(); // this callback exists only after install
     s.rendererCalls.fetch_add(1, std::memory_order_relaxed);
@@ -219,10 +249,16 @@ void rendererDetour(uintptr_t owner, uintptr_t source, uintptr_t helper) {
     EyeCapture& e=s.eye;
     const uint64_t manual=e.live.load(std::memory_order_acquire);
     const bool automatic=s.automaticLive.load(std::memory_order_acquire);
+    // The map watch (VR, mapCameraFrame) holds the gate open for itself: with it on, nothing below closes the gate or marks the profile dropped on its account.
+    const bool watch=s.mapWatch.load(std::memory_order_acquire);
     if (!automatic && !manual) {
-        s.profileDropped.store(true, std::memory_order_release);
-        s.gate.store(0, std::memory_order_release);
+        if (!watch) {
+            // A straggler of a closed capture. Once the watch has run in this process the profile may have switched under it, which is not a capture's profile drop.
+            if (!s.mapWatchEver.load(std::memory_order_acquire)) s.profileDropped.store(true, std::memory_order_release);
+            s.gate.store(0, std::memory_order_release);
+        }
         original(owner, source, helper);
+        if (watch) mapObserve(s, source);
         return;
     }
     const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
@@ -257,10 +293,11 @@ void rendererDetour(uintptr_t owner, uintptr_t source, uintptr_t helper) {
     }
     g_eyeSourceEpoch=previousEpoch; g_eyeSourceOrdinal=previousOrdinal;
     if (manual) e.inflight.fetch_sub(1,std::memory_order_acq_rel);
+    if (watch) mapObserve(s, source);
     if (automatic && runtimeFlatProfile()) observeSource(owner, source, helper, caller, before, beforeRead, epoch);
     else if (automatic) {
         s.profileDropped.store(true, std::memory_order_release);
-        s.gate.store(0, std::memory_order_release);
+        if (!watch) s.gate.store(0, std::memory_order_release);
     }
     s.inflight.fetch_sub(1, std::memory_order_acq_rel);
 }
@@ -533,7 +570,7 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
         }
         if (!s.closingFrame && (s.captureRefusal || s.witnessFrame >= s.armFrame || completedFrame > s.armFrame + kCaptureFrames)) {
             s.automaticLive.store(false,std::memory_order_release);
-            if (!s.eye.live.load(std::memory_order_acquire)) s.gate.store(0, std::memory_order_release);
+            if (!s.eye.live.load(std::memory_order_acquire) && !s.mapWatch.load(std::memory_order_acquire)) s.gate.store(0, std::memory_order_release);
             s.closingFrame = completedFrame;
         }
         if (s.closingFrame && completedFrame > s.closingFrame &&
@@ -613,7 +650,8 @@ void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callN
     if (!state) return; // existing refresh hook can precede this instrument's first Present
     State& s = *state;
     if (!runtimeFlatProfile()) {
-        if (s.gate.load(std::memory_order_acquire)) {
+        // The map watch holds the gate open in the VR profile: not a capture's profile drop.
+        if (s.gate.load(std::memory_order_acquire) && !s.mapWatch.load(std::memory_order_acquire)) {
             s.profileDropped.store(true, std::memory_order_release);
             s.gate.store(0, std::memory_order_release);
         }
@@ -747,7 +785,7 @@ void flatStationaryCameraEyeBoundary(uint32_t ledgerFrame,uint32_t nativeRenderF
     State* s=stateOrNull();if(!s || s->eye.armRefused || !s->eye.window.armed)return;
     EyeCapture& e=s->eye;
     if(e.live.exchange(0,std::memory_order_acq_rel)) {e.endQpc=eyeQpc();e.status="closed";}
-    if(!s->automaticLive.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
+    if(!s->automaticLive.load(std::memory_order_acquire) && !s->mapWatch.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
     if(!e.window.boundary(ledgerFrame))return;
     if(!install(*s)) {e.status=s->waitReason;return;}
     e.ledgerFrame=ledgerFrame;e.nativeFrame=nativeRenderFrame;e.ownerThread=GetCurrentThreadId();e.beginQpc=eyeQpc();
@@ -777,7 +815,7 @@ void flatStationaryCameraEyeRefreshPost(uintptr_t camera,uint64_t callNo,bool in
 void flatStationaryCameraEyeEnd() noexcept {
     State* s=stateOrNull();if(!s)return;
     auto& e=s->eye;if(e.live.exchange(0,std::memory_order_acq_rel)){e.endQpc=eyeQpc();e.status="ended-before-boundary";}
-    e.window.end();if(!s->automaticLive.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
+    e.window.end();if(!s->automaticLive.load(std::memory_order_acquire) && !s->mapWatch.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
 }
 bool flatStationaryCameraEyeWrite(const wchar_t* path) noexcept {
     State* s=stateOrNull();if(!s || s->eye.armRefused || !path)return false;
@@ -807,6 +845,133 @@ bool flatStationaryCameraEyeWrite(const wchar_t* path) noexcept {
     const bool ok=j.ok&&flushed&&closed;
     Log::get().note("eye camera: run=%ls ledger=%u native=%u status=%s sources=%u/%u refreshes=%u/%u inflight=%u foreign=%u bytes=%zu %s; zero rows explicitly unavailable, post requires an existing return callback",e.stamp,e.ledgerFrame,e.nativeFrame,e.status,sourceCount,calls,refreshCount,e.refreshes,inflight,e.foreignRefresh.load(),j.bytes,ok?"written":"WRITE FAILED");
     return ok;
+}
+
+// ---- The VR map camera (docs/galaxy-map-vr-2026-11-03.md, Fix 2) ----------------------------------------------------------------------------------------
+// The watch on the renderer hook: stage 0 of each camera source, read after the game's renderer returns, published for the frame thread and the draw
+// threads (map_camera_core.h). VR profile only; the flat profile's capture above is as it was.
+void mapCameraFrame() noexcept {
+    State* existing = stateOrNull();
+    if (runtimeFlatProfile()) {
+        // A live switch to flat: the watch stands down and the gate stays open only for a capture that wants it. Switching back restores it.
+        if (!existing || !existing->mapWatch.load(std::memory_order_acquire)) return;
+        State& f = *existing;
+        f.mapWatch.store(false, std::memory_order_release);
+        if (!f.automaticLive.load(std::memory_order_acquire) && !f.eye.live.load(std::memory_order_acquire)) f.gate.store(0, std::memory_order_release);
+        f.mapGalaxyOpen.store(false, std::memory_order_release);
+        f.mapAnyOpen.store(false, std::memory_order_release);
+        f.mapGalaxyHold = mapcam::Hold{};
+        f.mapSystemHold = mapcam::Hold{};
+        f.mapWasOpen = false;
+        return;
+    }
+    State* sp = allocateState();
+    if (!sp) {
+        static bool noted = false;
+        if (!noted) { noted = true; Log::get().note("map camera: the watch is off: its storage could not be allocated"); }
+        return;
+    }
+    State& s = *sp;
+    ++s.mapFrame;
+    if (!s.mapWatch.load(std::memory_order_acquire)) {
+        if (s.mapStood) return;
+        if (!s.hook.installed()) {
+            const uint64_t now = GetTickCount64();
+            if (s.mapTries && now - s.mapLastTryMs < 1000) return;
+            s.mapLastTryMs = now;
+            ++s.mapTries;
+            uint32_t missing = 0;
+            // Quiet while an unknown build's signatures are still resolving in the background (install() says it each time it fails).
+            const bool found = gameRvasFound(kHookRvas, std::size(kHookRvas), &missing) &&
+                gameRvasFound(stationcam::kGameRvas, stationcam::kGameAddresses, &missing);
+            if (!found || !install(s)) {
+                const char* why = !found ? "not-found-by-signature" : s.waitReason;
+                const bool transient = !found || std::strcmp(why, "game-module-unavailable") == 0;
+                if (!transient || s.mapTries >= 30) {
+                    s.mapStood = true;
+                    Log::get().note("map camera: the watch stands down after %u tries (%s): no map pose, so a map frame takes no history and the map's draws stay in the scene",
+                                    s.mapTries, why);
+                }
+                return;
+            }
+        }
+        s.mapWatch.store(true, std::memory_order_release);
+        s.mapWatchEver.store(true, std::memory_order_release);
+        s.gate.store(1, std::memory_order_release);
+        if (!s.mapOnSaid) {
+            s.mapOnSaid = true;
+            Log::get().note("map camera: the watch is on (VR profile): the renderer hook reads stage 0 of each camera source after the game's renderer returns; "
+                            "\"GalaxyMapView\" and \"SystemMapView\" publish a pose; no game getter called, nothing written");
+        }
+    }
+    const bool galaxy = s.mapGalaxyHold.step(s.mapFrame, s.map.galaxyPublishes());
+    const bool systemOpen = s.mapSystemHold.step(s.mapFrame, s.map.systemPublishes());
+    s.mapGalaxyOpen.store(galaxy, std::memory_order_release);
+    s.mapAnyOpen.store(galaxy || systemOpen, std::memory_order_release);
+    if ((galaxy || systemOpen) != s.mapWasOpen && s.mapEdgeNotes < 32) {
+        ++s.mapEdgeNotes;
+        Log::get().note("map camera: %s (%s); %llu map publishes, %llu of them moved the map so far",
+                        (galaxy || systemOpen) ? "a map is open" : "the map closed", galaxy ? "Galaxy Map" : systemOpen ? "System Map" : "last view",
+                        static_cast<unsigned long long>(s.map.galaxyPublishes() + s.map.systemPublishes()),
+                        static_cast<unsigned long long>(s.map.changes()));
+    }
+    s.mapWasOpen = galaxy || systemOpen;
+    // Each distinct stage 0 name once (at most mapcam::kMaxNames in a session): the flight names the screens' stages.
+    for (unsigned n = s.map.nameCount(); s.mapNamesSaid < n; ++s.mapNamesSaid) {
+        const float* at = s.map.namePosition(s.mapNamesSaid);
+        const char* name = s.map.nameAt(s.mapNamesSaid);
+        const mapcam::View v = mapcam::viewOfName(name);
+        Log::get().note("map camera: camera source stage 0 is named \"%s\" at (%.1f %.1f %.1f)%s", name, at ? at[0] : 0.0f, at ? at[1] : 0.0f, at ? at[2] : 0.0f,
+                        v == mapcam::View::kGalaxy ? ": the Galaxy Map's view" : v == mapcam::View::kSystem ? ": the System Map's view (unproven)" : "");
+    }
+    if (s.mapNamesSaid >= mapcam::kMaxNames && !s.mapNamesFullSaid) {
+        s.mapNamesFullSaid = true;
+        Log::get().note("map camera: %u stage 0 names said; later new names are not", mapcam::kMaxNames);
+    }
+}
+bool mapCameraGalaxyOpen() noexcept {
+    const State* s = stateOrNull();
+    return s && s->mapGalaxyOpen.load(std::memory_order_acquire);
+}
+bool mapCameraAnyOpen() noexcept {
+    const State* s = stateOrNull();
+    return s && s->mapAnyOpen.load(std::memory_order_acquire);
+}
+uint64_t mapCameraChanges() noexcept {
+    const State* s = stateOrNull();
+    return s ? s->map.changes() : 0;
+}
+// The refresh hook's callback (flat_camera_inject.cpp refreshPre), on whichever game thread refreshed the camera: while a map is open, a kind 5 camera's origin at camera+0x50 is offered to
+// the eyes' pair (map_camera_core.h Eyes), which keeps it when it is short enough to be a UI-frame eye's offset. One atomic load while no map is open; two guarded loads, no I/O,
+// nothing written to the camera.
+void mapCameraNoteEye(uintptr_t camera) noexcept {
+    State* s = stateOrNull();
+    if (!camera || !s || !s->mapAnyOpen.load(std::memory_order_acquire)) return;
+    uint32_t kind = 0;
+    float o[3] = {};
+    __try {
+        kind = *reinterpret_cast<const uint32_t*>(camera + 0x264);
+        if (kind == 5u) std::memcpy(o, reinterpret_cast<const void*>(camera + 0x50), sizeof(o));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (kind != 5u) return;
+    s->mapEyes.observe(o);
+}
+bool mapCameraEyes(float out[2][3], uint64_t* generation) noexcept {
+    const State* s = stateOrNull();
+    if (!s || !s->mapAnyOpen.load(std::memory_order_acquire)) return false;
+    return s->mapEyes.read(out, generation);
+}
+bool mapCameraPose(MapCameraPose& out) noexcept {
+    static_assert(sizeof(MapCameraPose) == sizeof(mapcam::Pose), "MapCameraPose is map_camera_core.h's Pose");
+    const State* s = stateOrNull();
+    if (!s || !s->mapAnyOpen.load(std::memory_order_acquire)) return false;
+    mapcam::View v = mapcam::View::kNone;
+    mapcam::Pose p{};
+    if (!s->map.read(v, p)) return false;
+    std::memcpy(&out, &p, sizeof(out));
+    return true;
 }
 
 } // namespace edvr

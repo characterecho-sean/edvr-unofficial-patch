@@ -151,6 +151,15 @@ std::wstring Config::chooseSettingsPath() const {
     return candidates[0];
 }
 
+std::wstring Config::vrSettingsPath() const {
+    const std::wstring candidates[2] = {m_moduleDir + L"\\" + kIniNameVrW,
+                                        executableDirectory() + L"\\" + kIniNameVrW};
+    for (const std::wstring& candidate : candidates) {
+        if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) return candidate;
+    }
+    return candidates[0];
+}
+
 bool Config::switchProfile() {
     const std::wstring next = chooseSettingsPath();
     bool changed = false;
