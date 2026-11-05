@@ -197,7 +197,7 @@ struct FlatRuntimeDrawScope {
     forward_light::Issue forwardIssue{};
     uint64_t lightPayloadToken=0;
     const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
-    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow ||
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow || dofBlur ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's

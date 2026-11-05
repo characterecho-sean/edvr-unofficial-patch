@@ -19259,3 +19259,15 @@ Memory: nine images at the blur's size (37 MB at 960x540), made at the first com
 Reading it: `flat dof blur 5s: composites=N averaged=N runs-started=N window-now=N blur=WxH; left to the game: ...`, once a window while composites run. A window where `flat dof composite` climbs with no such line means the path was never reached. `averaged` near `composites` in a still lobby is the code doing what it says; the picture is judged from a clip of the same console strip (77 to 136 before, 104 with AA off).
 
 Next flight, Epic, Depth of Field on, same lobby. (1) A clip with AA on, F7 off and back, as the first clip. (2) Supersampling 1.0: `flat hdr route 5s` `treated`, and `hdr-route` in the blur's line. (3) The higher Depth of Field setting and the main menu, with a NumLock census at each.
+
+## 2026-11-05, flight 06:42: the average never ran, and M was clean without it
+
+Flight `edvr_gfx_20261105_064231` (Epic, `v0.22.0-rc.6-205-g3bdb3212`, `--expect-build` passed), DLSS performance, DoF 1, the lobby. Sean: no flicker on preset M; it stays on K, on FSR, and less on XeSS.
+
+The code did not run. `flat dof composite` climbs to 4,730 refused and there is no `flat dof blur` line of any kind. The hooks call `beginActualDraw` only when `needsActualDraw()` says so, and the scope set `dofBlur` without that function naming it. Fixed, and the rig now pins it.
+
+So this flight is a baseline of the game's blur with no average. By eye: M clean, K flickers, FSR flickers, XeSS flickers less. The first clip's K is why it showed on the Frontier install after the VR-to-flat switch, and the DoF-off flight changed the preset as well.
+
+The jitter cycle differs by backend: `flat jitter` says phases=8 for DLSS and FSR and phases=32 for XeSS at this size. The ring holds 8, so XeSS's average spans a quarter of its cycle and will not sum to a constant.
+
+ruled out: "the average fixes M", because the average never ran on M.

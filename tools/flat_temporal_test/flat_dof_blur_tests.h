@@ -111,8 +111,16 @@ template<class Check> void run(Check check) {
         std::ifstream in(std::filesystem::path(path), std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     };
-    const std::string runtime = read("src/d3d11/flat_runtime.cpp"), buildBat = read("build.bat"), shaders = read("tools/temporal_shader_build/temporal_shader_build.cpp");
-    check(!runtime.empty() && !buildBat.empty() && !shaders.empty(), "dof blur wiring: source inputs are readable");
+    const std::string runtime = read("src/d3d11/flat_runtime.cpp"), buildBat = read("build.bat"), shaders = read("tools/temporal_shader_build/temporal_shader_build.cpp"),
+                      scope = read("src/d3d11/flat_runtime.h");
+    check(!runtime.empty() && !buildBat.empty() && !shaders.empty() && !scope.empty(), "dof blur wiring: source inputs are readable");
+    {
+        // The hooks call beginActualDraw only for a scope that says it needs it: the first build of this set the flag and never asked, so the average never ran.
+        const size_t needs = scope.find("bool needsActualDraw() const");
+        const size_t bodyEnd = needs == std::string::npos ? needs : scope.find('}', needs);
+        check(needs != std::string::npos && bodyEnd != std::string::npos && scope.substr(needs, bodyEnd - needs).find("dofBlur") != std::string::npos,
+              "dof blur wiring: the composite's scope asks for beginActualDraw");
+    }
     check(buildBat.find("\"src\\d3d11\\flat_dof_blur.cpp\"") != std::string::npos, "dof blur wiring: build.bat compiles the module into the DLL");
     check(shaders.find("kFlatDofBlurBytecode") != std::string::npos, "dof blur wiring: the shader tool makes its bytecode");
     {
