@@ -3064,6 +3064,15 @@ void testSupercruiseLines() {
             const float yawed[3] = {0.040855f + 1.7e-4f * 1.035048f, -0.007648f, 1.035048f};
             check(holdApplies(h, yawed, 7), "GP6c: the 1.7e-4 radians the arrow drifts while the head yaws 8.7 degrees is held");
         }
+        // The System Map's state is on only when the pointer is armed, the build's System Map return was found, a map is open and it is not the Galaxy Map.
+        {
+            using edvr::mappointer::systemMapOn;
+            check(!systemMapOn(true, true, 0x1000, true) && !systemMapOn(true, false, 0, true), "GP6d: the Galaxy Map open is never the System Map");
+            check(systemMapOn(false, true, 0x1000, true), "GP6d: the System Map open, armed, with its return found, is on");
+            check(!systemMapOn(false, true, 0, true), "GP6d: the System Map open without its return found stays as the game made it");
+            check(!systemMapOn(false, false, 0x1000, true) && !systemMapOn(false, false, 0, true), "GP6d: before the pointer is armed, or after it stood down, the System Map's state is off");
+            check(!systemMapOn(false, true, 0x1000, false) && !systemMapOn(false, true, 0, false), "GP6d: no map open is off");
+        }
         uint8_t gate[edvr::mappointer::kGateRelayBytes];
         std::memset(gate, 0xCC, sizeof(gate));
         int cell = 0, callback = 0;

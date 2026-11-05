@@ -69,6 +69,12 @@ inline void holdTake(PointerHold& h, const float arrow[3], uint64_t changes, con
     h.ret = ret;
 }
 
+// Whether the System Map's state is on: the pointer is armed, the build's System Map return was found, a map is open and it is not the Galaxy Map.
+// Without the return the System Map stays as the game made it (no marker or reticule swap, no body table, no close-view smoothing).
+inline bool systemMapOn(bool galaxyOpen, bool armed, uint64_t systemReturn, bool anyMapOpen) {
+    return !galaxyOpen && armed && systemReturn != 0 && anyMapOpen;
+}
+
 // rel in the map's axes: a = rel . rows[0], b = rel . rows[1], c = rel . rows[2] (the rig checks the far point's direction with it).
 inline void inMapAxes(const float rows[3][3], const float rel[3], float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = rel[0] * rows[i][0] + rel[1] * rows[i][1] + rel[2] * rows[i][2];
