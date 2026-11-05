@@ -266,13 +266,13 @@ def _cluster_changed(changed):
     return clusters
 
 
-def compare(exe_path, baseline_doc):
+def compare(exe, baseline_doc):
     """Compare a candidate exe against a captured baseline document.
 
-    Returns (lines, stats): the human report and a dict of per-target
-    verdicts the self-test asserts against.
+    exe is a path, or the image's bytes. Returns (lines, stats): the human
+    report and a dict of per-target verdicts the self-test asserts against.
     """
-    data = Path(exe_path).read_bytes()
+    data = exe if isinstance(exe, bytes) else Path(exe).read_bytes()
     im = Image(data)
     candidate_sha = hashlib.sha256(data).hexdigest()
     timestamp, image_size = read_identity(im)
@@ -2097,9 +2097,9 @@ def self_test():
         check("first diff +0x1" in detail)
 
         # Different section layout: same-RVA verdicts are UNRELIABLE, loudly.
-        relaid = td / "relaid.exe"
-        relaid.write_bytes(_fixture_pe(timestamp=0x22222222, text_size=0x8000))
-        lines, stats = compare(relaid, doc)
+        # This fixture stays in memory: written as a file, Defender quarantined
+        # it (2026-11-05, Program:Win32/Contebrew.A!ml) and the gate failed.
+        lines, stats = compare(_fixture_pe(timestamp=0x22222222, text_size=0x8000), doc)
         check(verdict_of(stats, "probe-a") == "UNRELIABLE")
         check(stats["unreliable"] == 2)
         detail = [line for line in lines if "probe-a" in line][0]
