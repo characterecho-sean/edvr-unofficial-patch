@@ -55,7 +55,8 @@
 //
 // THE PROBE (galaxy_map_ui.h): one point at the arrow's tip, in the game's own depth (clip = dot(cb0[4..7], float4(W - cb1[275].xyz, 1)), the arrow's record position W
 // being exactly the tip), tested against the panel mask: the pixel shader discards where the mask is clear, an occlusion query counts what stays. The tip is on a panel when the
-// mask covers it, or covers a point within reach on both opposite sides of it along any of four axes: the gaps between panels close and a panel's outer edge stays exact.
+// mask covers it, or covers a point within reach on both opposite sides of it along any of four axes: the gaps between panels close and the way onto a panel stays exact. While the arrow is on a panel the probe is kMapProbeStickyPS: mask within reach on
+// either side holds it, so a narrow strip of buttons does not drop it at its outer edge.
 #pragma once
 
 namespace edvr {
@@ -493,7 +494,8 @@ void main(uint2 v0 : INSTANCEANDMODELDATAINDEX, out float4 o0 : SV_POSITION)
 
 // kProbeReach is the gap-bridging reach as a fraction of the mask's width: 0.0235 is about 0.05 tan, 106 pixels at 4508. kProbeSteps is the number of samples a side along
 // each axis, so one step is an eighth of the reach (about 13 pixels at 4508).
-constexpr char kMapProbePS[] = R"HLSL(
+// kMapProbePS decides getting on: both sides of the tip. kMapProbeStickyPS decides staying on: either side. Whatever the first says yes to the second does too, so they cannot alternate at one place. The reach is more than half a side button's width, 95 pixels at 4032 against about 165 (docs/galaxy-map-vr-2026-11-03.md, "The side buttons").
+#define EDVR_MAP_PROBE_PS_HEAD R"HLSL(
 Texture2D<float4> Mask : register(t0);
 
 static const float kProbeReach = 0.0235;
@@ -517,13 +519,16 @@ float4 main(float4 pos : SV_POSITION) : SV_TARGET
                 plus = plus || covered(tip + o);
                 minus = minus || covered(tip - o);
             }
-            on = plus && minus;
+            on = )HLSL"
+#define EDVR_MAP_PROBE_PS_TAIL R"HLSL(;
         }
     }
     if (!on) discard;
     return float4(0.0, 0.0, 0.0, 0.0);
 }
-)HLSL";
+)HLSL"
+constexpr char kMapProbePS[] = EDVR_MAP_PROBE_PS_HEAD "plus && minus" EDVR_MAP_PROBE_PS_TAIL;
+constexpr char kMapProbeStickyPS[] = EDVR_MAP_PROBE_PS_HEAD "plus || minus" EDVR_MAP_PROBE_PS_TAIL;
 
 // THE DEPTH ISSUE'S PIXEL SHADERS (docs/galaxy-map-vr-2026-11-03.md, "Sprite order"). The sprites' colour issue tests the map's own D16 depth and writes none; a second issue after the
 // colour issue writes it (no stencil write-back comes between them), where the sprite is solid. Each shader below stands in for the game's pixel shader of that issue, bound over the swap scope's vertex shader, and does

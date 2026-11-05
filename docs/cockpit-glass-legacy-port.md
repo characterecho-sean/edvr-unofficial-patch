@@ -50,7 +50,8 @@ Temporary: `experimental.cockpit_glass_probe` (`cockpit_glass_probe.*`, `tools\c
 
 Analysis: `analysis\decomp\verify_20261103_cockpit_glass_legacy.txt` (312425) and `..._live.txt` (334925),
 filed 2026-11-03: permutation tables, the cb0 layout, the legacy PS written out. `..._live_mapping.txt` holds
-the legacy-to-live input table.
+the legacy-to-live input table. `analysis\decomp\verify_20261103_glass_wear_312425.txt` and `..._334925.txt`, filed
+2026-11-05: the wear findings of section 16.
 
 Ruled out: see the end of this doc.
 

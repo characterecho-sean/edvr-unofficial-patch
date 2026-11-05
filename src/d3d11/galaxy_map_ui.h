@@ -11,7 +11,7 @@
 //     a pixel shader that discards where the mask is clear, inside an occlusion query. A pixel counted means the tip is on a panel in that eye. The result is read at a later
 //     probe, never waited for: over = over[0] || over[1], read by the arrow's swap decision. Before any answer over is false; if the mask or the query cannot be made it is
 //     true (the game's arrow). "On a panel" is the mask under the tip, or under a point within reach on both opposite sides along one of four axes (kMapProbePS), so the
-//     gaps between panels close.
+//     gaps between panels close. While the arrow is on a panel, mask within reach on either side keeps it there (kMapProbeStickyPS), so it does not drop off a narrow strip of buttons.
 //
 // THE MAP CAMERA'S CONSTANTS. The icons', labels', rings' and stems' replacement shaders (C31238, 12382D, 94EA99, 3028E7) take the one pair of axes the world quads are spanned on (galaxy_map_axes.h), the map camera's position and the two eyes'
 // offsets from a 96-byte constant buffer at vertex slot 10 (MapCam), written from mapCameraPose's stage 0 (rows, position) and mapCameraEyes (flat_stationary_camera_capture.h) when
@@ -143,6 +143,7 @@ struct Counters {
     std::atomic<uint64_t> maskIssued[2];    // panel draws issued into the mask, by shader (C4B4B3, 5DAD41)
     std::atomic<uint64_t> maskLate;         // a panel draw reaching the mask after the eye's probe of the same frame (the mask was not complete at the probe)
     std::atomic<uint64_t> probes;           // probe points drawn inside a query
+    std::atomic<uint64_t> stickyProbes;     // of those, drawn with the arrow on a panel, so with the sticky edge
     std::atomic<uint64_t> answered;         // eye-frames whose queries came back
     std::atomic<uint64_t> framesOver, framesClear;   // of those, the tip on a panel / not
     std::atomic<uint64_t> ringFull;         // a probe not made because the ring held four unanswered eye-frames
