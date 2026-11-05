@@ -460,10 +460,11 @@ struct State {
     // not; the draw that names the world then is the world's. worldReference is the last named world's, and the camera H selected for a
     // frame replaces it (the selector's choice is the world, naming's is a guess): a reference a first-person draw once set is put right by
     // the next H. A world camera that really changed would veto the world itself; three frames in a row that vetoed and never named give the
-    // reference up (kFlatNamingVetoFrames).
+    // reference up (kFlatNamingVetoFrames). A zoom fast enough to veto the world vetoes every world draw, and each is then captured, so a frame's
+    // kFlatNamingVetoDraws-th vetoed draw with the world's near plane gives the reference up at once and names the world (namingVetoed).
     bool namingVetoedThisFrame = false;
-    uint32_t namingVetoStreak = 0, namingVetoLogged = 0;
-    uint64_t namingVetoes = 0, namingVetoReleases = 0;
+    uint32_t namingVetoStreak = 0, namingVetoLogged = 0, namingVetoNearDraws = 0, namingVetoBoundLogged = 0;
+    uint64_t namingVetoes = 0, namingVetoReleases = 0, namingVetoBounded = 0;
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
     unsigned preset = ~0u;
@@ -1112,11 +1113,11 @@ static void reportForegroundDomain(State& s) {
         (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified);
-    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s",
+    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu naming-veto-bounded=%llu last-refusal=%s",
         (unsigned long long)n.hCoveredFrames,
         (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
         (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
-        (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,
+        (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,(unsigned long long)s.namingVetoBounded,
         s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
     // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
     // "none" here even while every frame was refused (section 104, supersampled 4K).
@@ -1245,6 +1246,22 @@ template<class Draw,class Key>static bool namingVetoed(State& s,const Draw& d,co
     float rows[6][4];std::memcpy(rows,d.camera,sizeof(rows));
     FlatDomainWorldPrediction p;
     if(flatDomainPredictsWorld(rows,s.worldReference,&p))return false;
+    // More vetoed draws at the world's near plane than a first person makes: this camera is the world's, moved past the tolerance by a fast zoom.
+    // The reference goes now, not at the frame boundary, and false lets this draw name the world, so the rest of the frame is not captured.
+    if(flatNamingVetoBoundReached(p,s.namingVetoNearDraws)) {
+        ++s.namingVetoBounded;
+        if(s.namingVetoBoundLogged<12) {
+            ++s.namingVetoBoundLogged;
+            double p0=0,p1=0;const bool scale=flatCameraProjectionScale(rows,p0,p1);
+            Log::get().note("flat world naming bound %u/12: frame=%llu seq=%u VS=%016llX PS=%016llX camera=%016llX scale=%.6g,%.6g; world reference scale=%.6g,%.6g; %u vetoed draws this frame at the world's near plane are more than a first person makes, so this camera is the world's and this draw names it",
+                s.namingVetoBoundLogged,(unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,
+                (unsigned long long)k.cameraHash,scale?p0:0.0,scale?p1:0.0,s.worldReference.p0,s.worldReference.p1,s.namingVetoNearDraws);
+        }
+        s.worldReference=FlatDomainWorldReference{};
+        // The vetoed draws before this one were captured as first-person with the world's camera, so this frame cannot qualify. TAA captures nothing.
+        if(s.engine!=FlatMonoResolveMode::Taa)domainFail(s,"naming-bound","foreground-world-draws-captured-first-person",k);
+        return false;
+    }
     s.namingVetoedThisFrame=true;++s.namingVetoes;
     if(s.namingVetoLogged<12) {
         ++s.namingVetoLogged;
@@ -4804,6 +4821,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
+    s.namingVetoNearDraws=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;
     s.producerRun.armed = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;

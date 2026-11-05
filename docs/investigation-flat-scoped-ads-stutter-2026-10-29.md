@@ -2,14 +2,15 @@
 
 ## Status
 
-- **State (2026-11-05): REOPENED. Cause found, fix not built.** The stall is still
+- **State (2026-11-05): REOPENED. Cause found, fix built, NOT FLOWN.** The stall is still
   there at both zoom edges on Frontier, flat, DLSS: 3 frames of 138 to 170 ms. A zoom
   step over 10 % a frame makes the world's own camera fail the prediction, so nothing
   names the world and every world draw is captured as first-person, about 13,000 draws
   at 12 us each, until the third frame gives the reference up. See "The naming veto
   stall" below. Flight 4 hit about 90 vetoes a zoom edge against about 40,000 here,
   so its clean result does not show F1 and F2 cleared this stall.
-- **Next flight:** the bounded veto proposed in that section, flown in the same spot.
+- **Next flight:** the bounded veto (`kFlatNamingVetoDraws`), Frontier, the same spot:
+  the flight card in that section.
 - **Release (2026-10-30):** The history pools and shader cache fix (b3cf6e80) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
 - **Flight 4 (10-29, `97193c14`, Steam, flat, DLSS), read then as fixed; on main
   without the instruments.** Sean: "The hitches are gone!" Six scoped presses: no frame over 29 ms (flight 3: 43 to 104 ms at every
@@ -478,22 +479,33 @@ path, so F1 and F2 cannot be credited with clearing the stall in a busy scene.
 the time in a final full-screen pass, is not in these DLSS captures. That the zoom's
 step grows with frame time, which would tie the trigger to frame rate, is a hypothesis.
 
-**Proposed fix, not built (no key):** bound the veto inside the frame. After a set
-number of vetoed draws in one frame, give the reference up there and then.
-`namingVetoed` already passes a draw when there is no reference, so the next supported
-draw names the world and the rest of the frame is not captured. That caps the cost at
-the bound instead of 3 frames of every world draw. The grenade hold, the reason the
-veto exists, draws few first-person draws before the world and stays vetoed; the bound
-needs checking against the most vetoes a named frame has seen. The change's checks go
-in `tools\flat_temporal_test\flat_domain_admission_tests.h`.
+**The fix, not flown (no key):** `kFlatNamingVetoDraws`, 128 vetoed draws in one frame
+at the world's near plane. The draw that reaches it drops the reference, and
+`namingVetoed` returns false, so that draw names the world and the rest of the frame
+is not captured. The frame is refused (`foreground-world-draws-captured-first-person`),
+as these frames already were; TAA captures nothing and is not refused. At the flight's
+12 us a draw the cost is about 1.5 ms a frame, against 160 ms. A camera at its own near
+plane never counts, so the grenade hold, the reason the veto exists, stays vetoed.
 
-**Flight card:** the same spot and presses, DLSS, F4 captures in and out, then TAA.
+The bound's margin rests on two numbers: flight 4's frames that never named vetoed
+about 30 draws, and the bench's grenade hold draws 70. The largest legitimate count at
+the world's near plane has not been measured directly.
+
+The checks are in `tools\flat_temporal_test\flat_domain_admission_tests.h` and
+`flat_covered_draw_wiring_tests.h`. The bench's scenes have no fast-zoom case, so the
+flight is the first run of this path end to end. The 5 s line gains
+`naming-veto-bounded=`, and `flat world naming bound N/12` names the frame.
+
+**Flight card:** Frontier, the same spot and presses, DLSS, F4 captures in and out, then
+TAA.
 
 | What the log shows | Reading |
 |---|---|
-| no capture frame over about 30 ms; vetoes a zoom edge down from about 40,000 to the bound or less | fixed |
+| no capture frame over about 30 ms; `naming-veto-bounded` up at each zoom edge; vetoes a zoom edge down from about 40,000 to a few hundred | fixed |
 | stall gone, a soft or sharp snap remains | the refusal run: fix A, separate |
-| 3 slow frames stay | the bound never ran, or the cost is elsewhere: read `naming-veto-releases` first |
+| 3 slow frames stay, `naming-veto-bounded=0`, vetoes in the tens of thousands | the bound never ran |
+| 3 slow frames stay, `naming-veto-bounded` rising | the cost is elsewhere: read the CPU families |
+| a grenade or tool in hand now refuses, `flat world naming disagrees with H` lines | the bound is too low |
 
 ## Journal
 

@@ -245,6 +245,13 @@ constexpr double kFlatDomainWorldScaleTolerance = 0.10;
 // The naming veto (flat_runtime.cpp, State::namingVetoedThisFrame): after this many frames in a row that vetoed a pre-naming draw and never
 // named the world, the world reference is given up, so a world camera that really changed names itself again within three frames.
 constexpr uint32_t kFlatNamingVetoFrames = 3;
+// The same veto inside one frame (docs\investigation-flat-scoped-ads-stutter-2026-10-29.md, "The naming veto stall"). A scoped or Faster
+// Handling zoom moves the world's own camera past the tolerance in one frame (1.11 and 1.152 measured, against the 1.038 above), so its draws
+// are vetoed and each one, no longer the world's, is captured as a first-person draw: 13,000 draws at 12 us each in a busy scene, on each of the
+// three frames kFlatNamingVetoFrames waits. That is the half-second stall at a zoom edge. A first person draws far fewer: flight 4's frames that
+// never named vetoed about 30, and the grenade hold's bench case draws 70 at its own near plane. So this many vetoed draws in one frame with the
+// world's near plane say the camera is the world's, and the reference is given up there and then.
+constexpr uint32_t kFlatNamingVetoDraws = 128;
 struct FlatDomainWorldReference {
     float nearPlane = 0;
     double p0 = 0, p1 = 0;   // the projection scale on x and on y
@@ -281,6 +288,12 @@ inline bool flatDomainPredictsWorld(const float (&rows)[6][4], const FlatDomainW
     }
     if (detail) *detail = out;
     return out.predicted;
+}
+// One vetoed draw, counted toward kFlatNamingVetoDraws; true on the draw that reaches it. Only a draw with the world's near plane counts: a camera
+// with its own (the hipfire weapon's and a grenade's 0.0675) can never be taken for the world, however many draws it makes.
+inline bool flatNamingVetoBoundReached(const FlatDomainWorldPrediction& vetoed, uint32_t& nearEqualDraws) {
+    if (!vetoed.nearEqual) return false;
+    return ++nearEqualDraws >= kFlatNamingVetoDraws;
 }
 // An HDR target no draw has named the world for, with a first person in the frame (2026-10-29: on foot, a scanner tool in hand, panned to
 // bare terrain). The pool-less admission (flat_runtime.cpp, unnamedWorldDepth) takes the target's first camera for the world's only when
