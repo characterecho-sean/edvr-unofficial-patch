@@ -35,8 +35,8 @@ struct Watchdog {
   std::thread thread{[&]{ if (!done.wait(std::chrono::seconds(20))) std::_Exit(1); }};
   ~Watchdog() { done.signal(); thread.join(); }
 };
-bool reaches(const std::function<bool()>& predicate) {
-  const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+bool reaches(const std::function<bool()>& predicate, std::chrono::seconds timeout=std::chrono::seconds(2)) {
+  const auto until=std::chrono::steady_clock::now()+timeout;
   while (!predicate()) {
     if (std::chrono::steady_clock::now() >= until) return false;
     std::this_thread::yield();
@@ -130,9 +130,13 @@ void capacity() {
   PresentWorkQueue q; check(q.bindCurrentThread(), "capacity setup");
   std::vector<std::thread> callers;
   std::atomic<unsigned> rejected{0}, completed{0}, ran{0};
+  // q.close() below ends every caller, so none may reach its own deadline first: that would retire a queued request and count as a rejection. A loaded machine can start
+  // these threads seconds apart (CI, twice: the first caller's old 2 s ran out before the check), so the deadline outlasts the watchdog, and the wait for all sixteen is as
+  // long as the watchdog leaves room for. A healthy queue answers at once either way.
+  const auto outlivesWatchdog=std::chrono::seconds(30);
   for (unsigned i=0;i<PresentWorkQueue::kQueueCapacity;++i)
-    callers.emplace_back([&]{ if (!q.invoke([&]{++ran;}, std::chrono::seconds(2))) ++rejected; else ++completed; });
-  check(reaches([&]{return q.pending()==PresentWorkQueue::kQueueCapacity;}), "sixteen queued requests admitted");
+    callers.emplace_back([&]{ if (!q.invoke([&]{++ran;}, outlivesWatchdog)) ++rejected; else ++completed; });
+  check(reaches([&]{return q.pending()==PresentWorkQueue::kQueueCapacity;}, std::chrono::seconds(10)), "sixteen queued requests admitted");
   std::thread extra([&]{ if (!q.invoke([]{}, std::chrono::milliseconds(1))) ++rejected; }); extra.join();
   check(rejected==1, "seventeenth request rejected");
   q.close(); for (auto& t:callers) t.join();
