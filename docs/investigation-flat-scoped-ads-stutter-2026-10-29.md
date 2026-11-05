@@ -2,15 +2,18 @@
 
 ## Status
 
-- **State (2026-11-05): REOPENED. Cause found, fix built, NOT FLOWN.** The stall is still
-  there at both zoom edges on Frontier, flat, DLSS: 3 frames of 138 to 170 ms. A zoom
+- **State (2026-11-05): stall FIXED and flown (`0826fc84`, Frontier, flat), on the
+  branch, not merged.** Sean: "Fix seems to work!" The flight's table is in "The naming
+  veto stall". Not covered: TAA, a grenade or tool in hand, and per-frame captures.
+- **Before the fix:** the stall was still there at both zoom edges on Frontier, flat, DLSS: 3 frames of 138 to 170 ms. A zoom
   step over 10 % a frame makes the world's own camera fail the prediction, so nothing
   names the world and every world draw is captured as first-person, about 13,000 draws
   at 12 us each, until the third frame gives the reference up. See "The naming veto
   stall" below. Flight 4 hit about 90 vetoes a zoom edge against about 40,000 here,
   so its clean result does not show F1 and F2 cleared this stall.
-- **Next flight:** the bounded veto (`kFlatNamingVetoDraws`), Frontier, the same spot:
-  the flight card in that section.
+- **Next flight:** TAA and a grenade or tool in hand on this build, with F4 captures.
+- **Left by the fix:** DLSS is still off for about 765 ms on the way in, now at normal
+  frame time. That is the refusal below (fix A), and it may read as a soft or sharp snap.
 - **Release (2026-10-30):** The history pools and shader cache fix (b3cf6e80) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
 - **Flight 4 (10-29, `97193c14`, Steam, flat, DLSS), read then as fixed; on main
   without the instruments.** Sean: "The hitches are gone!" Six scoped presses: no frame over 29 ms (flight 3: 43 to 104 ms at every
@@ -506,6 +509,34 @@ TAA.
 | 3 slow frames stay, `naming-veto-bounded=0`, vetoes in the tens of thousands | the bound never ran |
 | 3 slow frames stay, `naming-veto-bounded` rising | the cost is elsewhere: read the CPU families |
 | a grenade or tool in hand now refuses, `flat world naming disagrees with H` lines | the bound is too low |
+
+**The flight (2026-11-05, 07:21, `edvr_gfx_20261105_071411.log`, build matches
+`0826fc84`):** four scoped presses, on DLSS, then FSR3 and XeSS switched in F8. Sean:
+"Fix seems to work!"
+
+| Measure | Before the fix | With it |
+|---|---|---|
+| `naming-veto-bounded` | not there | 58 across the presses |
+| vetoes | about 40,000 a zoom edge | 7,366 in all, about 127 a bounded frame |
+| `naming-veto-releases` | 1 a zoom edge | 0 |
+| frame spacing | 3 frames of 138 to 170 ms (captures) | 21 to 30 ms (press 1's 12 bound lines, DLSS) |
+| largest window's EDVR per frame total | 19.71 ms | 11.02 ms |
+| time since the last resolve, going in | 766 to 796 ms | 765 to 859 ms |
+| time since the last resolve, coming out | 531 to 547 ms | 218 to 234 ms |
+| refused frames a press | about 18 | about 47 |
+
+The stall has gone, but the time without DLSS going in has not shrunk: each frame whose
+step passes 10 % now refuses at normal frame time, about 47 frames against 3 slow ones
+and 16 others. That is the refusal, fix A's subject.
+
+The bound lines also measure the world's step directly: 1.109 to 1.211 a frame going in
+and 0.802 to 0.889 coming out, at about 25 ms a frame. That overlaps the weapon camera's
+1.18 or more, so a wider tolerance could not tell the two apart.
+
+Not covered: there were no F4 captures, so the frame spacing rests on press 1's lines
+and FSR3 and XeSS only on Sean's feel; the reporter's 30-frame tail cannot be judged.
+TAA and a grenade or tool in hand were not flown. No `flat world naming disagrees with
+H` line appeared.
 
 ## Journal
 
