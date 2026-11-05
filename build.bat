@@ -3334,6 +3334,7 @@ python tools\run_jobs.py --jobs 4 ^
     --gate "tools\compile_variants.py --self-test" ^
     --gate "tools\dxbc_disasm.py --self-test" ^
     --gate "tools\eye_bmp_to_png.py --self-test" ^
+    --gate "tools\character_motion_check.py --self-test" ^
     --gate "tools\diff_eye_dump.py --self-test" ^
     --gate "tools\eye_run_fit.py --self-test" ^
     --gate "tools\eye_run_shimmer.py --self-test" ^

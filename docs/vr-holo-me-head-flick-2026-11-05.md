@@ -45,9 +45,9 @@
 - **Temporary keys:** none added. Frontier's `census_offscreen = 1` belongs to the
   lobby DoF work and was left alone.
 - **Issues:** none filed yet.
-- **Measuring scripts:** `face_mv_check.py` and `helmet_mv_check.py` in the session
-  notes folder, not in the repo. They move to `tools\` with a self-test if the fix
-  goes ahead.
+- **Measuring tool:** `python tools\character_motion_check.py --target frontier
+  [--stamp S]`, gated in the build. It reads a dump's face, helmet and body against
+  the raw input, and exits 3 past its limits. Baselines below.
 
 ## Environment
 
@@ -256,10 +256,20 @@ On the fix's build, main merged: Holo-Me stopped and flying, INSERT in each, wat
 the face and the helmet frame. Then a look round the cockpit in flight, and an NPC on
 foot for the regression.
 
-- Face, flying: `face_mv_check.py` error under 0.6 native px on every frame from 4,
-  with travel still large, and `SkinE` still at 32 bits in the dump.
-- Helmet, stopped: `helmet_mv_check.py` helmet error under 0.25 input px, also during a
-  head turn. Its path line says engine on those pixels and how many are masked.
+`python tools\character_motion_check.py --target frontier --stamp <stamp>` reads each
+dump. Its baselines, on the dumps from before the fixes, with the tighter masks it uses
+(so a little different from the tables above):
+
+| Dump | Face, worst (native px) | Helmet, worst (native px) | SkinE format |
+|---|---|---|---|
+| `120817532001`, flying | 3.58, 8 of 12 frames past 0.6 | 1.25, 8 of 12 past 0.5 | 10 (16-bit) |
+| `125144765001`, stopped | 0.00, none past | 3.29, 9 of 12 past | 10 |
+| `125253331002`, flying | 7.95, 11 of 12 past | 1.60, 9 of 12 past | 10 |
+
+- Face, flying: error under 0.6 native px on every frame from 4, with travel still
+  large, and `SkinE` at DXGI format 2 (32-bit) in the dump.
+- Helmet, stopped: error under 0.5 native px, also during a head turn. The draw path
+  column says engine on those pixels and how many are masked.
 - Log: `engine motion: family vs_01DA82F8D0EA0C99: live`, no `takes no second skin` for
   it, and `masked` near 0 in `skin join: second skin this window`.
 - Sean: the flick and the helmet frame.
