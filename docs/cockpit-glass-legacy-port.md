@@ -1091,6 +1091,10 @@ Options, none built: (1) draw the whole canopy at the render's size and add it t
 
 Which side the dirt is lit from is not settled. Sean, 2026-11-06: no dirt from the cockpit lights with `all`, and the dirt brightens more when a lamp faces him. That leans to the outer side, as Lambert with an outward normal would leave a light inside at zero, but a spot's cone and the glare lobe also brighten toward a lamp facing the viewer. The cockpit lights are also weak: about 100 at most on a small patch, against about 500 for a warm spot. Temporary key `visual.cockpit_glass_lights_sides = one | both` (default one, local lights only, not the sun) lets one flight compare. A lamp behind the ship lighting the dirt with `one` would mean the inner side.
 
+Flown in VR on `ceeb4414` (Frontier, Pimax Crystal Super, log `edvr_gfx_20261106_105922`), Sean: "half looks fine", and no visible difference between station and station plus cockpit lights. The canopy timer, half with station lights, two clean windows: 0.218 and 0.226 ms a frame, 5,038 and 5,086 draws, all by the half route, about 85 fps (2,566 and 2,543 frames). Full was only flown in short bursts: 656 of 4,588 draws gave 0.412 ms, 456 of 4,638 gave 0.325 ms, which solve to about 1.1 to 1.5 ms for full, at about 77 fps in those windows. Rough, but the half route saves about 1 ms. Off at half was held for about 4 s only, so the loop's own share at half is not measured.
+
+ruled out: the cockpit's point lights showing on the dirt, because `all` with `both` sides (held 13 s at 11:01:57) looks the same as `station` to Sean. The lights are in the lists but weak: about 100 at most on a small patch against about 500 for a warm spot.
+
 The 300-360 canopy binds a window above the draws taken (open since "The dirt layer") are named by this log: `refused=360 (not-hdr-target=360)`. About 12 a second the canopy pair is drawn into a target that is not the HDR
 one, and that draw stays in the scene. What that target is, and whether its dirt shows, is not known.
 
