@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's list layout is read offline, and whether a hangar's lights are in those lists is the next flight ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's point and spot lists hold the pad's lights at the glass's depths, FLOWN on `ea6efed8`; next is an unshadowed light loop behind a temporary key ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -1060,3 +1060,15 @@ lights in full from slices between 0.5 and 8 m. Each sample copies and scans abo
 | Lights in the lists at farther slices only | the lights do not reach the glass in the game's own terms; a loop would add nothing |
 | All lists but `probe` are zero | the hangar's lights come another way; this route is ruled out |
 | A count past capacity, or absurd positions and radii | the layout is misread; nothing above stands until it is put right |
+
+Flown on `ea6efed8` (Frontier, VR, on a station's pad, log `edvr_gfx_20261106_064801`), four samples. The first row: **the pad's lights are in the lists, at the glass's depths.** No count past capacity, and
+the positions, radii and colours are plausible, so the layout stands for points and spots. The records are in the camera's space (their lengths hold while their directions move with the head).
+
+- Spots, 22 to 89 distinct, 8 printed a sample. Two kinds near the pad, by the shader's falloff at the camera, before the cone and a shadow: warm spots, radius 31.73, intensity 149,280 at 15.5 and 16.5 m,
+  give about 500; in S4, radius 96.06, intensity 34,912,000 at about 82 m, give about 950. White spots, radius 30.70, intensity 289,000, sat 32 to 36 m away, past their radius, so they give 0 at the camera.
+- Points, at most 128 in one cluster: the cockpit's own small lights, radius 0.5 to 3 m, intensity 7 to 64, within 2 m. They would light the dirt too, some orange and some blue.
+- The sun was on here: t1's colour 350, 335, 325 in all four samples, so "docked, the sun is off" (section 7) holds in a hangar and not on every pad; the shadow map keeps it off the glass.
+- Most warm and big spots carry a shadow index, and the shadow atlas is not bound to the canopy. `count+12` (18 lights) and `count+24` (8 or 9, in every cluster) are not identified. Which spot is the lamp Sean
+  pointed at is not known: this build did not print a spot's direction.
+
+The next build is an unshadowed loop over the points and spots behind a temporary key.
