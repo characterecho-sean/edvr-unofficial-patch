@@ -19,7 +19,7 @@ it can be compared with the text log. Every limit below is a named constant and 
 
 The height ledger, per valid pin record that is not cam_external (cam_raw is the camera as the eyes were rendered; E is pin.e, after the removals):
     cam_raw   = E + SEATED_Y_SIGN * (sub_raise + sub_vneck_y + sub_ads_y) + sub_weapon_view_y
-    body_view = cam_raw - gain * (head_y - head_ref)             the height the pilot gets, the physical head taken out
+    body_view = cam_raw - gain * (head_y - head_ref)             the height the pilot gets; gain is HEAD_GAIN = 0, pin.e already excludes the head
     game      = E - gain * (head_y - head_ref) - SEATED_Y_SIGN * (eye_y - sub_raise - sub_vneck_y - sub_ads_y) + sub_weapon_view_y
     so  body_view = game + SEATED_Y_SIGN * eye_y   exactly, and a term's effect on the view is SEATED_Y_SIGN times its change.
 SEATED_Y_SIGN is -1 because the pin takes the camera LESS the camera's body-axes motion for a seated shift S, which is (-S0, -S1, +S2)
@@ -53,13 +53,15 @@ EXC_MIN_S = 0.100           # ... for this long ...
 EXC_MERGE_S = 0.100         # ... merging gaps shorter than this
 TRANSITION_S = 0.6          # an excursion beginning within this after a stance, item or ADS change is a transition
 SLOW_SETTLE_S = 1.0         # a transition taking longer than this to come back is slow_settle
+EVIDENCE_AFTER_S = 0.5      # the evidence window for a cause ends this long after the onset (or when the episode does)
 LOOKBACK_S = 0.3            # the pre-onset baseline, and the evidence window's start
 STALL_S = 0.100             # a gap in pin or align records over this is a stall
 STALL_AFTER_S = 0.100       # a stall counts when it ends this close after (or anywhere before) the onset
 RUNTIME_DEFERRED_S = 0.050  # rt_eye deferred for this long
 RUNTIME_DIFF_M = 0.005      # |wanted - applied|
 GAME_MOVED_M = 0.005        # "the game moved" for subtraction_miss
-SAT_ROOM_M = 0.005          # legs' room left under this is used up
+SAT_ROOM_M = 0.005          # legs' room left under this is used up ...
+SAT_ROOM_SHARE = 0.5        # ... for this share of the window's calls (a running stride touches zero room on its own, 19% of the flown calls)
 STORE_MOVED_M = 0.03        # a stored neck or cam moved this much
 STARVED_S = 1.0             # not settled this long ...
 STARVED_AGE_MS = 250.0      # ... and the raise target this old
@@ -69,8 +71,9 @@ TERM_SHARE = 0.50           # term:<name>: the largest same-signed term holds th
 LEVEL_DEG = 10.0            # settled level frames: |aim pitch| under this
 REF_MIN_ROWS = 20           # rows a class needs for a reference
 HEADREF_MIN_ROWS = 30       # rows a recentre segment needs for its own head_ref
-GAIN_TOL = 0.15             # pin.e on head_y should be 1 within this
-GAIN_MIN_HEAD_M = 0.001     # the head must have moved this much (std) to fit a gain
+HEAD_GAIN = 0.0             # the gain of pin.e[1] on the physical head: none (F87h's hold cancels the sustained offset, pinEyeYAdjust the transient)
+GAIN_TOL = 0.15             # the fit may differ from HEAD_GAIN by this before it is a finding
+GAIN_FIT_MIN_RMS_M = 0.01   # a recentre segment is fitted only where the head moved this much rms (one flown segment moved 0.25 cm and gave a slope of +4.6)
 JOIN_MAX_AGE_S = 0.25       # a p1 older than this is not the pin's camera
 BOB_WINDOW_S = 0.25         # the moving mean
 BOB_LIMIT_M = 0.002         # a flown good value was 0.0003
@@ -96,6 +99,19 @@ IK_SHORTFALL_SEEN_CM = 0.1
 IK_ANIM_SHARE = 0.8         # the animation moved this share of what the IK output moved
 IK_ANIM_MIN_M = 0.01        # and the output moved at least this
 IK_EXEMPT_EXITS = ('ik_off',)   # not a refusal: the feature is off
+IK_JOIN_S = 0.05            # an ik record this close before a pin row is that row's joints
+VN_SMOOTH_S = 0.3           # view minus neck is averaged over a stride before it is judged
+VN_MIN_S = 0.300            # view_under_neck: under 0 this long
+HANDS_MIN_S = 0.100         # hands_above_view: the higher hand above the view this long
+STALE_M = 0.03              # raise_stale: the raise this far from its value at the last settled upright standing row ...
+STALE_S = 1.0               # ... while not settled, this long
+PATH_WINDOW_S = 0.5         # the path of the model root, for slope and ground speed
+FOOT_ROLL_S = 0.4           # the lowest foot is a rolling minimum over this
+FOOT_MATCH = 0.35           # the lowest foot fell by E's drop within this share: the model origin rose
+FOOT_HOLD = 0.25            # the lowest foot moved under this share of E's drop: the camera fell
+PITCH_CHANGED_DEG = 3.0
+MOVING_MPS = 3.0            # the E over neck table: moving faster than this along the ground
+SLOPE_BINS = (-90.0, -15.0, -5.0, 5.0, 15.0, 90.1)
 MAX_LISTED = 60             # findings listed per report before "... N more"
 
 MAGIC = b'EDVRONF1'
@@ -117,13 +133,17 @@ REQ_LEDGER = {
 REQ_FWD = {'pin': ['heading']}
 REQ_IK = {'ik': ['exit', 'refuse', 'write_down', 'plan_gen', 'fp_stale', 'g_stale', 'fp_age_ms', 'joints', 'anim_valid', 'final_valid', 'final_neck', 'anim_neck',
                  'final_chest', 'anim_chest'] +
-          [p + s for p in ARMS for s in ('reach_ratio', 'shortfall_cm', 'swivel_deg', 'elbow_deg', 'grip_err_cm', 'w_arm', 'pole_src', 'swivel_capped',
+          [p + s for p in ARMS for s in ('wrote', 'reach_ratio', 'shortfall_cm', 'swivel_deg', 'elbow_deg', 'grip_err_cm', 'w_arm', 'pole_src', 'swivel_capped',
                                           'swivel_min_violation', 'swivel_fallback', 'reach_limited', 'f159_reseed', 'f165_applied', 'f192_applied')] +
           ['%s_%s%s' % (w, p, j) for w in ('final', 'anim') for p in ARMS for j in ('upper', 'fore', 'hand')],
           'pin': ['e', 'pin_capped_h', 'pin_capped_v', 'f97_capped'], 'align': []}
 REQ_MARK = {'mark': ['number']}
+REQ_VIEW = {'ik': ['final_valid', 'final_neck', 'final_l_hand', 'final_r_hand']}
+REQ_STALE = {'align': ['raise_m']}
+# recorded from the flight after the first (F213): older files lack them, and the rules that use them say so
+REQ_NEW = {'pin': ['up', 'fwd'], 'ik': ['anim_pelvis', 'anim_l_foot', 'anim_r_foot', 'final_pelvis', 'final_l_foot', 'final_r_foot']}
 REQ_ALL = {}
-for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK):
+for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW):
     for _k, _v in _d.items():
         REQ_ALL.setdefault(_k, [])
         REQ_ALL[_k] = sorted(set(REQ_ALL[_k]) | set(_v))
@@ -324,6 +344,17 @@ def runs_of(mask):
     return list(zip(np.r_[idx[0], idx[br + 1]].tolist(), np.r_[idx[br], idx[-1]].tolist()))
 
 
+def tmean(t, v, w):
+    """A centred moving mean over w seconds on rows at times t; NaN rows are left out."""
+    f = np.isfinite(v)
+    c = np.r_[0.0, np.cumsum(np.where(f, v, 0.0))]
+    k = np.r_[0, np.cumsum(f)]
+    lo = np.searchsorted(t, t - w / 2, 'left')
+    hi = np.searchsorted(t, t + w / 2, 'right')
+    cnt = k[hi] - k[lo]
+    return np.where(cnt > 0, (c[hi] - c[lo]) / np.maximum(cnt, 1), np.nan)
+
+
 def gaps_of(t, limit):
     if len(t) < 2:
         return []
@@ -372,7 +403,7 @@ class Analysis:
     def header(self):
         S = self.S
         self.say('== session header')
-        self.say('build %s, game build %s, pid %s, %d file(s)%s' % (S.build, S.game_build, S.pid, len(S.files),
+        self.say('build %s, game %s, pid %s, %d file(s)%s' % (S.build, S.game_build, S.pid, len(S.files),
                                                                       ', last record truncated (tolerated)' if any(S.truncated) else ''))
         for n in S.notes:
             self.say('note: ' + n)
@@ -405,6 +436,46 @@ class Analysis:
         if self.gaps:
             self.say('stalls (a gap over %d ms in pin or align): %d, the longest %.0f ms at %s' % (
                 STALL_S * 1e3, len(self.gaps), 1e3 * max(b - a for a, b in self.gaps), S.lt(max(self.gaps, key=lambda g: g[1] - g[0])[0])))
+
+    def fit_head_gain(self, L, hy, e1, seg, sl_mask):
+        """The slope of pin.e[1] on head_y over settled level frames, within each class and recentre segment, pooled over the segments where the head moved
+        GAIN_FIT_MIN_RMS_M rms or more (a segment where it barely moved gives a meaningless slope). -> (slope or None, why not, segments used)."""
+        key = L.cls * 1000 + seg
+        use = np.zeros(len(hy), bool)
+        nseg = 0
+        for s_ in np.unique(seg):
+            m = sl_mask & (seg == s_)
+            if m.sum() >= REF_MIN_ROWS and float(np.sqrt(np.mean((hy[m] - hy[m].mean()) ** 2))) >= GAIN_FIT_MIN_RMS_M:
+                use |= m
+                nseg += 1
+        if not use.any():
+            return None, 'not fitted: the head moved under %g cm rms in every recentre segment' % (GAIN_FIT_MIN_RMS_M * 100), 0
+
+        def pooled(mask):
+            sxx = sxy = 0.0
+            for kk in np.unique(key[mask]):
+                m = mask & (key == kk)
+                if m.sum() < 5:
+                    continue
+                dx = hy[m] - hy[m].mean()
+                dy = e1[m] - e1[m].mean()
+                sxx += float((dx * dx).sum())
+                sxy += float((dx * dy).sum())
+            return sxx, sxy
+        sxx, sxy = pooled(use)
+        if sxx <= 0:
+            return None, 'not fitted: no head motion inside a class', 0
+        g = sxy / sxx
+        med = np.zeros(len(e1))
+        for kk in np.unique(key[use]):
+            m = use & (key == kk)
+            med[key == kk] = np.median(e1[m] - g * hy[m])
+        keep = use & (np.abs(e1 - g * hy - med) < EXC_M)
+        if keep.sum() >= REF_MIN_ROWS:
+            sxx2, sxy2 = pooled(keep)
+            if sxx2 > 0:
+                g = sxy2 / sxx2
+        return g, '', nseg
 
     # -- the ledger ---------------------------------------------------------------------------------------------------------------------------------------------------------
     def build_ledger(self):
@@ -517,46 +588,15 @@ class Analysis:
         L.head_ref = np.array([ref[s] if ref[s] is not None else gmed for s in seg])
         sl_mask = L.settled & L.level
         e1 = L.e[:, 1]
-        key = L.cls * 1000 + seg
-
-        def fit(mask):
-            sxx = sxy = 0.0
-            for kk in np.unique(key[mask]):
-                m = mask & (key == kk)
-                if m.sum() < 5:
-                    continue
-                dx = hy[m] - hy[m].mean()
-                dy = e1[m] - e1[m].mean()
-                sxx += float((dx * dx).sum())
-                sxy += float((dx * dy).sum())
-            return sxx, sxy
-        gain, why = 1.0, ''
-        if sl_mask.sum() >= REF_MIN_ROWS:
-            n = max(int(sl_mask.sum()), 1)
-            sxx, sxy = fit(sl_mask)
-            if sxx / n >= GAIN_MIN_HEAD_M ** 2:
-                gain = sxy / sxx
-                # a second pass without the frames that are far from their class's median (an excursion would bias the fit)
-                med = np.zeros(len(e1))
-                for kk in np.unique(key[sl_mask]):
-                    m = sl_mask & (key == kk)
-                    med[key == kk] = np.median(e1[m] - gain * hy[m])
-                keep = sl_mask & (np.abs(e1 - gain * hy - med) < EXC_M)
-                if keep.sum() >= REF_MIN_ROWS:
-                    sxx2, sxy2 = fit(keep)
-                    if sxx2 / max(int(keep.sum()), 1) >= GAIN_MIN_HEAD_M ** 2:
-                        gain = sxy2 / sxx2
-                why = 'fitted over %d settled level frames' % n
-            else:
-                why = 'the head moved under %.0f mm there, so 1 is assumed, not fitted' % (GAIN_MIN_HEAD_M * 1e3)
-        else:
-            why = 'under %d settled level frames, 1 is assumed' % REF_MIN_ROWS
-        L.gain = gain
-        self.say('ledger: gain of pin.e[1] on head_y %.3f (%s)' % (gain, why))
-        if not (abs(gain - 1.0) <= GAIN_TOL):
-            self.say('FINDING: the gain of pin.e on the physical head is %.2f, not about 1: the ledger assumes the game camera follows the head, and every height below uses %.2f' % (gain, gain))
-            self.findings.append(Finding(L.t[0], L.t[-1], 'gain', 'head', 'pin.e[1] on head_y gain %.2f' % gain))
-        L.head_d = gain * (hy - L.head_ref)
+        fit, why, nseg = self.fit_head_gain(L, hy, e1, seg, sl_mask)
+        L.gain_fit = fit
+        L.gain = HEAD_GAIN
+        self.say('ledger: pin.e is taken to exclude the physical head (gain %g: F87h hold cancels the sustained offset, pinEyeYAdjust the transient); checked by a fit of pin.e[1] on head_y: %s' % (
+            HEAD_GAIN, ('%.3f over %d recentre segment(s) where the head moved %g cm rms or more' % (fit, nseg, GAIN_FIT_MIN_RMS_M * 100)) if fit is not None else why))
+        if fit is not None and abs(fit - HEAD_GAIN) > GAIN_TOL:
+            self.say('FINDING: pin.e[1] follows the physical head with a gain of %.2f, not about %g: the ledger takes none of it out, so every height below carries it' % (fit, HEAD_GAIN))
+            self.findings.append(Finding(L.t[0], L.t[-1], 'gain', 'head', 'pin.e[1] on head_y gain %.2f, the ledger assumes %g' % (fit, HEAD_GAIN)))
+        L.head_d = HEAD_GAIN * (hy - L.head_ref)
         L.cam = e1 + SEATED_Y_SIGN * ssub + sub_wv[:, 1]
         L.body = L.cam - L.head_d
         L.game = e1 - L.head_d - SEATED_Y_SIGN * (eye[:, 1] - ssub) + sub_wv[:, 1]
@@ -634,21 +674,30 @@ class Analysis:
         self.say('  %d excursion(s) past %.1f cm for %d ms or more; %d transition(s) that came back within %.1f s (longest %.2f s), not findings' % (
             len(self.exc), EXC_M * 100, EXC_MIN_S * 1e3, ntrans, SLOW_SETTLE_S, trans_max))
 
-    def height_cause(self, i0, i1, ip):
+    def height_cause(self, i0, i1, ip, series=None, vsign=1.0, extra=None):
+        """The cause of a move of `series` (the body view's error by default). vsign: how the view's height enters the series (+1, or -1 for hands minus view);
+        extra: contributions that are not EDVR's terms (the neck, the hands), by name."""
         L, S = self.L, self.S
+        excursion = series is None
+        series = L.err if series is None else series
+        extra = extra or {}
         t0, tpk = float(L.t[i0]), float(L.t[ip])
-        lo, hi = t0 - LOOKBACK_S, float(L.t[i1])
+        lo, hi = t0 - LOOKBACK_S, min(float(L.t[i1]), t0 + EVIDENCE_AFTER_S)   # the evidence is what was true at the start, not over a long episode
         # the deltas: the 0.3 s before onset to the peak
         b0, b1 = sl(L.t, lo, t0 - 1e-9)
         base = np.arange(b0, b1) if b1 > b0 else np.array([max(i0 - 1, 0)])
         dl = collections.OrderedDict()
-        dl['game'] = float(L.game[ip] - L.game[base].mean())
-        dl['head'] = float(L.head_d[ip] - L.head_d[base].mean())
+        dl['game'] = vsign * float(L.game[ip] - L.game[base].mean())
+        dl['head'] = vsign * float(L.head_d[ip] - L.head_d[base].mean())
         eff = {}
         for k in ('raise', 'hold', 'weapon_eye', 'ads_lock', 'sight', 'vneck', 'ads_turn', 'run', 'weapon_view', 'unlisted'):
-            eff[k] = SEATED_Y_SIGN * float(L.terms[k][ip] - L.terms[k][base].mean())
+            eff[k] = vsign * SEATED_Y_SIGN * float(L.terms[k][ip] - L.terms[k][base].mean())
             dl[k] = eff[k]
-        move = float(L.err[ip] - L.err[base].mean())
+        for k, v in extra.items():
+            dl[k] = v
+        with np.errstate(all='ignore'):
+            bm = np.nanmean(series[base]) if np.isfinite(series[base]).any() else 0.0
+        move = float(series[ip] - bm)
         # stall
         for a, b in self.gaps:
             if b >= lo and a <= t0 + STALL_AFTER_S:
@@ -676,9 +725,9 @@ class Analysis:
                 rf = re_.f('refusals')[max(a0 - 1, 0):a1]
                 if rf.size and rf.max() > rf.min():
                     return 'runtime_not_applied', 'rt_eye refusals rose %d' % (rf.max() - rf.min()), dl
-                dw = np.abs(re_.f('wanted')[a0:a1] - re_.f('applied')[a0:a1]).max()
+                dw = np.abs(re_.f('wanted')[a0:a1, 1] - re_.f('applied')[a0:a1, 1]).max()   # the height: x and z lag while moving and do not move the view up or down
                 if dw > RUNTIME_DIFF_M:
-                    return 'runtime_not_applied', 'wanted and applied differ by %.1f cm' % (100 * dw), dl
+                    return 'runtime_not_applied', 'wanted and applied differ by %.1f cm in y' % (100 * dw), dl
         else:
             self.skipped('runtime_not_applied', 'rt_eye.deferred/refusals/wanted/applied (or no rt_eye records)')
         # subtraction miss
@@ -707,7 +756,7 @@ class Analysis:
             if (pin.f('f97_capped')[a0:a1] == 1).any():
                 sat.append('f97_capped')
             ran = pin.f('f179_ran')[a0:a1] == 1
-            if (ran & (pin.f('f179_legs_room')[a0:a1] <= SAT_ROOM_M)).any():
+            if (ran & (pin.f('f179_legs_room')[a0:a1] <= SAT_ROOM_M)).mean() >= SAT_ROOM_SHARE:   # a stride touches zero room every step: only a window mostly at zero is a cap
                 sat.append('legs_room used up')
         if sat:
             return 'saturation', ', '.join(sat), dl
@@ -721,6 +770,7 @@ class Analysis:
             if es.size and (es != es[0]).any():
                 return 'wrong_stance_store', 'eye_source changed', dl
         # settle starved: the unsettled run holding the onset, and the raise target's age
+        starved = ''
         un = ~(pin.f('settled') == 1)
         k0 = int(np.searchsorted(pt, t0, 'left'))
         if k0 < len(pt) and un[min(k0, len(un) - 1)] or k0 > 0 and un[k0 - 1]:
@@ -732,22 +782,244 @@ class Analysis:
                 j1 += 1
             ages = al.f('raise_age_ms')[b0_:b1_] if b1_ > b0_ else np.zeros(0)
             if pt[j1] - pt[j0] > STARVED_S and ages.size and ages.max() > STARVED_AGE_MS:
-                return 'settle_starved', 'not settled for %.1f s and the raise target %.0f ms old' % (pt[j1] - pt[j0], ages.max()), dl
+                starved = 'not settled for %.1f s and the raise target %.0f ms old' % (pt[j1] - pt[j0], ages.max())
+                # An excursion is judged in a settled stance, so a starved settle is the fault. For the view against the body it says why nothing corrected the move, not what moved.
+                if excursion:
+                    return 'settle_starved', starved, dl
+        uncorrected = '; not corrected: ' + starved if starved else ''
         # game camera
         tmax = max(abs(v) for k, v in eff.items())
         if abs(move) > 0 and abs(dl['game']) >= GAME_SHARE * abs(move) and tmax < TERM_FLAT_M:
-            return 'game_camera', 'the game holds %.0f%% of the move, EDVR terms flat' % (100 * abs(dl['game']) / abs(move)), dl
-        same = {k: v for k, v in eff.items() if v * move > 0}
+            return 'game_camera', 'the game holds %.0f%% of the move, EDVR terms flat%s' % (100 * abs(dl['game']) / abs(move), uncorrected), dl
+        pool = {'term:' + k: v for k, v in eff.items()}
+        pool.update(extra)
+        same = {k: v for k, v in pool.items() if v * move > 0}
         if same:
             k = max(same, key=lambda q: abs(same[q]))
             if abs(same[k]) >= TERM_SHARE * abs(move):
-                return 'term:' + k, '', dl
-        return 'unattributed', 'game %s cm of the %s cm move; no term holds half' % (fmt_cm(dl['game']), fmt_cm(move)), dl
+                return k, uncorrected[2:], dl
+        return 'unattributed', 'game %s cm of the %s cm move; no term holds half%s' % (fmt_cm(dl['game']), fmt_cm(move), uncorrected), dl
 
     def skipped(self, cause, what):
         line = 'cannot evaluate: %s missing (cause %s)' % (what, cause)
         if line not in self.cannot:
             self.cannot.append(line)
+
+    # -- the view against the body, for every stance ------------------------------------------------------------------------------------------------------------------------
+    def view_rules(self):
+        L, S = self.L, self.S
+        self.say('')
+        self.say('== view against the body, every stance (view = the body view; neck and hands as the IK finally wrote them, written or not; model space)')
+        self.vn_eps = []
+        if self.need('raise_stale', REQ_STALE):
+            self.raise_stale()
+        ik = S.tab('ik')
+        if not len(ik) or not self.need('view_under_neck, hands_above_view', REQ_VIEW):
+            return
+        tk = S.t('ik')
+        ji = np.searchsorted(tk, L.t, 'right') - 1
+        ok = ji >= 0
+        ok[ok] = (L.t[ok] - tk[ji[ok]]) <= IK_JOIN_S
+        ji = np.maximum(ji, 0)
+        ok &= ik.f('final_valid')[ji] == 1
+        nan = np.full(len(L.t), np.nan)
+        neck = np.where(ok, ik.f('final_neck')[ji][:, 1], nan).astype(np.float64)
+        hl = ik.f('final_l_hand')[ji][:, 1].astype(np.float64)
+        hr = ik.f('final_r_hand')[ji][:, 1].astype(np.float64)
+        with np.errstate(all='ignore'):
+            hand = np.where(ok, np.fmax(hl, hr), np.nan)
+        L.neck_y, L.hand_y, L.ik_ok, L.ji = neck, hand, ok, ji
+        view = L.body
+        vs = tmean(L.t, view - neck, VN_SMOOTH_S)
+        ha = hand - view
+        self.say('  %d of %d ledger rows have a final neck and hands within %d ms' % (int(ok.sum()), len(L.t), int(IK_JOIN_S * 1e3)))
+        eps = self.episodes(np.nan_to_num(vs, nan=1.0) < 0, VN_MIN_S)
+        for i0, i1 in eps:
+            seg = np.arange(i0, i1 + 1)
+            ip = int(seg[np.nanargmin(vs[seg])])
+            raw_under = np.flatnonzero(np.nan_to_num(view[seg] - neck[seg], nan=1.0) < 0)
+            if raw_under.size:   # the moving mean smears the onset by half its window: the onset is the first row that is under on its own
+                i0 = int(seg[raw_under[0]])
+            base = self.base_rows(i0)
+            with np.errstate(all='ignore'):
+                dneck = float(neck[ip] - np.nanmean(neck[base]))
+            cause, ev_, dl = self.height_cause(i0, i1, ip, series=vs, vsign=1.0, extra={'neck_moved': -dneck})
+            self.vn_eps.append((i0, i1, ip, cause))
+            t0, t1 = float(L.t[i0]), float(L.t[i1])
+            d = ' '.join('%s %s' % (k, fmt_cm(v)) for k, v in dl.items() if abs(v) >= 0.0005)
+            self.findings.append(Finding(t0, t1, 'view_under_neck', cause, 'view under the neck, %s %s to %s (%.2f s), peak %s cm (view minus neck), %s; moved by (cm, effect on view minus neck): %s%s' % (
+                self.cname(int(L.cls[i0])), S.lt(t0), S.lt(t1), t1 - t0, fmt_cm(vs[ip]), cause, d or 'nothing over 0.5 mm', ('; ' + ev_) if ev_ else '')))
+        eps2 = self.episodes(np.nan_to_num(ha, nan=-1.0) > 0, HANDS_MIN_S)
+        for i0, i1 in eps2:
+            seg = np.arange(i0, i1 + 1)
+            ip = int(seg[np.nanargmax(ha[seg])])
+            base = self.base_rows(i0)
+            with np.errstate(all='ignore'):
+                dhand = float(hand[ip] - np.nanmean(hand[base]))
+            cause, ev_, dl = self.height_cause(i0, i1, ip, series=ha, vsign=-1.0, extra={'hands_moved': dhand})
+            low = [e for e in self.vn_eps if e[0] <= i1 and i0 <= e[1]]
+            if low:   # hands swing with every stride, so what puts them above the view here is the view being low; the view's own finding names what moved it
+                ev_ = 'the view is under the neck through this (%s, from %s)' % (low[0][3], S.lt(float(L.t[low[0][0]])))
+                cause = 'view_under_neck'
+            t0, t1 = float(L.t[i0]), float(L.t[i1])
+            d = ' '.join('%s %s' % (k, fmt_cm(v)) for k, v in dl.items() if abs(v) >= 0.0005)
+            self.findings.append(Finding(t0, t1, 'hands_above_view', cause, 'hands above the view, %s %s to %s (%.2f s), the higher hand up to %s cm above it, %s; moved by (cm, effect on hands minus view): %s%s' % (
+                self.cname(int(L.cls[i0])), S.lt(t0), S.lt(t1), t1 - t0, fmt_cm(ha[ip]), cause, d or 'nothing over 0.5 mm', ('; ' + ev_) if ev_ else '')))
+        self.say('  view_under_neck: %d episode(s) of %.0f ms or more (view minus neck under 0 after a %.1f s moving mean); hands_above_view: %d episode(s) of %.0f ms or more' % (
+            len(eps), VN_MIN_S * 1e3, VN_SMOOTH_S, len(eps2), HANDS_MIN_S * 1e3))
+        self.camera_vs_body()
+
+    def base_rows(self, i0):
+        L = self.L
+        lo, hi = sl(L.t, L.t[i0] - LOOKBACK_S, L.t[i0] - 1e-9)
+        return np.arange(lo, hi) if hi > lo else np.array([max(i0 - 1, 0)])
+
+    def episodes(self, mask, min_s):
+        L = self.L
+        idx = np.flatnonzero(mask)
+        groups = []
+        for j in idx:
+            if groups and L.t[j] - L.t[groups[-1][-1]] < EXC_MERGE_S:
+                groups[-1].append(j)
+            else:
+                groups.append([j])
+        return [(g[0], g[-1]) for g in groups if L.t[g[-1]] - L.t[g[0]] >= min_s]
+
+    def raise_stale(self):
+        L, S = self.L, self.S
+        al = S.tab('align')
+        rm = al.f('raise_m')[L.ai].astype(np.float64)
+        n = len(L.t)
+        ar = np.arange(n)
+        stand = L.settled & (L.stance == S.enum('Stance', 'standing'))
+        last_stand = np.maximum.accumulate(np.where(stand, ar, -1))
+        last_set = np.maximum.accumulate(np.where(L.settled, ar, -1))
+        ref = np.where(last_stand >= 0, rm[np.maximum(last_stand, 0)], np.nan)
+        bad = (~L.settled) & (last_stand >= 0) & (np.abs(rm - ref) > STALE_M)
+        eps = self.episodes(bad, STALE_S)
+        for i0, i1 in eps:
+            held = float(np.median(rm[i0:i1 + 1]))
+            li = int(last_set[i0])
+            frm = S.enum_name('Stance', L.stance[li]) if li >= 0 else '?'
+            ls = int(last_stand[i0])
+            t0, t1 = float(L.t[i0]), float(L.t[i1])
+            self.findings.append(Finding(t0, t1, 'raise_stale', 'from_' + frm, 'raise stale %s to %s (%.1f s, not settled throughout): holding %s cm (from %s, the last settled row at %s) against %s cm at the last settled upright standing row (%s)' % (
+                S.lt(t0), S.lt(t1), t1 - t0, fmt_cm(held), frm, S.lt(L.t[li]) if li >= 0 else '?', fmt_cm(float(ref[i0])), S.lt(L.t[ls]))))
+        self.say('  raise_stale: %d episode(s) (not settled, the raise %.0f cm or more from its value at the last settled upright standing row, for %.1f s or more)' % (len(eps), STALE_M * 100, STALE_S))
+
+    def path_axes(self, L):
+        """The body's up (unit) per ledger row: the recorded row, or a fit that is printed as an estimate."""
+        S = self.S
+        pin = S.tab('pin')
+        if pin.has('up'):
+            u = pin.f('up')[L.R].astype(np.float64)
+            nn = np.linalg.norm(u, axis=1)
+            if (nn > 0.5).mean() > 0.5:
+                with np.errstate(all='ignore'):
+                    u = u / nn[:, None]
+                return u, nn > 0.5, 'recorded (pin.up)'
+        root = pin.f('root')[L.R].astype(np.float64)
+        c = S.tab('p1').f('e')[L.pi].astype(np.float64)
+        A = c - root
+        good = np.isfinite(A).all(axis=1) & np.isfinite(L.e[:, 1])
+        if good.sum() < 10:
+            return None, None, 'no up row recorded and too few rows to fit'
+        x = np.linalg.lstsq(A[good], L.e[good, 1], rcond=None)[0]
+        nx = float(np.linalg.norm(x))
+        u = x / nx
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, float(u[1])))))
+        return np.tile(u, (len(L.t), 1)), np.ones(len(L.t), bool), 'ESTIMATE (no up row recorded), a least-squares fit of (p1.e - root) . u = pin.e[1], |u| %.2f, %.0f deg from world Y' % (nx, ang)
+
+    def camera_vs_body(self):
+        L, S = self.L, self.S
+        self.say('')
+        self.say('== what moved the camera against the body (every view_under_neck episode)')
+        pin = S.tab('pin')
+        u, uok, how = self.path_axes(L)
+        if u is None:
+            self.say('  cannot evaluate: %s' % how)
+            return
+        root = pin.f('root')[L.R].astype(np.float64)
+        n = len(L.t)
+        j0 = np.searchsorted(L.t, L.t - PATH_WINDOW_S, 'left')
+        d = root - root[j0]
+        dt = np.maximum(L.t - L.t[j0], 1e-3)
+        vert = (d * u).sum(axis=1)
+        horiz = np.linalg.norm(d - vert[:, None] * u, axis=1)
+        speed = horiz / dt
+        slope = np.where(uok & (L.t - L.t[j0] > 0.2), np.degrees(np.arctan2(vert, horiz)), np.nan)
+        self.say('  body up: %s. Slope and speed are along the path of the model root over the last %.1f s (negative: downhill); world axes are not used for speed.' % (how, PATH_WINDOW_S))
+        ik = S.tab('ik')
+        lowfoot = pelvis = None
+        miss = S.missing({'ik': ['final_l_foot', 'final_r_foot', 'final_pelvis']}) if len(ik) else ['ik']
+        if not miss:
+            fl = ik.f('final_l_foot')[L.ji][:, 1].astype(np.float64)
+            fr = ik.f('final_r_foot')[L.ji][:, 1].astype(np.float64)
+            pv = ik.f('final_pelvis')[L.ji][:, 1].astype(np.float64)
+            with np.errstate(all='ignore'):
+                low = np.where(L.ik_ok, np.fmin(fl, fr), np.nan)
+            pelvis = np.where(L.ik_ok, pv, np.nan)
+            lowfoot = np.full(n, np.nan)
+            for i in range(n):
+                a = np.searchsorted(L.t, L.t[i] - FOOT_ROLL_S, 'left')
+                w = low[a:i + 1]
+                if np.isfinite(w).any():
+                    lowfoot[i] = np.nanmin(w)
+            if not np.isfinite(lowfoot).any():
+                lowfoot = None
+        self.feet_verdicts = []
+        if not self.vn_eps:
+            self.say('  no view_under_neck episode')
+        for i0, i1, ip, cause in self.vn_eps:
+            t0 = float(L.t[i0])
+            pre = np.arange(*sl(L.t, t0 - 1.0, t0 - 1e-9))
+            if pre.size == 0:
+                pre = np.array([max(i0 - 1, 0)])
+            with np.errstate(all='ignore'):
+                dE = float(L.e[ip, 1] - np.nanmean(L.e[pre, 1]))
+                dneck = float(L.neck_y[ip] - np.nanmean(L.neck_y[pre]))
+            a = np.arange(*sl(L.t, t0 - 0.5, t0 - 1e-9))
+            b = np.arange(*sl(L.t, t0, t0 + 0.5))
+            with np.errstate(all='ignore'):
+                p_before = float(np.nanmean(L.pitch[a])) if a.size else float('nan')
+                p_after = float(np.nanmean(L.pitch[b])) if b.size else float('nan')
+            hw = np.arange(*sl(L.t, t0 - 0.5, t0 + 0.5))
+            hmove = float(np.ptp(L.head_y[hw])) if hw.size else float('nan')
+            lines = ['E moved %s cm against the 1 s before (E %.2f m at the peak), neck %s cm; path slope %s deg at %.1f m/s; aim pitch %.1f deg before, %.1f after (%s); head moved %.1f mm' % (
+                fmt_cm(dE), L.e[ip, 1], fmt_cm(dneck), ('%+.0f' % slope[i0]) if np.isfinite(slope[i0]) else '?', speed[i0], p_before, p_after,
+                'changed' if abs(p_after - p_before) > PITCH_CHANGED_DEG else 'unchanged', hmove * 1e3)]
+            if lowfoot is None:
+                lines.append('cannot evaluate: feet (%s)' % ('ik.final_l_foot, final_r_foot or final_pelvis missing: a recording from before the feet were added' if miss else 'the feet were not recorded: the legs plan was not ok'))
+            else:
+                with np.errstate(all='ignore'):
+                    dfoot = float(lowfoot[ip] - np.nanmean(lowfoot[pre]))
+                    dpel = float(pelvis[ip] - np.nanmean(pelvis[pre]))
+                if not np.isfinite(dfoot) or abs(dE) < 0.02:
+                    verdict = 'cannot tell (the feet are not finite there, or E moved under 2 cm)'
+                elif dfoot <= 0 and abs(dfoot - dE) <= FOOT_MATCH * abs(dE):
+                    verdict = 'model origin rose'
+                elif abs(dfoot) <= FOOT_HOLD * abs(dE):
+                    verdict = 'camera fell'
+                else:
+                    verdict = 'mixed: the lowest foot moved %s cm against E %s cm' % (fmt_cm(dfoot), fmt_cm(dE))
+                lines.append('lowest foot (%.1f s rolling minimum) %s cm, pelvis %s cm: %s' % (FOOT_ROLL_S, fmt_cm(dfoot), fmt_cm(dpel), verdict))
+                self.feet_verdicts.append(verdict)
+            self.say('  view_under_neck episode %s (%s):' % (S.lt(t0), cause))
+            for ln in lines:
+                self.say('    ' + ln)
+        moving = (speed > MOVING_MPS) & np.isfinite(slope) & np.isfinite(L.e[:, 1] - L.neck[:, 1])
+        self.say('  E over the animated neck by path slope, moving over %g m/s (%d rows):' % (MOVING_MPS, int(moving.sum())))
+        if moving.sum() >= 10:
+            eon = (L.e[:, 1] - L.neck[:, 1])[moving]
+            sl_ = slope[moving]
+            for lo, hi in zip(SLOPE_BINS[:-1], SLOPE_BINS[1:]):
+                m = (sl_ >= lo) & (sl_ < hi)
+                if m.sum():
+                    self.say('    slope %+4.0f to %+4.0f deg: %4d rows, E over neck %s cm (sd %.1f)' % (lo, hi, m.sum(), fmt_cm(float(eon[m].mean())), 100 * float(eon[m].std())))
+            cc = float(np.corrcoef(eon, sl_)[0, 1]) if eon.std() > 0 and sl_.std() > 0 else float('nan')
+            self.say('    correlation of E over neck with the slope: %+.2f' % cc)
+        else:
+            self.say('    too few rows')
 
     # -- bob ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def bob(self):
@@ -886,6 +1158,7 @@ class Analysis:
         pe = pin.f('e')
         self.ik_gaps = gaps_of(tk, STALL_S)
         events = []
+        armstat = []
 
         def ev(kind, arm, k, kprev, t1, detail, joint=None, refcount=None):
             events.append(dict(kind=kind, arm=arm, k=int(k), kp=int(kprev), t0=float(tk[k]), t1=float(t1), detail=detail, joint=joint, extra=refcount))
@@ -893,33 +1166,37 @@ class Analysis:
         for p in ARMS:
             arm = p[0].upper()
             rel = {j: ik.f('final_%s%s' % (p, j)).astype(np.float64) - chest for j in ('upper', 'fore', 'hand')}
+            # an arm the IK did not write is the animation's: a rule on its joints says nothing about the IK (545 events came from arms never written in the first flight)
+            wrote = (ik.f(p + 'wrote') == 1) & (ik.f(p + 'w_arm') > 0)
+            wc = wrote[ci]
+            armstat.append('%s wrote on %d of %d calls' % (arm, int(wrote.sum()), n))
             if len(ci) > 1:
                 a, b = ci[:-1], ci[1:]
                 dfore = np.linalg.norm(rel['fore'][b] - rel['fore'][a], axis=1)
                 dhand = np.linalg.norm(rel['hand'][b] - rel['hand'][a], axis=1)
-                for q in np.flatnonzero((dfore > IK_ELBOW_JUMP_M) & (dhand < IK_HAND_STILL_M)):
+                for q in np.flatnonzero((dfore > IK_ELBOW_JUMP_M) & (dhand < IK_HAND_STILL_M) & wc[:-1] & wc[1:]):
                     ev('elbow_jump', arm, b[q], a[q], tk[b[q]], '%s elbow jumped %.1f cm in one call while the hand moved %.1f cm' % (arm, 100 * dfore[q], 100 * dhand[q]), ['fore'])
                 sw = ik.f(p + 'swivel_deg')[ci].astype(np.float64)
                 dsw = np.abs(wrap180(sw[1:] - sw[:-1]))
-                for q in np.flatnonzero(dsw > IK_SWIVEL_JUMP_DEG):
+                for q in np.flatnonzero((dsw > IK_SWIVEL_JUMP_DEG) & wc[:-1] & wc[1:]):
                     ev('swivel_jump', arm, b[q], a[q], tk[b[q]], '%s swivel jumped %.1f deg in one call' % (arm, dsw[q]), ['fore'])
             if len(ci):
                 grip = ik.f(p + 'grip_err_cm')[ci]
                 wa = ik.f(p + 'w_arm')[ci]
-                for r0, r1 in runs_of((grip > IK_GRIP_ERR_CM) & (wa > IK_GRIP_W)):
+                for r0, r1 in runs_of((grip > IK_GRIP_ERR_CM) & (wa > IK_GRIP_W) & wc):
                     if r1 - r0 + 1 >= IK_GRIP_CALLS:
                         ev('grip_loss', arm, ci[r0], ci[max(r0 - 1, 0)], tk[ci[r1]], '%s grip error over %.0f cm for %d calls (to %.1f cm)' % (arm, IK_GRIP_ERR_CM, r1 - r0 + 1, grip[r0:r1 + 1].max()), ['hand'])
                 rr = ik.f(p + 'reach_ratio')[ci]
                 sf = ik.f(p + 'shortfall_cm')[ci]
-                for r0, r1 in runs_of((rr >= IK_REACH_RATIO) | (sf > IK_SHORTFALL_CM)):
+                for r0, r1 in runs_of(((rr >= IK_REACH_RATIO) | (sf > IK_SHORTFALL_CM)) & wc):
                     if tk[ci[r1]] - tk[ci[r0]] >= IK_OVERREACH_S:
                         ev('overreach', arm, ci[r0], ci[max(r0 - 1, 0)], tk[ci[r1]], '%s reach ratio %.2f, shortfall %.1f cm, for %.0f ms' % (arm, rr[r0:r1 + 1].max(), sf[r0:r1 + 1].max(), 1e3 * (tk[ci[r1]] - tk[ci[r0]])), ['hand'])
                 hi_ = rel['fore'][ci][:, 1] > rel['upper'][ci][:, 1]
-                for r0, r1 in runs_of(hi_):
+                for r0, r1 in runs_of(hi_ & wc):
                     if tk[ci[r1]] - tk[ci[r0]] >= IK_ELBOW_HIGH_S:
                         ev('elbow_high', arm, ci[r0], ci[max(r0 - 1, 0)], tk[ci[r1]], '%s forearm joint above the upper arm joint for %.0f ms' % (arm, 1e3 * (tk[ci[r1]] - tk[ci[r0]])), ['fore'])
                 ed = ik.f(p + 'elbow_deg')[ci]
-                for r0, r1 in runs_of((ed < IK_ELBOW_LO_DEG) | (ed > IK_ELBOW_HI_DEG)):
+                for r0, r1 in runs_of(((ed < IK_ELBOW_LO_DEG) | (ed > IK_ELBOW_HI_DEG)) & wc):
                     if tk[ci[r1]] - tk[ci[r0]] >= IK_ELBOW_LIMIT_S:
                         ev('elbow_limit', arm, ci[r0], ci[max(r0 - 1, 0)], tk[ci[r1]], '%s elbow angle %.0f deg, outside %g..%g, for %.0f ms' % (arm, ed[r0:r1 + 1][np.argmax(np.abs(ed[r0:r1 + 1] - 104))], IK_ELBOW_LO_DEG, IK_ELBOW_HI_DEG, 1e3 * (tk[ci[r1]] - tk[ci[r0]])), ['fore'])
         if len(ci) > 1:
@@ -948,6 +1225,7 @@ class Analysis:
             e['cause'] = cause
             self.findings.append(Finding(e['t0'], e['t1'], 'ik_' + e['kind'], cause, 'IK %s at %s: %s; cause %s%s' % (e['kind'], S.lt(e['t0']), e['detail'], cause, (' (%s)' % ev_) if ev_ else '')))
         self.ik_events_list = events
+        self.say('  arm writes: %s (the rules on an arm need it written, with w_arm above 0)' % ', '.join(armstat))
         self.say('  %d completed call(s) of %d; %d event(s)%s' % (len(ci), n, len(events), ': ' + ', '.join('%s/%s x%d' % (k, c, v) for (k, c), v in sorted(counts.items())) if counts else ''))
 
     def ik_cause(self, e):
@@ -1055,7 +1333,7 @@ class Analysis:
 
     def mark_table(self, lo, hi):
         S, L = self.S, self.L
-        hdr = '    %-12s %-16s %-5s %-4s %6s %7s | %s | %-8s | L reach grip pole | R reach grip pole' % ('local', 'stance', 'item', 'ADS', 'pitch', 'err cm', 'game raise  hold weye   ads sight vneck', 'settle')
+        hdr = '    %-12s %-16s %-5s %-4s %6s %8s | %s | %-8s | L reach grip pole | R reach grip pole' % ('local', 'stance', 'item', 'ADS', 'pitch', 'err/v-n cm', 'game raise  hold weye   ads sight vneck', 'settle')
         self.say(hdr)
         ik = S.tab('ik')
         tk = S.t('ik')
@@ -1065,14 +1343,14 @@ class Analysis:
             if L is not None:
                 m = (L.t >= b0) & (L.t < b0 + 0.25)
                 if m.any():
-                    mean = lambda v: float(np.nanmean(v[m]))
+                    mean = lambda v: float(np.nanmean(v[m])) if np.isfinite(v[m]).any() else float('nan')
                     c = int(round(np.median(L.cls[m])))
                     st = S.enum_name('Stance', c // 2) + ('*' if c % 2 else '')
-                    cells = [mean(L.game) - np.nanmean(L.game[L.cls == c]) if (L.cls == c).any() else mean(L.game)]
+                    cells = [mean(L.game) - float(np.nanmean(L.game[L.cls == c])) if (L.cls == c).any() else mean(L.game)]
                     cells += [SEATED_Y_SIGN * (mean(L.terms[k]) - float(np.nanmean(L.terms[k][L.cls == c]))) if (L.cls == c).any() else SEATED_Y_SIGN * mean(L.terms[k])
                               for k in ('raise', 'hold', 'weapon_eye', 'ads_lock', 'sight', 'vneck')]
-                    row = '%-16s %-5s %-4s %6.1f %7s | %s | %-8s' % (st, S.enum_name('Support', int(np.median(L.support[m]))), 'yes' if L.ads[m].mean() > 0.5 else 'no', mean(L.pitch),
-                                                                      fmt_cm(mean(L.err)), ' '.join('%5s' % fmt_cm(x) for x in cells), S.enum_name('SettleWhy', int(np.median(L.why[m]))))
+                    row = '%-16s %-5s %-4s %6.1f %8s | %s | %-8s' % (st, S.enum_name('Support', int(np.median(L.support[m]))), 'yes' if L.ads[m].mean() > 0.5 else 'no', mean(L.pitch),
+                                                                      (fmt_cm(mean(L.err)) if np.isfinite(mean(L.err)) else (('v-n%s' % fmt_cm(mean(L.body) - mean(L.neck_y))) if getattr(L, 'neck_y', None) is not None and np.isfinite(mean(L.body) - mean(L.neck_y)) else 'n/a')), ' '.join('%5s' % fmt_cm(x) for x in cells), S.enum_name('SettleWhy', int(np.median(L.why[m]))))
             ikcol = ''
             if len(ik) and not self.S.missing({'ik': ['l_reach_ratio', 'l_grip_err_cm', 'l_pole_src', 'r_reach_ratio', 'r_grip_err_cm', 'r_pole_src']}):
                 m = (tk >= b0) & (tk < b0 + 0.25)
@@ -1092,6 +1370,7 @@ class Analysis:
         if self.L is not None:
             self.excursions()
             self.bob()
+            self.view_rules()
             self.leak_gains()
         else:
             self.say('')
@@ -1321,7 +1600,7 @@ SYN_ENUMS = {
     'EyeSource': ['unarmed', 'unarmed_no_class', 'stance', 'standing_over_crouch', 'start', 'hunched', 'none'], 'F193Source': ['hip', 'legs', 'camera'],
     'IkExit': ['completed', 'ik_off', 'plan_torn', 'plan_mismatch', 'inputs_refused', 'bad_joint_count', 'f166_write', 'f180_write', 'f169_write', 'pin_write', 'span_write'],
     'IkRefuse': ['buffer', 'plan_torn', 'plan', 'fp_torn', 'fp_stale', 'g_torn', 'g_stale', 'side', 'singular', 'write', 'fp_rig', 'none'], 'PoleSrc': ['legacy_swivel', 'stable_seed', 'body_down'],
-    'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
+    'PinState': ['still', 'walk', 'run', 'air', 'crouched'], 'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
 
 SYN_SCHEMA = collections.OrderedDict()
 SYN_SCHEMA['align'] = (1, _A('f32', 3, 'eye', 'run', 'ads_lock', 'sight', 'weapon_view', 'weapon_eye', 'virtual_neck') + _A('f32', 12, 'head_render', 'head_local') +
@@ -1333,15 +1612,16 @@ SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_v
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
-                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') +
+                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') +
                      _S('u8', 'valid') + _E('PinRefuse', 'refuse') + _S('u8', 'settled') + _E('SettleWhy', 'settle_why') + _S('u8', 'f138_refused') + _E('Stance', 'stance') +
-                     _S('u8', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
+                     _E('PinState', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
                      _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known'))
 _ik = _S('u64', 'plan_x', 'fp_x') + _S('u32', 'plan_gen', 'fp_gen', 'fp_seq', 'fp_frame', 'g_frame', 'p1', 'item_serial', 'fp_age_ms', 'g_age_ms', 'joints') + \
     _S('f32', 'spine_w', 'spine_pitch_rad', 'spine_roll_rad', 'square_rad', 'f166_w', 'f180_w', 'f169_w', 'off_w', 'f167_release', 'armed_w', 'base_w') + _arm('l_') + _arm('r_')
 for _w in ('anim', 'final'):
-    _ik += _A('f32', 3, _w + '_neck', _w + '_chest', _w + '_l_clav', _w + '_r_clav', _w + '_l_upper', _w + '_l_fore', _w + '_l_hand', _w + '_r_upper', _w + '_r_fore', _w + '_r_hand')
-_ik += _A('u16', 10, 'joint_idx') + _E('IkExit', 'exit') + _E('IkRefuse', 'refuse') + _S('u8', 'write_down', 'pin_called', 'pin_valid', 'fp_stale', 'g_stale', 'armed', 'bend_have', 'bend_write',
+    _ik += _A('f32', 3, _w + '_neck', _w + '_chest', _w + '_l_clav', _w + '_r_clav', _w + '_l_upper', _w + '_l_fore', _w + '_l_hand', _w + '_r_upper', _w + '_r_fore', _w + '_r_hand',
+              _w + '_pelvis', _w + '_l_foot', _w + '_r_foot')
+_ik += _A('u16', 13, 'joint_idx') + _E('IkExit', 'exit') + _E('IkRefuse', 'refuse') + _S('u8', 'write_down', 'pin_called', 'pin_valid', 'fp_stale', 'g_stale', 'armed', 'bend_have', 'bend_write',
                                                                                   'square_have', 'f166_ran', 'f180_ran', 'f169_ran', 'anim_valid', 'final_valid') + _arm8('l_') + _arm8('r_')
 SYN_SCHEMA['ik'] = (4, _ik)
 SYN_SCHEMA['mark'] = (5, _S('u32', 'number'))
@@ -1452,6 +1732,7 @@ class Sim:
         self.dgame = np.zeros(self.N)
         self.item = np.where(self.armed == 1, 7, 0)
         self.tables = None
+        self.head_gain = 0.0
 
     def win(self, a, b):
         return (self.t >= a) & (self.t < b)
@@ -1463,7 +1744,7 @@ class Sim:
         hd = self.head - 1.6
         ssub = T['raise_'] + T['vneck'] + T['ads_lock'] + T['sight']
         eye_y = T['run'] + T['ads_lock'] + T['sight'] + T['wv'] + T['weapon_eye'] + T['hold'] + T['raise_'] + T['ads_turn'] + T['vneck']
-        e1 = game + hd + SG * (T['hold'] + T['weapon_eye'] + T['ads_turn'] + T['run'])
+        e1 = game + self.head_gain * hd + SG * (T['hold'] + T['weapon_eye'] + T['ads_turn'] + T['run'])   # pin.e excludes the physical head (gain 0)
         z = np.zeros(N)
         ser = np.arange(1, N + 1)
         align = dict(t=t - 0.006, serial=ser, published=np.ones(N, int), on_foot=np.ones(N, int), local_valid=np.ones(N, int), raise_age_ms=np.full(N, 50.0), ads=self.ads.copy(),
@@ -1490,6 +1771,9 @@ class Sim:
         pin['neck_anim'] = np.stack([z, neck, z], 1)
         pin['neck_applied'] = pin['neck_anim']
         pin['heading'] = np.stack([z, z + 1.0], 1)
+        pin['up'] = np.stack([z, z + 1.0, z], 1)
+        pin['fwd'] = np.stack([z, z, z + 1.0], 1)
+        align['raise_m'] = -T['raise_']
         ik = dict(t=t + 0.001, exit=np.zeros(N, int), refuse=np.full(N, 11), anim_valid=np.ones(N, int), final_valid=np.ones(N, int), plan_gen=np.full(N, 3), joints=np.full(N, 80),
                   armed=self.armed.copy())
         chest = np.stack([z, 1.2 + (self.game - 1.5), z], 1)
@@ -1508,6 +1792,11 @@ class Sim:
             ik[p + 'elbow_deg'] = np.full(N, 110.0)
             ik[p + 'grip_err_cm'] = np.full(N, 0.5)
             ik[p + 'ok'] = np.ones(N, int)
+            ik[p + 'wrote'] = np.ones(N, int)
+            ik['final_%sfoot' % p] = np.stack([z + sx * 0.1, z, z], 1)
+            ik['anim_%sfoot' % p] = ik['final_%sfoot' % p].copy()
+        ik['final_pelvis'] = chest + np.array([0.0, -0.3, 0.0])
+        ik['anim_pelvis'] = ik['final_pelvis'].copy()
         rte = dict(t=t + 0.002, wanted=np.stack([z, eye_y, z], 1), applied=np.stack([z, eye_y, z], 1), serial_seen=ser, serial_applied=ser, deferred=np.zeros(N, int), refusals=np.zeros(N, int))
         rtc = dict(t=np.array([0.15]), ok=np.array([1]), reason=np.array([0]), moved_cm=np.array([0.2]))
         mk = dict(t=np.array([5.0, 11.0]), number=np.array([1, 2]))
@@ -1660,7 +1949,7 @@ def self_test():
         S, A = analyse(d)
         check(not A.findings, 'a clean walk, stand, crouch and ADS session has no finding: %s' % [f.detail[:90] for f in A.findings])
         check(A.joins['p1_al'] > 0.99 and A.joins['pin_p1'] > 0.99, 'the clean session joins fully')
-        check(abs(A.L.gain - 1.0) < 0.05, 'the clean gain is about 1 (%.3f)' % A.L.gain)
+        check(A.L.gain == HEAD_GAIN == 0.0 and A.L.gain_fit is None, 'the clean ledger takes no head out, and a head that moved under 1 cm rms is not fitted: %s' % A.L.gain_fit)
         check(len(A.L.refs) == 4, 'a reference per stance and armed: %s' % A.L.refs.keys())
         check(abs((A.L.body - A.L.game - SEATED_Y_SIGN * A.L.eye_y)).max() < 1e-9, 'the ledger identity body = game + sign * eye holds')
         rc, out = _run(d)
@@ -1823,18 +2112,97 @@ def self_test():
         _make(d7, stamp, drop={'pin': ['heading']})
         S7, A7 = analyse(d7)
         check('cannot evaluate: pin.heading missing' in '\n'.join(A7.out), 'a missing heading says so')
-        # a pin gain that is not 1 is said loudly
-        d8 = fresh()
+        # the head gain: near 0 is no finding (even with the head moving), a real follow is one
+        for follow, want in ((0.0, False), (0.5, True)):
+            dg = fresh()
+            sim = Sim()
+            sim.head[:] = 1.6 + 0.02 * np.sin(2 * np.pi * 0.25 * sim.t)
+            sim.head_gain = follow
+            sim.build()
+            write_session(dg, stamp, sim.tables)
+            Sg, Ag = analyse(dg)
+            has = [f for f in Ag.findings if f.kind == 'gain']
+            check(Ag.L.gain_fit is not None and abs(Ag.L.gain_fit - follow) < 0.05, 'the fitted head gain of %.1f comes back: %s' % (follow, Ag.L.gain_fit))
+            check(bool(has) == want, 'a head gain of %.1f %s a finding: %s' % (follow, 'is' if want else 'is not', [f.detail for f in Ag.findings][:2]))
 
-        def gain(s):
-            s.head[:] = 1.6 + 0.02 * np.sin(2 * np.pi * 0.25 * s.t)
-        sim = Sim()
-        gain(sim)
-        sim.build()
-        sim.tables['pin']['e'][:, 1] -= 0.5 * (sim.head - 1.6)
-        write_session(d8, stamp, sim.tables)
-        S8, A8 = analyse(d8)
-        check(abs(A8.L.gain - 0.5) < 0.1 and 'FINDING: the gain of pin.e' in '\n'.join(A8.out), 'a head gain of 0.5 is fitted and said: %.3f' % A8.L.gain)
+        # the view against the neck and the hands: a camera that sinks, with the feet either following it or holding
+        def sink(feet):
+            def pre(s_):
+                s_.dgame[s_.win(6.0, 7.0)] -= 0.50
+
+            def post(s_):
+                if feet == 'fall':
+                    ik = s_.tables['ik']
+                    m = (ik['t'] >= 6.0) & (ik['t'] < 7.0)
+                    for f in ('final_l_foot', 'final_r_foot'):
+                        ik[f] = ik[f] + np.where(m, 1.0, 0.0)[:, None] * np.array([0, -0.5, 0])
+            return pre, post
+        for feet, want_feet in (('hold', 'camera fell'), ('fall', 'model origin rose')):
+            d = fresh()
+            pre, post = sink(feet)
+            _make(d, stamp, [pre], [post])
+            S, A = analyse(d)
+            vn = [f for f in A.findings if f.kind == 'view_under_neck']
+            ha = [f for f in A.findings if f.kind == 'hands_above_view']
+            check(len(vn) == 1 and vn[0].cause == 'game_camera' and 6.0 <= vn[0].t0 <= 6.4, 'a sinking camera is view_under_neck from the game: %s' % [(f.kind, f.cause, round(f.t0, 2)) for f in A.findings])
+            check(len(ha) == 1 and ha[0].cause == 'view_under_neck', 'and hands_above_view because the view is low: %s' % [(f.kind, f.cause) for f in A.findings])
+            check(want_feet in A.feet_verdicts, 'the feet say "%s": %s' % (want_feet, A.feet_verdicts))
+            check(not [f for f in A.findings if f.kind.startswith('ik_')], 'a sinking camera makes no IK event: %s' % [(f.kind, f.cause) for f in A.findings if f.kind.startswith('ik_')])
+        # the same camera while the settle is starved: what moved is still the game's camera, and the starved settle is why nothing corrected it
+        def starve(s_):
+            m = s_.win(4.5, 8.0)
+            s_.tables['pin']['settled'][m], s_.tables['pin']['settle_why'][m] = 0, 1
+            s_.tables['align']['raise_age_ms'][m] = 400.0
+        d = fresh()
+        pre, post = sink('hold')
+        _make(d, stamp, [pre], [post, starve])
+        S, A = analyse(d)
+        vn = [f for f in A.findings if f.kind == 'view_under_neck']
+        check(len(vn) == 1 and vn[0].cause == 'game_camera' and 'not corrected' in repr(vars(vn[0])), 'a starved settle does not take the blame for what moved: %s' % [(f.cause, vars(f)) for f in vn])
+        # the same on a recording from before the feet were added
+        d = fresh()
+        pre, post = sink('hold')
+        _make(d, stamp, [pre], [post], drop={'ik': ['final_pelvis', 'final_l_foot', 'final_r_foot', 'anim_pelvis', 'anim_l_foot', 'anim_r_foot'], 'pin': ['up', 'fwd']})
+        S, A = analyse(d)
+        txt = '\n'.join(A.out)
+        check('cannot evaluate: feet' in txt and 'ESTIMATE' in txt, 'an older recording says the feet cannot be evaluated and the up row is an estimate')
+        # the hands rise on their own: hands_above_view caused by the hands
+        d = fresh()
+
+        def hands_up(s_):
+            ik = s_.tables['ik']
+            m = (ik['t'] >= 6.0) & (ik['t'] < 6.6)
+            for f in ('final_l_hand', 'final_r_hand'):
+                ik[f] = ik[f] + np.where(m, 1.0, 0.0)[:, None] * np.array([0, 0.6, 0])
+        _make(d, stamp, [], [hands_up])
+        S, A = analyse(d)
+        ha = [f for f in A.findings if f.kind == 'hands_above_view']
+        check(len(ha) == 1 and ha[0].cause == 'hands_moved', 'hands that rise on their own are hands_above_view caused by the hands: %s' % [(f.kind, f.cause) for f in A.findings])
+        # a raise held from the crouch while not settled
+        d = fresh()
+
+        def stale(s_):
+            m = s_.win(12.0, 15.5)
+            s_.tables['pin']['settled'][m], s_.tables['pin']['settle_why'][m] = 0, 1
+            s_.tables['align']['raise_m'][m] = 0.03
+        _make(d, stamp, [], [stale])
+        S, A = analyse(d)
+        rs = [f for f in A.findings if f.kind == 'raise_stale']
+        check(len(rs) == 1 and rs[0].cause == 'from_crouched' and 12.0 <= rs[0].t0 < 12.3, 'a raise held from the crouch is raise_stale from crouched: %s' % [(f.kind, f.cause, round(f.t0, 2)) for f in A.findings])
+        # arms the IK did not write: a huge reach and swivel jumps make no event
+        d = fresh()
+
+        def unwritten(s_):
+            ik = s_.tables['ik']
+            t = ik['t']
+            for p in ('l_', 'r_'):
+                ik[p + 'wrote'] = np.zeros(len(t), int)
+                ik[p + 'reach_ratio'] = np.where((t >= 5.0) & (t < 6.0), 1.5, 0.8)
+                ik[p + 'swivel_deg'] = np.where(np.floor(t * 4) % 2 == 0, 40.0, 80.0)
+                ik['final_%sfore' % p] = ik['final_%sfore' % p] + np.where(np.floor(t * 2) % 2 == 0, 0.0, 0.1)[:, None] * np.array([1.0, 0, 0])
+        _make(d, stamp, [], [unwritten])
+        S, A = analyse(d)
+        check(not A.ik_events_list and 'L wrote on 0 of' in '\n'.join(A.out), 'unwritten arms give no IK event and the report says how many calls wrote: %s' % [(e['kind']) for e in A.ik_events_list][:4])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('onfoot_check self-test: %s (%d checks passed, %d failed)' % ('FAILED' if fails else 'ok', passes[0], len(fails)))

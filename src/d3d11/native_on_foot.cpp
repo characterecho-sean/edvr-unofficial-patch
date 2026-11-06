@@ -17425,6 +17425,7 @@ struct PinCall {
     // from the animated neck, model axes, m), and the eye as drawn up from the neck as finally written (m; the close completes it, not a number until then).
     bool f171cOk = false;
     int f171cMode = 0, f171cBand = -1;
+    float bodyUp[3] = {}, bodyFwd[3] = {};   // F213: the AMC's up and forward rows in the world (m3p rows 1 and 2, as F85a forms its up-step); zero when the input was not read
     double f171cRaiseM = 0.0, f171cCamUpM = 0.0, f171cCamFwdM = 0.0, f171cGM = 0.0, f171cEyeUpM = std::nan("");
     bool localPitchValid = false, scenePitchValid = false;
     double localPitchDeg = 0.0, scenePitchDeg = 0.0, rawEyeY = 0.0, eyeYSelected = 0.0;
@@ -17527,6 +17528,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if (localPitchValid) localPitchRad = static_cast<double>(in.localPitchRad);
         }
         pc.p1 = in.p1;   // F85a
+        for (int i = 0; i < 3; ++i) {   // F213
+            pc.bodyUp[i] = in.m3p[4 + i];
+            pc.bodyFwd[i] = in.m3p[8 + i];
+        }
         pc.p1Valid = true;
         pc.localPitchSourceValid = in.localPitchValid;
         pc.localPoseQpc = in.localPoseQpc;
@@ -20363,9 +20368,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             rawHave[side] = true;
             for (int i = 0; i < 3; ++i) rawH[side][i] = static_cast<double>(g_pfzAnim[pl.side[side].H][12 + i]);
         }
-    // F213: the ten joints the recording follows, as the game animated them, before any stage below moves one. Only while recording; the scratch is under g_pfzBusy like the rest of this call.
-    static float s_recAnim[10][3];
-    static uint16_t s_recIdx[10];
+    // F213: the thirteen joints the recording follows (ten, then the pelvis and both feet from the legs' plan), as the game animated them, before any stage below moves one. Only while recording; the scratch is under g_pfzBusy like the rest of this call.
+    static float s_recAnim[13][3];
+    static uint16_t s_recIdx[13];
     uint64_t recTicks = 0;
     const bool recAnimTaken = onfootrec::active();
     if (recAnimTaken) {
@@ -20379,7 +20384,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             s_recIdx[5 + 3 * side] = pl.ok[side] ? static_cast<uint16_t>(pl.side[side].F) : 0xFFFFu;
             s_recIdx[6 + 3 * side] = pl.ok[side] ? static_cast<uint16_t>(pl.side[side].H) : 0xFFFFu;
         }
-        for (int k = 0; k < 10; ++k)
+        s_recIdx[10] = pl.legOk ? static_cast<uint16_t>(pl.leg[0].C) : 0xFFFFu;   // the pelvis the legs share (F65b's C)
+        s_recIdx[11] = pl.legOk ? static_cast<uint16_t>(pl.leg[0].H) : 0xFFFFu;   // L foot
+        s_recIdx[12] = pl.legOk ? static_cast<uint16_t>(pl.leg[1].H) : 0xFFFFu;   // R foot
+        for (int k = 0; k < 13; ++k)
             for (int i = 0; i < 3; ++i) s_recAnim[k][i] = s_recIdx[k] < count ? g_pfzAnim[s_recIdx[k]][12 + i] : std::numeric_limits<float>::quiet_NaN();
         recTicks = onfootrec::qpcNow() - t0;
     }
@@ -20857,6 +20865,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
         r.heading[0] = static_cast<float>(pc.hEye[0]);   // the eye's heading (x, z), F69d's axes: the checker's k_fwd needs it
         r.heading[1] = static_cast<float>(pc.hEye[1]);
+        for (int i = 0; i < 3; ++i) {
+            r.up[i] = pc.bodyUp[i];
+            r.fwd[i] = pc.bodyFwd[i];
+        }
         r.root_vy = g_pinMotion.vy;
         r.root_speed = g_pinMotion.speed;
         r.delta = pc.delta;
@@ -23162,9 +23174,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.f169_ran = pinCall.f169.ran;
         r.anim_valid = recAnimTaken;   // the recorder came on in the middle of this call when this is 0: no animated joints were taken, so none are claimed
         r.final_valid = recAnimTaken;
-        float* const animDst[10] = {r.anim_neck, r.anim_chest, r.anim_l_clav, r.anim_r_clav, r.anim_l_upper, r.anim_l_fore, r.anim_l_hand, r.anim_r_upper, r.anim_r_fore, r.anim_r_hand};
-        float* const finalDst[10] = {r.final_neck, r.final_chest, r.final_l_clav, r.final_r_clav, r.final_l_upper, r.final_l_fore, r.final_l_hand, r.final_r_upper, r.final_r_fore, r.final_r_hand};
-        for (int k = 0; k < 10; ++k) {
+        float* const animDst[13] = {r.anim_neck, r.anim_chest, r.anim_l_clav, r.anim_r_clav, r.anim_l_upper, r.anim_l_fore, r.anim_l_hand, r.anim_r_upper, r.anim_r_fore, r.anim_r_hand,
+                                    r.anim_pelvis, r.anim_l_foot, r.anim_r_foot};
+        float* const finalDst[13] = {r.final_neck, r.final_chest, r.final_l_clav, r.final_r_clav, r.final_l_upper, r.final_l_fore, r.final_l_hand, r.final_r_upper, r.final_r_fore, r.final_r_hand,
+                                     r.final_pelvis, r.final_l_foot, r.final_r_foot};
+        for (int k = 0; k < 13; ++k) {
             r.joint_idx[k] = recAnimTaken ? s_recIdx[k] : static_cast<uint16_t>(0xFFFFu);
             double p[3] = {};
             const bool have = recAnimTaken && finalAt(s_recIdx[k], p);

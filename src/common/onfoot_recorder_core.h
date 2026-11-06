@@ -91,6 +91,8 @@ ONF_ENUM(EyeSource, "unarmed", "unarmed_no_class", "stance", "standing_over_crou
 ONF_ENUM(F193Source, "hip", "legs", "camera")
 // how an armIkAfterAnimate call ended
 ONF_ENUM(IkExit, "completed", "ik_off", "plan_torn", "plan_mismatch", "inputs_refused", "bad_joint_count", "f166_write", "f180_write", "f169_write", "pin_write", "span_write")
+// nofoot::pinState: the speed bin of a pin sample (world-axis speed and vy, so a slope can read it wrong: the body's up row is in the pin record)
+ONF_ENUM(PinState, "still", "walk", "run", "air", "crouched")
 // IkRefusal (native_on_foot.cpp): the last refusal the call counted, then none
 ONF_ENUM(IkRefuse, "buffer", "plan_torn", "plan", "fp_torn", "fp_stale", "g_torn", "g_stale", "side", "singular", "write", "fp_rig", "none")
 // SideOut::f98Source: where the elbow's swivel came from. F84's rifle support and the pistol's pole are body_down; F165, F192, F159 and F181 are the flags beside it.
@@ -101,7 +103,7 @@ ONF_ENUM(Hold, "none", "f69h", "f192")
 ONF_ENUM(RecentreReason, "applied", "not_on_foot", "stored_seat_due", "rot_calibrate", "head_untracked", "replace_refused")
 
 inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPinRefuseEnum, &kSettleWhyEnum, &kStanceEnum, &kSupportEnum, &kEyeSourceEnum,
-                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum};
+                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum, &kPinStateEnum};
 
 // ---- the records ----------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Order inside a list: 8-byte fields, then 4-byte, then 2-byte, then 1-byte, so a struct has no padding but its tail.
@@ -131,8 +133,8 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(f64, f179_stand_w) S(f64, f179_stand_raise) S(f64, f179_legs_room) S(f64, f193_neck_y) S(f64, f193_eye_ask)                                            \
     S(f64, guard_push_cm) S(f64, guard_pred_cm) S(f64, guard_dist_cm)                                                                                        \
     S(f64, stored_neck_stand) S(f64, stored_neck_crouch) S(f64, stored_cam_stand) S(f64, stored_cam_crouch)                                                  \
-    S(u32, item_serial) S(u32, p1) A(f32, heading, 2)                                                                                                        \
-    S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) S(u8, pin_state) E(Support, support)    \
+    S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3)                                                                                                        \
+    S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) E(PinState, pin_state) E(Support, support)    \
     E(EyeSource, eye_source) S(u8, hunched) S(u8, pin_capped_h) S(u8, pin_capped_v) S(u8, f97_capped) S(u8, f107_began) E(F193Source, f193_source)         \
     S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known)
 
@@ -152,9 +154,11 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     ONF_IK_ARM_F32(S, l_) ONF_IK_ARM_F32(S, r_)                                                                                                              \
     A(f32, anim_neck, 3) A(f32, anim_chest, 3) A(f32, anim_l_clav, 3) A(f32, anim_r_clav, 3)                                                                 \
     A(f32, anim_l_upper, 3) A(f32, anim_l_fore, 3) A(f32, anim_l_hand, 3) A(f32, anim_r_upper, 3) A(f32, anim_r_fore, 3) A(f32, anim_r_hand, 3)             \
+    A(f32, anim_pelvis, 3) A(f32, anim_l_foot, 3) A(f32, anim_r_foot, 3)  \
     A(f32, final_neck, 3) A(f32, final_chest, 3) A(f32, final_l_clav, 3) A(f32, final_r_clav, 3)                                                             \
     A(f32, final_l_upper, 3) A(f32, final_l_fore, 3) A(f32, final_l_hand, 3) A(f32, final_r_upper, 3) A(f32, final_r_fore, 3) A(f32, final_r_hand, 3)       \
-    A(u16, joint_idx, 10)                                                                                                                                    \
+    A(f32, final_pelvis, 3) A(f32, final_l_foot, 3) A(f32, final_r_foot, 3)  \
+    A(u16, joint_idx, 13)                                                                                                                                    \
     E(IkExit, exit) E(IkRefuse, refuse) S(u8, write_down) S(u8, pin_called) S(u8, pin_valid) S(u8, fp_stale) S(u8, g_stale) S(u8, armed) S(u8, bend_have)  \
     S(u8, bend_write) S(u8, square_have) S(u8, f166_ran) S(u8, f180_ran) S(u8, f169_ran) S(u8, anim_valid) S(u8, final_valid)                               \
     ONF_IK_ARM_U8(S, E, l_) ONF_IK_ARM_U8(S, E, r_)
