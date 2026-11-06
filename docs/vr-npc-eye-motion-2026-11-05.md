@@ -2,9 +2,14 @@
 
 ## Status
 
-- **State: test build, not flown.** Branch `claude/npc-eye-motion`, from `07738546`
-  (v0.22.0-rc.7). It keys one more pair for the second skin. Whether that pair is the
-  eyes' colour is inferred, and the next flight settles it.
+- **State: flown by eye, not measured, merged to main 2026-11-05.** Branch `claude/npc-eye-motion`,
+  from `07738546` (v0.22.0-rc.7), flown on `ddb725c0` with the legacy glass fix (Frontier,
+  VR on foot, log `edvr_gfx_20261105_165800`). Sean: "eye fix seems to work in VR". The
+  log has the family live with its pixel shader patched, 9,070 draws in one 30 s window.
+  No eye dump was taken, so the eyes' E, their path and the face's error after the fix
+  are unmeasured. The corpus exactness test (`K9`) did not finish: 33 minutes, stopped,
+  on a 64x64 target, cause not looked into. That the pair is the eyes' colour is
+  supported by Sean's eye and is otherwise still inferred.
 - **Report (Sean, 2026-11-05):** "the bar tender/other npcs on the concourse, their
   eyes see to be blurring with motion".
 - **Environment:** native on-foot VR, native OpenXR runtime, Frontier, game build
