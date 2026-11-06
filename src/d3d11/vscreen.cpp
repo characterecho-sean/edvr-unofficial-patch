@@ -4280,6 +4280,11 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
         f.ps = bindingShaderHash(BindSlot::Ps);
     else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // The weapons fire: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
+    // The legacy canopy: named only while the replacement is bound for this draw, so a swap that was refused and `odyssey` leave the game's own canopy draw in the scene. The pair is the key too.
+    else if (f.targetKind == 1 && f.vs == kUiVsLegacyGlass && cockpitGlassLegacyLive() && cockpitGlassSwapActive()) {
+        f.legacyGlass = true;
+        f.ps = bindingShaderHash(BindSlot::Ps);
+    }
     // A2: the scope's gunsight mark. Its pair is also the weapon and tool material, so the key is the pair drawing 6 indices in 1 instance with a learned interface surface (the readout
     // atlas) sampled, and only while the scope lens is armed for the frame, or (C1a, crisp_reticle.h) while the frame thread's gate has the sights of a weapon the lens does not name up. The
     // cheap tests come first: the hash of an ordinary draw is not read (uiScopeMarkFacts, the rule the rig drives). Outside a press of the sights the second arming is down: one more load.

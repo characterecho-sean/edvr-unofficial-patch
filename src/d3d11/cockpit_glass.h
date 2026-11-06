@@ -35,7 +35,7 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 // asks this: the swap is EDVR's own, so the binding is still the game's canopy.
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual);
 // True between the replacement's bind (cockpitGlassPsFor handing it back) and the next bind of another pixel shader or the frame boundary: the bound canopy shader is EDVR's, with t12 and
-// b13 ours. Owner context. The flat UI layer takes the canopy into the weapons layer (ui_layer_math.h kLegacyGlass) only while this holds, so a replacement that was refused leaves the game's own
+// b13 ours. Owner context. The UI layer takes the canopy into the weapons layer (ui_layer_math.h kLegacyGlass) only while this holds, so a replacement that was refused leaves the game's own
 // stock canopy draw in the scene.
 bool cockpitGlassSwapActive();
 // The weapons layer takes the canopy draw (flat): its SV_Position is in the layer's pixels, and the shader looks up its light cluster by the game's. Sets the block at b13 so that
