@@ -68,6 +68,8 @@ ULONGLONG g_windowStart = 0;
 uint32_t g_binds = 0;      // canopy binds handed the replacement, this window
 uint32_t g_seen = 0;       // canopy binds the game made, this window
 uint32_t g_overlays = 0;   // ice or condensation draws drawn over with the legacy dirt, this window
+uint32_t g_t12Rebinds = 0, g_b13Rebinds = 0;   // canopy draws that found another binding in the swap's slot and put the swap's back, this window (cockpitGlassBeforeDraw)
+bool g_t12WriterSaid = false;                  // the first such t12 is described once a session
 
 // What was at t12 and b13 before the intact replacement's bind put the streaks and the dirt level there; given back at the next pixel-shader bind of another shader, or at the
 // frame boundary.
@@ -348,12 +350,16 @@ void resetWindow(ULONGLONG now) {
     g_binds = 0;
     g_seen = 0;
     g_overlays = 0;
+    g_t12Rebinds = 0;
+    g_b13Rebinds = 0;
 }
 
 void logWindow(ULONGLONG now) {
     char line[240];
     formatWindow(line, sizeof line, (now - g_windowStart) / 1000.0, g_binds, g_seen, g_overlays, replacementName(g_state));
     Log::get().note("%s", line);
+    if (g_t12Rebinds || g_b13Rebinds)
+        Log::get().note("cockpit glass: canopy draws that found another binding and put the swap's back, this window: t12 %u, b13 %u", g_t12Rebinds, g_b13Rebinds);
 }
 
 }  // namespace
@@ -372,6 +378,40 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 }
 
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual) { return actual && actual == g_ps ? kReplacedPsHash : 0; }
+
+void cockpitGlassBeforeDraw(ID3D11DeviceContext* ctx) {
+    if (!g_t12Bound) return;   // every draw but the canopy's: this and out
+    guarded("cockpitGlass.inputs.check", [&] {
+        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11Buffer* cb = nullptr;
+        ctx->PSGetShaderResources(kStreakSlot, 1, &srv);
+        ctx->PSGetConstantBuffers(kLevelSlot, 1, &cb);
+        if (srv != g_streakSrv) {
+            ++g_t12Rebinds;
+            if (!g_t12WriterSaid) {
+                g_t12WriterSaid = true;
+                D3D11_SHADER_RESOURCE_VIEW_DESC d{};
+                if (srv) srv->GetDesc(&d);
+                Log::get().note("cockpit glass: at a canopy draw t12 was %s (view dimension %d, format %d), written after the swap's bind; the streaks are bound again at every such draw and that view is what t12 gets back",
+                                srv ? "another view" : "empty", static_cast<int>(d.ViewDimension), static_cast<int>(d.Format));
+            }
+            // The binding that is there now is what the next pixel shader's hand-back must restore: the one saved at the swap's bind is stale. The reference moves to g_t12Prev.
+            if (g_t12Prev) g_t12Prev->Release();
+            g_t12Prev = srv;
+            srv = nullptr;
+            vScreenPSSetShaderResourcesRaw(ctx, kStreakSlot, 1, &g_streakSrv);
+        }
+        if (cb != g_levelCb) {
+            ++g_b13Rebinds;
+            if (g_b13Prev) g_b13Prev->Release();
+            g_b13Prev = cb;
+            cb = nullptr;
+            vScreenPSSetConstantBuffersRaw(ctx, kLevelSlot, 1, &g_levelCb);
+        }
+        if (srv) srv->Release();
+        if (cb) cb->Release();
+    });
+}
 
 bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx) {
     const Overlay which = overlayFor(bindingShaderHash(BindSlot::Ps));   // the game's own pixel shader: the shadow records it, never the replacement

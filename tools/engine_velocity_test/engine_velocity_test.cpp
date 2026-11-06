@@ -233,6 +233,8 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         {L"vs_A6A39338C06E03A1", L"ps_1AE6AB9A94C0456E", false},
         // 2026-11-05 (Frontier 12:48, Holo-Me): the commander's suit and helmet, keyed for VR with the second skin.
         {L"vs_01DA82F8D0EA0C99", L"ps_2C3ADCD2FCD47298", false},
+        // 2026-11-05 (Frontier 14:37, a bartender): an NPC's eyes, keyed for VR with the second skin.
+        {L"vs_33A5025C48FC8259", L"ps_7AA0441EE0E88667", false},
     };
     for (const auto& p : pairs) onePair(device, context, root, p, &check);
     // Candidates: pairs seen drawing stock that are not keyed. Each is tried
@@ -410,6 +412,7 @@ int wmain(int argc, wchar_t** argv) {
         {0x114AF608F86D9ED8ull, 0xA17504A2627767F2ull}, {0xD99AFDC250D19A3Full, 0xE86271E464CCDC1Dull},
         {0xA6A39338C06E03A1ull, 0x1AE6AB9A94C0456Eull},   // 2026-11-01: the NPC hair's forward pass
         {0x01DA82F8D0EA0C99ull, 0x2C3ADCD2FCD47298ull},   // 2026-11-05: the commander's suit and helmet
+        {0x33A5025C48FC8259ull, 0x7AA0441EE0E88667ull},   // 2026-11-05: an NPC's eyes
     };
     static_assert(edvr::engine_velocity_family::kFamilyCount <= edvr::engine_velocity_detail::kMaxFamilies,
                   "every keyed family has its own substituted-draw counter");

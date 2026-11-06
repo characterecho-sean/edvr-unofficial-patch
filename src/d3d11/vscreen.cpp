@@ -5510,7 +5510,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         // TEMPORARY (cockpit_glass_probe.h): the canopy draw's state, before anything substitutes a binding; one load while off.
-        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
@@ -5538,7 +5538,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'D', count, start, 0);
-    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'D', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }   // tags the camera write before it / counts a mini-render's draws
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
@@ -5606,7 +5606,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
-        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h)
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h)
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         {
@@ -5632,7 +5632,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'I', count, startIndex, baseVertex);
-    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'I', count, 1);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
@@ -5696,7 +5696,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
-        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5723,7 +5723,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'N', perInstance, startVertex, 0);
-    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'N', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
@@ -5782,7 +5782,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
-        if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
+        if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h)
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5812,7 +5812,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'X', perInstance, startIndex, baseVertex);
-    if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
+    if (cockpitGlassLegacyLive() && self == g_state->ownerCtx) cockpitGlassBeforeDraw(self); if (cockpitGlassProbeLive() && self == g_state->ownerCtx) cockpitGlassProbeDraw(self, 'X', perInstance, instances);   // TEMPORARY (cockpit_glass_probe.h): before the verdict
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");

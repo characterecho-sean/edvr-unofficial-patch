@@ -118,7 +118,7 @@ struct DrawCache {
     bool guarded = false;   // the overlay guard's private t3 is bound for the draws of this run (kept bound lazily, 2026-10-16 round 4)
     uint32_t srv3 = 0;      // the shadow's generation of PS t3 when it was bound: a game set of t3 over the private one takes the slow half
 };
-constexpr int kMaxFamilies = 16;   // kFamilies must fit: the static_assert in engine_velocity.cpp
+constexpr int kMaxFamilies = 24;   // kFamilies must fit: the static_assert in engine_velocity.cpp
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
