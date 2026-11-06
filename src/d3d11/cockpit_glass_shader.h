@@ -299,7 +299,7 @@ float3 spotDirection(uint bits) {
 
 void addLocalLight(float3 toLight, float d2, float3 light, float3 nIn, float3 viewDir, float gloss, inout float3 lambert, inout float3 glareSum) {
     float3 L = toLight / sqrt(d2);
-    // TEMPORARY (experimental.cockpit_glass_lights_sides): dirtLevel.z above 0.5 lets a local light reach the dirt from either side of the glass.
+    // TEMPORARY (visual.cockpit_glass_lights_sides): dirtLevel.z above 0.5 lets a local light reach the dirt from either side of the glass.
     float facing = dot(nIn, L);
     lambert += (dirtLevel.z > 0.5 ? abs(facing) : saturate(facing)) * light;
     glareSum += pow(saturate(dot(L, viewDir)), gloss) * (gloss + 6.0) * 0.03125 * light;

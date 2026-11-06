@@ -607,7 +607,7 @@ static void build4WiringTests() {
 }
 
 static void ruleTests() {
-    // experimental.cockpit_glass_resolution: the key's reading and the decision of the legacy canopy's route (ui_layer_math.h).
+    // visual.cockpit_glass_resolution: the key's reading and the decision of the legacy canopy's route (ui_layer_math.h).
     check(uiLegacyGlassKeyHalf("half") && !uiLegacyGlassKeyHalf("full") && !uiLegacyGlassKeyHalf("off") && !uiLegacyGlassKeyHalf("") && !uiLegacyGlassKeyHalf("Half") && !uiLegacyGlassKeyHalf(nullptr),
           "the key reads half only as \"half\"; anything else is full");
     check(uiLegacyGlassHalfRes(true, 4032, 4034, 2016, 2017), "VR at 50 percent: the layer is twice the target on both axes, so the half route");

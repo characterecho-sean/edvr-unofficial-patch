@@ -93,7 +93,7 @@ inline float lightsLevelOf(const char* v) {
     return 0.0f;
 }
 
-// TEMPORARY (experimental.cockpit_glass_lights_sides, docs\cockpit-glass-legacy-port.md, "Station lights"): one (a local light reaches the dirt from the lit side only, as the sun does) or both. Anything else is one.
+// TEMPORARY (visual.cockpit_glass_lights_sides, docs\cockpit-glass-legacy-port.md, "Station lights"): one (a local light reaches the dirt from the lit side only, as the sun does) or both. Anything else is one.
 inline float sidesLevelOf(const char* v) { return v && std::strcmp(v, "both") == 0 ? 1.0f : 0.0f; }
 
 // Whether the Legacy glass dirt row is dimmed (and ignores steps and typing): the dirt is only drawn by the legacy shader.

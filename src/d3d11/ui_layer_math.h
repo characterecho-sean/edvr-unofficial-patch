@@ -765,7 +765,7 @@ inline bool uiLayerFamilyUsesWeaponsLayer(UiLayerFamily f) {
     return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark || f == UiLayerFamily::kLegacyGlass;
 }
 
-// experimental.cockpit_glass_resolution (TEMPORARY): "half" asks for the legacy canopy to be drawn at the draw target's size and added into the weapons layer; anything else is "full",
+// visual.cockpit_glass_resolution (TEMPORARY): "half" asks for the legacy canopy to be drawn at the draw target's size and added into the weapons layer; anything else is "full",
 // the draw into the weapons layer at its own size.
 inline bool uiLegacyGlassKeyHalf(const char* value) {
     return value && std::strcmp(value, "half") == 0;

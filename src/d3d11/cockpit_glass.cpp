@@ -37,7 +37,7 @@ uint32_t g_configGeneration = 0;
 bool g_on = false;
 int g_dirtPercent = kDirtPercentDefault;   // visual.cockpit_glass_dirt, read with the look at the frame boundary
 float g_lightsLevel = 0.0f;                // visual.cockpit_glass_lights, read with the look (lightsLevelOf)
-float g_sidesLevel = 0.0f;                 // TEMPORARY: experimental.cockpit_glass_lights_sides, read with the look (sidesLevelOf)
+float g_sidesLevel = 0.0f;                 // TEMPORARY: visual.cockpit_glass_lights_sides, read with the look (sidesLevelOf)
 std::string g_unrecognisedSaid;   // the last unrecognised value the log has named, so a typo is said once and not every config change
 
 // Everything made on one device is kept as raw pointers on purpose, never released at exit (a static destructor that releases a D3D object during shutdown is the kind of
@@ -511,11 +511,11 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
                 Log::get().note("cockpit glass: dirt level %d%% (visual.cockpit_glass_dirt), from the next canopy bind", dirtPercent);
         }
         // TEMPORARY: whether they reach it from both sides of the glass, said when it moves.
-        const std::string sides = cfg.getString("experimental.cockpit_glass_lights_sides", "one");
+        const std::string sides = cfg.getString("visual.cockpit_glass_lights_sides", "one");
         const float sidesLevel = sidesLevelOf(sides.c_str());
         if (sidesLevel != g_sidesLevel) {
             g_sidesLevel = sidesLevel;
-            Log::get().note("cockpit glass: local lights reach the dirt from %s (experimental.cockpit_glass_lights_sides = %s), from the next canopy bind", sidesLevel > 0.5f ? "both sides" : "the lit side", sides.c_str());
+            Log::get().note("cockpit glass: local lights reach the dirt from %s (visual.cockpit_glass_lights_sides = %s), from the next canopy bind", sidesLevel > 0.5f ? "both sides" : "the lit side", sides.c_str());
         }
         // Which local lights reach the dirt, said when it moves, whatever the look, with the value as read.
         const std::string lights = cfg.getString("visual.cockpit_glass_lights", "off");

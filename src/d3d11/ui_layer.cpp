@@ -490,7 +490,7 @@ struct Eye {
     bool wPubMatched = false;        // the re-issue that stamped wPubSeq composited by the tonemap difference (false: the plain add)
     uint64_t wMarkNotedSeq = 0;      // the last frame whose mark the door counted (scopeZoomNoteMarkComposite), once an eye-frame
 
-    // The half-resolution canopy's glass target G (experimental.cockpit_glass_resolution = half, TEMPORARY): R16G16B16A16_FLOAT at the draw target's size, cleared at the eye-frame's first half
+    // The half-resolution canopy's glass target G (visual.cockpit_glass_resolution = half, TEMPORARY): R16G16B16A16_FLOAT at the draw target's size, cleared at the eye-frame's first half
     // route canopy draw, added bilinearly into W once at the tonemap re-issue, before W is composited. gDs is its own depth-stencil at the same size, seeded from the game's, so no other
     // family's seed of another size (hdrDs, ds) is touched or reused by it.
     Ptr<ID3D11Texture2D> gTex;
@@ -811,7 +811,7 @@ struct Window {
     uint64_t weaponsEyeMatched = 0, weaponsEyeFallback = 0;
     // The legacy canopy (kLegacyGlass) in the weapons layer: draws taken, layers holding glass no re-issue published, and the eye-frames that carried glass, by composite kind.
     uint64_t glassTaken = 0, glassLost = 0, glassEyeMatched = 0, glassEyePlain = 0;
-    // The half-resolution route (experimental.cockpit_glass_resolution): decisions that asked for it, those that kept the full route (by reason), the draws taken by each route, and the
+    // The half-resolution route (visual.cockpit_glass_resolution): decisions that asked for it, those that kept the full route (by reason), the draws taken by each route, and the
     // adds into W that ran or failed at the door.
     uint64_t glassHalfAsked = 0, glassHalfRatio = 0, glassHalfNotReady = 0, glassHalfDraws = 0, glassFullDraws = 0, glassAdds = 0, glassAddFailed = 0;
     // The shield ripple: eye-frames the door applied it, and its declines (0 reserved, 1 frame format, 2 pieces, 3 a picture the game made itself).
@@ -1483,7 +1483,7 @@ bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye, const char* madeFo
     return true;
 }
 
-// experimental.cockpit_glass_resolution (TEMPORARY; docs\cockpit-glass-legacy-port.md, "Station lights"): read by uiLayerConfigure on every reconfigure, used by the decision of the legacy canopy's draw.
+// visual.cockpit_glass_resolution (TEMPORARY; docs\cockpit-glass-legacy-port.md, "Station lights"): read by uiLayerConfigure on every reconfigure, used by the decision of the legacy canopy's draw.
 std::atomic<bool> g_glassKeyHalf{false};
 bool g_glassKeyNoted = false;           // the key's first reading is said, then each change
 bool g_glassHalfNotReadyNoted = false;  // G or the add pass could not be made: said once, the draw keeps the full route
@@ -2652,7 +2652,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     const bool wl = g_draw.weapons && which == 0;
     // The shield ripple: the 820E draw (g_draw.ripple, with g_draw.hdr) goes into the eye's displacement layer D, tested against the same seeded depth.
     const bool rp = g_draw.ripple && which == 0;
-    // The half-resolution canopy (experimental.cockpit_glass_resolution): the draw goes into the eye's glass target G at the DRAW TARGET's size, tested against G's own seeded depth-stencil. It is still a
+    // The half-resolution canopy (visual.cockpit_glass_resolution): the draw goes into the eye's glass target G at the DRAW TARGET's size, tested against G's own seeded depth-stencil. It is still a
     // weapons-layer draw (wl): W is cleared, its counts are kept, and the composite finds the glass added into W at the tonemap re-issue (glassHalfAdd).
     const bool gh = wl && g_draw.glassHalf && g_draw.family == UiLayerFamily::kLegacyGlass;
     // The Galaxy Map's own issues (which 2: into the panel mask, which 3: the arrow's probe into the layer with nothing written) take their own blend and test no depth.
@@ -3127,7 +3127,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                     ++g_win.glassHalfDraws;
                     if (!g_glassHalfNoted) {
                         g_glassHalfNoted = true;
-                        Log::get().note("legacy glass: half resolution (experimental.cockpit_glass_resolution = half): the first canopy draw went into the %s eye's glass target G, %ux%u (R16G16B16A16_FLOAT, %.1f MB), the draw "
+                        Log::get().note("legacy glass: half resolution (visual.cockpit_glass_resolution = half): the first canopy draw went into the %s eye's glass target G, %ux%u (R16G16B16A16_FLOAT, %.1f MB), the draw "
                                         "target's size, with its own %ux%u depth-stencil; the weapons layer is %ux%u and takes G added bilinearly once an eye-frame, before the composite (said once).",
                                         g_draw.eye == 0 ? "left" : "right", e.gW, e.gH, uiLayerMB(uiLayerBytes(e.gW, e.gH, 8)), e.gDs.w, e.gDs.h, e.wW, e.wH);
                     }
@@ -4191,7 +4191,7 @@ void logLegacyGlass() {
         Log::get().note("legacy glass: not asked in this window (the canopy pair did not reach the layer's decision: visual.cockpit_glass is odyssey, the weapons layer is not live, or the canopy was not drawn).");
         return;
     }
-    // The resolution route (experimental.cockpit_glass_resolution): by the key as it stands now, what each draw took. A window where half was asked and no draw took it, or draws went to G and no add
+    // The resolution route (visual.cockpit_glass_resolution): by the key as it stands now, what each draw took. A window where half was asked and no draw took it, or draws went to G and no add
     // ran, reads differently from one that worked.
     const bool keyHalf = g_glassKeyHalf.load(std::memory_order_relaxed);
     std::string route;
@@ -4516,13 +4516,13 @@ bool rippleR1Allows(ID3D11DeviceContext* ctx);
 void uiLayerConfigure(Config& cfg) {
     detail::g_uiSeedDiagnostics = g_hdrDrawTimingOn;
     g_seedCensus.configure(g_hdrDrawTimingOn);
-    // experimental.cockpit_glass_resolution (TEMPORARY): full | half, live; anything but half is full. Said at the first reading and at each change.
+    // visual.cockpit_glass_resolution (TEMPORARY): full | half, live; anything but half is full. Said at the first reading and at each change.
     {
-        const std::string res = cfg.getString("experimental.cockpit_glass_resolution", "full");
+        const std::string res = cfg.getString("visual.cockpit_glass_resolution", "full");
         const bool half = uiLegacyGlassKeyHalf(res.c_str());
         if (!g_glassKeyNoted || half != g_glassKeyHalf.load(std::memory_order_relaxed)) {
             g_glassKeyNoted = true;
-            Log::get().note("legacy glass: experimental.cockpit_glass_resolution = %s: the canopy's draw goes into the weapons layer %s (the half route needs the layer at least 1.5x the draw's target on both axes; "
+            Log::get().note("legacy glass: visual.cockpit_glass_resolution = %s: the canopy's draw goes into the weapons layer %s (the half route needs the layer at least 1.5x the draw's target on both axes; "
                             "the 30 s \"legacy glass:\" line says which route each draw took).",
                             res.c_str(), half ? "through the glass target at the draw target's size, added into it bilinearly" : "at its own size");
         }
@@ -5071,7 +5071,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                     : ensureLayerFor(ctx, f.eye) &&
                           (f.blend != UiBlendShape::kMultiply || ensureMult(ctx, g_eye[f.eye], f.eye));
             d = uiLayerDecide(f);
-            // The legacy canopy's route (experimental.cockpit_glass_resolution): half only when the key asks and the weapons layer is at least 1.5 times the draw's target on both axes. Everything the
+            // The legacy canopy's route (visual.cockpit_glass_resolution): half only when the key asks and the weapons layer is at least 1.5 times the draw's target on both axes. Everything the
             // half route needs (G, the add pass's shaders and states) is made HERE, before the draw is taken: a failure keeps the full route, said once, so no draw is taken and then dropped.
             if (d == UiLayerDecision::kRedirect && family == UiLayerFamily::kLegacyGlass && g_glassKeyHalf.load(std::memory_order_relaxed)) {
                 ++g_win.glassHalfAsked;
