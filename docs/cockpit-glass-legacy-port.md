@@ -1048,5 +1048,15 @@ draw (INFERRED). A spot's shadow atlas and cookie texture are not bound to the c
 110 a spot, unshadowed, per pixel at the layer's size. Without shadows a light behind the hull still lights the dirt.
 
 Not known, and it decides everything: whether a hangar's lights are in these lists at all. The probe flight of section 7 does not say: it logged t0 and t2's sizes (43,720,704 bytes, which is
-18,432 clusters, and 270,448) and not their contents, and it did not log cb1[249..254]. A baked or other path would leave these lists empty. Next: a docked flight that reads t0's counts and
-cb1[249..254] at a canopy draw, through the existing `experimental.cockpit_glass_probe`.
+18,432 clusters, and 270,448) and not their contents, and it did not log cb1[249..254]. A baked or other path would leave these lists empty.
+
+The probe build (2026-11-06, branch `claude/glass-local-lights`, NOT FLOWN): `experimental.cockpit_glass_probe = on` now also copies t0 and t2 at each sample's canopy draw (one first, then one
+every 30 s, 12 at most) and logs cb1[227..228] and [248..254]. Each sample prints a `light lists:` grid line, a `list <name>:` line for all nine lists, zeros included, and up to 8 point and 8 spot
+lights in full from slices between 0.5 and 8 m. Each sample copies and scans about 44 MB, so expect a hitch every 30 s in this build.
+
+| What a docked sample shows | Reading |
+|---|---|
+| Point or spot lists hold lights at the glass's slices, with the radius reaching the cockpit | a loop can light the dirt; try it behind a temporary key |
+| Lights in the lists at farther slices only | the lights do not reach the glass in the game's own terms; a loop would add nothing |
+| All lists but `probe` are zero | the hangar's lights come another way; this route is ruled out |
+| A count past capacity, or absurd positions and radii | the layout is misread; nothing above stands until it is put right |

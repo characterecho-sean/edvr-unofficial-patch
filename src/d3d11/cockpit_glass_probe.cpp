@@ -12,7 +12,9 @@
 #include <d3d11_1.h>
 #include <wrl/client.h>
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace edvr {
 
@@ -33,6 +35,9 @@ constexpr uint32_t kReadbackGiveUpFrames = 120;
 constexpr UINT kSrvSlots = 12;
 constexpr UINT kSamplerSlots = 3;
 constexpr UINT kCbMaxBytes = 16u << 20;   // a whole-buffer copy of anything larger is refused and said
+constexpr UINT kListMaxBytes = 128u << 20;   // t0 was 43.7 MB in the probe flight of 2026-11-03; a copy clips here, and the grid line then says the buffer held fewer clusters
+constexpr uint32_t kLightsPrinted = 8;       // lights per list printed in full, from the depths the glass lies at
+constexpr float kGlassNearM = 0.5f, kGlassFarM = 8.0f;   // the depths taken as the glass's, for choosing which lights to print
 
 bool g_configRead = false;
 uint32_t g_configGeneration = 0;
@@ -60,7 +65,9 @@ struct Pending {
     bool on = false;
     uint32_t sample = 0;
     uint64_t frame = 0;
-    Readback cb1, cb2, light;
+    Readback cb1, cb2, light, lists, records;
+    bool cb1Kept = false;   // cb1Bytes holds the registers the lists are read with
+    uint8_t cb1Bytes[kCb1Regs * 16] = {};
 } g_pending;
 
 const char* blendName(D3D11_BLEND b) {
@@ -220,8 +227,8 @@ void logOm(ID3D11DeviceContext* ctx, uint32_t sample) {
     }
 }
 
-// The PS's views; t1 (the directional-light buffer) also gets its copy. Returns whether that copy was made.
-bool logSrvs(ID3D11DeviceContext* ctx, uint32_t sample, Readback* light) {
+// The PS's views; t1 (the directional-light buffer) also gets its copy, and t0 and t2 (the light lists and records) theirs. Returns whether t1's copy was made.
+bool logSrvs(ID3D11DeviceContext* ctx, uint32_t sample, Readback* light, Readback* lists, Readback* records) {
     ID3D11ShaderResourceView* srv[kSrvSlots] = {};
     ctx->PSGetShaderResources(0, kSrvSlots, srv);
     bool copied = false;
@@ -252,11 +259,11 @@ bool logSrvs(ID3D11DeviceContext* ctx, uint32_t sample, Readback* light) {
                             "bind=0x%X misc=0x%X",
                             sample, i, static_cast<int>(vd.ViewDimension), static_cast<int>(vd.Format), firstEl, numEl, flags,
                             bd.ByteWidth, bd.StructureByteStride, static_cast<int>(bd.Usage), bd.BindFlags, bd.MiscFlags);
-            if (i == 1) {
-                // A raw view counts 4-byte elements; a structured one counts its stride.
-                const UINT unit = (flags & D3D11_BUFFEREX_SRV_FLAG_RAW) ? 4u : (bd.StructureByteStride ? bd.StructureByteStride : 4u);
-                copied = copyBuffer(ctx, buf.Get(), firstEl * unit, kLightBytes, false, light, "t1", sample);
-            }
+            // A raw view counts 4-byte elements; a structured one counts its stride.
+            const UINT unit = (flags & D3D11_BUFFEREX_SRV_FLAG_RAW) ? 4u : (bd.StructureByteStride ? bd.StructureByteStride : 4u);
+            if (i == 1) copied = copyBuffer(ctx, buf.Get(), firstEl * unit, kLightBytes, false, light, "t1", sample);
+            if (i == 0) copyBuffer(ctx, buf.Get(), firstEl * unit, kListMaxBytes, false, lists, "t0", sample);
+            if (i == 2) copyBuffer(ctx, buf.Get(), firstEl * unit, kListMaxBytes, false, records, "t2", sample);
         } else if (res && SUCCEEDED(res.As(&t2))) {
             D3D11_TEXTURE2D_DESC td{};
             t2->GetDesc(&td);
@@ -335,9 +342,9 @@ void takeSample(ID3D11DeviceContext* ctx, char kind, UINT count, UINT instances,
     Pending p;
     p.sample = sample;
     p.frame = g_frame;
-    logSrvs(ctx, sample, &p.light);
+    logSrvs(ctx, sample, &p.light, &p.lists, &p.records);
     logAndCopyCbs(ctx, sample, &p.cb1, &p.cb2);
-    p.on = !p.cb1.done || !p.cb2.done || !p.light.done;
+    p.on = !p.cb1.done || !p.cb2.done || !p.light.done || !p.lists.done || !p.records.done;
     g_pending = p;
     if (!p.on) Log::get().note("glass probe: sample %u nothing to read back", sample);
 }
@@ -374,8 +381,89 @@ bool tryRead(ID3D11DeviceContext* ctx, Readback& rb, const char* what, uint32_t 
         return true;
     }
     logReadback(what, sample, static_cast<const uint8_t*>(m.pData) + rb.offset, rb.bytes, spans, spanCount, wholeRegs);
+    // The frame block is kept for the light lists, which are read with its grid and record offsets once their own copies are ready.
+    if (&rb == &g_pending.cb1 && rb.bytes >= sizeof g_pending.cb1Bytes) {
+        std::memcpy(g_pending.cb1Bytes, static_cast<const uint8_t*>(m.pData) + rb.offset, sizeof g_pending.cb1Bytes);
+        g_pending.cb1Kept = true;
+    }
     ctx->Unmap(rb.staging.Get(), 0);
     rb.staging.Reset();
+    return true;
+}
+
+// What the light lists held at this canopy draw. Every list gets its line, zeros included: all zeros at a lit hangar is the answer that the lists do not carry its lights, and it reads differently
+// from a sample with no line at all, which is a copy that failed (said by copyBuffer or the map line).
+void logLightLists(uint32_t sample, const uint8_t* t0, UINT t0Bytes, const uint8_t* t2, UINT t2Bytes) {
+    const uint8_t* cb = g_pending.cb1Bytes;
+    if (!g_pending.cb1Kept) {
+        Log::get().note("glass probe: sample %u light lists not read: the frame block was not read back whole", sample);
+        return;
+    }
+    const uint32_t nx = u32At(cb, 228 * 16), ny = u32At(cb, 228 * 16 + 4), ns = u32At(cb, 228 * 16 + 8), tile = u32At(cb, 228 * 16 + 12);
+    const float scale = f32At(cb, 227 * 16 + 8), bias = f32At(cb, 227 * 16 + 12);
+    const int lo = sliceOfDepth(kGlassNearM, scale, bias, ns), hi = sliceOfDepth(kGlassFarM, scale, bias, ns);
+    const uint64_t grid = static_cast<uint64_t>(nx) * ny * ns;
+    Log::get().note("glass probe: sample %u light lists: grid %ux%ux%u (%llu clusters), tile %u, t0 copy %u bytes holds %u of them, t2 copy %u bytes; slices at 0.5, 1, 2, 4, 8 m: %d %d %d %d %d", sample, nx, ny, ns,
+                    static_cast<unsigned long long>(grid), tile, t0Bytes, clustersHeld(nx, ny, ns, t0Bytes), t2Bytes, lo, sliceOfDepth(1.0f, scale, bias, ns), sliceOfDepth(2.0f, scale, bias, ns),
+                    sliceOfDepth(4.0f, scale, bias, ns), hi);
+    for (int l = 0; l < kLightListCount; ++l) {
+        uint32_t ids[kLightsPrinted] = {};
+        uint32_t idCount = 0;
+        const ListCensus c = censusList(t0, t0Bytes, nx, ny, ns, kLightLists[l], lo, hi, ids, kLightsPrinted, &idCount);
+        char slices[420];
+        size_t n = 0;
+        slices[0] = '\0';
+        for (uint32_t s = 0; s < kMaxSlices && n < sizeof slices - 16; ++s)
+            if (c.bySlice[s]) n += std::snprintf(slices + n, sizeof slices - n, " %u:%u", s, c.bySlice[s]);
+        Log::get().note("glass probe: sample %u list %s: %u clusters hold any, %u ids, %u distinct lights, at most %u in a cluster, %u past capacity, %u ids past the table; clusters by slice:%s", sample, kLightLists[l].name,
+                        c.clusters, c.ids, c.distinct, c.most, c.overCapacity, c.idsPast, n ? slices : " none");
+        if (l != kListPoint && l != kListSpot) continue;
+        // The records offsets: cb1[249].zw for a point, cb1[250].zw for a spot.
+        const uint32_t reg = l == kListPoint ? 249u : 250u;
+        const uint32_t a = u32At(cb, reg * 16 + 8), b = u32At(cb, reg * 16 + 12);
+        for (uint32_t i = 0; i < idCount; ++i) {
+            LightRecord r;
+            const bool ok = l == kListPoint ? readPoint(t2, t2Bytes, a, b, ids[i], &r) : readSpot(t2, t2Bytes, a, b, ids[i], &r);
+            if (!ok) {
+                Log::get().note("glass probe: sample %u %s id %u: the record is past t2's %u bytes (bases %u, %u)", sample, kLightLists[l].name, ids[i], t2Bytes, a, b);
+                continue;
+            }
+            Log::get().note("glass probe: sample %u %s id %u at the glass's depths: pos %.2f %.2f %.2f (%.1f m), radius %.2f, intensity %.5g, colour %.3f %.3f %.3f, source radius %.3f, cos outer %.3f inner %.3f, shadow %d, cookie %d",
+                            sample, kLightLists[l].name, ids[i], r.x, r.y, r.z, std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z), r.radius, r.intensity, r.r, r.g, r.b, r.sourceRadius, r.cosOuter, r.cosInner, r.shadow, r.cookie);
+        }
+    }
+}
+
+// True when both list copies are finished (read, failed or absent). They are mapped together, and only once the frame block has been read.
+bool tryReadLights(ID3D11DeviceContext* ctx, uint32_t sample) {
+    Readback& l = g_pending.lists;
+    Readback& r = g_pending.records;
+    if (l.done && r.done) return true;
+    if (l.done || r.done) {   // one copy of the two was never made: copyBuffer said why, and there is nothing to read the other with
+        Log::get().note("glass probe: sample %u light lists not read: %s was not copied", sample, l.done ? "t0" : "t2");
+        l = Readback{};
+        r = Readback{};
+        return true;
+    }
+    D3D11_MAPPED_SUBRESOURCE lm{}, rm{};
+    HRESULT hr = ctx->Map(l.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &lm);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+    if (SUCCEEDED(hr)) {
+        const HRESULT hr2 = ctx->Map(r.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &rm);
+        if (hr2 == DXGI_ERROR_WAS_STILL_DRAWING) {
+            ctx->Unmap(l.staging.Get(), 0);
+            return false;
+        }
+        hr = hr2;
+        if (SUCCEEDED(hr)) {
+            logLightLists(sample, static_cast<const uint8_t*>(lm.pData) + l.offset, l.bytes, static_cast<const uint8_t*>(rm.pData) + r.offset, r.bytes);
+            ctx->Unmap(r.staging.Get(), 0);
+        }
+        ctx->Unmap(l.staging.Get(), 0);
+    }
+    if (FAILED(hr)) Log::get().note("glass probe: sample %u light lists map failed (0x%08lX)", sample, static_cast<unsigned long>(hr));
+    l = Readback{};
+    r = Readback{};
     return true;
 }
 
@@ -386,7 +474,8 @@ void finishPending(ID3D11DeviceContext* ctx) {
     const bool a = tryRead(ctx, g_pending.cb1, "cb1", s, kCb1Spans, sizeof kCb1Spans / sizeof kCb1Spans[0], 0);
     const bool b = tryRead(ctx, g_pending.cb2, "cb2", s, nullptr, 0, kCb2Regs);
     const bool c = tryRead(ctx, g_pending.light, "t1", s, nullptr, 0, kLightBytes / 16);
-    if (a && b && c) {
+    const bool d = a && tryReadLights(ctx, s);
+    if (a && b && c && d) {
         g_pending = Pending{};
         Log::get().note("glass probe: sample %u read back", s);
     } else if (g_frame - g_pending.frame > kReadbackGiveUpFrames) {
