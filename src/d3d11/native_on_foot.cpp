@@ -1300,14 +1300,15 @@ void readKey() {
         g_f214KeyLast = on;
         g_f214Key.store(on, std::memory_order_relaxed);
     }
-    // F215 (TEMPORARY A/B, live, the developer tier's "Body follows view"): unarmed and upright, the whole skeleton moves vertically so the neck stays the eye height under a view that is the game's camera plus
+    // F215 (TEMPORARY A/B, live, the developer tier's "Body follows view"): unarmed and upright, or (F217) with an item at the hip, the whole skeleton moves vertically so the neck stays the eye height under a view that is the game's camera plus
     // a constant raise. On, F214's moving follow is inert. Off: nothing runs and the raise is as F214 (or before it) made it.
     {
         const bool on = cfg.getString("experimental.native_on_foot_body_follows_view", "on") != "off";
         if (first || on != g_f215KeyLast)
             Log::get().note("native on foot body follows view (F215, TEMPORARY): experimental.native_on_foot_body_follows_view is %s -- %s", on ? "on" : "off",
                             on ? "unarmed and upright, the whole body (feet included) moves up and down so the neck stays your eye height under the view, which holds the game's camera plus a constant raise: "
-                                 "the view no longer rides over the neck on a slope or swings in a turn; F214's moving follow does nothing while this is on; an item drawn, a crouch or a camera away lets the body "
+                                 "the view no longer rides over the neck on a slope or swings in a turn, with an item at the hip too (F217: the body follows the view to one level camera height, and holds in the sights or "
+                                 "with the aim pitched up 20 degrees or more); F214's moving follow does nothing while this is on; a crouch or a camera away lets the body "
                                  "back to the animation at 0.6 m/s; the per-window body follows view line names the calls"
                                : "the body stays as the game animates it and the raise follows F214 (view follows body moving) or the settled stance, as before F215");
         g_f215KeyLast = on;
@@ -17619,7 +17620,8 @@ struct PinCall {
     double f214Target = std::nan("");
     // F215: what the body-follows-view rule did this call (nofoot::f215::State; kNotRun: the call never reached the step), the shift it put on the pose (m) and where it was going (m)
     uint8_t f215State = nofoot::f215::kNotRun;
-    double f215BodyY = 0.0, f215Target = 0.0;
+    double f215BodyY = 0.0, f215Target = 0.0;   // f215BodyY: the shift in force for this whole call (the last call's result: the internal space is the model's with the body unshifted, every pose write adds it)
+    bool f215Wrote = false;   // F217: stage 0 wrote the whole pose (with the shift)
 };
 alignas(16) float g_pinOut[nofoot::kPfzMaxJoints][16];
 // The speed state of the AMC, from successive P1 inputs (the hook's; one writer): a 0.15 s low-pass of the horizontal speed, the vertical speed.
@@ -17689,6 +17691,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         pc.eAgeUs = ageUs;   // F213
         if (ageUs > 500000ull) refusal = kPinRefStaleInput;   // a stall: up to half a second the last camera is used (a pose that snaps back is worse)
         else if (!nofoot::pfzAffineInverse(in.m3p, invM)) refusal = kPinRefMatrix;
+        else {   // F217: the internal space: the model's with the body unshifted. Everything formed from invM (E, the drawn eye, the view, G's root) enters less the shift in force, which every pose write adds back
+            pc.f215BodyY = g_f215.y;
+            nofoot::f215::shiftWorldToModel(invM, pc.f215BodyY);
+        }
         if (in.localPitchValid && in.localPoseQpc != 0 && nowQ >= in.localPoseQpc) {
             localPitchAgeUs = f30QpcUs(nowQ - in.localPoseQpc);
             localPitchValid = localPitchAgeUs <= 500000ull;
@@ -18151,7 +18157,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 g_f160.reset();   // F160: the kept target is the last stance's, not the next scope's
                 g_f193Stop.endPress();   // F193: and no press carries over an edge of the camera
                 g_f214.reset();   // F214: and no window, nor a settled target from before it
-                g_f215.reset();   // F215: and no neck window, nor a shift from before it (the pose is written unshifted from this call on)
+                g_f215.reset();   // F215: and no neck window, nor a shift from before it (the shift in force this call is already in its figures and writes; the next call starts from 0)
             }
             bool f138Own = false;  // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
             nofoot::f95::SettleIn si;
@@ -18176,27 +18182,32 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f138SettleRefusedRec = true;   // F213
             }
             // F215: unarmed and upright, the body follows the view (nofoot::f215): the whole skeleton moves vertically by y so the neck stays the eye height under a view that is the game's camera plus a
-            // constant raise. The shift goes only on the writes into the game's pose (guardedWritePoseJoint); every figure below stays what it was, except that the stance's settle, the stance store and
-            // F138 see the camera less y: a level camera, as they were built for. The neck stays the animated neck (si.neckY), so the settled branch publishes N0 + h - (E - y), about the constant R0.
+            // constant raise. The shift goes only on the writes into the game's pose (guardedWritePoseJoint); every figure below is in the internal space (E, the drawn eye, the view and G enter less the shift in force), so the stance's settle, the stance store and
+            // F138 see a level camera, as they were built for. The neck stays the animated neck (si.neckY), so the settled branch publishes N0 + h - E, E being the internal camera (F217: the true camera less the shift in force), about the constant R0.
+            // The step's y takes effect on the next call. Where y holds (aim, pose, head, filling, the sights) the camera moves on without it, so no settle is taken there.
             // With the key off, or released, y is 0 and all of it is as before F215. F214 is inert while this is on (its step reads the key below).
             {
                 nofoot::f215::In bi;
                 bi.keyOn = g_f215Key.load(std::memory_order_relaxed);
                 bi.away = refusal == kPinRefCameraAway;
-                bi.itemDrawn = f138Item || pc.detachW > 0.0;
+                bi.inSights = pc.detachW > 0.0;
+                bi.hipItem = f138Item && !(pc.detachW > 0.0);
                 bi.lowPosture = pc.postureW >= 0.5 || (headFinite && !nofoot::pinHeadUpright(p44[1]));
+                bi.lowPostureItem = pc.postureW >= 0.5;
+                bi.levelCamY = nofoot::f215::levelCamY(g_f98Eye.have[nofoot::f94::kClassStanding], g_f98Eye.neckY[nofoot::f94::kClassStanding]);
+                bi.aimPitchDeg = f138AimKnown ? pc.f86AimPitch : std::nan("");
                 bi.aimRefused = f138SettleRefused;
                 bi.poseValid = localPitchValid;
                 bi.fresh = freshIn;
                 bi.headPitchDeg = localPitchValid ? localPitchRad * 180.0 / nofoot::kIkPi : std::nan("");
                 bi.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
-                bi.eyeY = pc.eyeYSelected;
+                bi.eyeY = pc.eyeYSelected + pc.f215BodyY;   // E is internal (less the shift in force); the rule reads the true camera
                 bi.neckY = N0[1];
                 bi.eyeHeightM = f97H;
                 const nofoot::f215::Out bo = g_f215.step(bi);
-                pc.f215State = bo.state;
-                pc.f215BodyY = bo.y;
+                pc.f215State = bo.state;   // the result takes effect on the next call (pc.f215BodyY is the shift this call works in)
                 pc.f215Target = bo.targetY;
+                if (bi.keyOn && nofoot::f215::settleHeld(bo.state)) si.valid = false;   // y holds while the camera moves on: a settle now would read the slope as a stance
                 nofoot::f215::Call bc;
                 bc.state = bo.state;
                 bc.keyOn = bi.keyOn;
@@ -18205,7 +18216,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 bc.r0M = bo.r0M;
                 g_f215Box.write([&](nofoot::f215::Stats& win) noexcept { win.add(bc); });
             }
-            const double camLevelY = pc.eyeYSelected - pc.f215BodyY;   // F215: the game's camera less the body's shift: what the settle, the stance class and F138 measure
+            const double camLevelY = pc.eyeYSelected;   // F217: E is already the camera less the shift in force: what the settle, the stance class and F138 measure
             si.still = !pc.f95Moving;
             si.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
             si.neckY = N0[1] + f97W * std::max(pc.f97RaiseF93, 0.0);
@@ -18256,7 +18267,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 // F138: an unarmed upright stance is the reference the pitched look's sink is measured against: the target just published, G of this call, the animated neck, the
                 // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
                 if (!itemDrawn && upright)
-                    g_f138.noteStance(pc.f95Target, pc.rawEyeY - pc.f215BodyY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid, si.tS);
+                    g_f138.noteStance(pc.f95Target, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid, si.tS);
             }
             // F194: the view's height as this call read it (the drawn eye above the character's origin, pc.f97EyeDrawn[1]: the job camera with every add EDVR makes and the head's own motion, in the model
             // that stands at the feet; a fresh game frame at the hip with the commander's camera, the sights and a camera away not read), for the frame thread's probe at an edge of look to aim; and, while
@@ -18283,7 +18294,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // valid, takes the target in force (the last one published since the edge) and G, smoothed over about 0.3 s. It is the reference of a pilot who looks up before the first
             // settle of the session (the settle needs 0.3 s of stillness); a settled reference wins when it is usable.
             if (si.valid && f138AimKnown && !f138Item && pc.postureW < 0.5 && (!headFinite || nofoot::pinHeadUpright(p44[1])))
-                g_f138.noteRunning(si.tS, g_f138HeldM, pc.rawEyeY - pc.f215BodyY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
+                g_f138.noteRunning(si.tS, g_f138HeldM, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
             {
                 namespace f138 = nofoot::f138;
                 f138::In fi;
@@ -18296,7 +18307,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 fi.cameraAway = refusal == kPinRefCameraAway;
                 fi.poseValid = localPitchValid;
                 fi.generation = in.localPoseGeneration;
-                fi.rawEyeY = pc.rawEyeY - pc.f215BodyY;
+                fi.rawEyeY = pc.rawEyeY;
                 fi.neckY = N0[1];
                 fi.localHeadY = static_cast<double>(in.localHeadY);
                 const f138::Out fo = g_f138.step(fi);
@@ -18332,7 +18343,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                     g_f214Box.write([&](nofoot::f214::Stats& win) noexcept { win.add(xc); });
                 }
                 // F215: while the body follows the view (active, unarmed and upright) the raise is the constant R0, on every fresh game frame, unless another publisher (a settled stance's target, ADS, F138)
-                // took this call: the settled branch's own target is N0 + h - (E - y), which is R0 to within the neck window's error. The frame thread's filter, clamp and ramp carry it as they carry any target.
+                // took this call: the settled branch's own target is N0 + h - E (E internal), which is R0 to within the neck window's error. The frame thread's filter, clamp and ramp carry it as they carry any target.
                 if (pc.f215State == nofoot::f215::kActive && freshIn && !(f138Own || fo.publish)) f94TargetPublish(nofoot::f215::levelRaiseM(f97H), now);
                 if (fo.pitched || fo.returned || fo.returnRefused || fo.notNeeded) {
                     f138::Call fc;
@@ -19239,6 +19250,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // The whole pose into the span: the freeze's matrices where it wrote, the animated ones elsewhere.
         // F215: from here to the end of this hook call every pose write adds the body-follows-view shift (guardedWritePoseJoint); the stages before stage 0 (F166, F180, F169) wrote with 0.
         g_f215WriteY = pc.f215BodyY;
+        pc.f215Wrote = true;
         for (uint32_t j = 0; j < count && !writeFault; ++j) {
             const float* src = froze && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
             if (!guardedWritePoseJoint(sp.buf + static_cast<uint64_t>(j) * 64u, src)) writeFault = true;
@@ -20478,6 +20490,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     float fpm[nofoot::kIkFpSlots][16] = {};
     uint64_t fpAge = 0, gAge = 0;
     IkGData G;
+    double yUsed = 0.0;   // F217: the shift in force this call works in (g_f215.y when pinWanted)
     bool armsOk = mode != 0;
     bool fpStale = false, gStale = false;
     if (armsOk) {
@@ -20522,6 +20535,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         } else {
             std::memcpy(fpm, s_fpm, sizeof(fpm));
             G = s_G;
+            if (pinWanted) {   // F217: G is formed from the true FP root and AMC; the pin and the arms work in the internal space (the body unshifted), so it enters less the shift in force (s_G and g_ikG stay true)
+                yUsed = g_f215.y;
+                nofoot::f215::shiftWorldToModel(G.g, yUsed);
+            }
         }
     }
     {   // F66g: the Animate event: the d the G it read carried (zero when there was none), and the span buffer this call writes
@@ -21090,6 +21107,15 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                   exactRifleForCall, rifleQualityWeight, &s_physicalPole, physicalPoleActive, leftStablePolicy, rifleStableAuthority, bodyDetachForCall,
                   adsPush, static_cast<double>(wBase), writeOk, armsOk ? effectiveHand : nullptr, wSqRamp, sqAmount, barrelDirs, sqArmed, offW,
                   solveEnvelope, elbowOutM, trimRad, pinCall);
+    if (pinCalled && pinStageOk && yUsed != 0.0 && !pinCall.f215Wrote) {   // F217: the pin did not reach its pose write but G carries the shift: write the whole pose with it so the arms and the body stay together
+        g_f215WriteY = yUsed;
+        bool wrote = true;
+        for (uint32_t j = 0; j < count && wrote; ++j) {
+            const float* src = froze && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
+            wrote = guardedWritePoseJoint(sp.buf + static_cast<uint64_t>(j) * 64u, src);
+        }
+        if (wrote) g_f215Shifted.fetch_add(1, std::memory_order_relaxed);
+    }
     if (pinCalled && onfootrec::active()) {   // F213: this call's stage 0, on every path it can take (a refused call shows with its refusal; no record at all is a call that never reached the stage)
         onfootrec::PinRec r;
         onfootrec::initRecord(r);
@@ -21116,8 +21142,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.detach_w = pc.detachW;
         r.posture_w = pc.postureW;
         r.aim_pitch_deg = pc.f86Ok ? pc.f86AimPitch : std::nan("");
-        r.eye_y_selected = pc.eyeYSelected;
-        r.raw_eye_y = pc.rawEyeY;
+        r.eye_y_selected = pc.eyeYSelected + pc.f215BodyY;   // F217: the recording keeps the true camera (E is internal, less the shift in force)
+        r.raw_eye_y = pc.rawEyeY + pc.f215BodyY;
+        r.e[1] += pc.f215BodyY;
         r.f98_eye_y = pc.f98EyeY;
         r.raise_target = pc.f94Target;
         r.f95_target = pc.f95Target;

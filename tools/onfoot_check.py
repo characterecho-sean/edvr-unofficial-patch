@@ -132,6 +132,9 @@ F215_TURN_SIDE_S = 0.3      # ... for this long each side
 F215_TURN_AFTER_S = 1.2     # ... and the height moves are read to this long after the turn, because a raise that follows the neck catches up as much as a second after it ...
 F215_TURN_LEFT_M = 0.15     # ... or until the root has left by this in the plane (the pilot set off)
 F215_TURN_MOVE_CM = 3.0     # F215 finding: the median view move across the turns is over this (a starting guess)
+F215_TURN_CAM_JUDGE_CM = 2.0   # F217: a turn is judged only when the camera, the physical head out, moved under this (else the camera moved, not the body: not judged)
+F217_LEVEL_CAM_M = 1.60     # F217: E (true) on level ground with an item at the hip (a starting guess; the arc cutter read 1.60-1.61 m, the laser rifle 1.56-1.59)
+F217_LEVEL_TOL_CM = 5.0     # F217 finding: the median E on level ground with an item is further than this from that height
 F216_STRETCH_ROWS = 128     # F216: a straight stretch is this many rows ...
 F216_FACING_DOT = 0.998     # ... with the facing steady (dot with the first row's over this) ...
 F216_MIN_MPS = 2.0          # ... at a plane speed of at least this
@@ -1192,6 +1195,61 @@ class Analysis:
         cnt = k[hi] - k[lo]
         return np.where(cnt > 0, (c[hi] - c[lo]) / np.maximum(cnt, 1), np.nan)
 
+    # -- F217: the body follows the view with an item at the hip ----------------------------------------------------------------------------------------------------------------------
+    def f217_item(self, pin, g, j0, tan, path):
+        """Seconds of pin calls in active_item and held_sights; E (true, pin.eye_y_selected) against the level height on level ground (|tan slope| <= F215_LEVEL_TAN over the last
+        F215_LEVEL_PATH_M of path) by item serial, a finding when it is further than F217_LEVEL_TOL_CM from F217_LEVEL_CAM_M; over the hip rows with an item, the seconds and the largest figure of the
+        higher hand over the view and of the view under the neck (the IK's final joints against the body view: the internal terms the section uses). A recording without the state is a baseline."""
+        L, S = self.L, self.S
+        ai, hs = S.enum('F215State', 'active_item'), S.enum('F215State', 'held_sights')
+        if ai < 0:
+            self.say('  item at the hip: the recording\'s F215 state has no active_item (a recording from before F217): the body was not moved with an item, and nothing here is a finding')
+            return
+        st = pin.f('f215_state').astype(int)
+        tp = S.t('pin')
+        dtp = np.zeros(len(tp))
+        if len(tp) > 1:
+            d_ = np.diff(tp)
+            dtp[1:] = np.where((d_ > 0) & (d_ < 0.25), d_, 0.0)
+        sec_ai, sec_hs = float(dtp[st == ai].sum()), float(dtp[st == hs].sum())
+        self.say('  item at the hip (F217): %.1f s of pin calls in active_item, %.1f s held in the sights' % (sec_ai, sec_hs))
+        self.f215['item_active_s'], self.f215['item_sights_s'] = sec_ai, sec_hs
+        rows_ai = st[L.R] == ai
+        if pin.has('eye_y_selected') and rows_ai.any():
+            ey = pin.f('eye_y_selected')[L.R].astype(np.float64)
+            lvl = rows_ai & (path - path[j0] >= 0.9 * F215_LEVEL_PATH_M) & (L.t - L.t[j0] < 3.0) & (tan <= F215_LEVEL_TAN) & np.isfinite(ey)
+            self.f215['item_level'] = {}
+            for ser in np.unique(L.item[lvl]):
+                m = lvl & (L.item == ser)
+                if int(m.sum()) < F215_LEVEL_MIN_ROWS:
+                    self.say('    item %d: %d level rows with the item at the hip, too few (need %d)' % (int(ser), int(m.sum()), F215_LEVEL_MIN_ROWS))
+                    continue
+                med = float(np.median(ey[m]))
+                self.f215['item_level'][int(ser)] = med
+                self.say('    item %d: E (true) on level ground median %.3f m over %d rows, the level height %.2f m (%+.1f cm)' % (int(ser), med, int(m.sum()), F217_LEVEL_CAM_M, 100.0 * (med - F217_LEVEL_CAM_M)))
+                if abs(med - F217_LEVEL_CAM_M) * 100.0 > F217_LEVEL_TOL_CM:
+                    self.findings.append(Finding(float(L.t[m][0]), float(L.t[m][-1]), 'f217_item_level', 'constant', 'F217: on level ground with item %d at the hip E stood %.3f m, not the level height %.2f m '
+                                                 '(off by %.1f cm, limit %.1f; %d rows)' % (int(ser), med, F217_LEVEL_CAM_M, 100.0 * abs(med - F217_LEVEL_CAM_M), F217_LEVEL_TOL_CM, int(m.sum()))))
+            if not self.f215['item_level']:
+                self.say('    no level rows with an item at the hip (the last %.1f m of path flat): E against the level height is not measured' % F215_LEVEL_PATH_M)
+        hand_y, neck_y = getattr(L, 'hand_y', None), getattr(L, 'neck_y', None)
+        if hand_y is None:
+            self.say('    hip rows: the IK record is missing, the hands and the neck are not measured')
+            return
+        hip = (L.armed == 1) & ~L.ads & np.isfinite(hand_y) & np.isfinite(neck_y)
+        if not hip.any():
+            self.say('    hip rows with an item and a final neck and hands: none')
+            return
+        dtl = np.zeros(len(L.t))
+        if len(L.t) > 1:
+            d_ = np.diff(L.t)
+            dtl[1:] = np.where((d_ > 0) & (d_ < 0.25), d_, 0.0)
+        hv, vn = hand_y - L.body, neck_y - L.body
+        self.f215['item_hand_over_view_cm'] = float(np.max(hv[hip])) * 100.0
+        self.f215['item_view_under_neck_cm'] = float(np.max(vn[hip])) * 100.0
+        self.say('    hip rows with an item (not in the sights): %.1f s; the higher hand over the view up to %+.1f cm, the view under the neck up to %+.1f cm' % (
+            float(dtl[hip].sum()), self.f215['item_hand_over_view_cm'], self.f215['item_view_under_neck_cm']))
+
     # -- F215: the body follows the view ---------------------------------------------------------------------------------------------------------------------------------------------
     def f215_section(self):
         L, S = self.L, self.S
@@ -1262,6 +1320,8 @@ class Analysis:
                                              '(off by %.1f cm, limit %.1f): R0 is %+.1f cm and the needed raise %+.1f cm (%d rows)' % (med, F215_NECK_MEAN_S, F215_CONST_CM, abs(med - F215_CONST_CM), F215_R0_CM, r0, need, int(lv.sum()))))
         else:
             self.say('  level rows: %d, too few (need %d) to compare R0 with the measured E over the mean neck' % (int(lv.sum()), F215_LEVEL_MIN_ROWS))
+        if have_state:
+            self.f217_item(pin, g, j0, tan, path)
         # every in-place turn: the heading changes over F215_TURN_DEG within F215_TURN_S, the root nearly still for F215_TURN_SIDE_S each side
         ang = np.degrees(np.unwrap(np.arctan2(np.nan_to_num(fh[:, 0]), np.nan_to_num(fh[:, 2]))))
         jb = np.searchsorted(L.t, L.t - F215_TURN_S, 'left')
@@ -1269,6 +1329,8 @@ class Analysis:
         rooth = (root * u).sum(axis=1)
         camh = rooth + L.e[:, 1]
         viewh = rooth + L.body + L.by   # the view in the world: L.body is the view against the body, so the body's shift goes back on
+        # F217: the pilot's own head is not the camera's or the view's move: align.head_local y (the change since the turn's start) comes out of both (the ledger's body view has HEAD_GAIN of it out already)
+        hy_ = S.tab('align').f('head_local')[L.ai][:, 7].astype(np.float64) if S.tab('align').has('head_local') else np.zeros(n)
 
         def plane_speed(ia, ib):
             if ib <= ia or L.t[ib] - L.t[ia] <= 0.0:
@@ -1304,10 +1366,12 @@ class Analysis:
             left = np.nonzero(np.linalg.norm(away, axis=1) > F215_TURN_LEFT_M)[0]
             if left.size:
                 ie = ib + int(left[0]) - 1
-            dcam = float(np.max(np.abs(camh[ia:ie + 1] - camh[ia])))
+            dh_ = hy_[ia:ie + 1] - hy_[ia]
+            dcam = float(np.nanmax(np.abs((camh[ia:ie + 1] - camh[ia]) - dh_)))
             droot = float(np.max(np.abs(rooth[ia:ie + 1] - rooth[ia])))
-            dview = float(np.max(np.abs(viewh[ia:ie + 1] - viewh[ia])))
-            turns.append(dict(t0=float(L.t[ia]), t1=float(L.t[ib]), dang=dang, pivot_cm=dist * 100.0, cam_cm=dcam * 100.0, root_cm=droot * 100.0, view_cm=dview * 100.0))
+            dview = float(np.nanmax(np.abs((viewh[ia:ie + 1] - viewh[ia]) - (1.0 - HEAD_GAIN) * dh_)))
+            turns.append(dict(t0=float(L.t[ia]), t1=float(L.t[ib]), dang=dang, pivot_cm=dist * 100.0, cam_cm=dcam * 100.0, root_cm=droot * 100.0, view_cm=dview * 100.0,
+                              judged=bool(dcam * 100.0 < F215_TURN_CAM_JUDGE_CM)))
         self.f215['turns'] = turns
         if not turns:
             self.say('  in-place turns (heading over %.0f deg in %.2f s, the root under %.1f m/s for %.1f s each side): none' % (F215_TURN_DEG, F215_TURN_S, F215_TURN_SIDE_MPS, F215_TURN_SIDE_S))
@@ -1315,17 +1379,23 @@ class Analysis:
         self.say('  in-place turns (heading over %.0f deg in %.2f s, the root under %.1f m/s for %.1f s each side): %d. Per turn: heading change, the pivot ahead of the root along the facing, and the largest world height moves '
                  'from its start to %.1f s after it of the camera (E), the root and the view (height = root . up + the model height):' % (
                      F215_TURN_DEG, F215_TURN_S, F215_TURN_SIDE_MPS, F215_TURN_SIDE_S, len(turns), F215_TURN_AFTER_S))
+        self.say('  (the physical head, align.head_local y since the turn\'s start, is out of the camera and view figures; a turn is judged only where the camera moved under %.0f cm)' % F215_TURN_CAM_JUDGE_CM)
         for tr in turns[:20]:
-            self.say('    %s to %s: %+.0f deg, pivot %.1f cm, camera %.1f cm, root %.1f cm, view %.1f cm' % (S.lt(tr['t0']), S.lt(tr['t1']), tr['dang'], tr['pivot_cm'], tr['cam_cm'], tr['root_cm'], tr['view_cm']))
+            self.say('    %s to %s: %+.0f deg, pivot %.1f cm, camera %.1f cm, root %.1f cm, view %.1f cm%s' % (S.lt(tr['t0']), S.lt(tr['t1']), tr['dang'], tr['pivot_cm'], tr['cam_cm'], tr['root_cm'], tr['view_cm'],
+                                                                                                   '' if tr['judged'] else '; camera moved: not judged'))
         if len(turns) > 20:
             self.say('    ... %d more' % (len(turns) - 20))
-        med_view = float(np.median([tr['view_cm'] for tr in turns]))
+        jt = [tr for tr in turns if tr['judged']]
+        if not jt:
+            self.say('  no turn qualifies (the camera, the physical head out, moved %.0f cm or more in each): the view across turns is not judged' % F215_TURN_CAM_JUDGE_CM)
+            return
+        med_view = float(np.median([tr['view_cm'] for tr in jt]))
         self.f215['turn_move_cm'] = med_view
-        self.say('  median over the turns: pivot %.1f cm, camera %.1f cm, root %.1f cm, view %.1f cm' % (float(np.median([tr['pivot_cm'] for tr in turns])), float(np.nanmedian([tr['cam_cm'] for tr in turns])),
-                                                                                                         float(np.median([tr['root_cm'] for tr in turns])), med_view))
+        self.say('  median over the %d judged turn(s): pivot %.1f cm, camera %.1f cm, root %.1f cm, view %.1f cm' % (len(jt), float(np.median([tr['pivot_cm'] for tr in jt])), float(np.nanmedian([tr['cam_cm'] for tr in jt])),
+                                                                                                                  float(np.median([tr['root_cm'] for tr in jt])), med_view))
         if have_state and med_view > F215_TURN_MOVE_CM:
-            self.findings.append(Finding(turns[0]['t0'], turns[-1]['t1'], 'f215_turn_view_move', 'turn', 'F215: in %d in-place turn(s) the view moved a median %.1f cm in the world (camera %.1f cm, root %.1f cm), limit %.1f cm' % (
-                len(turns), med_view, float(np.nanmedian([tr['cam_cm'] for tr in turns])), float(np.median([tr['root_cm'] for tr in turns])), F215_TURN_MOVE_CM)))
+            self.findings.append(Finding(jt[0]['t0'], jt[-1]['t1'], 'f215_turn_view_move', 'turn', 'F215: in %d judged in-place turn(s) the view moved a median %.1f cm in the world (camera %.1f cm, root %.1f cm), limit %.1f cm' % (
+                len(jt), med_view, float(np.nanmedian([tr['cam_cm'] for tr in jt])), float(np.median([tr['root_cm'] for tr in jt])), F215_TURN_MOVE_CM)))
 
     # -- F216: the view bob --------------------------------------------------------------------------------------------------------------------------------------------------------------
     @staticmethod
@@ -2015,7 +2085,7 @@ SYN_ENUMS = {
     'EyeSource': ['unarmed', 'unarmed_no_class', 'stance', 'standing_over_crouch', 'start', 'hunched', 'none'], 'F193Source': ['hip', 'legs', 'camera'],
     'IkExit': ['completed', 'ik_off', 'plan_torn', 'plan_mismatch', 'inputs_refused', 'bad_joint_count', 'f166_write', 'f180_write', 'f169_write', 'pin_write', 'span_write'],
     'IkRefuse': ['buffer', 'plan_torn', 'plan', 'fp_torn', 'fp_stale', 'g_torn', 'g_stale', 'side', 'singular', 'write', 'fp_rig', 'none'], 'PoleSrc': ['legacy_swivel', 'stable_seed', 'body_down'],
-    'PinState': ['still', 'walk', 'run', 'air', 'crouched'], 'F214State': ['off', 'not_moving', 'filling', 'followed', 'held_aim', 'held_head', 'held_pose', 'held_posture', 'held_item', 'held_f138', 'held_away', 'not_run'], 'F215State': ['off', 'released_away', 'released_item', 'released_posture', 'held_aim', 'held_pose', 'held_head', 'filling', 'active', 'not_run'], 'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
+    'PinState': ['still', 'walk', 'run', 'air', 'crouched'], 'F214State': ['off', 'not_moving', 'filling', 'followed', 'held_aim', 'held_head', 'held_pose', 'held_posture', 'held_item', 'held_f138', 'held_away', 'not_run'], 'F215State': ['off', 'released_away', 'released_item', 'released_posture', 'held_aim', 'held_pose', 'held_head', 'filling', 'active', 'held_sights', 'active_item', 'not_run'], 'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
 
 SYN_SCHEMA = collections.OrderedDict()
 SYN_SCHEMA['align'] = (1, _A('f32', 3, 'eye', 'run', 'ads_lock', 'sight', 'weapon_view', 'weapon_eye', 'virtual_neck', 'bob_seated') + _A('f32', 12, 'head_render', 'head_local') +
@@ -2757,6 +2827,44 @@ def self_test():
             if not on:
                 tr = A.f215['turns']
                 check(len(tr) == 3 and A.f215['turn_move_cm'] > 3.0 and 'no active call' in '\n'.join(A.out), 'with the shift off the view moves with the hill\'s rise across the turns: %s' % A.f215['turn_move_cm'])
+        # F217: an item at the hip. The pilot walks 1.5 m/s along +z for 20 s with the arc cutter (serial 7) drawn. slope: the ground rises at 0.25 and the body follows, so E (true) is the level height
+        # plus the shift and the level rows are none; level: flat ground with E the level height plus `off`.
+        def f217_post(slope, off, state='active_item'):
+            def post(s_):
+                pin, al = s_.tables['pin'], s_.tables['align']
+                t = s_.t
+                n = len(t)
+                pin['stance'][:], pin['armed'][:], pin['detach_w'][:], pin['item_serial'][:] = 0, 1, 0.0, 7
+                al['ads'][:] = 0
+                walk = np.clip(t - 1.0, 0.0, 20.0) * 1.5
+                root = np.stack([np.zeros(n), slope * walk, walk], 1)
+                pin['root'], pin['fwd'] = root, np.tile([0.0, 0.0, 1.0], (n, 1))
+                y = np.minimum(slope * walk, 0.6)
+                e = F217_LEVEL_CAM_M + off + y
+                pin['eye_y_selected'], pin['raw_eye_y'] = e, e
+                pin['e'][:, 1] = e
+                pin['f215_state'] = np.full(n, SYN_ENUMS['F215State'].index(state))
+                pin['f215_body_y'] = y
+            return post
+        for slope, off, want in ((0.25, 0.0, set()), (0.0, 0.0, set()), (0.0, 0.08, {'f217_item_level'}), (0.0, -0.08, {'f217_item_level'})):
+            d = fresh()
+            _make(d, stamp, [], [f217_post(slope, off)])
+            S, A = analyse(d)
+            got = {f.kind for f in A.findings if f.kind.startswith('f217')}
+            check(got == want, 'F217 findings for an armed walk on a slope of %.2f with E %+.0f cm off the level height: %s, want %s (%s)' % (slope, 100 * off, sorted(got), sorted(want), A.f215))
+            if slope == 0.25:
+                check(A.f215.get('item_active_s', 0.0) > 20.0 and not A.f215.get('item_level') and 'item at the hip (F217)' in '\n'.join(A.out),
+                      'an armed slope walk counts its seconds in active_item and has no level rows: %s' % A.f215)
+            if slope == 0.0 and off == 0.0:
+                check(abs(A.f215['item_level'].get(7, 0.0) - F217_LEVEL_CAM_M) < 1e-6 and 'hip rows with an item' in '\n'.join(A.out), 'level ground with E on the level height reads it by item serial and measures the hip rows: %s' % A.f215)
+        d = fresh()
+        _make(d, stamp, [], [f217_post(0.0, 0.08, state='active')])
+        S, A = analyse(d)
+        check(not [f for f in A.findings if f.kind.startswith('f217')], 'rows not in active_item are not judged against the level height')
+        d = fresh()
+        _make(d, stamp, [], [f217_post(0.0, 0.08)], drop={'pin': ['f215_state', 'f215_body_y', 'f215_target']})
+        S, A = analyse(d)
+        check(not [f for f in A.findings if f.kind.startswith('f217')], 'a recording without the F215 state names no F217 finding')
         # the view is formed less the body's shift, and a change of it is -delta body_y in the terms
         d = fresh()
         _make(d, stamp, [], [f215_post(True, 0.15)])

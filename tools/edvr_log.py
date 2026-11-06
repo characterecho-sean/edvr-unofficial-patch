@@ -12667,7 +12667,7 @@ def _hj_f214(rows, ctx):
 H215_LABEL = "native on foot body follows view (F215)"
 H215_RE = (r"native on foot body follows view \(F215\) (?P<wl>\d+) s: experimental\.native_on_foot_body_follows_view is (?P<key>on|off); pin calls (?P<calls>\d+), unarmed (?P<un>\d+), "
            r"active (?P<act>\d+), held head (?P<head>\d+) aim (?P<aim>\d+) pose (?P<pose>\d+), filling (?P<fil>\d+), released item (?P<item>\d+) posture (?P<post>\d+) away (?P<away>\d+); "
-           r"body move (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<n>\d+) active calls); raise R0 (?P<r0>%s) cm; poses written shifted (?P<shifted>\d+)$" % ((_HN,) * 4))
+           r"body move (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<n>\d+) active calls); raise R0 (?P<r0>%s) cm; poses written shifted (?P<shifted>\d+)(?:; item at the hip active (?P<iact>\d+), held in the sights (?P<sight>\d+))?$" % ((_HN,) * 4))
 H215_MIN_CALLS = 30   # unarmed calls with the key on and none active: the neck window fills in 0.2 s (18 calls at 90 Hz), so this many unarmed calls could not all be held by chance
 
 
@@ -12675,7 +12675,7 @@ def _hj_f215(rows, ctx):
     """F215 (TEMPORARY): unarmed and upright, the whole body moves up and down so the neck stays the eye height under a view that is the game's camera plus a constant raise. The window line counts
     the pin calls (unarmed, active, held by reason, released by reason), the body's move over the active calls, R0, and the pose writes that carried a shift. NEVER APPLIED: the key on and 30 or more
     unarmed calls in all with not one active (the step never ran to an active state, or every call was held or released: the counts say which); or active calls and not one pose written shifted
-    (the rule ran and the pose was never written with its shift). IDLE: the key off in every window, or under 30 unarmed calls. OK otherwise, with the active share and the body's move."""
+    (the rule ran and the pose was never written with its shift); an item at the hip (F217) is reported and never judged. IDLE: the key off in every window, or under 30 unarmed calls. OK otherwise, with the active share and the body's move."""
     sec = rows.get("sec", [])
     if not sec:
         return None
@@ -12683,11 +12683,14 @@ def _hj_f215(rows, ctx):
     g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
     held = ", ".join("%s %d" % (name, g(k)) for name, k in (("head pitch", "head"), ("aim pitch", "aim"), ("no pose", "pose"), ("filling", "fil"), ("item", "item"), ("posture", "post"),
                                                           ("away", "away")) if g(k))
+    # F217: the item-at-the-hip part is at the end of the line and absent from older logs; it is reported, never judged (an item at the hip does not make a flight NEVER APPLIED)
+    ig = lambda k: sum(int(r[k]) for r in sec if r.get(k) is not None)
+    armed = ("; item at the hip: active %d, held in the sights %d" % (ig("iact"), ig("sight"))) if any(r.get("iact") is not None for r in sec) else ""
     mv = [r for r in sec if r["mean"] is not None]
     mvn = sum(int(r["n"]) for r in mv)
     rng = ("; body move mean %+.1f cm, min %+.1f, max %+.1f over %d active calls" % (sum(float(r["mean"]) * int(r["n"]) for r in mv) / mvn, min(float(r["min"]) for r in mv),
                                                                                  max(float(r["max"]) for r in mv), mvn)) if mvn else "; no active call"
-    text = "%d s: %d pin calls, %d unarmed, %d active%s%s; poses written shifted %d; R0 %s cm" % (_hsecs(sec), g("calls"), g("un"), g("act"), "; not active: " + held if held else "", rng, g("shifted"), sec[-1]["r0"])
+    text = "%d s: %d pin calls, %d unarmed, %d active%s%s; poses written shifted %d; R0 %s cm" % (_hsecs(sec), g("calls"), g("un"), g("act"), "; not active: " + held if held else "", rng, g("shifted"), sec[-1]["r0"]) + armed
     if not on:
         return ("IDLE", text + "; the key was off in every window: the body is as the game animates it")
     un, act, shifted = g("un", on), g("act", on), g("shifted", on)
@@ -24358,14 +24361,25 @@ def self_test_health():
         f215src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f215.h"))
         F215 = "body follows view (F215)"
 
-        def win215(key="on", calls=900, un=600, act=500, held=(20, 10, 5, 30, 15, 10, 10), mv="mean +20.0 cm (min -5.0, max +45.0) over 500 active calls", r0="7.0", shifted=480, wl=10):
+        def win215(key="on", calls=900, un=600, act=500, held=(20, 10, 5, 30, 15, 10, 10), mv="mean +20.0 cm (min -5.0, max +45.0) over 500 active calls", r0="7.0", shifted=480, wl=10, iact=0, sight=0,
+                   old=False):
             fmt = health_c_format(f215src, "native on foot body follows view (F215) %u s")
             if fmt is None:
                 raise AssertionError("native_on_foot_f215.h has no format holding the F215 window line: the --health rule that reads it is out of date")
-            return health_render(fmt, (wl, key, calls, un, act) + tuple(held) + (mv, float(r0), shifted))
+            line = health_render(fmt, (wl, key, calls, un, act) + tuple(held) + (mv, float(r0), shifted, iact, sight))
+            tail = "; item at the hip active %d, held in the sights %d" % (iact, sight)
+            if old:   # a log from before F217 ends at the shifted count
+                if not line.endswith(tail):
+                    raise AssertionError("the F215 window line no longer ends with the item-at-the-hip part: the --health rule that reads it is out of date")
+                line = line[:-len(tail)]
+            return line
         check("F215: a flight that was active in 500 of 600 unarmed calls and shifted 480 poses is OK and names the held reasons", [win215()], 0, [("OK", F215)],
               has=["10 s: 900 pin calls, 600 unarmed, 500 active; not active: head pitch 20, aim pitch 10, no pose 5, filling 30, item 15, posture 10, away 10; body move mean +20.0 cm, min -5.0, max +45.0 over 500 active calls; poses written shifted 480; R0 7.0 cm",
                    "active in 500 of 600 unarmed calls (83%), 480 pose writes shifted"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F217: a line from before the item part still parses and reports no item part", [win215(old=True)], 0, [("OK", F215)], has=["poses written shifted 480; R0 7.0 cm"], lacks=["UNPARSED", "item at the hip"])
+        check("F217: the item at the hip is reported with its counts", [win215(iact=300, sight=40)], 0, [("OK", F215)], has=["item at the hip: active 300, held in the sights 40"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F217: an armed flight (no unarmed calls, item active) is never NEVER APPLIED", [win215(calls=900, un=0, act=0, held=(0,) * 7, mv="none", shifted=700, iact=800, sight=40)], 0, [("IDLE", F215)],
+              has=["item at the hip: active 800, held in the sights 40"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F215: the key on, 600 unarmed calls and none active is NEVER APPLIED", [win215(act=0, held=(0,) * 7, mv="none", shifted=0)], 3, [("NEVER APPLIED", F215)],
               has=["the key is on and 600 unarmed calls were active in none"], lacks=["UNPARSED"])
         check("F215: the key on, every unarmed call held (a head pitched the whole time) is NEVER APPLIED, with the counts to read", [win215(act=0, held=(600, 0, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3,

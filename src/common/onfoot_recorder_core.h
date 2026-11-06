@@ -96,7 +96,7 @@ ONF_ENUM(PinState, "still", "walk", "run", "air", "crouched")
 // nofoot::f214::State: what the moving view follow did this call (not_run: the call never reached the step)
 ONF_ENUM(F214State, "off", "not_moving", "filling", "followed", "held_aim", "held_head", "held_pose", "held_posture", "held_item", "held_f138", "held_away", "not_run")
 // nofoot::f215::State: what the body-follows-view rule did this call (not_run: the call never reached the step)
-ONF_ENUM(F215State, "off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "held_head", "filling", "active", "not_run")
+ONF_ENUM(F215State, "off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "held_head", "filling", "active", "held_sights", "active_item", "not_run")
 // IkRefusal (native_on_foot.cpp): the last refusal the call counted, then none
 ONF_ENUM(IkRefuse, "buffer", "plan_torn", "plan", "fp_torn", "fp_stale", "g_torn", "g_stale", "side", "singular", "write", "fp_rig", "none")
 // SideOut::f98Source: where the elbow's swivel came from. F84's rifle support and the pistol's pole are body_down; F165, F192, F159 and F181 are the flags beside it.
