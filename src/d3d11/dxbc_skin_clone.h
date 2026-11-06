@@ -291,6 +291,35 @@ inline Plan analyse(const std::vector<uint32_t>& t) {
         anchor = i;
         break;
     }
+    // The eyes' forward pass (vs 33A5, 2026-11-05): the pose chain ends in r1, as D99A's does, but after the displacement block one top-level
+    // `add r3.xyz, r1.xyzx, r2.xzwx` puts the result in the register the matrix multiplies read. So nothing writes that register before the branch.
+    // Follow that one add back to its first source, a plain temporary, and look for the anchor there. Only a shader the search above refused gets here.
+    if (anchor == ~size_t(0)) {
+        for (size_t i = consumer[0]; i-- > limit;) {
+            const Instr& in = body[i];
+            if (depth[i] != 0 || in.opcode != kAdd || in.operand.size() != 3) continue;
+            const size_t dst = in.operand[0], src = in.operand[1];
+            if (typeOf(t[dst]) != kTypeTemp || ((t[dst] >> 2) & 3u) != 0 || t[indexWordAt(t, dst)] != reg || ((t[dst] >> 4) & 15u) != wantMask) continue;
+            if (typeOf(t[src]) != kTypeTemp || ((t[src] >> 2) & 3u) != 1 || (t[src] >> 31) != 0) break;
+            const uint32_t sw = (t[src] >> 4) & 255u;
+            const uint32_t from = t[indexWordAt(t, src)];
+            const uint32_t comp[3] = {(sw >> (2 * plan.comp[0])) & 3u, (sw >> (2 * plan.comp[1])) & 3u, (sw >> (2 * plan.comp[2])) & 3u};
+            const uint32_t fromMask = (1u << comp[0]) | (1u << comp[1]) | (1u << comp[2]);
+            for (size_t k = limit; k-- > posLoad + 1;) {
+                const Instr& a = body[k];
+                if (depth[k] != 0 || a.opcode != kAdd || a.operand.size() != 3) continue;
+                const size_t d = a.operand[0];
+                if (typeOf(t[d]) != kTypeTemp || ((t[d] >> 2) & 3u) != 0 || t[indexWordAt(t, d)] != from || ((t[d] >> 4) & 15u) != fromMask) continue;
+                anchor = k;
+                break;
+            }
+            if (anchor != ~size_t(0)) {
+                plan.posReg = from;
+                for (int c = 0; c < 3; ++c) plan.comp[c] = comp[c];
+            }
+            break;
+        }
+    }
     if (anchor == ~size_t(0)) throw std::runtime_error("anchor not found");
     if (baseLoad >= anchor) throw std::runtime_error("the base load follows the anchor");
     plan.baseLoadAt = body[baseLoad].at;
