@@ -607,6 +607,15 @@ static void build4WiringTests() {
 }
 
 static void ruleTests() {
+    // The decision of the legacy canopy's route (ui_layer_math.h).
+    check(uiLegacyGlassHalfRes(4032, 4034, 2016, 2017), "VR at 50 percent: the layer is twice the target on both axes, so the half route");
+    check(!uiLegacyGlassHalfRes(3840, 2160, 3840, 2160), "flat at 1:1 keeps the full route");
+    check(uiLegacyGlassHalfRes(3024, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(3023, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(3024, 3023, 2016, 2016),
+          "the threshold is 1.5 times the target on BOTH axes, inclusive: one pixel short on either axis is the full route");
+    check(!uiLegacyGlassHalfRes(4032, 2016, 2016, 2016) && !uiLegacyGlassHalfRes(2016, 4032, 2016, 2016), "twice on one axis and 1:1 on the other is the full route");
+    check(!uiLegacyGlassHalfRes(0, 4034, 2016, 2017) && !uiLegacyGlassHalfRes(4032, 4034, 0, 2017) && !uiLegacyGlassHalfRes(4032, 0, 2016, 2017) && !uiLegacyGlassHalfRes(4032, 4034, 2016, 0),
+          "a zero size on any side is the full route");
+    check(uiLegacyGlassHalfRes(0xFFFFFFFFu, 0xFFFFFFFFu, 1, 1), "the arithmetic does not overflow on large layers");
     check(kWeaponPairCount == 3, "three weapons-fire pairs");
     for (size_t i = 0; i < kWeaponPairCount; ++i) {
         const WeaponPair& p = kWeaponPairs[i];
@@ -1716,6 +1725,11 @@ static Rgb bilinearAt(uint32_t lx, uint32_t ly) {
     return {mix(mix(a.r, b.r, fx), mix(c.r, d.r, fx), fy), mix(mix(a.g, b.g, fx), mix(c.g, d.g, fx), fy), mix(mix(a.b, b.b, fx), mix(c.b, d.b, fx), fy)};
 }
 
+// The half-resolution canopy's glass target G in the rig: a pattern of HDR values at the render's size.
+static Rgb glassAt(uint32_t x, uint32_t y) {
+    return {0.25f * static_cast<float>((x * 3 + y) % 7), 0.125f * static_cast<float>((x + y * 5) % 11), 0.5f * static_cast<float>(x % 2)};
+}
+
 struct Fx {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx, deferred;
@@ -2208,6 +2222,64 @@ static void gpuTests() {
         f.freshLayers();
         f.runPlan(sharpTonePlan(false, true, true), f.states);
         check(litError(f.read8(f.eTex.Get())) <= 3, "control: the real sequence passes the comparator");
+    }
+
+    // ---- the half-resolution canopy's add (sharpGlassAddPass): G at the render's size, resampled bilinearly to the layer's size and ADDED to W, colour only, before the source pass adds F_up
+    {
+        ComPtr<ID3D11Texture2D> gTex = f.halfTexture(kFw, kFh, glassAt);
+        ComPtr<ID3D11ShaderResourceView> gSrv = f.srvOf(gTex.Get());
+        const auto glassUp = [](uint32_t lx, uint32_t ly) {
+            const float qx = (lx + 0.5f) / kLw * kFw - 0.5f, qy = (ly + 0.5f) / kLh * kFh - 0.5f;
+            const int x0 = static_cast<int>(std::floor(qx)), y0 = static_cast<int>(std::floor(qy));
+            const float fx = qx - x0, fy = qy - y0;
+            const auto at = [](int x, int y) {
+                x = std::min(std::max(x, 0), static_cast<int>(kFw) - 1);
+                y = std::min(std::max(y, 0), static_cast<int>(kFh) - 1);
+                const Rgb g = glassAt(static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+                return Rgb{roundHalf(g.r), roundHalf(g.g), roundHalf(g.b)};
+            };
+            const Rgb a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
+            const auto mix = [](float p, float q, float t) { return p + (q - p) * t; };
+            return Rgb{mix(mix(a.r, b.r, fx), mix(c.r, d.r, fx), fy), mix(mix(a.g, b.g, fx), mix(c.g, d.g, fx), fy), mix(mix(a.b, b.b, fx), mix(c.b, d.b, fx), fy)};
+        };
+        const auto exec = [](ID3D11DeviceContext* c, ID3D11CommandList* l, int restore) { c->ExecuteCommandList(l, restore); };
+        f.freshLayers();
+        ID3D11RenderTargetView* s = sentinelRtv.Get();
+        f.ctx->OMSetRenderTargets(1, &s, nullptr);
+        check(sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), kLw, kLh, exec), "the glass add pass runs");
+        ComPtr<ID3D11RenderTargetView> rt;
+        f.ctx->OMGetRenderTargets(1, &rt, nullptr);
+        check(rt.Get() == sentinelRtv.Get(), "the immediate context's render target is back after the glass add");
+        const std::vector<float> W = f.readHalf(f.wTex.Get());
+        float worst = 0;
+        bool alphaKept = true;
+        for (uint32_t y = 0; y < kLh; ++y)
+            for (uint32_t x = 0; x < kLw; ++x) {
+                const size_t i = (static_cast<size_t>(y) * kLw + x) * 4;
+                const Rgb l = lightAt(x, y), g = glassUp(x, y);
+                worst = std::max({worst, std::fabs(W[i] - (roundHalf(l.r) + g.r)), std::fabs(W[i + 1] - (roundHalf(l.g) + g.g)), std::fabs(W[i + 2] - (roundHalf(l.b) + g.b))});
+                alphaKept = alphaKept && W[i + 3] == 1.0f;
+            }
+        std::printf("glass add: W within %.5f of L + bilinear(G)\n", static_cast<double>(worst));
+        check(worst < 0.02f, "the glass add leaves W = L + G resampled bilinearly to the layer's size (to half precision)");
+        check(alphaKept, "the glass add leaves W's alpha alone");
+        // Then the source pass of the same re-issue adds F_up: W = L + G_up + F_up, which is the order the tonemap bracket runs them in.
+        check(sharpSourcePass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, f.fSrv.Get(), f.sRtv.Get(), f.wRtv.Get(), kLw, kLh, exec), "the source pass runs after the glass add");
+        const std::vector<float> W2 = f.readHalf(f.wTex.Get());
+        float worst2 = 0;
+        for (uint32_t y = 0; y < kLh; ++y)
+            for (uint32_t x = 0; x < kLw; ++x) {
+                const size_t i = (static_cast<size_t>(y) * kLw + x) * 4;
+                const Rgb l = lightAt(x, y), g = glassUp(x, y), up = bilinearAt(x, y);
+                worst2 = std::max({worst2, std::fabs(W2[i] - (roundHalf(l.r) + g.r + up.r)), std::fabs(W2[i + 1] - (roundHalf(l.g) + g.g + up.g)), std::fabs(W2[i + 2] - (roundHalf(l.b) + g.b + up.b))});
+            }
+        std::printf("glass add then source pass: W within %.5f of L + G_up + F_up\n", static_cast<double>(worst2));
+        check(worst2 < 0.03f, "after the glass add the source pass gives W = L + G_up + F_up");
+        // The refusals: no source view, no target, no layer size.
+        check(!sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, nullptr, f.wRtv.Get(), kLw, kLh, exec) &&
+                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), nullptr, kLw, kLh, exec) &&
+                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), 0, kLh, exec),
+              "the glass add refuses a missing source, target or size");
     }
 
     // ---- the debug layer saw nothing wrong

@@ -103,6 +103,9 @@ enum class GpuCensusSection : uint8_t {
     AlteredHdrHud,            // a HUD draw moved into the HDR HUD layer (fix.ui_quality's crisp HUD, the layer at 4032^2): the game's shading
                               // at the layer's size, timed by the route's moved-draw timer (ui_layer.cpp routeBegin/routeEnd). Only while
                               // g_hdrDrawTimingOn is on (off since 2026-10-14; it was on for the 2026-10-13 measurement build).
+    AlteredLegacyGlass,       // the legacy canopy's draw (visual.cockpit_glass = legacy, taken into the weapons layer), timed whole by ui_layer.cpp from the layer's issue to uiLayerEnd, in both
+                              // profiles. In VR the "UI draws" scope times the same draw on its own turn, so this item is also inside that one and is NEVER added to the altered line's
+                              // "together" figure; flat does not time "UI draws". No turn in the rotation until called this window, so with the look on `odyssey` the census samples as before.
     // A draw wrapped in another fix's state change (RemLok, the loading hologram, scrim,
     // particles, the panel ...): ONE SECTION PER FIX, kAlteredFixCount of them, in AlteredFix's
     // order. They share ONE turn in the rotation (the first owns it, turnOwnerOf), one K and one

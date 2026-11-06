@@ -75,7 +75,12 @@ constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "sun glare clamp", "sun glare steady", "particles", "FSS panel",
     "loading scrim", "menu backdrop", "unnamed fix"
 };
-static_assert(kAlteredClassSections == 3, "one name for each altered-draw class");
+// The canopy's section (AlteredLegacyGlass) follows the three classes that make the "together" figure and is NOT one of them: it is inside "UI draws" in VR (the same draw timed on its own
+// turn), so it is reported after "together" and never summed into it.
+constexpr size_t kLegacyGlassSection = static_cast<size_t>(GpuCensusSection::AlteredLegacyGlass);
+constexpr size_t kAlteredTogetherClasses = 3;
+static_assert(kAlteredClassSections == kAlteredTogetherClasses + 1 && kLegacyGlassSection == kAlteredFirst + kAlteredTogetherClasses && sizeof(kAlteredNames) / sizeof(kAlteredNames[0]) == kAlteredTogetherClasses,
+              "one name for each altered-draw class that is summed, and the canopy's section after them");
 // The VR world route's three sections (gpu_census.h) come right after the seed and are the last in-frame ones. The
 // rotation gives none of them a turn until it has been called this window, so a session with the key off samples as it did
 // before they existed.
@@ -230,7 +235,7 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
 constexpr size_t kScopeZoomSection = static_cast<size_t>(GpuCensusSection::DoorScopeZoom);
 // A world-route, FSS reveal, on-foot depth readers', second-skin or scope lens section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) &&
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection || i == kLegacyGlassSection) &&
            g_section[i].occurrences == 0;
 }
 // The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
@@ -388,7 +393,7 @@ void logAndResetWindow(uint64_t now) {
     // named fix by fix on the line after it.
     double alteredTotal = 0.0;
     std::string alteredItems;
-    for (size_t i = 0; i < kAlteredClassSections; ++i) {
+    for (size_t i = 0; i < kAlteredTogetherClasses; ++i) {
         const Snapshot s = snapshotOf(g_section[kAlteredFirst + i], frames);
         appendItem(alteredItems, kAlteredNames[i], s);
         alteredTotal += s.msPerFrame;
@@ -519,11 +524,25 @@ void logAndResetWindow(uint64_t now) {
     // Elite's own draws that EDVR alters: what the AA path's GPU cost looks like from
     // outside, inside draws the census would otherwise count as the game's. Each is the
     // game's draw timed whole, so the figures INCLUDE the game's own work in those draws.
+    // The legacy canopy's draw (visual.cockpit_glass = legacy), on its own: ms per frame, draws per frame and how many spans were timed. "-" means no canopy draw reached the layer this window.
+    // In VR "UI draws" times the same draw on its own turn, so the canopy is also inside that figure; here it is never added to "together". Flat does not time "UI draws".
+    std::string glassItem;
+    {
+        const Snapshot g = snapshotOf(g_section[kLegacyGlassSection], frames);
+        if (!g.occurred) {
+            glassItem = "legacy glass canopy draws -";
+        } else {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "legacy glass canopy draws %.3f (%.2f/frame, %u timed)", g.msPerFrame, g.perFrame, g.samples);
+            glassItem = buf;
+        }
+    }
     Log::get().note(
         "EDVR GPU census, Elite's own draws that EDVR alters (each is the game's draw timed whole, so a figure "
         "includes the game's own work in it, not only what EDVR adds, and none of it is in EDVR ~%.3f above): "
-        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window.%s",
-        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal, eyeNote);
+        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window. Also timed on their own and NOT added to together: %s -- in VR these are also inside \"UI draws\" "
+        "(the same draw, timed on its own turn); flat does not time \"UI draws\".%s",
+        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal, glassItem.c_str(), eyeNote);
     // The "other fix-wrapped draws" above, one fix at a time: which code wraps the draws that cost.
     Log::get().note(
         "EDVR GPU census, the other fix-wrapped draws above by the fix that wraps each (the same draws, the game's own "

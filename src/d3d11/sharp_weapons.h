@@ -101,4 +101,30 @@ inline bool sharpSourcePass(ID3D11DeviceContext* immediate, ID3D11DeviceContext*
     return true;
 }
 
+// The half-resolution canopy's add: the glass target G, at the draw target's size, resampled bilinearly to the weapons layer's size and ADDED
+// to W (colour only; W's alpha is untouched). It is the source pass's own shaders and blend with target 0 left unbound: the pixel shader's scratch output is discarded, and target 1's
+// additive blend gives W += bilinear(G). It runs before the source pass of the same re-issue, which then adds F_up to the sum.
+inline bool sharpGlassAddPass(ID3D11DeviceContext* immediate, ID3D11DeviceContext* deferred, ID3D11VertexShader* vs, ID3D11PixelShader* ps,
+                              const SharpPassStates& states, ID3D11ShaderResourceView* g, ID3D11RenderTargetView* weapons,
+                              uint32_t layerW, uint32_t layerH, SharpExecute execute) {
+    if (!immediate || !deferred || !vs || !ps || !states.sourceBlend || !g || !weapons || !layerW || !layerH || !execute) return false;
+    ID3D11RenderTargetView* targets[2] = {nullptr, weapons};
+    deferred->IASetInputLayout(nullptr);
+    deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    deferred->VSSetShader(vs, nullptr, 0);
+    deferred->PSSetShader(ps, nullptr, 0);
+    deferred->PSSetShaderResources(0, 1, &g);
+    deferred->OMSetRenderTargets(2, targets, nullptr);
+    deferred->OMSetBlendState(states.sourceBlend.Get(), nullptr, 0xFFFFFFFFu);
+    const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(layerW), static_cast<float>(layerH), 0.0f, 1.0f};
+    deferred->RSSetViewports(1, &vp);
+    deferred->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    deferred->PSSetShaderResources(0, 1, &none);
+    Microsoft::WRL::ComPtr<ID3D11CommandList> list;
+    if (FAILED(deferred->FinishCommandList(FALSE, list.ReleaseAndGetAddressOf())) || !list) return false;
+    execute(immediate, list.Get(), 1);
+    return true;
+}
+
 }  // namespace edvr

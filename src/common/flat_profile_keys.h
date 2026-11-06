@@ -41,6 +41,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The legacy glass's dirt level (visual.cockpit_glass_dirt, cockpit_glass.cpp): percent, 0 to 300, read live with the look, in both profiles. The row under it.
         // Unlisted, getIntInRange answers 0 here whatever the file says, which is a clean pane, and the row could never raise it.
         std::strcmp(key, "visual.cockpit_glass_dirt") == 0 ||
+        // Which lights reach that dirt (visual.cockpit_glass_lights, cockpit_glass_core.h lightsLevelOf): off | station, read live with the look, in both profiles. The row under that.
+        // Unlisted, getString answers "off" here whatever the file says, and the row could never turn them on.
+        std::strcmp(key, "visual.cockpit_glass_lights") == 0 ||
         // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
         // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
         // running stock", so the row could never turn the fix on.
