@@ -413,26 +413,6 @@ void cockpitGlassBeforeDraw(ID3D11DeviceContext* ctx) {
     });
 }
 
-int cockpitGlassInputsAtDraw(ID3D11DeviceContext* ctx, uint64_t hash) {
-    if (!g_on || hash != kReplacedPsHash || !g_ps) return -1;
-    int bits = 0;
-    guarded("cockpitGlass.inputs.read", [&] {
-        ID3D11PixelShader* ps = nullptr;
-        ID3D11ShaderResourceView* srv = nullptr;
-        ID3D11Buffer* cb = nullptr;
-        ctx->PSGetShader(&ps, nullptr, nullptr);
-        ctx->PSGetShaderResources(kStreakSlot, 1, &srv);
-        ctx->PSGetConstantBuffers(kLevelSlot, 1, &cb);
-        if (ps != g_ps) bits |= 1;
-        if (!srv || srv != g_streakSrv) bits |= 2;
-        if (!cb || cb != g_levelCb) bits |= 4;
-        if (ps) ps->Release();
-        if (srv) srv->Release();
-        if (cb) cb->Release();
-    });
-    return bits;
-}
-
 bool cockpitGlassOverlayBegin(ID3D11DeviceContext* ctx) {
     const Overlay which = overlayFor(bindingShaderHash(BindSlot::Ps));   // the game's own pixel shader: the shadow records it, never the replacement
     if (which == Overlay::None) return false;

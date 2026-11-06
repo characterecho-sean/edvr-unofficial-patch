@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is overwritten after the swap's bind. Fix built on `claude/legacy-glass-diag`, not flown. See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. Open: the dirt smears under the upscaler in flat. See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -909,8 +909,28 @@ count is 0 with `cockpit glass: canopy draws that found another binding` countin
 nothing else that uses t12 changes, since it gets its binding back at the next pixel
 shader bind.
 
-- ruled out as the main cause: (a) and (b), because the dirt's albedo is zero without
-  t12 at every one of those draws, whatever the light does.
+Flown on `ddb725c0` (Frontier, flat, log `edvr_gfx_20261105_165800`), Sean: "Dirt stays
+on now". The first rebind is at 17:00:02.6, about 0.8 s before the supercruise edge, so
+supercruise is not what starts it: t12 was empty, not another view, so whatever writes
+it is clearing the slot. In the window to 17:00:31, 2032 canopy draws found it empty and
+were put right, and the probe's t12 count is 0 of 3057. What clears it is still not
+named. VR on the same flight: t12 was found empty on 4,801 of 4,816 canopy draws just
+after the switch, falling to about 355 a window; how the dirt looked there was not
+reported. The probe's per-draw counts came out with the merge, and the rebind count
+stays in the window lines.
+
+A second report on the same flight, open: with the dirt staying, Sean sees it smear
+when the ship moves, in flat under DLSS. With anti-aliasing off the smear goes (Sean,
+2026-11-05). Open hypothesis: the canopy writes no depth, so the dirt is a transparent
+layer over the stars, and the one motion value per pixel cannot suit both. Evidence
+wanted: a Shift+NumLock capture during a turn, for the motion on the glass pixels. Seen
+already and not explained: at 15:51, flying straight with the dirt gone, the glass
+pixels carried about 1 px of motion spreading from the centre with a sky depth.
+
+- ruled out: the legacy shader itself as the smear, because the smear goes with
+  anti-aliasing off, with the same shader and the same dirt.
+- ruled out as the main cause of the lost dirt: (a) and (b), because the dirt's albedo
+  is zero without t12 at every one of those draws, whatever the light does.
 
 - ruled out: the swap stopping, because binds equal canopy-seen in every window of
   both logs, about 3,000 in 30 s, after the exit as before.
