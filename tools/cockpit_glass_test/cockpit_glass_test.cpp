@@ -90,13 +90,20 @@ static void testCore() {
     // The block at b13: two registers, the second the layer-to-game pixel map, the identity for a scene draw.
     check(sizeof(cg::LevelBlock) == 32 && offsetof(cg::LevelBlock, map) == 16 && offsetof(cg::LevelBlock, dirt) == 0, "the b13 block is cbuffer Level's two registers: the level, then the map at byte 16");
     {
-        cg::LevelBlock a{0.5f, {0, 0, 0}, {2, 3, 4, 5}}, b = a;
+        cg::LevelBlock a{0.5f, 0.0f, {0, 0}, {2, 3, 4, 5}}, b = a;
         check(!cg::levelBlockDiffers(a, b), "an unchanged block is not uploaded again");
         cg::identityLevelMap(b);
         check(b.map[0] == 1 && b.map[1] == 1 && b.map[2] == 0 && b.map[3] == 0 && b.dirt == 0.5f && cg::levelBlockDiffers(a, b), "the identity map keeps the level and is a change from a layer's map");
         b = a;
         b.dirt = 1.0f;
         check(cg::levelBlockDiffers(a, b), "a moved dirt level is a change");
+    }
+    check(cg::lightsLevelOf("off") == 0.0f && cg::lightsLevelOf("spots") == 1.0f && cg::lightsLevelOf("all") == 2.0f && cg::lightsLevelOf("on") == 0.0f && cg::lightsLevelOf(nullptr) == 0.0f,
+          "the local lights key: off, spots or all; anything else is off");
+    {
+        cg::LevelBlock a{0.5f, 0.0f, {0, 0}, {1, 1, 0, 0}}, b = a;
+        b.lights = 1.0f;
+        check(cg::levelBlockDiffers(a, b), "a moved local lights setting is a change");
     }
     check(cg::kLiveInputCount == 7 && cg::kLiveInputs[6].isPosition && cg::kLiveInputs[1].isUint, "the signature table has the game's seven inputs");
     for (size_t i = 0; i < cg::kLiveInputCount; ++i) check(cg::kLiveInputs[i].reg == i, "the game's inputs sit in registers 0 to 6 in order");
@@ -185,6 +192,17 @@ static uint16_t floatToHalf(float f) {
 
 enum Variant { kIntact = 0, kIce = 1, kCondensation = 2 };
 
+// One local light, as the rig writes its records into t2 (the layout docs\cockpit-glass-legacy-port.md, "Station lights", read from the game's shaders).
+struct RigLight {
+    float pos[3] = {0, 0, 0};
+    float radius = 10.0f, intensity = 1000.0f;
+    uint32_t colour = 0x3FFFFFFFu;   // 10:10:10, all full
+    uint32_t direction = 2;          // a spot's: axis 2, positive, the others 0: straight along +z
+    float cosOuter = 0.5f, cosInner = 1.0f;
+    float sourceRadius = 0.0f;       // a spot's is a float; a point's is written as a half (the rig's points use 0)
+    uint16_t exponentHalf = 0x3C00, scaleHalf = 0x3C00;   // 1.0 and 1.0
+};
+
 struct Case {
     Variant variant = kIntact;
     bool streaks = true;      // the streak texture bound at t12 (its texel is 1, so the dirt texture reads the legacy max, 0.09)
@@ -203,6 +221,8 @@ struct Case {
     bool probe = false;
     float probeColour[3] = {0, 0, 0};
     bool crack = false;   // the crack texture's alpha is full and its normal flat, and the crack colour is 0.3 grey
+    float lights = 0;     // the block's y: 0 none, 1 spots, 2 spots and points
+    std::vector<RigLight> spots, points;   // in the first cluster's lists, ids in order
 };
 
 struct Pixel { float r, g, b, a; };
@@ -248,6 +268,8 @@ public:
         setu(228, 0, c.tilesX); setu(228, 1, c.tilesY); setu(228, 2, 1); setu(228, 3, c.tile);   // the tile grid (one column and row by default), one slice, the tile size in pixels
         setu(245, 1, c.sunOn ? 1 : 0);
         setu(253, 1, 0); setu(253, 2, 1024);   // probe volumes at byte 0 of t2, their headers at byte 1024
+        setu(250, 2, 2048); setu(250, 3, 3072);   // the spots' two records
+        setu(249, 2, 4096); setu(249, 3, 4608);   // the points' two records
         frame[261] = {{0.2f, 0.001f, 0, 0}};   // the moment shadow's light-bleed cutoff and bias
         frame[277] = {{1, 0, 0, 0}}; frame[278] = {{0, 1, 0, 0}}; frame[279] = {{0, 0, 1, 0}};   // the camera basis: identity, so lighting space is view space
         frame[297] = {{4, 4, 0.25f, 0.25f}};
@@ -266,7 +288,34 @@ public:
         material[15] = {{1, 1, 0, 0}};
         material[17] = {{0, 0, 0.5f, 0}};   // crack threshold 0.5
         // t0: the cluster record 0 (count at +28, probe list at +2212), t1: the sun, t2: the probe volume and header.
-        std::vector<uint32_t> lists(16384 / 4, 0), sun(48 / 4, 0), records(2048 / 4, 0);
+        std::vector<uint32_t> lists(16384 / 4, 0), sun(48 / 4, 0), records(8192 / 4, 0);
+        const auto putf = [&](size_t at, float v) { std::memcpy(&records[at / 4], &v, 4); };
+        lists[4 / 4] = static_cast<uint32_t>(c.spots.size());
+        for (size_t i = 0; i < c.spots.size(); ++i) {
+            const RigLight& l = c.spots[i];
+            lists[(548 + i * 4) / 4] = static_cast<uint32_t>(i);
+            const size_t a = 2048 + (i << 5), b = 3072 + (i << 5);
+            for (int k = 0; k < 3; ++k) putf(a + k * 4, l.pos[k]);
+            records[(a + 12) / 4] = l.direction;
+            putf(a + 24, l.radius);
+            putf(b, l.intensity);
+            records[(b + 4) / 4] = l.colour;
+            putf(b + 8, l.sourceRadius);
+            records[(b + 12) / 4] = static_cast<uint32_t>(l.cosOuter * 65535.0f + 0.5f) | (static_cast<uint32_t>(l.cosInner * 65535.0f + 0.5f) << 16);
+            records[(b + 16) / 4] = static_cast<uint32_t>(l.exponentHalf) | (static_cast<uint32_t>(l.scaleHalf) << 16);
+        }
+        lists[0] = static_cast<uint32_t>(c.points.size());
+        for (size_t i = 0; i < c.points.size(); ++i) {
+            const RigLight& l = c.points[i];
+            lists[(36 + i * 4) / 4] = static_cast<uint32_t>(i);
+            const size_t a = 4096 + (i << 4), b = 4608 + (i << 4);
+            for (int k = 0; k < 3; ++k) putf(a + k * 4, l.pos[k]);
+            putf(a + 12, l.radius);
+            putf(b, l.intensity);
+            records[(b + 4) / 4] = l.colour;
+            records[(b + 8) / 4] = static_cast<uint32_t>(l.scaleHalf) << 16;   // source radius half 0
+            records[(b + 12) / 4] = 0xFFFFFFFFu;   // no shadow
+        }
         if (c.probe) {
             const uint32_t base = c.probeCluster * 2372u;   // the cluster's record in t0
             lists[(base + 28) / 4] = 1;
@@ -285,7 +334,7 @@ public:
         Float4 vsv[5] = {{{c.masks[0], c.masks[1], c.masks[2], c.masks[3]}}, {{c.normal[0], c.normal[1], c.normal[2], 0}}, {{c.position[0], c.position[1], c.position[2], 0}},
                          {{c.tangent[0], c.tangent[1], c.tangent[2], 0}}, {{0.5f, 0.5f, 0, 0}}};
         ComPtr<ID3D11Buffer> vcb = constantBuffer(vsv, sizeof vsv);
-        ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 16384), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 2048);
+        ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 16384), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 8192);
         ComPtr<ID3D11ShaderResourceView> t3 = cubeArray(c.probeColour), t5 = moments(c.occluder);
         auto* ctx = rig.ctx.Get();
         const float clear[4] = {-1, -1, -1, -1};
@@ -301,7 +350,7 @@ public:
         ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
         ctx->PSSetConstantBuffers(1, 2, cbs);
         // The block is cbuffer Level's two registers, 32 bytes: a smaller one would read zeros past its end (the pixel map would be a scale of 0).
-        cg::LevelBlock levelData{c.dirtLevel, {0, 0, 0}, {c.pixelMap[0], c.pixelMap[1], c.pixelMap[2], c.pixelMap[3]}};
+        cg::LevelBlock levelData{c.dirtLevel, c.lights, {0, 0}, {c.pixelMap[0], c.pixelMap[1], c.pixelMap[2], c.pixelMap[3]}};
         ComPtr<ID3D11Buffer> levelCb = constantBuffer(&levelData, sizeof levelData);
         ID3D11Buffer* level = c.levelBound ? levelCb.Get() : nullptr;
         ctx->PSSetConstantBuffers(cg::kLevelSlot, 1, &level);
@@ -697,6 +746,97 @@ static void testShader() {
     Case none;   // no mask at all
     const Pixel zero = canopy.draw(none);
     check(zero.r == 0 && zero.g == 0 && zero.b == 0 && closeTo(zero.a, kBaseAlpha, 0.01f), "no mask draws the legacy alpha base and no colour");
+
+    // The local lights (experimental.cockpit_glass_lights). The pixel at (0, 0, 5) with the lit normal (0, 0, -1), and the game's falloff: a light of radius 10 at distance 5 has k^2 / d^2 = 0.03515625. So intensity
+    // 1000 / that is a light of 1000 at the glass, and it must draw exactly what a sun of 1000 from the same direction draws: same Lambert, same 1/pi, same glare.
+    {
+        const float atFive = 0.9375f * 0.9375f / 25.0f;
+        Case lit;
+        lit.masks[1] = liveMask;
+        lit.sunColour[0] = lit.sunColour[1] = lit.sunColour[2] = sun;
+        lit.sunDir[0] = 0; lit.sunDir[1] = 0; lit.sunDir[2] = 1.0f;
+        const Pixel sunLit = canopy.draw(lit);
+        check(sunLit.r > 0.01f, "the reference: a sun from the camera's side lights the dirt");
+        Case base;
+        base.masks[1] = liveMask;
+        base.sunOn = false;
+        RigLight one;
+        one.intensity = sun / atFive;
+        Case spot = base;
+        spot.spots.push_back(one);
+        spot.lights = 1;
+        const Pixel spotLit = canopy.draw(spot);
+        std::printf("a spot of 1000 at the glass: got %g, a sun of 1000 %g\n", spotLit.r, sunLit.r);
+        check(closeTo(spotLit.r, sunLit.r, 0.02f) && closeTo(spotLit.b, sunLit.b, 0.02f), "a spot draws what a sun of the same strength and direction draws");
+        check(closeTo(spotLit.a, kBaseAlpha, 0.01f), "a local light does not change the alpha");
+        Case off = spot;
+        off.lights = 0;
+        check(canopy.draw(off).r == 0, "with the key off the same lists reach nothing");
+        off = spot;
+        off.levelBound = false;
+        check(canopy.draw(off).r == 0, "with the block unbound nothing is lit");
+        Case outOfRange = spot;
+        outOfRange.spots[0].radius = 4.0f;
+        check(canopy.draw(outOfRange).r == 0, "a pixel past the light's radius is not lit");
+        Case src = spot;
+        src.spots[0].sourceRadius = 10.0f;
+        check(closeTo(canopy.draw(src).r, sunLit.r * 0.25f, 0.02f), "a source radius past the distance holds the falloff at 1 / source^2");
+        Case side = spot;
+        side.spots[0].direction = 0;   // axis 0: along +x, so the pixel is outside the cone
+        check(canopy.draw(side).r == 0, "a pixel outside the cone is not lit");
+        Case tilt = spot;
+        tilt.spots[0].direction = (8192u << 17) | 2u;   // axis 2, the first field 0.5: (0.5, 0, 1) normalised, 0.894 along the pixel
+        tilt.spots[0].exponentHalf = 0x4000;            // 2.0
+        const float coneTilt = (0.894427f - 0.5f) / 0.5f;
+        check(closeTo(canopy.draw(tilt).r, sunLit.r * coneTilt * coneTilt, 0.02f), "the direction's first field and the cone's exponent, as the game's shader unpacks them");
+        Case scaled = spot;
+        scaled.spots[0].scaleHalf = 0x3800;   // 0.5
+        check(closeTo(canopy.draw(scaled).r, sunLit.r * 0.5f, 0.02f), "the record's scale");
+        Case red = spot;
+        red.spots[0].colour = 1023u;
+        const Pixel redLit = canopy.draw(red);
+        check(closeTo(redLit.r, sunLit.r, 0.02f) && redLit.g == 0 && redLit.b == 0, "the colour's first ten bits are red");
+        // The second axis: from (0, -3, 2) the pixel lies along (0, 0.707, 0.707), a spot on axis 1 points along +y: 0.707 along it, so the cone is 0.414; the Lambert is 0.707. On axis 0 it is outside the cone.
+        Case axis1 = spot;
+        axis1.spots[0].pos[1] = -3.0f; axis1.spots[0].pos[2] = 2.0f;
+        axis1.spots[0].direction = 1;
+        const float x18 = 18.0f / 100.0f, k18 = 1.0f - x18 * x18;
+        const float axisWant = sunLit.r * (k18 * k18 / 18.0f) / atFive * ((0.707107f - 0.5f) / 0.5f) * 0.707107f;
+        check(closeTo(canopy.draw(axis1).r, axisWant, 0.03f), "a spot's dropped axis 1 is its y");
+        axis1.spots[0].direction = 0;
+        check(canopy.draw(axis1).r == 0, "...and axis 0 its x");
+        // The glare: a light straight ahead of the pixel has no Lambert on this normal, and only the smudge shows it, as the sun's.
+        Case smudgeSun;
+        smudgeSun.masks[2] = 0.5f;
+        smudgeSun.sunColour[0] = smudgeSun.sunColour[1] = smudgeSun.sunColour[2] = sun;
+        smudgeSun.sunDir[0] = 0; smudgeSun.sunDir[1] = 0; smudgeSun.sunDir[2] = -1.0f;
+        const Pixel glareSun = canopy.draw(smudgeSun);
+        check(glareSun.r > 0, "the reference: a sun straight ahead shows in the smudge");
+        Case smudge;
+        smudge.masks[2] = 0.5f;
+        smudge.sunOn = false;
+        smudge.lights = 1;
+        RigLight ahead = one;
+        ahead.pos[2] = 10.0f;
+        ahead.direction = 2u | 4u;   // axis 2, negative: back along the view
+        smudge.spots.push_back(ahead);
+        check(closeTo(canopy.draw(smudge).r, glareSun.r, 0.02f), "a light straight ahead draws the sun's glare");
+        // Points: spots only leaves them out.
+        Case point = base;
+        point.points.push_back(one);
+        point.lights = 1;
+        check(canopy.draw(point).r == 0, "`spots` leaves the point lights out");
+        point.lights = 2;
+        check(closeTo(canopy.draw(point).r, sunLit.r, 0.02f), "`all` draws a point light as a sun of the same strength");
+        point.spots.push_back(one);
+        check(closeTo(canopy.draw(point).r, sunLit.r * 2.0f, 0.02f), "`all` adds the spots and the points");
+        // The cap: a cluster can hold 128, the loop stops at 16.
+        Case many = base;
+        many.lights = 2;
+        for (int i = 0; i < 20; ++i) many.spots.push_back(one);
+        for (int i = 0; i < 20; ++i) many.points.push_back(one);
+        check(closeTo(canopy.draw(many).r, sunLit.r * 32.0f, 0.02f), "16 spots and 16 points at most reach a pixel");
+    }
 
     // Dirt under the sun: the dirt mask from live's mask, the streak texel 1 (so 0.09), Lambert on the legacy normal over pi, divided by the alpha written.
     Case dirt;

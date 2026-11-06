@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's point and spot lists hold the pad's lights at the glass's depths, FLOWN on `ea6efed8`; next is an unshadowed light loop behind a temporary key ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's point and spot lists hold the pad's lights at the glass's depths, FLOWN on `ea6efed8`; an unshadowed light loop is built behind the temporary key `experimental.cockpit_glass_lights`, NOT FLOWN ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -1071,4 +1071,9 @@ the positions, radii and colours are plausible, so the layout stands for points 
 - Most warm and big spots carry a shadow index, and the shadow atlas is not bound to the canopy. `count+12` (18 lights) and `count+24` (8 or 9, in every cluster) are not identified. Which spot is the lamp Sean
   pointed at is not known: this build did not print a spot's direction.
 
-The next build is an unshadowed loop over the points and spots behind a temporary key.
+The loop (2026-11-06, branch `claude/glass-local-lights`, NOT FLOWN). Temporary key `experimental.cockpit_glass_lights`, live, flat and VR: `off` (the default), `spots`, or `all` (spots and points).
+It goes in the shader's b13 block, y of register 0. Each light is the game's falloff and cone, then Lambert and glare with the same 1/pi as the sun in `main`, so the rig holds a light of 1000 at the glass equal to a
+sun of 1000 from that direction. Up to 16 spots and 16 points a pixel; no shadow or cookie. Remove the key once the choice is made: ship the winner as behaviour.
+
+Unproven: that 1/pi fits (the game's own spot loop in `26EA073903FD8909` is specular only, so it does not show the diffuse scale); whether no shadows looks right; the cost, from the `EDVR GPU census` with the key
+`off` against `spots` and `all` at the same spot. The flight compares them on one pad.
