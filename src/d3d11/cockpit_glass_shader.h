@@ -36,7 +36,7 @@ constexpr char kCockpitGlassLegacyPsHlsl[] = R"HLSL(
 cbuffer Frame : register(b1) { float4 cb1[327]; }
 cbuffer Material : register(b2) { float4 cb2[18]; }
 // EDVR's own, bound by the swap: dirtLevel.x is the dirt level (visual.cockpit_glass_dirt / 100, 1 = the look as shipped). Unbound it reads 0, which is no dirt. dirtLevel.y is which local lights reach the
-// dirt (visual.cockpit_glass_lights): 0 none, 1 spots, 2 spots and points.
+// dirt (visual.cockpit_glass_lights): 0 none, 1 the spots.
 // pixelMap maps the pixel this runs at onto the game's: game = pixel * pixelMap.xy + pixelMap.zw. The scene draw is the identity (1, 1, 0, 0). In the weapons layer SV_Position is in the layer's
 // pixels, and the light-cluster lookup is by the game's (probeAmbient). A scale of 0 (the block unbound, or too small to reach this register) reads as the identity.
 cbuffer Level : register(b13) { float4 dirtLevel; float4 pixelMap; }
@@ -270,9 +270,9 @@ float3 probeAmbient(float3 viewPos, float3 nView, float2 pixel) {
     return acc * cb1[90].z;
 }
 )HLSL" R"HLSL(
-// The local lights (visual.cockpit_glass_lights; docs\cockpit-glass-legacy-port.md, "Station lights"): the game's clustered spot and point lists and records, read as its forward-lit
+// The local lights (visual.cockpit_glass_lights; docs\cockpit-glass-legacy-port.md, "Station lights"): the game's clustered spot list and records, read as its forward-lit
 // shaders read them (26EA073903FD8909), with no shadow or cookie, whose textures the canopy has not bound. The falloff and the cone are the game's. Each light is summed for the Lambert and the glare, with the
-// same 1/pi the sun has in main. A cluster holds up to 128 of each; the loops stop at these.
+// same 1/pi the sun has in main. A cluster holds up to 128; the loop stops at this.
 static const uint kMaxLocalLights = 16;
 // A local light whose strength times its brightest colour channel is under this is skipped: the sun is about 300 to 2,400 in these units, and the dirt's albedo is small.
 static const float kMinLocalLight = 1.0;
@@ -299,13 +299,11 @@ float3 spotDirection(uint bits) {
 
 void addLocalLight(float3 toLight, float d2, float3 light, float3 nIn, float3 viewDir, float gloss, inout float3 lambert, inout float3 glareSum) {
     float3 L = toLight / sqrt(d2);
-    // TEMPORARY (visual.cockpit_glass_lights_sides): dirtLevel.z above 0.5 lets a local light reach the dirt from either side of the glass.
-    float facing = dot(nIn, L);
-    lambert += (dirtLevel.z > 0.5 ? abs(facing) : saturate(facing)) * light;
+    lambert += saturate(dot(nIn, L)) * light;
     glareSum += pow(saturate(dot(L, viewDir)), gloss) * (gloss + 6.0) * 0.03125 * light;
 }
 
-void localLights(float3 viewPos, float2 pixel, float3 nIn, float gloss, bool points, inout float3 lambert, inout float3 glareSum) {
+void localLights(float3 viewPos, float2 pixel, float3 nIn, float gloss, inout float3 lambert, inout float3 glareSum) {
     uint base = clusterBase(viewPos, pixel);
     float3 viewDir = normalize(viewPos);
     uint spots = min(ClusterLists.Load(base + 4u), kMaxLocalLights);
@@ -331,20 +329,6 @@ void localLights(float3 viewPos, float2 pixel, float3 nIn, float gloss, bool poi
         if (cone <= 0.0) continue;
         float strength = asfloat(rb.x) * falloff * pow(cone, exponent) * scale;
         if (strength * peak < kMinLocalLight) continue;
-        float3 colour = float3(rb.y & 1023u, (rb.y >> 10) & 1023u, (rb.y >> 20) & 1023u) / 1023.0;
-        addLocalLight(toLight, d2, colour * strength, nIn, viewDir, gloss, lambert, glareSum);
-    }
-    if (!points) return;
-    uint count = min(ClusterLists.Load(base), kMaxLocalLights);
-    [loop] for (uint p = 0; p < count; ++p) {
-        uint id = ClusterLists.Load(base + 36u + p * 4u) << 4;
-        float4 ra = asfloat(ProbeRecords.Load4(id + asuint(cb1[249].z)));
-        float3 toLight = ra.xyz - viewPos;
-        float d2 = dot(toLight, toLight);
-        if (d2 > ra.w * ra.w || d2 < 0.000001) continue;
-        uint4 rb = ProbeRecords.Load4(id + asuint(cb1[249].w));
-        float strength = asfloat(rb.x) * localFalloff(d2, ra.w, f16tof32(rb.z & 0xFFFFu)) * f16tof32(rb.z >> 16);
-        if (strength * maxColour(rb.y) < kMinLocalLight) continue;
         float3 colour = float3(rb.y & 1023u, (rb.y >> 10) & 1023u, (rb.y >> 20) & 1023u) / 1023.0;
         addLocalLight(toLight, d2, colour * strength, nIn, viewDir, gloss, lambert, glareSum);
     }
@@ -419,7 +403,7 @@ float4 main(PsIn i) : SV_Target {
     // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
     float3 direct = shadow * kInvPi * lightColour;
     float3 localLambert = 0, localGlare = 0;
-    if (dirtLevel.y > 0.5) localLights(pv, gamePixel, nIn, gloss, dirtLevel.y > 1.5, localLambert, localGlare);
+    if (dirtLevel.y > 0.5) localLights(pv, gamePixel, nIn, gloss, localLambert, localGlare);
     float3 radiance = (ndl * direct + ambient + kInvPi * localLambert) * albedo + specAmt * (glare * direct + kInvPi * localGlare);
     if (any(isnan(radiance))) radiance = 0;
 #if EDVR_OVERLAY

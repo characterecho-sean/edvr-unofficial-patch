@@ -607,18 +607,15 @@ static void build4WiringTests() {
 }
 
 static void ruleTests() {
-    // visual.cockpit_glass_resolution: the key's reading and the decision of the legacy canopy's route (ui_layer_math.h).
-    check(uiLegacyGlassKeyHalf("half") && !uiLegacyGlassKeyHalf("full") && !uiLegacyGlassKeyHalf("off") && !uiLegacyGlassKeyHalf("") && !uiLegacyGlassKeyHalf("Half") && !uiLegacyGlassKeyHalf(nullptr),
-          "the key reads half only as \"half\"; anything else is full");
-    check(uiLegacyGlassHalfRes(true, 4032, 4034, 2016, 2017), "VR at 50 percent: the layer is twice the target on both axes, so the half route");
-    check(!uiLegacyGlassHalfRes(false, 4032, 4034, 2016, 2017), "the key full never takes the half route");
-    check(!uiLegacyGlassHalfRes(true, 3840, 2160, 3840, 2160), "flat at 1:1 keeps the full route with the key on");
-    check(uiLegacyGlassHalfRes(true, 3024, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(true, 3023, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(true, 3024, 3023, 2016, 2016),
+    // The decision of the legacy canopy's route (ui_layer_math.h).
+    check(uiLegacyGlassHalfRes(4032, 4034, 2016, 2017), "VR at 50 percent: the layer is twice the target on both axes, so the half route");
+    check(!uiLegacyGlassHalfRes(3840, 2160, 3840, 2160), "flat at 1:1 keeps the full route");
+    check(uiLegacyGlassHalfRes(3024, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(3023, 3024, 2016, 2016) && !uiLegacyGlassHalfRes(3024, 3023, 2016, 2016),
           "the threshold is 1.5 times the target on BOTH axes, inclusive: one pixel short on either axis is the full route");
-    check(!uiLegacyGlassHalfRes(true, 4032, 2016, 2016, 2016) && !uiLegacyGlassHalfRes(true, 2016, 4032, 2016, 2016), "twice on one axis and 1:1 on the other is the full route");
-    check(!uiLegacyGlassHalfRes(true, 0, 4034, 2016, 2017) && !uiLegacyGlassHalfRes(true, 4032, 4034, 0, 2017) && !uiLegacyGlassHalfRes(true, 4032, 0, 2016, 2017) && !uiLegacyGlassHalfRes(true, 4032, 4034, 2016, 0),
+    check(!uiLegacyGlassHalfRes(4032, 2016, 2016, 2016) && !uiLegacyGlassHalfRes(2016, 4032, 2016, 2016), "twice on one axis and 1:1 on the other is the full route");
+    check(!uiLegacyGlassHalfRes(0, 4034, 2016, 2017) && !uiLegacyGlassHalfRes(4032, 4034, 0, 2017) && !uiLegacyGlassHalfRes(4032, 0, 2016, 2017) && !uiLegacyGlassHalfRes(4032, 4034, 2016, 0),
           "a zero size on any side is the full route");
-    check(uiLegacyGlassHalfRes(true, 0xFFFFFFFFu, 0xFFFFFFFFu, 1, 1), "the arithmetic does not overflow on large layers");
+    check(uiLegacyGlassHalfRes(0xFFFFFFFFu, 0xFFFFFFFFu, 1, 1), "the arithmetic does not overflow on large layers");
     check(kWeaponPairCount == 3, "three weapons-fire pairs");
     for (size_t i = 0; i < kWeaponPairCount; ++i) {
         const WeaponPair& p = kWeaponPairs[i];

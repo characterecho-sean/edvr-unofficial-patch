@@ -75,26 +75,18 @@ constexpr unsigned kLevelSlot = 13;
 // identity (1, 1, 0, 0) for every scene draw. While the weapons layer takes the canopy, SV_Position is in the layer's pixels, and the shader's light-cluster lookup (the probe ambient) needs
 // the game's, so the layer sets the map from ui_holo_remap::params (the target's size over the layer's, and the frame's jitter in the game's pixels) for that draw and clears it after.
 struct LevelBlock {
-    float dirt, lights, sides, pad;   // register 0: x the dirt level, y which local lights reach the dirt (lightsLevelOf), z whether they reach it from both sides (sidesLevelOf)
+    float dirt, lights, pad[2];   // register 0: x the dirt level, y whether local lights reach the dirt (lightsLevelOf)
     float map[4];                 // register 1: the pixel map
 };
 static_assert(sizeof(LevelBlock) == 32, "two float4 registers, as cbuffer Level declares them");
 inline void identityLevelMap(LevelBlock& b) { b.map[0] = b.map[1] = 1.0f; b.map[2] = b.map[3] = 0.0f; }
 inline bool levelBlockDiffers(const LevelBlock& a, const LevelBlock& b) {
-    return a.dirt != b.dirt || a.lights != b.lights || a.sides != b.sides || a.map[0] != b.map[0] || a.map[1] != b.map[1] || a.map[2] != b.map[2] || a.map[3] != b.map[3];
+    return a.dirt != b.dirt || a.lights != b.lights || a.map[0] != b.map[0] || a.map[1] != b.map[1] || a.map[2] != b.map[2] || a.map[3] != b.map[3];
 }
 
-// visual.cockpit_glass_lights (docs\cockpit-glass-legacy-port.md, "Station lights"): which of the game's local lights reach the dirt. off, station (the spot lights), or all (those and the point
-// lights, which are mostly the cockpit's own). Anything else reads as off. The value is register 0's y: the shader tests 0.5 and 1.5.
-inline float lightsLevelOf(const char* v) {
-    if (!v) return 0.0f;
-    if (std::strcmp(v, "station") == 0) return 1.0f;
-    if (std::strcmp(v, "all") == 0) return 2.0f;
-    return 0.0f;
-}
-
-// TEMPORARY (visual.cockpit_glass_lights_sides, docs\cockpit-glass-legacy-port.md, "Station lights"): one (a local light reaches the dirt from the lit side only, as the sun does) or both. Anything else is one.
-inline float sidesLevelOf(const char* v) { return v && std::strcmp(v, "both") == 0 ? 1.0f : 0.0f; }
+// visual.cockpit_glass_lights (docs\cockpit-glass-legacy-port.md, "Station lights"): whether the station's spot lights reach the dirt. off or station; anything else reads as off. The value is
+// register 0's y: the shader tests 0.5.
+inline float lightsLevelOf(const char* v) { return v && std::strcmp(v, "station") == 0 ? 1.0f : 0.0f; }
 
 // Whether the Legacy glass dirt row is dimmed (and ignores steps and typing): the dirt is only drawn by the legacy shader.
 inline bool dirtRowDim(Look look) { return look != Look::Legacy; }

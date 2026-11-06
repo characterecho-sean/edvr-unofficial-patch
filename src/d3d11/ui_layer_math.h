@@ -765,16 +765,10 @@ inline bool uiLayerFamilyUsesWeaponsLayer(UiLayerFamily f) {
     return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark || f == UiLayerFamily::kLegacyGlass;
 }
 
-// visual.cockpit_glass_resolution (TEMPORARY): "half" asks for the legacy canopy to be drawn at the draw target's size and added into the weapons layer; anything else is "full",
-// the draw into the weapons layer at its own size.
-inline bool uiLegacyGlassKeyHalf(const char* value) {
-    return value && std::strcmp(value, "half") == 0;
-}
-
-// Whether the legacy canopy's draw takes the half-resolution route: the key asks for it, and the eye's weapons layer is at least 1.5 times the draw's target on BOTH axes (2 * layer >= 3 *
-// target, in integers). At 1:1 (flat at its native size) the route would only add a pass, so the draw keeps the full route and flat behaves as it did.
-inline bool uiLegacyGlassHalfRes(bool keyHalf, uint32_t layerW, uint32_t layerH, uint32_t targetW, uint32_t targetH) {
-    if (!keyHalf || !layerW || !layerH || !targetW || !targetH) return false;
+// Whether the legacy canopy's draw takes the half-resolution route, drawn at the draw target's size and added into the weapons layer: the eye's weapons layer is at least 1.5 times the draw's target on
+// BOTH axes (2 * layer >= 3 * target, in integers). At 1:1 (flat at its native size) the route would only add a pass, so the draw keeps the full route and flat behaves as it did.
+inline bool uiLegacyGlassHalfRes(uint32_t layerW, uint32_t layerH, uint32_t targetW, uint32_t targetH) {
+    if (!layerW || !layerH || !targetW || !targetH) return false;
     return 2ull * layerW >= 3ull * targetW && 2ull * layerH >= 3ull * targetH;
 }
 

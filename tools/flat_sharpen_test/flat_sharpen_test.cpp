@@ -496,13 +496,12 @@ void panelTable(const std::string& root, const std::string& gen) {
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
         check(same, "the Performance tab has the flat page's six rows in their order (HUD Anti-Aliasing directly under UI quality)");
     }
-    check(kFlatVisualRowCount == 8 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
+    check(kFlatVisualRowCount == 6 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
               std::strcmp(kFlatVisualRows[1].section, "visual") == 0 && std::strcmp(kFlatVisualRows[1].key, "star_glow") == 0 &&
               std::strcmp(kFlatVisualRows[2].section, "visual") == 0 && std::strcmp(kFlatVisualRows[2].key, "cockpit_glass") == 0 &&
               std::strcmp(kFlatVisualRows[3].section, "visual") == 0 && std::strcmp(kFlatVisualRows[3].key, "cockpit_glass_dirt") == 0 &&
               std::strcmp(kFlatVisualRows[4].section, "visual") == 0 && std::strcmp(kFlatVisualRows[4].key, "cockpit_glass_lights") == 0 &&
-              std::strcmp(kFlatVisualRows[5].key, "cockpit_glass_resolution") == 0 && std::strcmp(kFlatVisualRows[6].key, "cockpit_glass_lights_sides") == 0 &&
-              std::strcmp(kFlatVisualRows[7].section, "fix") == 0 && std::strcmp(kFlatVisualRows[7].key, "particle_billboard") == 0 &&
+              std::strcmp(kFlatVisualRows[5].section, "fix") == 0 && std::strcmp(kFlatVisualRows[5].key, "particle_billboard") == 0 &&
               flatVisualHasRow("visual", "star_glow") && flatVisualHasRow("visual", "cockpit_glass") && flatVisualHasRow("visual", "cockpit_glass_dirt") &&
               flatVisualHasRow("fix", "particle_billboard") && !flatVisualHasRow("fix", "temporal_aa") && flatProfileReadsKey("fix.particle_billboard") &&
               flatProfileReadsKey("visual.cockpit_glass_dirt") && flatVisualHasRow("visual", "cockpit_glass_lights") && flatProfileReadsKey("visual.cockpit_glass_lights"),

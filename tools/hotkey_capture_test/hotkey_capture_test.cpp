@@ -2228,8 +2228,6 @@ void testVisualPage() {
         {"visual", "cockpit_glass", "The cockpit"},
         {"visual", "cockpit_glass_dirt", "The cockpit"},
         {"visual", "cockpit_glass_lights", "The cockpit"},
-        {"visual", "cockpit_glass_resolution", "The cockpit"},
-        {"visual", "cockpit_glass_lights_sides", "The cockpit"},
     };
     constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
     int at = 0, world = -1;
@@ -2246,7 +2244,7 @@ void testVisualPage() {
         if (strcmp(kMenuRows[i].key, "world_scale") == 0) world = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie, Star glow, Cockpit glass, Legacy glass dirt, Legacy glass lights and its two test rows, Fix tier, in edvr.ini order under their headings (the desktop window rows moved to their own page, 2026-10-28)");
+    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie, Star glow, Cockpit glass, Legacy glass dirt and Legacy glass lights, Fix tier, in edvr.ini order under their headings (the desktop window rows moved to their own page, 2026-10-28)");
     for (int i = 0; i < kCount; ++i) {
         const bool moved = strcmp(kMenuRows[i].key, "panel_curvature") == 0 || strcmp(kMenuRows[i].key, "intro_backdrop") == 0 || strcmp(kMenuRows[i].key, "intro_video") == 0;
         if (moved && strcmp(kMenuRows[i].section, "advanced") != 0) checkf(strcmp(kMenuRows[i].page, "fixes") != 0, "%s.%s is no longer on the Fixes page", kMenuRows[i].section, kMenuRows[i].key);
