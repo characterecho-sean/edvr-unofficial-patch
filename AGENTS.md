@@ -250,6 +250,9 @@ minutes after a flight finally reproduced the effect being chased.
 - After editing, re-read the changed region for the things that have bitten
   here: declaration order, a duplicated census or log string, a shader
   entry-point name collision that would silently disable a new instrument.
+- **Do not name anything `near` or `far` in C++.** `windows.h` defines both
+  as empty macros, so `Case far = spot;` compiles as `Case = spot;` and the
+  error does not name the cause. Write `nearZ`, `farPlane`, `outOfRange`.
 - **Trace a new instrument end to end before flying it.** A summary path
   that set its finished flag before calling the report was dead on
   arrival; a fix that returned early shadowed the probe meant to measure
