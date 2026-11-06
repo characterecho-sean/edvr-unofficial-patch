@@ -2113,6 +2113,24 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         const bool beside = bodyRow >= 0 && hudRow == bodyRow + 1 && strcmp(kMenuRows[hudRow].page, kMenuRows[bodyRow].page) == 0 && strcmp(kMenuRows[hudRow].group, kMenuRows[bodyRow].group) == 0;
         check(found == 1 && shaped && beside, "HUD stays with view (F220, TEMPORARY) is one [experimental] on/off row right after Body follows view, on its page and under its heading: live, shipped on");
     }
+    // F222 (TEMPORARY): "Steady body in turns" is an [experimental] on/off choice right after "HUD stays with view" (F220), on the same page and under the same heading, live, shipped on.
+    {
+        int hudRow = -1, turnRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") != 0) continue;
+            if (strcmp(d.key, "native_on_foot_hud_stays_with_view") == 0) hudRow = i;
+            if (strcmp(d.key, "native_on_foot_steady_body_in_turns") == 0) {
+                turnRow = i;
+                ++found;
+                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "Steady body in turns") == 0 && strcmp(d.choices, "on|off") == 0 && strcmp(d.shipped, "on") == 0 &&
+                         d.applies == 1;
+            }
+        }
+        const bool beside = hudRow >= 0 && turnRow == hudRow + 1 && strcmp(kMenuRows[turnRow].page, kMenuRows[hudRow].page) == 0 && strcmp(kMenuRows[turnRow].group, kMenuRows[hudRow].group) == 0;
+        check(found == 1 && shaped && beside, "Steady body in turns (F222, TEMPORARY) is one [experimental] on/off row right after HUD stays with view, on its page and under its heading: live, shipped on");
+    }
     // F170 (TEMPORARY): "Crouched ADS torso square" is the thirteenth number row of the developer tier's native on foot rows (the twelfth before F181 put "Hip elbow swivel max" before it, the tenth before F180 put the two rows of its own between, the eighth before F178 put the two "Standing ADS body" rows between, the seventh before
     // F171 put "Crouched ADS body left / right" before that), right after the hip elbow swivel row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed,
     // live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It carries no old value over.

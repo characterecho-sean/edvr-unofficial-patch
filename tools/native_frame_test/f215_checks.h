@@ -479,7 +479,7 @@ void run215(Check&& check) {
         check(has(cpp, "pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid, si.tS)") && has(cpp, "fi.rawEyeY = pc.rawEyeY;") &&
                   has(cpp, "g_f138.noteRunning(si.tS, g_f138HeldM, pc.rawEyeY, N0[1]") && !has(cpp, "pc.rawEyeY - pc.f215BodyY"),
               "F217: F138 sees the internal (level) camera in its stance, its running reference and its step, with no second subtraction");
-        check(has(cpp, "nofoot::f215::shiftWorldToModel(invM, pc.f215BodyY);") && has(cpp, "nofoot::f215::shiftWorldToModel(G.g, yUsed);") && has(cpp, "bi.eyeY = pc.eyeYSelected + pc.f215BodyY;") &&
+        check(has(cpp, "nofoot::f215::shiftWorldToModel(invM, pc.f215BodyY);") && has(cpp, "nofoot::f215::shiftWorldToModel(G.g, yUsed);") && has(cpp, "bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;") &&
                   !has(cpp, "pc.f215BodyY = bo.y;") && has(cpp, "nofoot::f215::settleHeld(bo.state)) si.valid = false;"),
               "F217: the world-to-model matrix and G enter less the shift in force, the step reads the true camera, its result takes effect next call, and a held state takes no settle");
         check(has(cpp, "r.eye_y_selected = pc.eyeYSelected + pc.f215BodyY;") && has(cpp, "r.raw_eye_y = pc.rawEyeY + pc.f215BodyY;") && has(cpp, "r.e[1] += pc.f215BodyY;"), "F217: the recording keeps the true camera");

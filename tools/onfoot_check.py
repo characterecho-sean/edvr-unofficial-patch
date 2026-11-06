@@ -153,6 +153,17 @@ F218_MAX_MPS = 12.0         # a speed over this is the root jumping (a ship, a t
 F218_MIN_CLASS_S = 1.0      # a class with less left-arm writing than this is left out
 F218_SPINE_FLIP = 0.5       # a step of the spine weight over this is a flip
 F218_FINDING_MIN_S = 2.0    # F218 finding: an item with this much left-arm writing at speed ...
+F222_RATE_DPS = 100.0        # F222 section: rows with the body turning at this rate (deg/s) or more ...
+F222_MIN_ROWS = 40          # ... an item with this many is read
+F222_FINDING_ROWS = 100     # finding heading_follows_yaw_step: this many rows ...
+F222_FINDING_SLOPE = -0.5   # ... and the heading's residual on the yaw step's residual under this slope
+F222_RATE_SPAN_S = 0.15     # the body's yaw rate is taken over the last this many seconds
+F223_JUMP_M = 0.10          # F223 section: the rule's limits (src/d3d11/native_on_foot_f223.h): a change of the camera in the model this large ...
+F223_CAMERA_SHARE = 0.5     # ... with the camera in the world moving less than this share of it ...
+F223_MAX_GAP_S = 0.1        # ... between frames this close
+F223_GROUP_S = 0.15         # calls the rule would take closer than this are one event
+F223_LOOK_CALLS = 6         # the chest and the elbow are read over this many calls from the event
+F223_CRUSH_M = 0.25         # finding root_jump_crushed: the final chest falls more than this
 F221_STRAFE_MPS = 1.0         # F221: a strafe: the root moving this fast or more along the body's right (or left) ...
 F221_STRAFE_SPAN_S = 0.2    # ... measured over the last this many seconds
 F221_OVER_HAND_CM = 3.0     # F221 finding: the left elbow this far over the hand, at the hip ...
@@ -197,8 +208,9 @@ REQ_F216 = {'align': ['bob_seated', 'bob_w'], 'p1': ['sub_bob', 'bob_w']}   # re
 # recorded from F218 and F219 on; older recordings lack them, and the F218/F219 section says so and gives no finding for the figures that need them (the step figures need only the first group)
 REQ_F218 = {'pin': ['root', 'item_serial', 'f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'],
             'ik': ['item_serial', 'spine_w', 'l_reach_ratio', 'l_wrote', 'final_l_fore', 'final_chest', 'final_valid', 'l_swivel_limited', 'r_swivel_limited', 'l_swivel_cut_deg', 'r_swivel_cut_deg']}
+REQ_F223 = {'pin': ['f223_pop_m']}   # recorded from F223 on; older recordings lack it and the root jump section says so
 REQ_ALL = {}
-for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216, REQ_F218):
+for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216, REQ_F218, REQ_F223):
     for _k, _v in _d.items():
         REQ_ALL.setdefault(_k, [])
         REQ_ALL[_k] = sorted(set(REQ_ALL[_k]) | set(_v))
@@ -453,6 +465,7 @@ class Analysis:
         self.leak = {}
         self.cannot = []
         self.ik = None
+        self.f222 = self.f223 = None   # the F222 and F223 sections' figures
         self.f215 = self.f216 = self.f218 = None   # the F215, F216 and F218/F219 sections' figures
         self.lever = self.lever_view = self.f214 = None   # the E / view over neck fits on the slope, and the F214 section's figures
 
@@ -1742,6 +1755,157 @@ class Analysis:
                     int(ser[i]), float(np.max(over_cm[i:j + 1])), t_ik[j] - t_ik[i], F221_OVER_HAND_CM, F221_OVER_HAND_MIN_S, pole)))
             i = j + 1
 
+    # -- F222: the turning body's neck target and chest, and the heading against the yaw step ------------------------------------------------------------------------------------
+    SG9 = np.array([-21.0, 14.0, 39.0, 54.0, 59.0, 54.0, 39.0, 14.0, -21.0]) / 231.0
+
+    @staticmethod
+    def f222_resid(x):
+        """x less its quadratic smoothing over 9 calls (the Savitzky-Golay centre weights), along axis 0; the 4 rows at each end are not a number."""
+        x = np.asarray(x, dtype=np.float64)
+        out = np.full(x.shape, np.nan)
+        n = len(x)
+        if n < 9:
+            return out
+        sm = np.zeros((n - 8,) + x.shape[1:])
+        for j in range(9):
+            sm += Analysis.SG9[j] * x[j:j + n - 8]
+        out[4:n - 4] = x[4:n - 4] - sm
+        return out
+
+    def f222_section(self):
+        """Per item with F222_MIN_ROWS or more rows at a body yaw rate of F222_RATE_DPS or more (the pin's fwd about the first up, the rate over F222_RATE_SPAN_S): the neck target's and the final
+        chest's residual about a local quadratic over 9 calls (median and 90th percentile of its size, mm), and the slope of the heading's residual on the yaw step's residual. ik rows take the pin
+        record of the same call (the last pin record at or before). Finding heading_follows_yaw_step: the slope under F222_FINDING_SLOPE with F222_FINDING_ROWS or more rows."""
+        S = self.S
+        self.f222 = None
+        self.say('')
+        self.say('== turning (F222): neck target and chest residual about a local quadratic over 9 calls, by item, with the body turning at %g deg/s or more; key experimental.native_on_foot_steady_body_in_turns is %s' % (
+            F222_RATE_DPS, S.keys.get('experimental.native_on_foot_steady_body_in_turns', 'on')))
+        ik, pin = S.tab('ik'), S.tab('pin')
+        miss = [('ik.' + f) for f in ('final_chest', 'item_serial') if not ik.has(f)] + [('pin.' + f) for f in ('fwd', 'up', 'neck_target', 'heading') if not pin.has(f)]
+        if not len(ik) or not len(pin) or miss:
+            self.say('  cannot evaluate: %s' % (', '.join(miss) if miss else 'no ik or pin records'))
+            return
+        t_ik, t_pin = S.t('ik'), S.t('pin')
+        pi = np.searchsorted(t_pin, t_ik, 'right') - 1
+        have = pi >= 0
+        pi = np.maximum(pi, 0)
+        with np.errstate(all='ignore'):
+            fwd = pin.f('fwd').astype(np.float64)
+            up0 = pin.f('up')[0].astype(np.float64)
+            up0 = up0 / max(float(np.linalg.norm(up0)), 1e-9)
+            ref = np.array([1.0, 0.0, 0.0])
+            e1 = ref - float(np.dot(ref, up0)) * up0
+            if np.linalg.norm(e1) < 0.1:
+                e1 = np.array([0.0, 0.0, 1.0]) - float(up0[2]) * up0
+            e1 = e1 / np.linalg.norm(e1)
+            e2 = np.cross(up0, e1)
+            yaw = np.degrees(np.unwrap(np.arctan2(fwd @ e2, fwd @ e1)))
+            j0 = np.searchsorted(t_pin, t_pin - F222_RATE_SPAN_S, 'left')
+            span = t_pin - t_pin[j0]
+            rate = np.where(span >= 0.5 * F222_RATE_SPAN_S, (yaw - yaw[j0]) / np.maximum(span, 1e-3), np.nan)
+            step = np.zeros(len(yaw))
+            step[1:] = np.diff(yaw)
+            hd = pin.f('heading').astype(np.float64)
+            hdg = np.degrees(np.unwrap(np.arctan2(hd[:, 0], hd[:, 1])))
+            neck = pin.f('neck_target').astype(np.float64)[pi]
+            chest = ik.f('final_chest').astype(np.float64)
+            r_neck = np.linalg.norm(self.f222_resid(neck), axis=1) * 1000.0
+            r_chest = np.linalg.norm(self.f222_resid(chest), axis=1) * 1000.0
+            r_hdg = self.f222_resid(hdg[pi])
+            r_step = self.f222_resid(step[pi])
+        ser = ik.f('item_serial').astype(np.int64)
+        rate_ik = rate[pi]
+        self.f222 = dict(items={})
+        for s_ in sorted(set(ser.tolist())):
+            m = have & (ser == s_) & (np.abs(rate_ik) >= F222_RATE_DPS) & np.isfinite(r_neck) & np.isfinite(r_chest) & np.isfinite(r_hdg) & np.isfinite(r_step)
+            n = int(m.sum())
+            if n < F222_MIN_ROWS:
+                continue
+            slope = float(np.polyfit(r_step[m], r_hdg[m], 1)[0]) if float(np.var(r_step[m])) > 1e-12 else float('nan')
+            fig = dict(rows=n, neck_med=float(np.median(r_neck[m])), neck_p90=float(np.percentile(r_neck[m], 90)), chest_med=float(np.median(r_chest[m])), chest_p90=float(np.percentile(r_chest[m], 90)), slope=slope,
+                       rate=float(np.median(np.abs(rate_ik[m]))))
+            self.f222['items'][int(s_)] = fig
+            self.say('  item %d: %d rows, body turning %.0f deg/s median; neck target residual median %.2f mm, 90th percentile %.2f mm; final chest residual median %.2f mm, 90th percentile %.2f mm; heading residual on yaw step residual slope %+.2f' % (
+                s_, n, fig['rate'], fig['neck_med'], fig['neck_p90'], fig['chest_med'], fig['chest_p90'], slope))
+            if n >= F222_FINDING_ROWS and np.isfinite(slope) and slope < F222_FINDING_SLOPE:
+                self.findings.append(Finding(t_ik[m].min(), t_ik[m].max(), 'heading_follows_yaw_step', 'eye', 'F222: item %d, the heading in the model followed the body\'s yaw step with slope %+.2f over %d rows turning at %.0f deg/s or more '
+                                             '(limit %.1f): the eye rows are taken through the wrong frame' % (s_, slope, n, F222_RATE_DPS, F222_FINDING_SLOPE)))
+        if not self.f222['items']:
+            self.say('  no item with %d rows or more at %g deg/s or more: nothing to read' % (F222_MIN_ROWS, F222_RATE_DPS))
+
+    # -- F223: root jumps -----------------------------------------------------------------------------------------------------------------------------------------------------------------
+    def f223_section(self):
+        """Each call the F223 rule would take (the camera in the model, pin.e[1], changing by F223_JUMP_M or more between two new game frames less than F223_MAX_GAP_S apart while the world camera
+        (the p1 record's, the last at or before the pin call) moved less than F223_CAMERA_SHARE of it along pin.up), grouped when closer than F223_GROUP_S: time, item, calls, the first change,
+        f223_pop_m when recorded, the final chest's lowest y over the next F223_LOOK_CALLS calls against the call before, the left elbow's highest height over the hand. Finding root_jump_crushed:
+        the final chest falls more than F223_CRUSH_M."""
+        S = self.S
+        self.f223 = None
+        self.say('')
+        self.say('== root jumps (F223): the calls the rule takes (camera in the model changing %g m or more with the world camera moving under %g of it)' % (F223_JUMP_M, F223_CAMERA_SHARE))
+        ik, pin, p1 = S.tab('ik'), S.tab('pin'), S.tab('p1')
+        miss = [('pin.' + f) for f in ('e', 'up', 'p1', 'item_serial') if not pin.has(f)] + [('p1.' + f) for f in ('cam',) if not p1.has(f)] + [('ik.' + f) for f in ('final_chest',) if not ik.has(f)]
+        if not len(pin) or not len(p1) or miss:
+            self.say('  cannot evaluate: %s' % (', '.join(miss) if miss else 'no pin or p1 records'))
+            return
+        t_pin, t_p1, t_ik = S.t('pin'), S.t('p1'), S.t('ik')
+        pf = pin.f('p1').astype(np.int64)
+        idx = np.flatnonzero(np.concatenate([[True], pf[1:] != pf[:-1]]))
+        ci = np.maximum(np.searchsorted(t_p1, t_pin[idx], 'right') - 1, 0)
+        with np.errstate(all='ignore'):
+            e = pin.f('e').astype(np.float64)[idx, 1]
+            cam = p1.f('cam').astype(np.float64)[ci]
+            up = pin.f('up').astype(np.float64)[idx]
+            up = up / np.maximum(np.linalg.norm(up, axis=1), 1e-9)[:, None]
+            tt = t_pin[idx]
+            dt = np.zeros(len(idx))
+            dt[1:] = np.diff(tt)
+            dE = np.zeros(len(idx))
+            dE[1:] = np.diff(e)
+            dC = np.zeros(len(idx))
+            dC[1:] = ((cam[1:] - cam[:-1]) * up[1:]).sum(axis=1)
+            take = (dt > 0.0) & (dt < F223_MAX_GAP_S) & (np.abs(dE) >= F223_JUMP_M) & (np.abs(dC) < F223_CAMERA_SHARE * np.abs(dE))
+        ser = pin.f('item_serial').astype(np.int64)[idx]
+        pop = pin.f('f223_pop_m').astype(np.float64) if pin.has('f223_pop_m') else None
+        groups = []
+        for k in np.flatnonzero(take):
+            if groups and tt[k] - tt[groups[-1][-1]] <= F223_GROUP_S:
+                groups[-1].append(int(k))
+            else:
+                groups.append([int(k)])
+        self.f223 = dict(events=[])
+        for g in groups:
+            k0, k1 = g[0], g[-1]
+            t0, t1 = float(tt[k0]), float(tt[k1])
+            line = '  %s item %d: %d calls, the camera in the model %+.2f m in the first' % (S.lt(t0), int(ser[k0]), len(g), float(dE[k0]))
+            ev = dict(t=t0, item=int(ser[k0]), calls=len(g), jump=float(dE[k0]), pop=None, chest_min=None, drop=None, elbow=None)
+            if pop is not None:
+                sel = (t_pin >= t0 - 1e-6) & (t_pin <= t1 + 0.1)
+                ev['pop'] = float(pop[sel][np.argmax(np.abs(pop[sel]))]) if sel.any() else 0.0
+                line += '; f223_pop_m up to %+.2f m' % ev['pop']
+            else:
+                line += '; f223_pop_m not recorded (a recording from before F223)'
+            if len(ik) and len(t_ik):
+                i0 = int(np.searchsorted(t_ik, t0 - 1e-6, 'left'))
+                rows = slice(i0, min(i0 + F223_LOOK_CALLS, len(t_ik)))
+                chest = ik.f('final_chest').astype(np.float64)[:, 1]
+                if i0 >= 1 and rows.stop > rows.start:
+                    ev['chest_min'] = float(np.nanmin(chest[rows]))
+                    ev['drop'] = float(chest[i0 - 1] - ev['chest_min'])
+                    line += '; final chest y lowest %.2f m against %.2f before (a fall of %.2f m)' % (ev['chest_min'], float(chest[i0 - 1]), ev['drop'])
+                if ik.has('final_l_fore') and ik.has('final_l_hand') and rows.stop > rows.start:
+                    over = (ik.f('final_l_fore').astype(np.float64)[rows, 1] - ik.f('final_l_hand').astype(np.float64)[rows, 1]) * 100.0
+                    ev['elbow'] = float(np.nanmax(over))
+                    line += '; left elbow over the hand up to %+.1f cm' % ev['elbow']
+                if ev['drop'] is not None and ev['drop'] > F223_CRUSH_M:
+                    self.findings.append(Finding(t0, t1, 'root_jump_crushed', 'root', 'F223: item %d, the model root jumped (the camera in the model %+.2f m in one call) and the final chest fell %.2f m within %d calls to %.2f m (limit %.2f)%s' % (
+                        int(ser[k0]), float(dE[k0]), ev['drop'], F223_LOOK_CALLS, ev['chest_min'], F223_CRUSH_M, '' if ev['pop'] is None else '; the move taken was %+.2f m' % ev['pop'])))
+            self.say(line)
+            self.f223['events'].append(ev)
+        if not groups:
+            self.say('  no call the rule would take')
+
     # -- bob ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def bob(self):
         L = self.L
@@ -2100,6 +2264,8 @@ class Analysis:
             self.say('')
             self.say('== height excursions, bob, leak gains: not evaluated (no ledger)')
         self.f218_section()
+        self.f222_section()
+        self.f223_section()
         self.ik_events()
         if since is not None or until is not None:
             lo = since if since is not None else 0.0
@@ -2337,7 +2503,7 @@ SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_v
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
-                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') + _S('f32', 'f218_offset_m') +
+                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') + _S('f32', 'f218_offset_m', 'f223_pop_m') +
                      _S('u8', 'valid') + _E('PinRefuse', 'refuse') + _S('u8', 'settled') + _E('SettleWhy', 'settle_why') + _S('u8', 'f138_refused') + _E('Stance', 'stance') +
                      _E('PinState', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
                      _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known') + _E('F214State', 'f214_state') + _E('F215State', 'f215_state') + _S('u8', 'f218_held', 'f218_applied', 'f218_refused'))
@@ -3258,6 +3424,87 @@ def self_test():
         S, A = analyse(d)
         txt = '\n'.join(A.out)
         check('item 3, walk' in txt and 'no strafe bins' in txt and not [f for f in A.findings if f.kind == 'elbow_over_hand'], 'F221: a recording without the arm joints or the body axes still prints the section and names no F221 finding')
+        # F222: a body turning at 342 deg/s in uneven steps (5.3, 2.3, 2.3, 5.3 deg a call). With the neck target swinging by the step and the heading in the model reading the step the section reads a heading that
+        # follows the yaw step (a slope near -1) and a finding; with both steady it reads neither.
+        def turn_post(follows):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                n = len(t)
+                steps = np.array([5.3, 2.3, 2.3, 5.3])[np.arange(n) % 4]
+                yaw = np.radians(np.cumsum(steps))
+                pin['fwd'] = np.stack([np.sin(yaw), np.zeros(n), np.cos(yaw)], 1)
+                m = (t >= 2.0) & (t < 9.0)
+                ik['item_serial'], pin['item_serial'] = np.where(m, 3, 0), np.where(m, 3, 0)
+                hdg = np.radians(-1.55 - (steps if follows else np.zeros(n)))
+                pin['heading'] = np.stack([np.sin(hdg), np.cos(hdg)], 1)
+                pin['neck_target'] = pin['neck_anim'] + (np.stack([0.0015 * (steps - 3.8), np.zeros(n), np.zeros(n)], 1) if follows else 0.0)
+            return post
+        for follows in (True, False):
+            d = fresh()
+            _make(d, stamp, [], [turn_post(follows)])
+            S, A = analyse(d)
+            it = (A.f222 or {}).get('items', {}).get(3)
+            got = [f for f in A.findings if f.kind == 'heading_follows_yaw_step']
+            txt = '\n'.join(A.out)
+            if follows:
+                check(it is not None and it['slope'] < -0.9 and it['slope'] > -1.1 and it['neck_med'] > 1.0 and len([f for f in got if 'item 3' in f.detail]) == 1 and '== turning (F222)' in txt,
+                      'F222: a heading that follows the yaw step reads a slope near -1, a neck target residual over 1 mm and one finding: %s' % (it,))
+            else:
+                check(it is not None and abs(it['slope']) < 0.1 and it['neck_med'] < 0.2 and not [f for f in got if 'item 3' in f.detail] and it['rows'] > 300, 'F222: a steady heading and neck target in the same turn read no slope and no finding: %s' % (it,))
+        d = fresh()
+        _make(d, stamp)
+        S, A = analyse(d)
+        check('nothing to read' in '\n'.join(A.out) and (A.f222 or {}).get('items') == {} and not [f for f in A.findings if f.kind == 'heading_follows_yaw_step'], 'F222: a recording with no turning reads nothing and names no finding')
+        # F223: one jump pack start: the camera in the model (pin.e y) 1.70 to 0.60 in one call and back over four, the world camera smooth. The chest falls and the elbow stands over the hand: a finding;
+        # with the chest as it was, the event is listed and there is none.
+        def jump_post(crush, pop=True):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                k0 = int(np.searchsorted(t, 5.0))
+                series = [1.60, 1.65, 1.70, 0.60, 0.92, 1.31, 1.54, 1.61, 1.60]
+                e = pin['e'].copy()
+                e[:, 1] = 1.60
+                for j, v in enumerate(series):
+                    e[k0 + j, 1] = v
+                pin['e'] = e
+                ik['item_serial'], pin['item_serial'] = np.full(len(t), 5), np.full(len(t), 5)
+                if pop:
+                    pm = np.zeros(len(t))
+                    pm[k0 + 3:k0 + 8] = -1.10
+                    pin['f223_pop_m'] = pm
+                if crush:
+                    chest = ik['final_chest'].copy()
+                    chest[k0 + 3:k0 + 6, 1] -= 0.55
+                    ik['final_chest'] = chest
+                    fore = ik['final_l_fore'].copy()
+                    fore[k0 + 3:k0 + 5, 1] += 0.27
+                    ik['final_l_fore'] = fore
+                s_.k0_223 = k0
+            return post
+        d = fresh()
+        _make(d, stamp, [], [jump_post(True)])
+        S, A = analyse(d)
+        evs = (A.f223 or {}).get('events', [])
+        got = [f for f in A.findings if f.kind == 'root_jump_crushed']
+        txt = '\n'.join(A.out)
+        check(len(evs) == 1 and evs[0]['calls'] == 4 and abs(evs[0]['jump'] + 1.10) < 1e-6 and abs(evs[0]['pop'] + 1.10) < 1e-6 and evs[0]['drop'] is not None and evs[0]['drop'] > 0.5 and evs[0]['elbow'] > 20.0 and len(got) == 1 and '== root jumps (F223)' in txt,
+              'F223: a jump pack start is one event of 4 calls with the pop, the chest fall and the elbow over the hand, and one root_jump_crushed finding: %s' % (evs,))
+        d = fresh()
+        _make(d, stamp, [], [jump_post(False)])
+        S, A = analyse(d)
+        evs = (A.f223 or {}).get('events', [])
+        check(len(evs) == 1 and abs(evs[0]['drop']) < 0.05 and not [f for f in A.findings if f.kind == 'root_jump_crushed'], 'F223: a jump with the chest held is listed and is no finding')
+        d = fresh()
+        _make(d, stamp, [], [jump_post(True, pop=False)], drop={'pin': ['f223_pop_m']})
+        S, A = analyse(d)
+        txt = '\n'.join(A.out)
+        check('not recorded (a recording from before F223)' in txt and len((A.f223 or {}).get('events', [])) == 1, 'F223: a recording from before the pin record carried the move still lists the event and says so')
+        d = fresh()
+        _make(d, stamp)
+        S, A = analyse(d)
+        check('no call the rule would take' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'root_jump_crushed'], 'F223: a recording with no jump lists none')
         # arms the IK did not write: a huge reach and swivel jumps make no event
         d = fresh()
 

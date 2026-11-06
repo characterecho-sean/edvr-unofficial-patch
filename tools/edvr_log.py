@@ -12850,6 +12850,54 @@ def _hj_f221(rows, ctx):
     return ("OK", text)
 
 
+# F222 (TEMPORARY): the eye rows' heading, up and offset taken in the frame they were drawn in (experimental.native_on_foot_steady_body_in_turns; formatLine in src/d3d11/native_on_foot_f222.h).
+H222_LABEL = "native on foot eye in its own frame (F222)"
+H222_RE = (r"native on foot eye in its own frame \(F222\) (?P<wl>\d+) s: experimental\.native_on_foot_steady_body_in_turns is (?P<key>on|off); (?P<calls>\d+) pin calls, (?P<taken>\d+) rows taken; "
+           r"the body's turn taken out of the heading mean (?P<mean>%s) deg, largest (?P<max>%s)$" % (_HN, _HN))
+H222_MIN_CALLS = 30
+
+
+def _hj_f222(rows, ctx):
+    """F222: the eye's heading, up and offset are taken in the frame the rows were drawn in. The window line counts the pin calls, the calls that took new rows, and with the key on the horizontal
+    angle the body's turn since the rows were drawn would have put into the heading (mean, largest). IDLE with the key off or under 30 calls; NEVER APPLIED with the key on, 30 or more calls and
+    no row taken; OK with the figures. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    calls = sum(int(r["calls"]) for r in sec)
+    taken = sum(int(r["taken"]) for r in sec)
+    on = any(r["key"] == "on" for r in sec)
+    mean_w = sum(int(r["calls"]) * float(r["mean"]) for r in sec if r["key"] == "on") / max(1, sum(int(r["calls"]) for r in sec if r["key"] == "on"))
+    text = "%d s: key %s; %d pin calls, %d rows taken; the body's turn taken out of the heading mean %.2f deg, largest %.2f" % (_hsecs(sec), "on" if on else "off", calls, taken, mean_w, max(float(r["max"]) for r in sec))
+    if not on:
+        return ("IDLE", text + "; the key is off")
+    if calls < H222_MIN_CALLS:
+        return ("IDLE", text + "; under %d pin calls: little to judge" % H222_MIN_CALLS)
+    if taken == 0:
+        return ("NEVER APPLIED", text + "; %d pin calls with the key on and not one took rows (F222)" % calls)
+    return ("OK", text)
+
+
+# F223: a jump of the model root goes into the whole-body move (formatLine in src/d3d11/native_on_foot_f223.h): printed only for a window that took or refused a call.
+H223_LABEL = "native on foot root jump (F223)"
+H223_RE = (r"native on foot root jump \(F223\) (?P<wl>\d+) s: (?P<taken>\d+) calls taken, the largest (?P<largest>%s) m; (?P<refused>\d+) refused \(the camera itself moved\); the move now (?P<move>%s) m$" % (_HN, _HN))
+
+
+def _hj_f223(rows, ctx):
+    """F223: a jump of the model root goes into the whole-body move. The window line, printed only for a window with a call taken or refused, counts the calls taken, the largest, those refused
+    (the camera itself moved) and the move in force. OK when a call was taken; IDLE when only refusals. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    taken = sum(int(r["taken"]) for r in sec)
+    refused = sum(int(r["refused"]) for r in sec)
+    largest = max((float(r["largest"]) for r in sec), key=abs)
+    text = "%d s: %d calls taken, the largest %+.2f m; %d refused" % (_hsecs(sec), taken, largest, refused)
+    if taken > 0:
+        return ("OK", text)
+    return ("IDLE", text + "; nothing taken: no jump pack start, or the camera moved with the model")
+
+
 H_F213 = "on-foot recording (F213)"
 F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
 
@@ -18038,6 +18086,12 @@ HEALTH_RULES = (
     _hrule("tool elbow (F221)", ("F221",), (H221_LABEL,), (
         ("sec", H221_RE),
     ), _hj_f221),
+    _hrule("eye in its own frame (F222)", ("F222",), (H222_LABEL,), (
+        ("sec", H222_RE),
+    ), _hj_f222),
+    _hrule("root jump (F223)", ("F223",), (H223_LABEL,), (
+        ("sec", H223_RE),
+    ), _hj_f223),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -24613,6 +24667,34 @@ def self_test_health():
               has=["20 s: 400 solves", "weight mean 0.62", "mean -17.5 cm, highest +1.5 cm"], lacks=["UNPARSED"])
         check("F221: no window line (no arc cutter) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F221: a window line that drifted from its pattern is UNPARSED", [win221().replace("solves with", "solves of")], 4, [("UNPARSED", F221)])
+        # ---- F222, F223: the eye in its own frame and the root jump; their window lines are rendered from the C format strings in the headers ----
+        f222src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f222.h"))
+        f223src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f223.h"))
+        F222 = "eye in its own frame (F222)"
+        F223 = "root jump (F223)"
+
+        def win222(key="on", calls=900, taken=890, mean=3.4, mx=5.3, wl=10):
+            fmt = health_c_format(f222src, "native on foot eye in its own frame (F222) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f222.h has no format holding the F222 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, taken, float(mean), float(mx)))
+
+        def win223(taken=4, largest=-1.14, refused=0, move=-0.5, wl=10):
+            fmt = health_c_format(f223src, "native on foot root jump (F223) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f223.h has no format holding the F223 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, taken, float(largest), refused, float(move)))
+        check("F222: a window with rows taken is OK with the figures", [win222()], 0, [("OK", F222)],
+              has=["10 s: key on; 900 pin calls, 890 rows taken; the body's turn taken out of the heading mean 3.40 deg, largest 5.30"], lacks=["UNPARSED", "NEVER"])
+        check("F222: the key on, 30 or more calls and no row taken is NEVER APPLIED", [win222(taken=0)], 3, [("NEVER APPLIED", F222)], has=["not one took rows"], lacks=["UNPARSED"])
+        check("F222: the key off is IDLE", [win222(key="off", taken=0, mean=0.0, mx=0.0)], 0, [("IDLE", F222)], has=["the key is off"], lacks=["NEVER", "UNPARSED"])
+        check("F222: under 30 calls is IDLE, even with no row taken", [win222(calls=20, taken=0)], 0, [("IDLE", F222)], has=["under 30 pin calls"], lacks=["NEVER", "UNPARSED"])
+        check("F222: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F222: a window line that drifted from its pattern is UNPARSED", [win222().replace("rows taken", "rows")], 4, [("UNPARSED", F222)])
+        check("F223: a window with a call taken is OK with the figures", [win223()], 0, [("OK", F223)], has=["10 s: 4 calls taken, the largest -1.14 m; 0 refused"], lacks=["UNPARSED", "NEVER"])
+        check("F223: refusals alone are IDLE", [win223(taken=0, largest=0.0, refused=3, move=0.0)], 0, [("IDLE", F223)], has=["nothing taken"], lacks=["UNPARSED", "NEVER"])
+        check("F223: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F223: a window line that drifted from its pattern is UNPARSED", [win223().replace("calls taken", "taken")], 4, [("UNPARSED", F223)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.
