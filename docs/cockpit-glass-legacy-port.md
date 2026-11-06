@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `claude/vr-glass-layer` `d006d0e3`, not merged ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's list layout is read offline, and whether a hangar's lights are in those lists is the next flight ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -1028,5 +1028,25 @@ The game's own canopy does not either. Disassembling `4E4FF61E8A08FC7E`, its onl
 that probe loop. Its other light loop runs over the directional lights (CB1[245].y). So nothing in the shader being replaced shows how local lights are stored. How the Horizons client's
 dirt looked in a station is not known: the captures of section 12 are all in space.
 
-Lighting the dirt from local lights means new work, with the unknowns: what cluster bytes +0 to +24 and +32 to +2211 hold, the record layout in t2, whether a station's spot lights are in
-those lists at all, and the cost of a light loop per pixel at the layer's size. The next step is to read another shader that loops over the lights.
+Lighting the dirt from local lights means new work. Read offline from forward-lit game shaders (61 pixel shaders use this cluster arithmetic; `26EA073903FD8909` is the clearest, the cull
+compute is `074CB657FDBD43E6`):
+
+| Cluster count at | List starts at | Holds | Records in t2 |
+|---|---|---|---|
+| +0 | +36, 128 ids | point lights (radius, no cone), CONFIRMED | `id<<4` + cb1[249].z and .w |
+| +4 | +548, 128 ids | spot lights (cone, optional shadow and cookie), CONFIRMED | `id<<5` + cb1[250].z and .w |
+| +8 to +20 | +1060, +1316, +1572, +1828 | other types; which is which is INFERRED only | cb1[250].xy to cb1[252].xy |
+| +24, +32 | +2084, +2340 | not identified | cb1[252].w, cb1[253].x, cb1[253].w, cb1[254].x |
+| +28 | +2212, 32 ids | reflection probes, what the canopy reads | as above |
+
+A spot's first record: position xyz, packed direction in .w (largest component dropped), radius as a float at +24. Its second: intensity, a 10:10:10 colour, source radius, cos outer and cos
+inner as 16-bit fractions, then at +16 a cone exponent and a scale as half floats and 16-bit shadow and cookie indices, plus one, 0 meaning none. Falloff is
+saturate(1-(d^2/R^2)^2)^2 / max(d^2, srcR^2); the cone is pow(saturate((cos - outer)/(inner - outer)), exponent).
+
+The canopy has t0 and t2 bound and the same shared constant buffer, so an unshadowed loop over points and spots can be written with what it already binds, if cb1[249..250] are filled at that
+draw (INFERRED). A spot's shadow atlas and cookie texture are not bound to the canopy, so those would need more. Counted from the listing, not profiled: about 70 instructions a point light and
+110 a spot, unshadowed, per pixel at the layer's size. Without shadows a light behind the hull still lights the dirt.
+
+Not known, and it decides everything: whether a hangar's lights are in these lists at all. The probe flight of section 7 does not say: it logged t0 and t2's sizes (43,720,704 bytes, which is
+18,432 clusters, and 270,448) and not their contents, and it did not log cb1[249..254]. A baked or other path would leave these lists empty. Next: a docked flight that reads t0's counts and
+cb1[249..254] at a canopy draw, through the existing `experimental.cockpit_glass_probe`.
