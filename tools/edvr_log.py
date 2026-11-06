@@ -12625,6 +12625,52 @@ def _hj_f212(rows, ctx):
     return ("OK", text)
 
 
+H_F213 = "on-foot recording (F213)"
+F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
+
+
+def _hj_f213(rows, ctx):
+    """F213: the on-foot flight recorder (src\\common\\onfoot_recorder_core.h formatWindowLine, src\\d3d11\\onfoot_recorder.cpp). It records only with log.on_foot_detail on and native
+    on foot, and says so in one line a window with the records and drops of each of its seven types, plus a "ready" line once a launch that proves the build has it.
+    NEVER APPLIED: on-foot time with the detail log on and the build's ready line, and no window line at all; or window lines in which no type had a record (the recorder not
+    running says why); a "not recording" line. PARTIAL: any type dropped records (the ring was full: the writer fell behind), named with its count. A type with no record in a
+    window that had others is only said (a site that did not run, or a stage that was off). The state of the detail log comes from F125's line."""
+    wins, ready = rows.get("win", []), rows.get("ready", [])
+    detail, onfoot = _hdetail(ctx), _hnative_onfoot(ctx)
+    if not any(rows.values()):
+        return None
+    if not wins:
+        if rows.get("fail"):
+            return ("NEVER APPLIED", "not recording: %s" % rows["fail"][-1]["why"])
+        if ready and detail in ("on", "mixed") and onfoot:
+            return ("NEVER APPLIED", "native on foot with log.on_foot_detail on and the recorder's ready line, but not one window line: the recorder never ran (F213)")
+        return ("IDLE", "the recorder is ready; no window line (the detail log was off, or native on foot was not on)")
+    totals = {name: sum(int(r[k]) for r in wins) for name, k, _ in F213_TYPES}
+    drops = {name: sum(int(r[k]) for r in wins) for name, _, k in F213_TYPES}
+    parts = ["%d s of windows: %s" % (_hsecs(wins), ", ".join("%s %d" % (name, totals[name]) for name, _, _ in F213_TYPES))]
+    parts.append("%d bytes written, %d segment(s), writer stall max %d ms" % (sum(int(r["bytes"]) for r in wins), max(int(r["seg"]) for r in wins), max(int(r["stall"]) for r in wins)))
+    ikn = sum(int(r["ikn"]) for r in wins)
+    if ikn:
+        parts.append("ik producer cost mean %.1f us, max %.1f us over %d" % (sum(float(r["mean"]) * int(r["ikn"]) for r in wins) / ikn, max(float(r["max"]) for r in wins), ikn))
+    marks = rows.get("mark", [])
+    if marks:
+        parts.append("%d mark press(es), %d with the recorder off" % (len(marks), sum(1 for r in marks if r["what"] != "recorded")))
+    text = "; ".join(parts)
+    if not any(totals.values()):
+        notrun = [r for r in wins if r["state"] != "running"]
+        why = "; " + notrun[-1]["state"] if notrun else ""
+        return ("NEVER APPLIED", text + "; the recorder was asked for and wrote no record of any type" + why)
+    if rows.get("fail"):
+        return ("NEVER APPLIED", text + "; the recorder stopped: %s" % rows["fail"][-1]["why"])
+    dropped = [(name, drops[name]) for name, _, _ in F213_TYPES if drops[name]]
+    zero = [name for name, _, _ in F213_TYPES if not totals[name] and name not in ("mark", "rt_recentre")]
+    if zero:
+        text += "; no record of %s in the whole window" % ", ".join(zero)
+    if dropped:
+        return ("PARTIAL", text + "; the ring was full and records were dropped: " + ", ".join("%s %d" % d for d in dropped) + " (the writer fell behind; a gap in a type's sequence is a drop)")
+    return ("OK", text)
+
+
 def _hj_f115_pair(edges, secs):
     """[(edge, read-back or None)]: each edge with the first read-back not yet taken that comes at or after it and before the next edge (by the log's clock; in the
     log's order when a line has no stamp)."""
@@ -17438,6 +17484,18 @@ HEALTH_RULES = (
                 r"the game asked for up to \|yaw\| (?P<ay>[\d.]+) and \|pitch\| (?P<ap>[\d.]+); look processor, local component, native on foot active \((?P<reads>\d+) read\(s\)\): "
                 r"largest \|velocity\| yaw (?P<vy>[\d.]+) pitch (?P<vp>[\d.]+), largest \|target\| yaw (?P<ty>[\d.]+) pitch (?P<tp>[\d.]+)"),
     ), _hj_f212),
+    _hrule(H_F213, ("F213",), ("(F213)",), (
+        ("ready", r"native on foot recorder \(F213\): ready; it records to edvr_logs\\onfoot while"),
+        ("win", r"native on foot recorder \(F213\) (?P<wl>\d+) s: (?P<state>running|not running(?:: .*?)?); records \(drops\): align (?P<a>\d+) \((?P<ad>\d+)\), p1 (?P<p>\d+) \((?P<pd>\d+)\), "
+                r"pin (?P<n>\d+) \((?P<nd>\d+)\), ik (?P<i>\d+) \((?P<id>\d+)\), mark (?P<m>\d+) \((?P<md>\d+)\), rt_eye (?P<e>\d+) \((?P<ed>\d+)\), "
+                r"rt_recentre (?P<r>\d+) \((?P<rd>\d+)\); runtime pushes seen (?P<rt>\d+); (?P<bytes>\d+) bytes written, (?P<seg>\d+) segment\(s\), writer stall max (?P<stall>\d+) ms; "
+                r"ik producer cost mean (?P<mean>[\d.]+) us, max (?P<max>[\d.]+) us over (?P<ikn>\d+); file (?P<file>.*)$"),
+        ("open", r"native on foot recorder \(F213\): segment (?P<seg>\d+) opened: (?P<file>\S+)$"),
+        ("close", r"native on foot recorder \(F213\): closed (?P<file>\S+) \(the session: (?P<rec>\d+) records, (?P<bytes>\d+) bytes, (?P<segs>\d+) segment\(s\), "
+                  r"(?P<old>\d+) older file\(s\) removed at the start, (?P<rot>\d+) segment\(s\) removed by rotation\)(?: at shutdown)?$"),
+        ("fail", r"native on foot recorder \(F213\): not recording: (?P<why>.*)$"),
+        ("mark", r"native on foot mark (?P<n>\d+) \(F213\): (?P<what>recorded|recorder off|recorder busy, not recorded)$"),
+    ), _hj_f213, needs_detail=True),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
         ("began", r"native on foot \(F115\): native stereo on foot began at frame (?P<frame>\d+)"),   # F212 reads it: native on foot was active
@@ -24113,6 +24171,46 @@ def self_test_health():
                       has=[row("NEVER APPLIED", syn.name)], lacks=["not judged"])
         detail_report("F125: the off state carried into a --since window", [F125_OFF, (90, f90_part())], 0, has=["not judged (detail log off)"],
                       lacks=["NEVER APPLIED"], since="10:01:00")
+        # ---- the on-foot recording (F213): its lines are rendered from the C format strings in onfoot_recorder_core.h and onfoot_recorder.cpp ----
+        rec_core = read_text(os.path.join(repo_root(), "src", "common", "onfoot_recorder_core.h"))
+        rec_cpp = read_text(os.path.join(repo_root(), "src", "d3d11", "onfoot_recorder.cpp"))
+
+        def RF213(src, needle, *vals):
+            fmt = health_c_format(src, needle)
+            if fmt is None:
+                raise AssertionError("the F213 sources have no log format holding %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmt, vals)
+
+        def win213(state="running", rec=(90, 90, 90, 90, 0, 180, 0), drop=(0, 0, 0, 0, 0, 0, 0), stall=3, ikn=90):
+            vals = [1, state]
+            for n, d in zip(rec, drop):
+                vals += [n, d]
+            return RF213(rec_core, "native on foot recorder (F213) %u s", *vals, 180, 100000, 1, stall, 12.5, 40.0, ikn, "onfoot_20261105_171000_000.rec")
+        READY213 = RF213(rec_cpp, "native on foot recorder (F213): ready")
+        FAIL213 = RF213(rec_cpp, "not recording: %s", "the ring could not be allocated")
+        MARK213 = RF213(rec_cpp, "native on foot mark %u (F213)", 3, "recorded")
+        MARKOFF213 = RF213(rec_cpp, "native on foot mark %u (F213)", 4, "recorder off")
+        ONFOOT213 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        check("F213: records of every stage, no drops: OK", [F125_ON, ONFOOT213, READY213, win213(), MARK213], 0, [("OK", H_F213)],
+              has=["1 s of windows: align 90, p1 90, pin 90, ik 90, mark 0, rt_eye 180, rt_recentre 0", "100000 bytes written, 1 segment(s), writer stall max 3 ms",
+                   "ik producer cost mean 12.5 us, max 40.0 us over 90", "1 mark press(es), 0 with the recorder off"], lacks=["UNPARSED", "PARTIAL", "NEVER APPLIED"])
+        check("F213: a mark pressed with the recorder off is counted", [F125_ON, ONFOOT213, READY213, win213(), MARKOFF213], 0, [("OK", H_F213)], has=["1 mark press(es), 1 with the recorder off"])
+        check("F213: windows with no record of any type are NEVER APPLIED", [F125_ON, ONFOOT213, READY213, win213(rec=(0,) * 7)], 3, [("NEVER APPLIED", H_F213)],
+              has=["wrote no record of any type"], lacks=["UNPARSED"])
+        check("F213: a recorder that is not running says why, and is NEVER APPLIED", [F125_ON, ONFOOT213, READY213, win213(state="not running: the ring could not be allocated", rec=(0,) * 7)], 3,
+              [("NEVER APPLIED", H_F213)], has=["not running: the ring could not be allocated"], lacks=["UNPARSED"])
+        check("F213: on foot with the detail log on and the ready line but no window line is NEVER APPLIED", [F125_ON, ONFOOT213, READY213], 3, [("NEVER APPLIED", H_F213)],
+              has=["not one window line"], lacks=["UNPARSED"])
+        check("F213: a 'not recording' line is NEVER APPLIED", [F125_ON, ONFOOT213, READY213, FAIL213], 3, [("NEVER APPLIED", H_F213)], has=["not recording: the ring could not be allocated"],
+              lacks=["UNPARSED"])
+        check("F213: dropped records are PARTIAL and name the type", [F125_ON, ONFOOT213, READY213, win213(drop=(0, 0, 7, 0, 0, 0, 0))], 0, [("PARTIAL", H_F213)],
+              has=["records were dropped: pin 7"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F213: a type with no record while the others have some is said, not judged", [F125_ON, ONFOOT213, READY213, win213(rec=(90, 0, 90, 90, 0, 180, 0))], 0, [("OK", H_F213)],
+              has=["no record of p1 in the whole window"])
+        check("F213: detail off with only the ready line is idle, never NEVER APPLIED", [F125_OFF, ONFOOT213, READY213], 0, [("IDLE", H_F213)], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F213: a window line that drifted from its pattern is not read as a window (no window: NEVER APPLIED, with the line named)",
+              [F125_ON, ONFOOT213, READY213, win213().replace("records (drops)", "records")], 3, [("NEVER APPLIED", H_F213)], has=["line(s) the rule's patterns do not match"])
+        check("F213: a lone line of the rule's label that no pattern matches is UNPARSED", [F125_ON, ONFOOT213, "native on foot recorder (F213): something new happened"], 4, [("UNPARSED", H_F213)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

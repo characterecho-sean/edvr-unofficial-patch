@@ -39,6 +39,7 @@
 #include "native_temporal_client.h"
 #include "native_sharpen_client.h"
 #include "native_desktop_window_client.h"
+#include "onfoot_recorder_client.h"
 #include "native_frame_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
@@ -308,6 +309,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
   NativeDesktopWindowClient desktopWindow;   // visual.desktop_window: each captured eye's finished texture, for Elite's desktop window (optional)
+  OnFootRecorderClient onFootRec;            // F213: the on-foot flight recorder's records (rt_eye, rt_recentre), handed to the graphics half's export (optional)
+  double recEyePrevWanted[3]={},recEyePrevApplied[3]={};   // F213: eyePoll's wanted and applied offsets at its last record, to tell a change
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
@@ -3658,6 +3661,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     eyeoffset::localTarget(lookSeated,eyeWanted,eyeTarget);
     if(std::fmax(std::fabs(eyeTarget[0]-eyeApplied[0]),std::fmax(std::fabs(eyeTarget[1]-eyeApplied[1]),std::fabs(eyeTarget[2]-eyeApplied[2])))<=1e-6)
       eyeAppliedSerial=eyeSerialSeen;
+    {   // F213: the flight recorder's rt_eye: this poll's wanted, target and applied offsets, after the apply, while any is non-zero or one changed since the last record.
+      // deferred: a delta over a micrometre that waited for an open frame or a stored seat. The graphics half says false (and nothing is built twice) when it is not recording.
+      const bool nonZero=eyeWanted[0]!=0||eyeWanted[1]!=0||eyeWanted[2]!=0||eyeApplied[0]!=0||eyeApplied[1]!=0||eyeApplied[2]!=0;
+      bool changed=false;
+      for(int i=0;i<3;++i) changed=changed||eyeWanted[i]!=recEyePrevWanted[i]||eyeApplied[i]!=recEyePrevApplied[i];
+      if(nonZero||changed) {
+        onfootrec::RtEyeRec rec;onfootrec::initRecord(rec);
+        for(int i=0;i<3;++i){rec.wanted[i]=eyeWanted[i];rec.target[i]=eyeTarget[i];rec.applied[i]=eyeApplied[i];recEyePrevWanted[i]=eyeWanted[i];recEyePrevApplied[i]=eyeApplied[i];}
+        rec.seat_yaw_deg=seatRadToDeg(lookSeated.yaw);
+        rec.applies=eyeApplies;rec.refusals=eyeRefusals;rec.origin_sets=seated.originSets();
+        rec.serial_seen=eyeSerialSeen;rec.serial_applied=eyeAppliedSerial;
+        rec.frame_open=state.frameOpen();rec.seat_ahead=seatApplyAhead();
+        rec.deferred=biggest>1e-6&&(rec.frame_open||rec.seat_ahead);
+        rec.changed=changed;
+        onFootRec.push(graphicsProxy,rec);
+      }
+    }
     if(now-eyeLineMs>=5000||eyeLineMs==0) {
       eyeLineMs=now;
       // F134: wanted_m is the seated offset, target_m that offset turned into LOCAL by the seat's heading (seat_yaw_deg), applied_m what the origin carries (they agree
@@ -3718,14 +3738,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool applyPositionRecentre(uint32_t ask,bool* retry=nullptr) {
     if(retry)*retry=false;
     const char* why=nullptr;
+    uint8_t recWhy=0;   // F213: the flight recorder's reason (onfootrec RecentreReason): 0 applied, 1 not on foot, 2 stored seat due, 3 rotation calibrate, 4 head untracked, 5 replace refused
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime t=0;
-    if(seat.where()!=SeatWhere::OnFoot)why="the seat memory does not place the player on foot";
-    else if(seatApplyAhead())why="a stored seat is due";
-    else if(std::fabs(rotApplied[0])>1e-6||std::fabs(rotApplied[1])>1e-6||std::fabs(rotWanted[0])>1e-6||std::fabs(rotWanted[1])>1e-6)why="the rotation calibration is on";
+    if(seat.where()!=SeatWhere::OnFoot){why="the seat memory does not place the player on foot";recWhy=1;}
+    else if(seatApplyAhead()){why="a stored seat is due";recWhy=2;}
+    else if(std::fabs(rotApplied[0])>1e-6||std::fabs(rotApplied[1])>1e-6||std::fabs(rotWanted[0])>1e-6||std::fabs(rotWanted[1])>1e-6){why="the rotation calibration is on";recWhy=3;}
     else {
       const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&t,counterNow,nullptr,boundary.estimateNow());
       constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked){why="the head is not tracked";if(retry)*retry=true;}
+      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked){why="the head is not tracked";recWhy=4;if(retry)*retry=true;}
     }
     if(!why&&!lookSeatedKnown)lookRebase();
     const SeatPose beforeSeated=lookSeated;
@@ -3737,10 +3758,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       adsPivot[0]=head.pose.position.x;adsPivot[1]=head.pose.position.y;adsPivot[2]=head.pose.position.z;
       if(seated.setOrigin(seatedPoseFor(next,rotApplied[1],adsApplied))!=XR_SUCCESS) {
         for(int i=0;i<3;++i)adsPivot[i]=oldPivot[i];
-        why="the seated space replace was refused";
+        why="the seated space replace was refused";recWhy=5;
       }
     }
+    // F213: the flight recorder's rt_recentre, one per attempt: the seated origin before and after (unchanged when refused), the outcome. The values the attempt already holds.
+    const auto recentreRecord=[&](bool ok) {
+      onfootrec::RtRecentreRec rec;onfootrec::initRecord(rec);
+      const SeatPose after=ok?next:beforeSeated;
+      rec.origin_before[0]=beforeSeated.x;rec.origin_before[1]=beforeSeated.y;rec.origin_before[2]=beforeSeated.z;
+      rec.origin_after[0]=after.x;rec.origin_after[1]=after.y;rec.origin_after[2]=after.z;
+      rec.moved_cm=ok?seatDistance(beforeSeated,next)*100.0:0.0;
+      rec.serial=ask;rec.ok=ok;rec.reason=recWhy;rec.retry=retry&&*retry;
+      onFootRec.push(graphicsProxy,rec);
+    };
     if(why) {
+      recentreRecord(false);
       ++positionRecentreRefusals;
       if(!retry||!*retry||!positionRecentreRetryTraced)
         nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s,refusals=%llu\n",unsigned(ask),why,(unsigned long long)positionRecentreRefusals);
@@ -3753,6 +3785,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     dropPoseFrame(PoseInvalidation::Other);
     fillPollRing();
     ++positionRecentres;
+    recentreRecord(true);
     nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0,origin_is_seat=%u,baseline_yaw_deg=%.3f,look_comp_deg=%.3f,look_base_deg=%.3f\n",unsigned(ask),
         (unsigned long long)positionRecentres,beforeSeated.x,beforeSeated.y,beforeSeated.z,beforeSeated.yaw,next.x,next.y,next.z,next.yaw,
         seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw),unsigned(seat.originIsSeat()),seatRadToDeg(baselineYaw),seatRadToDeg(lookComp),seatRadToDeg(lookBase));

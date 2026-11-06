@@ -50,6 +50,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "store_hook.h"
 #include "flat_world_witness.h"
+#include "onfoot_recorder.h"   // F213: onfootrec::mark, the on-foot mark key's job
 #include "native_on_foot_hooks.h"   // nativeOnFootHooksFrameBoundary (the frame tick) and nativeOnFootHooksShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -287,10 +288,12 @@ struct State {
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
+    // The on-foot flight recorder's mark (F213, hotkey.on_foot_mark): a line in the recording and in the log at the moment of a press. Bound by default (F9).
+    Hotkey onFootMarkKey;
     // What each of those three was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText;
+    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText, onFootMarkKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1369,6 +1372,8 @@ void tickHotkeys() {
     if (g_state->blendProbeKey.pressed()) blendProbeRequest("hotkey.blend_probe");   // TEMPORARY (blend_probe.h)
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
+    // F213: the on-foot recording's mark. Nothing else happens on this thread for it.
+    if (g_state->onFootMarkKey.pressed()) onfootrec::mark();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
         g_state->censusKey.takeMissedWhileUnfocused()) {
         ++g_state->missedCensusNotes;
@@ -2133,6 +2138,12 @@ void configureDiagnosticHotkeys() {
          "hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be armed this session "
          "(the settings menu's row still can).",
          " Both eyes go to edvr_logs\\eyes as BMP on each press, one hitch each."},
+        // F213: the on-foot flight recorder's mark. Bound by default (F9 is in none of Elite's stock control schemes); a press only counts, writes one mark record when the
+        // recorder is running and says so in the log either way. It does not touch the eye dump, which stalls a frame.
+        {&s.onFootMarkKey, &s.onFootMarkKeyText, Config::get().getString("hotkey.on_foot_mark", "F9"),
+         "hotkey.on_foot_mark", "on-foot mark",
+         "hotkey: on_foot_mark is set but bound nothing, so a press cannot mark the on-foot recording this session.",
+         " A press writes a mark into the on-foot recording (log.on_foot_detail) and a line to the log."},
     };
     for (Item& it : items) {
         if (!first && *it.applied == it.value) continue;

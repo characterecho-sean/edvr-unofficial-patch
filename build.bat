@@ -466,7 +466,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrPluginHasActivePlugins ^
     --extra-export edvrNoteNativeEyeShare ^
     --extra-export edvrNoteNativeViewCircle ^
-    --extra-export edvrNoteNativeScopeZoom
+    --extra-export edvrNoteNativeScopeZoom ^
+    --extra-export edvrOnFootRecordPush
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build
@@ -677,7 +678,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\native_on_foot_hooks.cpp" "src\d3d11\native_preview_camera.cpp" "src\d3d11\native_on_foot.cpp" ^
+    "src\d3d11\native_on_foot_hooks.cpp" "src\d3d11\native_preview_camera.cpp" "src\d3d11\native_on_foot.cpp" "src\d3d11\onfoot_recorder.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -2730,6 +2731,22 @@ if errorlevel 1 ( echo [edvr] ERROR: blend probe test build failed & exit /b 1 )
 "%OBJ%\blendprobe\blend_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_onfoot_recorder
+REM F213, the on-foot flight recorder (src\common\onfoot_recorder_core.h): the schema against offsetof/sizeof for every record, the multi-producer ring, per-type sequences,
+REM segment rotation and retention over an injected sink, a truncated last record, and a deterministic fixture folder (the exe's argument) that it reads back.
+REM The fixture rule is in the head of tools\onfoot_recorder_test\onfoot_recorder_test.cpp. No game, no Windows API here.
+if not exist "%OBJ%\onfootrec" mkdir "%OBJ%\onfootrec"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\onfootrec\\" ^
+    /Fe"%OBJ%\onfootrec\onfoot_recorder_test.exe" "tools\onfoot_recorder_test\onfoot_recorder_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: on-foot recorder test build failed & exit /b 1 )
+"%OBJ%\onfootrec\onfoot_recorder_test.exe" "%OBJ%\onfootrec\fixture" || exit /b 1
+REM F213: the Python checker reads the fixture the exe just wrote and pins the field names its rules use to this schema, the way :rig_eye_draw_snapshot runs eye_draw_snapshot.py.
+REM The checker's --self-test runs once, in the Python self-test gate with the other tools.
+python "tools\onfoot_check.py" --verify-fixture "%OBJ%\onfootrec\fixture" || exit /b 1
+exit /b 0
+
 :rig_vr_world_mips_test
 REM The VR on-foot world route's mipped screen (design doc section 82, src\d3d11\vr_world_mips.cpp): a real D3D11 WARP
 REM device, the production module linked in as a source, away from build\d3d11.dll. The rig takes System32's device through
@@ -3335,6 +3352,7 @@ python tools\run_jobs.py --jobs 4 ^
     --gate "tools\dxbc_disasm.py --self-test" ^
     --gate "tools\eye_bmp_to_png.py --self-test" ^
     --gate "tools\character_motion_check.py --self-test" ^
+    --gate "tools\onfoot_check.py --self-test" ^
     --gate "tools\diff_eye_dump.py --self-test" ^
     --gate "tools\eye_run_fit.py --self-test" ^
     --gate "tools\eye_run_shimmer.py --self-test" ^
