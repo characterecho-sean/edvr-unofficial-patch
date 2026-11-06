@@ -303,6 +303,11 @@ nofoot::f216::SeatedHistory g_f216Hist;                       // F216: the term'
 double g_f216Pub[3] = {};                                     // frame thread: the term's seated vector in the alignment about to be published (recorded under its serial by f89AlignPublish)
 std::atomic<uint32_t> g_f216PubSeq{0};                        // F216: the P1 hook's newest move for the frame thread (a seqlock; the frame thread takes nothing older than kPubMaxAgeMs)
 nofoot::f216::Pub g_f216PubMove;
+std::atomic<bool> g_f220Key{true};                            // F220 (TEMPORARY): experimental.native_on_foot_hud_stays_with_view, on by default, live: the HUD's placement moves with the view's bob term (set on the frame thread, read by the placement hook)
+bool g_f220KeyLast = true;                                    // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_f220Move[3];                             // F220: the bob term the newest game frame's pose carried, in body axes (right, up, forward), m; exact zeros when none (the P1 hook writes, the placement hook reads)
+nofoot::f171c::Mailbox<nofoot::f216::HudStats> g_f220Box;     // F220: the placement hook's window of calls for the log line (the frame thread takes it)
+uint64_t g_f220LineMs = 0;                                    // F220: the log window's start (frame thread)
 std::atomic<uint32_t> g_f216Removed[3];                       // P1 hook: frames that took the term out of the camera, by the serial the pose carried, by the newest published, serial not found
 double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
@@ -1322,13 +1327,24 @@ void readKey() {
         g_f215KeyLast = on;
         g_f215Key.store(on, std::memory_order_relaxed);
     }
+    // F220 (TEMPORARY A/B, live, the developer tier's "HUD stays with view"): with View bob off, the HUD's placement moves with the view's bob term instead of the view moving against it.
+    {
+        const bool on = cfg.getString("experimental.native_on_foot_hud_stays_with_view", "on") != "off";
+        if (first || on != g_f220KeyLast)
+            Log::get().note("native on foot hud with the view (F220, TEMPORARY): experimental.native_on_foot_hud_stays_with_view is %s -- %s", on ? "on" : "off",
+                            on ? "with View bob off, the HUD's placement moves by the same amount the view is moved to take the bob out, so the HUD goes with the view instead of the view moving against it; "
+                                 "a HUD that follows the head is left alone; the per-window hud with the view line names the calls"
+                               : "the HUD stays where the game places it, and the view moves against it by the bob term, as before F220");
+        g_f220KeyLast = on;
+        g_f220Key.store(on, std::memory_order_relaxed);
+    }
     // F216 (permanent user setting, live, "View bob"): off (the default): EDVR takes most of the game's running bob out of the view; on: the view has the game's bob as it is.
     {
         const bool keep = cfg.getString("fix.native_on_foot_view_bob", "off") == "on";
         if (first || keep != g_f216KeyLast)
             Log::get().note("native on foot view bob setting (F216): fix.native_on_foot_view_bob is %s -- %s", keep ? "on" : "off",
                             keep ? "the view has the game's running bob as it is; nothing is taken out"
-                                 : "unarmed or armed, running at 2 m/s or more outside the sights, most of the game's running bob (up and down, and side to side) is taken out of the view, up to 5 cm on each axis; "
+                                 : "unarmed or armed, running at 2 m/s or more outside the sights, most of the game's running bob (up and down, and side to side) is taken out of the view, up to 2.5 cm on each axis; "
                                    "the per-window view bob line names the frames");
         g_f216KeyLast = keep;
         g_f216Keep.store(keep, std::memory_order_relaxed);
@@ -3246,6 +3262,7 @@ struct F13Inputs {
     float size = 1.0f;
     bool head = false;
     float C[16] = {};
+    float shift[3] = {};   // F220: the eye's bob move in body axes (right, up, forward), m, added to the translation (not with the head follow); all exact zeros when none
 };
 struct F12Matrix {
     bool have = false;           // a write of ours is in place for this HRC
@@ -3499,10 +3516,12 @@ void f13ReadHead(uintptr_t listB) noexcept {
 // The inputs of a placement, for the no-compounding comparison.
 bool f13SameInputs(const F13Inputs& a, const F13Inputs& b) noexcept {
     if (!f12Near(a.s, b.s) || !f12Near(a.size, b.size) || a.head != b.head) return false;
+    for (int i = 0; i < 3; ++i)
+        if (a.shift[i] != b.shift[i]) return false;   // F220: exactly, a shift that returns to zero must be seen
     return !a.head || std::memcmp(a.C, b.C, sizeof(a.C)) == 0;
 }
 
-// The final matrix from a base and the inputs: distance, then size (the basis only), then the head transform.
+// The final matrix from a base and the inputs: distance, then size (the basis only), then the head transform, or (F220, the head follow off) the translation moved by the shift.
 void f13Compose(const float* base, const F13Inputs& in, float* out) noexcept {
     float S[16];
     for (size_t r = 0; r < 4; ++r) {
@@ -3518,6 +3537,7 @@ void f13Compose(const float* base, const F13Inputs& in, float* out) noexcept {
         f13Mul(S, in.C, T);   // F34: the follow order is the one behaviour (after)
         std::memcpy(out, T, sizeof(T));
     } else {
+        nofoot::f216::addHudShift(S, in.shift);
         std::memcpy(out, S, sizeof(S));
     }
 }
@@ -3551,7 +3571,12 @@ void f13PlaceHud(void* hrcPtr, uintptr_t listB) noexcept {
         in.head = wantHead && src.valid;
         if (in.head) std::memcpy(in.C, src.C, sizeof(in.C));
     }
-    const bool neutral = f12Near(s, 1.0f) && f12Near(size, 1.0f) && !in.head;
+    // F220: the HUD goes with the view: the bob term the newest game frame's pose carried (the P1 hook stored it), unless the HUD follows the head (it reads the views' pose, which has the term).
+    const bool f220On = g_f220Key.load(std::memory_order_relaxed);
+    if (f220On && !in.head)
+        for (int i = 0; i < 3; ++i) in.shift[i] = g_f220Move[i].load(std::memory_order_relaxed);
+    g_f220Box.write([&](nofoot::f216::HudStats& win) noexcept { win.add(f220On, in.shift); });
+    const bool neutral = f12Near(s, 1.0f) && f12Near(size, 1.0f) && !in.head && in.shift[0] == 0.0f && in.shift[1] == 0.0f && in.shift[2] == 0.0f;
     if (h != g_f12Hrc) {
         g_f12Hrc = h;
         for (auto& m : g_f12Mat) m = F12Matrix{};
@@ -11849,6 +11874,10 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
             f216ForPin(haveCarried, carried, f216Seated, &f216Source);
             for (int i = 0; i < 3; ++i) S[i] += f216Seated[i];
             const bool f216Taken = f216Seated[0] != 0.0 || f216Seated[1] != 0.0 || f216Seated[2] != 0.0;
+            // F220: the same term in body axes for the HUD's placement (an exact 0 when none was carried)
+            double f220Body[3] = {};
+            nofoot::f216::seatedToBody(f216Seated, f220Body);
+            for (int i = 0; i < 3; ++i) g_f220Move[i].store(f216Taken ? static_cast<float>(f220Body[i]) : 0.0f, std::memory_order_relaxed);
             if (f216Taken) g_f216Removed[f216Source == nofoot::f94::kSrcMatched ? 0 : f216Source == nofoot::f94::kSrcLegacy ? 1 : 2].fetch_add(1, std::memory_order_relaxed);
             if (haveS || f94SeatedY != 0.0 || f137Taken || f216Taken) {
                 const float rows[9] = {m3p[0], m3p[1], m3p[2], m3p[4], m3p[5], m3p[6], m3p[8], m3p[9], m3p[10]};
@@ -11871,6 +11900,9 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
                 r.sub_raise = static_cast<float>(f94SeatedY);
                 for (int i = 0; i < 3; ++i) r.sub_bob[i] = static_cast<float>(f216Seated[i]);   // F216
                 r.bob_w = static_cast<float>(f216Out.w);
+                const bool f220Shifts = g_f220Key.load(std::memory_order_relaxed) && !g_followHead.load(std::memory_order_relaxed);   // F220: the shift the placement will use (zeros with the key off or the HUD on the head)
+                r.hud_shift_on = g_f220Key.load(std::memory_order_relaxed) ? 1 : 0;
+                for (int i = 0; i < 3; ++i) r.hud_shift[i] = f220Shifts && f216Taken ? static_cast<float>(f220Body[i]) : 0.0f;
                 r.aim_pitch_deg = g_f109RootPitch.load(std::memory_order_relaxed);
                 r.serial_carried = haveCarried ? carried.eyeAlignApplied : 0u;
                 r.game_frame = frame;
@@ -15247,6 +15279,7 @@ void f115Exit(uint64_t now, bool fromPanels) noexcept {
     g_eyeAlignPub[0] = g_eyeAlignPub[1] = g_eyeAlignPub[2] = 0.0;
     g_f94NeckSeatedPub = 0.0;
     g_f216Pub[0] = g_f216Pub[1] = g_f216Pub[2] = 0.0;   // F216: the zero alignment carries no bob term
+    for (auto& m : g_f220Move) m.store(0.0f, std::memory_order_relaxed);   // F220: nor does the HUD
     const float zeroEye[3] = {};
     f89AlignPublish(zeroEye);
     const double zero3[3] = {};
@@ -17632,7 +17665,7 @@ struct PinCall {
     bool f215Wrote = false;   // F217: stage 0 wrote the whole pose (with the shift)
     // F218: the rifle's rest solution was held back this call, the slide ran (a rifle held and the pose moved), the solution changed since the last call, and the length of the slide's offset (m)
     bool f218Held = false, f218Ran = false, f218Switched = false;
-    double f218OffsetM = 0.0;
+    double f218OffsetM = 0.0, f218Off[2] = {};   // f218Off: the slide's offset on x and z, which the bend's target rides so the bend does not read it as an error
 };
 alignas(16) float g_pinOut[nofoot::kPfzMaxJoints][16];
 // The speed state of the AMC, from successive P1 inputs (the hook's; one writer): a 0.15 s low-pass of the horizontal speed, the vertical speed.
@@ -19282,6 +19315,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.f218Ran = true;
             pc.f218Switched = g_f218Slide.switched;
             pc.f218OffsetM = g_f218Slide.offsetM;
+            pc.f218Off[0] = off218[0];
+            pc.f218Off[1] = off218[1];
             if (off218[0] != 0.0 || off218[1] != 0.0) {
                 for (uint32_t j = 0; j < count; ++j) {
                     g_pfzAnim[j][12] = static_cast<float>(static_cast<double>(g_pfzAnim[j][12]) + off218[0]);
@@ -21372,6 +21407,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             // pitch back against the armed limits, a 4.2 cm lift of the neck): two stages with opposing targets in one pass. The bend now closes only the
             // pin's caps' residual.
             nofoot::pinBendTargetWithReach(pinCall.T, pinCall.reach, bt.t);
+            bt.t[0] = static_cast<float>(static_cast<double>(bt.t[0]) + pinCall.f218Off[0]);   // F218: the neck carries the slide's offset, and the bend must not take it back out
+            bt.t[2] = static_cast<float>(static_cast<double>(bt.t[2]) + pinCall.f218Off[1]);
             bt.pov = nofoot::kBendNeckJoint;
             bt.ms = now;
         }
@@ -25932,6 +25969,8 @@ void f138Line(uint64_t now) noexcept {
         g_f215Box.clearPending.store(true, std::memory_order_relaxed);   // F215: nor the body's
         g_f215Shifted.store(0, std::memory_order_relaxed);
         g_f216Box.clearPending.store(true, std::memory_order_relaxed);   // F216: nor the bob's
+        g_f220LineMs = 0;
+        g_f220Box.clearPending.store(true, std::memory_order_relaxed);   // F220: nor the HUD shift's
         g_f218LineMs = g_f219LineMs = 0;
         g_f218Box.clearPending.store(true, std::memory_order_relaxed);   // F218: nor the rifle torso's
         g_f219Box.clearPending.store(true, std::memory_order_relaxed);   // F219: nor the elbow step's
@@ -26018,6 +26057,15 @@ void f138Line(uint64_t now) noexcept {
             char bobLine[760];
             nofoot::f216::formatLine(bobLine, sizeof(bobLine), secs216, vw);
             Log::get().note("%s", bobLine);
+        }
+    }
+    // F220: the HUD goes with the view, one line for a window with placement calls on foot (the key's state, the calls that carried a shift), F125's diet like F216's.
+    if (const uint32_t secs220 = nofoot::logwin::window(g_f220LineMs, now)) {
+        nofoot::f216::HudStats hw;
+        if (g_f220Box.take(&hw) && hw.any()) {
+            char hudLine[400];
+            nofoot::f216::formatHudLine(hudLine, sizeof(hudLine), secs220, hw);
+            Log::get().note("%s", hudLine);
         }
     }
     // F218: the rifle's torso, one line for a window with rifle calls that moved the pose (a window with none prints nothing). F219: the elbow's step limit, one line for a window with arm solves at the
@@ -38136,6 +38184,7 @@ static std::string recorderKeysJson() {
         nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)))));
     str("experimental.native_on_foot_view_follows_body_moving", cfg.getString("experimental.native_on_foot_view_follows_body_moving", "on"));
     str("experimental.native_on_foot_body_follows_view", cfg.getString("experimental.native_on_foot_body_follows_view", "on"));
+    str("experimental.native_on_foot_hud_stays_with_view", cfg.getString("experimental.native_on_foot_hud_stays_with_view", "on"));
     str("fix.native_on_foot_view_bob", cfg.getString("fix.native_on_foot_view_bob", "off"));
     num("experimental.native_on_foot_stand_ads_spine_straighten",
         nofoot::f180::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_spine_straighten", 0.9f))));
@@ -38370,6 +38419,7 @@ void nativeOnFootShutdown() {
     const float zeroEyeAlign[3] = {};
     g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
     g_f216Pub[0] = g_f216Pub[1] = g_f216Pub[2] = 0.0;   // F216: ... and no view bob term
+    for (auto& m : g_f220Move) m.store(0.0f, std::memory_order_relaxed);   // F220: ... and the HUD has no shift
     f137Reset();   // F137: ... and no virtual neck
     f138Reset();   // F138: ... and no stance reference
     f89AlignPublish(zeroEyeAlign);

@@ -2095,6 +2095,24 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "ADS left arm reach (F185, TEMPORARY) is one [experimental] number row right after Hip elbow swivel max, on its page and under its heading: 0.8..1, step 0.01, unsigned, live, shipped 0.92");
     }
+    // F220 (TEMPORARY): "HUD stays with view" is an [experimental] on/off choice right after "Body follows view" (F215), on the same page and under the same heading, live, shipped on.
+    {
+        int bodyRow = -1, hudRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") != 0) continue;
+            if (strcmp(d.key, "native_on_foot_body_follows_view") == 0) bodyRow = i;
+            if (strcmp(d.key, "native_on_foot_hud_stays_with_view") == 0) {
+                hudRow = i;
+                ++found;
+                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "HUD stays with view") == 0 && strcmp(d.choices, "on|off") == 0 && strcmp(d.shipped, "on") == 0 &&
+                         d.applies == 1;
+            }
+        }
+        const bool beside = bodyRow >= 0 && hudRow == bodyRow + 1 && strcmp(kMenuRows[hudRow].page, kMenuRows[bodyRow].page) == 0 && strcmp(kMenuRows[hudRow].group, kMenuRows[bodyRow].group) == 0;
+        check(found == 1 && shaped && beside, "HUD stays with view (F220, TEMPORARY) is one [experimental] on/off row right after Body follows view, on its page and under its heading: live, shipped on");
+    }
     // F170 (TEMPORARY): "Crouched ADS torso square" is the thirteenth number row of the developer tier's native on foot rows (the twelfth before F181 put "Hip elbow swivel max" before it, the tenth before F180 put the two rows of its own between, the eighth before F178 put the two "Standing ADS body" rows between, the seventh before
     // F171 put "Crouched ADS body left / right" before that), right after the hip elbow swivel row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed,
     // live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It carries no old value over.

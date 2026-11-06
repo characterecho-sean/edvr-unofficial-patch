@@ -142,8 +142,10 @@ F216_SPEED_SPLIT_MPS = 5.0  # the speed bins
 F216_SLOPE_SPLIT = 0.05     # the slope bins (|tan| under, over)
 F216_BAND_HZ = (2.5, 6.0)   # the bob's band
 F216_SIDE_BAND_HZ = (1.0, 6.0)   # the side's band: the sway runs at half the stride's rate, about 1.7 Hz at a sprint
-F216_SPRINT_MM = 4.0        # F216 finding: a level sprint leaves more than this in the view with the key off (a starting guess)
-F216_CLAMP_M = 0.05         # nofoot::f216::kClampM, for the clamp share
+F216_SPRINT_MM = 3.0        # F216 finding: a level sprint leaves more than this in the view with the key off (a starting guess; 4.0 for the moving-mean filter)
+F216_CLAMP_M = 0.025        # nofoot::f216::kClampM, for the clamp share ...
+F216_CLAMP_OLD_M = 0.05     # ... 5 cm for a recording whose build predates the band-pass filter (no p1.hud_shift in it)
+F216_LOW_BAND_HZ = (0.0, 1.5)   # the up term's slow part: what a change of slope fills
 F218_SPEED_S = 0.5          # F218/F219 section: the root's plane speed is taken over the last this many seconds
 F218_WALK_MPS = 0.3         # walk: from this speed ...
 F218_SPRINT_MPS = 4.0       # ... sprint: from this speed
@@ -1442,6 +1444,8 @@ class Analysis:
             self.say('  cannot evaluate: p1.e missing')
             return
         have_bob = al.has('bob_seated')
+        have_hud = p1.has('hud_shift')
+        clamp_m = F216_CLAMP_M if have_hud else F216_CLAMP_OLD_M
         key = str(S.keys.get('fix.native_on_foot_view_bob', 'off'))
         u, root, fh, path, free = g['u'], g['root'], g['fh'], g['path'], g['free']
         n = len(L.t)
@@ -1485,9 +1489,10 @@ class Analysis:
                 sp = float(np.mean(speed[k]))
                 tt = L.t[k]
                 b = (0 if sp < F216_SPEED_SPLIT_MPS else 1, 0 if slope < F216_SLOPE_SPLIT else 1)
-                clampshare = float(np.mean(np.max(np.abs(bob[k]), axis=1) >= F216_CLAMP_M - 1e-4))
+                clampshare = float(np.mean(np.max(np.abs(bob[k]), axis=1) >= clamp_m - 1e-4))
                 rows[b].append(dict(cam=self.band_rms(tt, cam_up[k], *F216_BAND_HZ), view=self.band_rms(tt, view_up[k], *F216_BAND_HZ), side=self.band_rms(tt, view_side[k], *F216_SIDE_BAND_HZ), cam_side=self.band_rms(tt, cam_side[k], *F216_SIDE_BAND_HZ),
-                                    along=self.band_rms(tt, view_along[k], *F216_BAND_HZ), term=float(np.std(bob[k, 1])), clamp=clampshare, t0=float(tt[0]), t1=float(tt[-1])))
+                                    along=self.band_rms(tt, view_along[k], *F216_BAND_HZ), term=float(np.std(bob[k, 1])), term_low=self.band_rms(tt, bob[k, 1], *F216_LOW_BAND_HZ),
+                                    term_band=self.band_rms(tt, bob[k, 1], *F216_BAND_HZ), clamp=clampshare, t0=float(tt[0]), t1=float(tt[-1])))
                 stretches += 1
                 i += F216_STRETCH_ROWS
         self.f216 = dict(stretches=stretches, bins={})
@@ -1497,17 +1502,30 @@ class Analysis:
             key, stretches, F216_STRETCH_ROWS, F216_FACING_DOT, F216_MIN_MPS))
         names = {(0, 0): 'under %g m/s, level' % F216_SPEED_SPLIT_MPS, (0, 1): 'under %g m/s, slope' % F216_SPEED_SPLIT_MPS, (1, 0): '%g m/s and over, level' % F216_SPEED_SPLIT_MPS,
                  (1, 1): '%g m/s and over, slope' % F216_SPEED_SPLIT_MPS}
+        if have_hud:   # F220: the move of the HUD with the view the placement was given, from the P1 record of each row (a recording without the field prints nothing)
+            hs = p1.f('hud_shift')[L.pi].astype(np.float64)
+            fin = np.isfinite(hs).all(axis=1)
+            nz = np.any(hs != 0.0, axis=1) & fin
+            rr_ = run & fin
+            up_mm = float(np.sqrt(np.mean(hs[rr_, 1] ** 2))) * 1000.0 if rr_.any() else float('nan')
+            side_mm = float(np.sqrt(np.mean(hs[rr_, 0] ** 2))) * 1000.0 if rr_.any() else float('nan')
+            share = float(np.mean(nz)) if n else 0.0
+            self.f216['hud'] = dict(up_mm=up_mm, side_mm=side_mm, share=share, run_rows=int(rr_.sum()), rows=int(n))
+            self.say('  HUD shift (F220, p1.hud_shift; key experimental.native_on_foot_hud_stays_with_view is %s): over the %d run rows up rms %.2f mm, side rms %.2f mm; non-zero on %.1f%% of the %d rows on foot' % (
+                S.keys.get('experimental.native_on_foot_hud_stays_with_view', 'on'), int(rr_.sum()), up_mm, side_mm, 100.0 * share, n))
         if not stretches:
             self.say('  no stretch to judge')
             return
-        self.say('  %.1f to %.1f Hz rms in mm (side from %.1f Hz; mean over the stretches), by speed and slope (|tan| under %.2f is level): camera / view up, camera / view side, view along; the up term\'s rms; share of rows at the %.0f cm clamp' % (
-            F216_BAND_HZ[0], F216_BAND_HZ[1], F216_SIDE_BAND_HZ[0], F216_SLOPE_SPLIT, F216_CLAMP_M * 100))
+        self.say('  %.1f to %.1f Hz rms in mm (side from %.1f Hz; mean over the stretches), by speed and slope (|tan| under %.2f is level): camera / view up, camera / view side, view along; the up term\'s rms (all of it, under %.1f Hz, in the band); share of rows at the %.1f cm clamp' % (
+            F216_BAND_HZ[0], F216_BAND_HZ[1], F216_SIDE_BAND_HZ[0], F216_SLOPE_SPLIT, F216_LOW_BAND_HZ[1], clamp_m * 100))
         for bkey in sorted(rows):
             rr = rows[bkey]
             m = lambda f: float(np.nanmean([r[f] for r in rr])) * 1000.0
-            self.f216['bins'][bkey] = dict(n=len(rr), cam_mm=m('cam'), view_mm=m('view'), side_mm=m('side'), along_mm=m('along'), term_mm=m('term'), clamp=float(np.mean([r['clamp'] for r in rr])))
-            self.say('    %-24s %3d stretches: up %.2f / %.2f, side %.2f / %.2f, along %.2f; term %.2f; clamp %.1f%%' % (names[bkey], len(rr), m('cam'), m('view'), m('cam_side'), m('side'), m('along'), m('term'),
-                                                                                                                  100.0 * self.f216['bins'][bkey]['clamp']))
+            self.f216['bins'][bkey] = dict(n=len(rr), cam_mm=m('cam'), view_mm=m('view'), side_mm=m('side'), along_mm=m('along'), term_mm=m('term'), term_low_mm=m('term_low'), term_band_mm=m('term_band'),
+                                         clamp=float(np.mean([r['clamp'] for r in rr])))
+            self.say('    %-24s %3d stretches: up %.2f / %.2f, side %.2f / %.2f, along %.2f; term %.2f (under %.1f Hz %.2f, %.1f to %.1f Hz %.2f); clamp %.1f%%' % (
+                names[bkey], len(rr), m('cam'), m('view'), m('cam_side'), m('side'), m('along'), m('term'), F216_LOW_BAND_HZ[1], m('term_low'), F216_BAND_HZ[0], F216_BAND_HZ[1], m('term_band'),
+                100.0 * self.f216['bins'][bkey]['clamp']))
         sprint = self.f216['bins'].get((1, 0))
         if sprint and have_bob and key == 'off' and sprint['view_mm'] > F216_SPRINT_MM:
             rr = rows[(1, 0)]
@@ -2201,8 +2219,8 @@ SYN_SCHEMA['align'] = (1, _A('f32', 3, 'eye', 'run', 'ads_lock', 'sight', 'weapo
                        _S('f32', 'hold_y', 'raise_y', 'raise_z', 'neck_seated_y', 'ads_turn_dy', 'ads_turn_dz', 'turret_z', 'aim_rad', 'raise_target', 'raise_age_ms', 'raise_ramp', 'raise_m', 'bob_w') +
                        _S('u32', 'serial', 'eye_align_applied') + _S('u8', 'align_mode', 'pin_scope', 'on_foot', 'cam_external', 'ads', 'aim_fresh', 'published', 'raise_turned', 'ads_turned',
                                                                      'have_frame', 'local_valid', 'raise_clamped', 'raise_following') + _E('VneckReason', 'vneck_reason'))
-SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_vneck', 'sub_weapon_view', 'sub_bob') + _S('f32', 'sub_raise', 'aim_pitch_deg', 'bob_w') + _S('u32', 'serial_carried', 'game_frame') +
-                    _S('u8', 'have_ads_shift') + _E('SrcKind', 'src') + _E('SrcKind', 'vneck_src'))
+SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_vneck', 'sub_weapon_view', 'sub_bob', 'hud_shift') + _S('f32', 'sub_raise', 'aim_pitch_deg', 'bob_w') + _S('u32', 'serial_carried', 'game_frame') +
+                    _S('u8', 'have_ads_shift', 'hud_shift_on') + _E('SrcKind', 'src') + _E('SrcKind', 'vneck_src'))
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
@@ -3010,6 +3028,30 @@ def self_test():
         _make(d, stamp, [], [sprint_post(False)], drop={'align': ['bob_seated', 'bob_w'], 'p1': ['sub_bob', 'bob_w']})
         S, A = analyse(d)
         check('align.bob_seated missing' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'f216_sprint_bob'], 'a recording from before F216 reads the view as the camera and names no sprint finding')
+        # F216b, F220: a recording made with the band-pass filter has p1.hud_shift. The clamp share reads against 2.5 cm (against 5 cm without the field), the up term's rms is split under 1.5 Hz and in
+        # 2.5 to 6 Hz, and the HUD's shift (up 6 mm and side 4 mm at the stride rate, planted) is read as its rms and the share of rows with a shift
+        def hud_post(s_):
+            sprint_post(True, 0.030)(s_)
+            p1, t = s_.tables['p1'], s_.t
+            sn = np.sin(2 * np.pi * 3.4 * t)
+            p1['hud_shift'] = np.stack([0.004 * sn, 0.006 * sn, np.zeros(len(t))], 1)
+            p1['hud_shift_on'] = np.ones(len(t), np.uint8)
+        d = fresh()
+        _make(d, stamp, [], [hud_post])
+        S, A = analyse(d)
+        bn = (A.f216 or {}).get('bins', {}).get((1, 0))
+        hud = (A.f216 or {}).get('hud')
+        txt = chr(10).join(A.out)
+        check(bn is not None and bn['clamp'] > 0.2 and abs(bn['term_band_mm'] - 21.2) < 2.0 and bn['term_low_mm'] < 0.15 * bn['term_band_mm'] and 'under 1.5 Hz' in txt and 'at the 2.5 cm clamp' in txt,
+              'F216b: with p1.hud_shift the clamp reads against 2.5 cm and the up term is split by band: %s' % (bn,))
+        check(hud is not None and abs(hud['up_mm'] - 4.24) < 0.4 and abs(hud['side_mm'] - 2.83) < 0.3 and hud['share'] > 0.9 and 'HUD shift (F220' in txt, 'F220: the HUD shift is read as up 4.24 and side 2.83 mm rms with a share of rows: %s' % (hud,))
+        d = fresh()
+        _make(d, stamp, [], [hud_post], drop={'p1': ['hud_shift', 'hud_shift_on']})
+        S, A = analyse(d)
+        bn = (A.f216 or {}).get('bins', {}).get((1, 0))
+        txt = chr(10).join(A.out)
+        check(bn is not None and bn['clamp'] < 0.01 and (A.f216 or {}).get('hud') is None and 'HUD shift (F220' not in txt and 'at the 5.0 cm clamp' in txt,
+              'F220: a recording without p1.hud_shift keeps the 5 cm clamp and prints no HUD shift: %s' % (bn,))
         check(abs(Analysis.band_rms(np.arange(128) / 90.0, 0.010 * np.sin(2 * np.pi * 3.4 * np.arange(128) / 90.0), 2.5, 6.0) * 1000 - 7.07) < 0.7 and
               Analysis.band_rms(np.arange(128) / 90.0, 0.010 * np.sin(2 * np.pi * 0.7 * np.arange(128) / 90.0), 2.5, 6.0) * 1000 < 0.5, 'the band rms reads a 3.4 Hz 10 mm sine as 7.07 mm and a 0.7 Hz one as nothing')
         # F218, F219: the left elbow against the chest, by item and speed. A rifle (serial 3) walked 1.5 m/s for 7 s: with the torso flipping between two solutions three times a second (the elbow 8 cm

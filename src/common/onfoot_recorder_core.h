@@ -125,9 +125,9 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
 // p1: the game thread, the P1 hook, where it publishes E for the local commander's eye camera
 #define ONF_LIST_P1(S, A, E)                                                                                                                                 \
     A(f64, cam, 3) A(f64, e, 3)                                                                                                                              \
-    A(f32, sub_ads, 3) A(f32, sub_vneck, 3) A(f32, sub_weapon_view, 3) S(f32, sub_raise) S(f32, aim_pitch_deg) A(f32, sub_bob, 3) S(f32, bob_w)                                              \
+    A(f32, sub_ads, 3) A(f32, sub_vneck, 3) A(f32, sub_weapon_view, 3) S(f32, sub_raise) S(f32, aim_pitch_deg) A(f32, sub_bob, 3) S(f32, bob_w) A(f32, hud_shift, 3)                                              \
     S(u32, serial_carried) S(u32, game_frame)                                                                                                                \
-    S(u8, have_ads_shift) E(SrcKind, src) E(SrcKind, vneck_src)
+    S(u8, have_ads_shift) S(u8, hud_shift_on) E(SrcKind, src) E(SrcKind, vneck_src)
 
 // pin: the Animate thread, once per local-body call that reached stage 0
 #define ONF_LIST_PIN(S, A, E)                                                                                                                                \

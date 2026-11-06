@@ -12738,6 +12738,36 @@ def _hj_f216(rows, ctx):
     return ("OK", text + "; removing in %d of %d frames at a run (%.0f%%)" % (rem_off, run, 100.0 * rem_off / run))
 
 
+# F220 (TEMPORARY): the HUD goes with the view (experimental.native_on_foot_hud_stays_with_view; formatHudLine in src/d3d11/native_on_foot_f216.h). The window line counts the placement calls on foot and
+# those that carried a shift. The key's own note line carries "(F220, TEMPORARY)", so it is not a window line this rule must parse. The rule reads the F216 line of the same log too: that line says
+# whether any frame had a term to move the HUD by.
+H220_LABEL = "native on foot hud with the view (F220)"
+H220_RE = (r"native on foot hud with the view \(F220\) (?P<wl>\d+) s: experimental\.native_on_foot_hud_stays_with_view is (?P<key>on|off); placement calls (?P<calls>\d+), with a shift (?P<sh>\d+); "
+           r"up rms (?P<urms>%s) max (?P<umax>%s) mm, side rms (?P<srms>%s) max (?P<smax>%s) mm$" % ((_HN,) * 4))
+
+
+def _hj_f220(rows, ctx):
+    """F220: the HUD goes with the view. IDLE: the key off in every window, or no frame carried a term (the F216 line shows none removing: the key View bob on, or nothing at a run).
+    NEVER APPLIED: the key on, the F216 line shows the term removing from some frame, and not one placement call had a shift (the placement hook never read the term, or the key is not read).
+    OK otherwise, with the calls that had a shift and the largest of the shift."""
+    hud = rows.get("hud", [])
+    if not hud:
+        return None
+    on = [r for r in hud if r["key"] == "on"]
+    rem = sum(int(r["rem"]) for r in rows.get("bob", []))
+    text = "%d s: %d placement calls, %d with a shift" % (_hsecs(hud), sum(int(r["calls"]) for r in hud), sum(int(r["sh"]) for r in hud))
+    if not on:
+        return ("IDLE", text + "; the key was off in every window: the HUD stays where the game places it")
+    calls, shifted = sum(int(r["calls"]) for r in on), sum(int(r["sh"]) for r in on)
+    if not rem:
+        return ("IDLE", text + "; no frame carried a term (the F216 line shows none removing): nothing to move the HUD by")
+    if not shifted:
+        return ("NEVER APPLIED", text + "; the key is on, the view bob term was removing from %d frames and not one of %d placement calls had a shift" % (rem, calls))
+    wsum = lambda k: sum(float(r[k]) ** 2 * int(r["sh"]) for r in on)
+    return ("OK", text + "; shifted in %d of %d placement calls (%.0f%%); up rms %.1f mm (max %.1f), side rms %.1f (max %.1f)" % (
+        shifted, calls, 100.0 * shifted / calls, (wsum("urms") / shifted) ** 0.5, max(float(r["umax"]) for r in on), (wsum("srms") / shifted) ** 0.5, max(float(r["smax"]) for r in on)))
+
+
 # F218: the laser rifle's torso at the hip (formatLine in src/d3d11/native_on_foot_f218.h). The window line counts the pin calls that moved the pose with the rifle held, those on the rest solution
 # (applied), refused or held back, the changes of solution (switches) and the slide's largest offset.
 H218_LABEL = "native on foot rifle torso (F218)"
@@ -17963,6 +17993,10 @@ HEALTH_RULES = (
     _hrule("view bob (F216)", ("F216",), (H216_LABEL,), (
         ("sec", H216_RE),
     ), _hj_f216),
+    _hrule("HUD with the view (F220)", ("F220", "F216"), (H220_LABEL,), (
+        ("hud", H220_RE),
+        ("bob", H216_RE),
+    ), _hj_f220),
     _hrule("rifle torso (F218)", ("F218",), (H218_LABEL,), (
         ("sec", H218_RE),
     ), _hj_f218),
@@ -24471,6 +24505,23 @@ def self_test_health():
         check("F216: a window with the key on beside one with it off is judged on the off window", [win216(key="on", rem=0, moves=(0,) * 6, clamp=0), win216()], 0, [("OK", F216)],
               has=["20 s: 1800 game frames"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F216: a window line that drifted from its pattern is UNPARSED", [win216().replace("game frames", "frames")], 4, [("UNPARSED", F216)])
+        # ---- F220: the HUD goes with the view; its window line is rendered from the C format string in native_on_foot_f216.h, and the rule reads the F216 line beside it ----
+        F220 = "HUD with the view (F220)"
+
+        def win220(key="on", calls=900, sh=600, moves=(3.4, 7.1, 2.0, 4.5), wl=10):
+            fmt = health_c_format(f216src, "native on foot hud with the view (F220) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f216.h has no format holding the F220 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, sh) + tuple(float(m) for m in moves))
+        check("F220: the key on, the term removing and 600 of 900 placement calls shifted is OK and names the shift", [win216(), win220()], 0, [("OK", F220)],
+              has=["10 s: 900 placement calls, 600 with a shift", "shifted in 600 of 900 placement calls (67%); up rms 3.4 mm (max 7.1), side rms 2.0 (max 4.5)"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F220: the key on, the term removing and not one placement call shifted is NEVER APPLIED", [win216(), win220(sh=0, moves=(0,) * 4)], 3, [("NEVER APPLIED", F220)],
+              has=["the view bob term was removing from 500 frames and not one of 900 placement calls had a shift"], lacks=["UNPARSED"])
+        check("F220: the key off is IDLE, never NEVER APPLIED", [win216(), win220(key="off", sh=0, moves=(0,) * 4)], 0, [("IDLE", F220)],
+              has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F220: no frame removing (the F216 line shows none) is IDLE, never NEVER APPLIED", [win216(run=60, rem=0, moves=(0,) * 6, clamp=0), win220(sh=0, moves=(0,) * 4)], 0, [("IDLE", F220)],
+              has=["no frame carried a term"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F220: a window line that drifted from its pattern is UNPARSED", [win216(), win220().replace("placement calls", "calls")], 4, [("UNPARSED", F220)])
         # ---- F218: the rifle's torso; its window line is rendered from the C format string in native_on_foot_f218.h ----
         f218src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f218.h"))
         F218 = "rifle torso (F218)"
