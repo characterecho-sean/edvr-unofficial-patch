@@ -95,6 +95,7 @@
 #include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
 #include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
 #include "native_on_foot_f195.h"   // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred (pure parts)
+#include "native_on_foot_f214.h"   // F214: unarmed, the view raise follows the neck while the body moves (the window, the rule, the log line: pure parts)
 #include "native_on_foot_f205.h"   // F205: the full-detail scope takes both eyes (the effective sight eye) and every ADS press shows its view inside a circle sized as flat's ADS FOV (pure parts)
 #include "../common/view_circle.h" // F206: the circle's request (its centre) between the halves
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
@@ -270,6 +271,11 @@ double g_standAdsBodyLeftCmLast = 1e9;                        // the value last 
 std::atomic<float> g_standAdsSpine{0.9f};                     // F180b (TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten, 0..1, live: the share of the ADS hunch of the upper spine and the neck taken back out standing in the sights; F181: default 0.9, the pilot's flown value
 double g_standAdsSpineLast = 1e9;                             // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; F181: default 2, the pilot's flown value (F179's first was 10)
+std::atomic<bool> g_f214Key{true};                            // F214 (TEMPORARY): experimental.native_on_foot_view_follows_body_moving, on by default, live: unarmed, the view raise follows the neck while the body moves (set on the frame thread, read by the pin hook)
+bool g_f214KeyLast = true;                                    // the value last logged (frame thread; the first read always logs)
+nofoot::f214::Follow g_f214;                                  // F214: the pin hook's window and the settled target to go back to (one writer: the hook, under g_pfzBusy; reset by the hook at an edge)
+nofoot::f171c::Mailbox<nofoot::f214::Stats> g_f214Box;        // F214: the hook's window of calls for the log line (the frame thread takes it)
+uint64_t g_f214LineMs = 0;                                    // F214: the log window's start (frame thread)
 double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
 std::atomic<float> g_adsLeftReach{static_cast<float>(nofoot::f185::kDialDefault)};   // F185 (TEMPORARY): experimental.native_on_foot_ads_left_reach, 0.80..1.00, live: in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the grip; 1.00 is today's; default 0.92
@@ -1262,6 +1268,17 @@ void readKey() {
                             "the hip it only measures the push it would make; the per-window neck guard lines name the figures", cm, nofoot::f179::kNeckGuardMinCm, nofoot::f179::kNeckGuardMaxCm);
         g_neckGuardCmLast = cm;
         g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F214 (TEMPORARY A/B, live, the developer tier's "View follows body moving"): unarmed, the view raise follows the neck while the body moves. Off: nothing runs and the raise is as before F214.
+    {
+        const bool on = cfg.getString("experimental.native_on_foot_view_follows_body_moving", "on") != "off";
+        if (first || on != g_f214KeyLast)
+            Log::get().note("native on foot view follows body (F214, TEMPORARY): experimental.native_on_foot_view_follows_body_moving is %s -- %s", on ? "on" : "off",
+                            on ? "unarmed and upright, with the body moving and the head level, the view's raise follows the neck through a mean over the last 0.6 s (published once the window holds 0.3 s), "
+                                 "so the view stays the eye height over the neck on a slope; an item drawn or a crouch takes the last settled stance's raise again; the per-window view follows body line names the calls"
+                               : "the raise is taken from a settled stance only, as before F214");
+        g_f214KeyLast = on;
+        g_f214Key.store(on, std::memory_order_relaxed);
     }
     // F181a (TEMPORARY, live, the developer tier's "Hip elbow swivel max"): with a two-handed gun at the hip the left elbow swings at most this many degrees off the stance's plane (the plane F98a
     // measures its swivel from); 90 leaves the game's pose as it is. Weighted by the hip share (1 less the detach weight): none in the sights, where F180a's body-down blend rules.
@@ -17453,6 +17470,9 @@ struct PinCall {
     uint8_t refuseRec = 0xFF;
     uint64_t eAgeUs = 0;
     bool f138SettleRefusedRec = false;
+    // F214: what the follow did this call (nofoot::f214::State; kNotRun: the call never reached the step) and the mean it published (not a number: none)
+    uint8_t f214State = nofoot::f214::kNotRun;
+    double f214Target = std::nan("");
 };
 alignas(16) float g_pinOut[nofoot::kPfzMaxJoints][16];
 // The speed state of the AMC, from successive P1 inputs (the hook's; one writer): a 0.15 s low-pass of the horizontal speed, the vertical speed.
@@ -17983,6 +18003,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 g_f138HeldM = 0.0;   // F170: the raise starts again from 0
                 g_f160.reset();   // F160: the kept target is the last stance's, not the next scope's
                 g_f193Stop.endPress();   // F193: and no press carries over an edge of the camera
+                g_f214.reset();   // F214: and no window, nor a settled target from before it
             }
             bool f138Own = false;  // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
             nofoot::f95::SettleIn si;
@@ -18051,6 +18072,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
                 g_f160.store(pc.f95Target, itemSerialForCall, cls);   // F160: the target the release brings back
+                g_f214.noteSettled(pc.f95Target);   // F214: the target to go back to on leaving the moving follow for an item or a crouch (a moving target is never stored)
                 f138Own = true;
                 // F138: an unarmed upright stance is the reference the pitched look's sink is measured against: the target just published, G of this call, the animated neck, the
                 // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
@@ -18100,6 +18122,36 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 fi.localHeadY = static_cast<double>(in.localHeadY);
                 const f138::Out fo = g_f138.step(fi);
                 if (fo.publish) f94TargetPublish(fo.publishM, now);
+                // F214: unarmed, with the body moving, the raise follows the neck through a 0.6 s mean (nofoot::f214). After F138's step, so F138 keeps its say; the key off runs nothing. The crouch and the upright
+                // test are the ones F170's running reference uses (pc.postureW reads the animated neck; pc.wc would read the camera, which a steep downhill lowers); the head's pitch is the physical head's (LOCAL).
+                {
+                    nofoot::f214::In xi;
+                    xi.keyOn = g_f214Key.load(std::memory_order_relaxed);
+                    xi.moving = pc.f95Moving;
+                    xi.away = refusal == kPinRefCameraAway;
+                    xi.itemDrawn = f138Item || pc.detachW > 0.0;
+                    xi.lowPosture = pc.postureW >= 0.5 || (headFinite && !nofoot::pinHeadUpright(p44[1]));
+                    xi.owned = f138Own || fo.publish;
+                    xi.valid = si.valid;
+                    xi.aimRefused = f138SettleRefused;
+                    xi.poseValid = localPitchValid;
+                    xi.fresh = freshIn;
+                    xi.sampleOk = pc.f94TargetOk;
+                    xi.headPitchDeg = localPitchValid ? localPitchRad * 180.0 / nofoot::kIkPi : std::nan("");
+                    xi.tS = si.tS;
+                    xi.sampleM = pc.f94Target;
+                    const nofoot::f214::Out xo = g_f214.step(xi);
+                    if (xo.publish) f94TargetPublish(xo.publishM, now);
+                    pc.f214State = xo.state;
+                    pc.f214Target = xo.state == nofoot::f214::kFollowed ? xo.meanM : std::nan("");
+                    nofoot::f214::Call xc;
+                    xc.state = xo.state;
+                    xc.keyOn = xi.keyOn;
+                    xc.movingUnarmed = xi.moving && !f138Item;
+                    xc.republished = xo.republish;
+                    if (xo.publish && !xo.republish) xc.publishedM = xo.publishM;
+                    g_f214Box.write([&](nofoot::f214::Stats& win) noexcept { win.add(xc); });
+                }
                 if (fo.pitched || fo.returned || fo.returnRefused || fo.notNeeded) {
                     f138::Call fc;
                     fc.aimDeg = pc.f86AimPitch;
@@ -20922,6 +20974,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.have_stored_crouch = g_f98Eye.have[nofoot::f94::kClassCrouched];
         r.armed = pc.armed;
         r.aim_known = pc.f86Ok;
+        r.f214_state = pc.f214State;   // F214
+        r.f214_target = pc.f214Target;
         onfootrec::push(r);
     }
     if (!pinStageOk) {
@@ -25541,6 +25595,8 @@ void f138Line(uint64_t now) noexcept {
     if (g_f138LineReset.exchange(false, std::memory_order_relaxed)) {
         lineMs = binMs = 0;
         f193LineMs = 0;
+        g_f214LineMs = 0;
+        g_f214Box.clearPending.store(true, std::memory_order_relaxed);   // F214: nor the follow's
         g_f138Box.clearPending.store(true, std::memory_order_relaxed);   // F170: the window the edge left is not the next second's
         g_f171cBox.clearPending.store(true, std::memory_order_relaxed);  // F171: nor the raise carriage's
         g_f175Box.clearPending.store(true, std::memory_order_relaxed);   // F175: nor the view roll's
@@ -25596,6 +25652,16 @@ void f138Line(uint64_t now) noexcept {
             char bodyLine[760];
             nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), secs193, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));
             Log::get().note("%s", bodyLine);
+        }
+    }
+    // F214: the view follows the body while moving, one line for a window with pin calls (the hook's window accumulates until it is taken): every 10 s by default, every second with log.on_foot_detail
+    // (F125's diet). A window with no pin call prints nothing; one with calls says what each did, so a hook that never reached the step cannot read as success.
+    if (const uint32_t secs214 = nofoot::logwin::window(g_f214LineMs, now)) {
+        nofoot::f214::Stats fw;
+        if (g_f214Box.take(&fw) && fw.any()) {
+            char followLine[760];
+            nofoot::f214::formatLine(followLine, sizeof(followLine), secs214, fw);
+            Log::get().note("%s", followLine);
         }
     }
     for (int m = 0; m < 2; ++m)
@@ -37694,6 +37760,7 @@ static std::string recorderKeysJson() {
     num("fix.native_on_foot_look_to_aim_smoothing_ms", cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 50));
     num("experimental.native_on_foot_neck_guard_cm",
         nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)))));
+    str("experimental.native_on_foot_view_follows_body_moving", cfg.getString("experimental.native_on_foot_view_follows_body_moving", "on"));
     num("experimental.native_on_foot_stand_ads_spine_straighten",
         nofoot::f180::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_spine_straighten", 0.9f))));
     num("experimental.native_on_foot_ads_left_reach",

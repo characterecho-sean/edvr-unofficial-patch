@@ -12625,6 +12625,43 @@ def _hj_f212(rows, ctx):
     return ("OK", text)
 
 
+# F214 (TEMPORARY): unarmed, the view raise follows the neck while the body moves (experimental.native_on_foot_view_follows_body_moving; formatLine in src/d3d11/native_on_foot_f214.h).
+# The key's own note line carries a different label ("view follows body (F214, TEMPORARY)"), so it is not a window line this rule must parse.
+H214_LABEL = "native on foot view follows body (F214)"
+H214_RE = (r"native on foot view follows body \(F214\) (?P<wl>\d+) s: experimental\.native_on_foot_view_follows_body_moving is (?P<key>on|off); pin calls (?P<calls>\d+), moving and unarmed "
+           r"(?P<mv>\d+), followed (?P<fol>\d+); held: filling (?P<fil>\d+), aim pitch (?P<aim>\d+), head pitch (?P<head>\d+), no pose (?P<pose>\d+), posture (?P<post>\d+), item (?P<item>\d+), "
+           r"F138 (?P<f138>\d+), away (?P<away>\d+); published target (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<pub>\d+) calls); re-published (?P<re>\d+)$" % ((_HN,) * 3))
+H214_MIN_CALLS = 30   # moving unarmed calls with the key on and none followed: the window fills in 0.3 s (27 calls at 90 Hz), so this many moving calls could not all be held by chance
+
+
+def _hj_f214(rows, ctx):
+    """F214 (TEMPORARY): unarmed, the view raise follows the neck while the body moves, through a 0.6 s mean (the slope flight: the camera over the neck is +9 cm + 60 cm x tan(slope), and
+    only a settled stance corrected it). The window line counts the pin calls: moving and unarmed, followed, and held by reason (filling, aim pitch, head pitch, no pose, posture, item, F138,
+    away). NEVER APPLIED: the key on, 30 or more moving unarmed calls in all, and not one followed (the step never ran to a published target, or every call was held: the held counts say which).
+    IDLE: the key off in every window (the raise is as before F214), or under 30 moving unarmed calls (a flight spent standing or armed). OK otherwise, with the followed share, the held
+    reasons, and the published target's range."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    on = [r for r in sec if r["key"] == "on"]
+    g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
+    held = ", ".join("%s %d" % (name, g(k)) for name, k in (("filling", "fil"), ("aim pitch", "aim"), ("head pitch", "head"), ("no pose", "pose"), ("posture", "post"), ("item", "item"),
+                                                          ("F138", "f138"), ("away", "away")) if g(k))
+    pub = [r for r in sec if r["mean"] is not None]
+    pubn = sum(int(r["pub"]) for r in pub)
+    rng = ("; published target mean %+.1f cm, min %+.1f, max %+.1f over %d calls" % (sum(float(r["mean"]) * int(r["pub"]) for r in pub) / pubn, min(float(r["min"]) for r in pub),
+                                                                                    max(float(r["max"]) for r in pub), pubn)) if pubn else "; no target published"
+    text = "%d s: %d pin calls, %d moving and unarmed, %d followed%s%s; re-published %d" % (_hsecs(sec), g("calls"), g("mv"), g("fol"), "; held: " + held if held else "", rng, g("re"))
+    if not on:
+        return ("IDLE", text + "; the key was off in every window: the raise is as before F214")
+    mv, fol = g("mv", on), g("fol", on)
+    if mv >= H214_MIN_CALLS and not fol:
+        return ("NEVER APPLIED", text + "; the key is on and %d moving unarmed calls followed none (the held counts say whether the step ran and held every call, or no call reached it)" % mv)
+    if mv < H214_MIN_CALLS:
+        return ("IDLE", text + "; under %d moving unarmed calls with the key on: little to judge" % H214_MIN_CALLS)
+    return ("OK", text + "; followed %d of %d moving unarmed calls (%.0f%%)" % (fol, mv, 100.0 * fol / mv))
+
+
 H_F213 = "on-foot recording (F213)"
 F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
 
@@ -17789,6 +17826,9 @@ HEALTH_RULES = (
         ("seconds", r"native on foot view motion \(F95a\) seconds: body \[(?P<body>[\d.,]*)\], ground \[(?P<ground>[\d.,]*)\], HUD standing \[(?P<hs>[\d.,]*)\], "
                     r"HUD moving \[(?P<hm>[\d.,]*)\]; settled (?P<settled_s>\d+) of (?P<ws>\d+) s$"),
     ), _hj_f95a_motion),
+    _hrule("view follows body (F214)", ("F214",), (H214_LABEL,), (
+        ("sec", H214_RE),
+    ), _hj_f214),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -24211,6 +24251,30 @@ def self_test_health():
         check("F213: a window line that drifted from its pattern is not read as a window (no window: NEVER APPLIED, with the line named)",
               [F125_ON, ONFOOT213, READY213, win213().replace("records (drops)", "records")], 3, [("NEVER APPLIED", H_F213)], has=["line(s) the rule's patterns do not match"])
         check("F213: a lone line of the rule's label that no pattern matches is UNPARSED", [F125_ON, ONFOOT213, "native on foot recorder (F213): something new happened"], 4, [("UNPARSED", H_F213)])
+        # ---- F214 (TEMPORARY): the view follows the body while moving; its window line is rendered from the C format string in native_on_foot_f214.h ----
+        f214src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f214.h"))
+        F214 = "view follows body (F214)"
+
+        def win214(key="on", calls=900, mv=600, fol=500, held=(50, 10, 20, 5, 0, 0, 15, 0), pub="mean +15.0 cm (min +10.0, max +20.0) over 500 calls", re_=0, wl=10):
+            fmt = health_c_format(f214src, "native on foot view follows body (F214) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f214.h has no format holding the F214 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, mv, fol) + tuple(held) + (pub, re_))
+        check("F214: a flight that followed 500 of 600 moving unarmed calls is OK and names the held reasons", [win214()], 0, [("OK", F214)],
+              has=["10 s: 900 pin calls, 600 moving and unarmed, 500 followed; held: filling 50, aim pitch 10, head pitch 20, no pose 5, F138 15; published target mean +15.0 cm, min +10.0, max +20.0 over 500 calls",
+                   "followed 500 of 600 moving unarmed calls (83%)"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F214: the key on, 600 moving unarmed calls and none followed is NEVER APPLIED", [win214(fol=0, held=(0, 0, 0, 0, 0, 0, 0, 0), pub="none")], 3, [("NEVER APPLIED", F214)],
+              has=["the key is on and 600 moving unarmed calls followed none"], lacks=["UNPARSED"])
+        check("F214: the key on, every moving call held (a head pitched the whole time) is NEVER APPLIED, with the held counts to read", [win214(fol=0, held=(0, 0, 600, 0, 0, 0, 0, 0), pub="none")], 3,
+              [("NEVER APPLIED", F214)], has=["held: head pitch 600", "no target published"], lacks=["UNPARSED"])
+        check("F214: the key off with moving calls is IDLE, never NEVER APPLIED", [win214(key="off", fol=0, held=(0,) * 8, pub="none")], 0, [("IDLE", F214)],
+              has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: under 30 moving unarmed calls with none followed is IDLE", [win214(mv=20, fol=0, held=(20, 0, 0, 0, 0, 0, 0, 0), pub="none")], 0, [("IDLE", F214)],
+              has=["under 30 moving unarmed calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: a window with the key off beside one with it on is judged on the on window", [win214(key="off", fol=0, held=(0,) * 8, pub="none"), win214()], 0, [("OK", F214)],
+              has=["20 s: 1800 pin calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: the re-publishes are counted", [win214(re_=3)], 0, [("OK", F214)], has=["re-published 3"], lacks=["UNPARSED"])
+        check("F214: a window line that drifted from its pattern is UNPARSED", [win214().replace("pin calls", "calls")], 4, [("UNPARSED", F214)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

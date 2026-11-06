@@ -110,7 +110,14 @@ FOOT_ROLL_S = 0.4           # the lowest foot is a rolling minimum over this
 FOOT_MATCH = 0.35           # the lowest foot fell by E's drop within this share: the model origin rose
 FOOT_HOLD = 0.25            # the lowest foot moved under this share of E's drop: the camera fell
 PITCH_CHANGED_DEG = 3.0
-MOVING_MPS = 3.0            # the E over neck table: moving faster than this along the ground
+MOVING_MPS = 2.5            # the E over neck table: moving faster than this along the ground ...
+FACING_COS = 0.95           # ... and along the facing: the path's horizontal part and the body's forward (pin.fwd) within this cosine
+PHYS_HEAD_SHARE = 0.60      # physical_head: the head's own change (head_local y) over the same window holds this share of the move, with the same sign
+FEET_NECK_HELD_M = 0.03     # the feet verdict is read only where the animated neck held within this over the window
+F214_ERR_CM = 5.0           # F214 finding: the view over the neck is off neck + eye height by more than this on average where the follow ran (a starting guess)
+F214_BOB_MM = 5.0           # F214 finding: the raise's own bob, rms after a moving mean, over this where the follow ran (a starting guess)
+F214_BOB_WINDOW_S = 0.3     # the moving mean for the raise's own bob
+EYE_HEIGHT_DEFAULT_CM = 15.0   # fix.native_on_foot_eye_height_cm when the recording's header does not carry it
 SLOPE_BINS = (-90.0, -15.0, -5.0, 5.0, 15.0, 90.1)
 MAX_LISTED = 60             # findings listed per report before "... N more"
 
@@ -142,8 +149,9 @@ REQ_VIEW = {'ik': ['final_valid', 'final_neck', 'final_l_hand', 'final_r_hand']}
 REQ_STALE = {'align': ['raise_m']}
 # recorded from the flight after the first (F213): older files lack them, and the rules that use them say so
 REQ_NEW = {'pin': ['up', 'fwd'], 'ik': ['anim_pelvis', 'anim_l_foot', 'anim_r_foot', 'final_pelvis', 'final_l_foot', 'final_r_foot']}
+REQ_F214 = {'pin': ['f214_state', 'f214_target']}   # recorded from F214 on
 REQ_ALL = {}
-for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW):
+for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214):
     for _k, _v in _d.items():
         REQ_ALL.setdefault(_k, [])
         REQ_ALL[_k] = sorted(set(REQ_ALL[_k]) | set(_v))
@@ -374,6 +382,17 @@ def fmt_cm(x):
     return '%+.1f' % (x * 100.0)
 
 
+def f214_measure(t, view, neck, raise_, mask, eye_m):
+    """F214 where the follow ran (mask): the mean of |view - (neck + eye height)| in cm, and the raise's own bob in mm (rms of the raise less its centred moving mean over F214_BOB_WINDOW_S,
+    over the masked rows; None without a raise series)."""
+    err = float(np.nanmean(np.abs(view[mask] - (neck[mask] + eye_m))) * 100.0)
+    bob = None
+    if raise_ is not None and np.isfinite(raise_[mask]).any():
+        res = raise_ - tmean(t, raise_, F214_BOB_WINDOW_S)
+        bob = float(np.sqrt(np.nanmean(res[mask] ** 2)) * 1000.0)
+    return err, bob
+
+
 class Finding:
     def __init__(self, t0, t1, kind, cause, detail, limit=True):
         self.t0, self.t1, self.kind, self.cause, self.detail, self.limit = float(t0), float(t1), kind, cause, detail, limit
@@ -387,6 +406,7 @@ class Analysis:
         self.leak = {}
         self.cannot = []
         self.ik = None
+        self.lever = self.lever_view = self.f214 = None   # the E / view over neck fits on the slope, and the F214 section's figures
 
     def say(self, s=''):
         self.out.append(s)
@@ -594,8 +614,10 @@ class Analysis:
         self.say('ledger: pin.e is taken to exclude the physical head (gain %g: F87h hold cancels the sustained offset, pinEyeYAdjust the transient); checked by a fit of pin.e[1] on head_y: %s' % (
             HEAD_GAIN, ('%.3f over %d recentre segment(s) where the head moved %g cm rms or more' % (fit, nseg, GAIN_FIT_MIN_RMS_M * 100)) if fit is not None else why))
         if fit is not None and abs(fit - HEAD_GAIN) > GAIN_TOL:
-            self.say('FINDING: pin.e[1] follows the physical head with a gain of %.2f, not about %g: the ledger takes none of it out, so every height below carries it' % (fit, HEAD_GAIN))
-            self.findings.append(Finding(L.t[0], L.t[-1], 'gain', 'head', 'pin.e[1] on head_y gain %.2f, the ledger assumes %g' % (fit, HEAD_GAIN)))
+            # Not a finding: F87h absorbs a sustained offset, so the gain stays near 0, but a quick move of the head does reach E (the slope flight's mark 6: the head fell 14 cm and E 15 cm), so a fitted
+            # value between 0 and about 1.3 is understood. The ledger takes none of it out; a move the head made is named physical_head.
+            self.say('info: pin.e[1] follows the physical head with a fitted gain of %.2f (the ledger assumes %g): a sustained offset is absorbed but a quick move of the head reaches E, so a value between 0 and about 1.3 is expected; '
+                     'an excursion the head made is named physical_head' % (fit, HEAD_GAIN))
         L.head_d = HEAD_GAIN * (hy - L.head_ref)
         L.cam = e1 + SEATED_Y_SIGN * ssub + sub_wv[:, 1]
         L.body = L.cam - L.head_d
@@ -787,6 +809,11 @@ class Analysis:
                 if excursion:
                     return 'settle_starved', starved, dl
         uncorrected = '; not corrected: ' + starved if starved else ''
+        # physical head: the head's own change over the same window (base to peak) holds most of the move, with the same sign. E excludes a sustained offset of the head but a quick move reaches it,
+        # which the game's camera cannot be blamed for.
+        dph = vsign * float(L.head_y[ip] - L.head_y[base].mean())
+        if abs(move) > 0 and dph * move > 0 and abs(dph) >= PHYS_HEAD_SHARE * abs(move):
+            return 'physical_head', 'the physical head (head_local y) moved %s cm of the %s cm move, %.0f%%%s' % (fmt_cm(dph), fmt_cm(move), 100 * abs(dph) / abs(move), uncorrected), dl
         # game camera
         tmax = max(abs(v) for k, v in eff.items())
         if abs(move) > 0 and abs(dl['game']) >= GAME_SHARE * abs(move) and tmax < TERM_FLAT_M:
@@ -994,7 +1021,9 @@ class Analysis:
                 with np.errstate(all='ignore'):
                     dfoot = float(lowfoot[ip] - np.nanmean(lowfoot[pre]))
                     dpel = float(pelvis[ip] - np.nanmean(pelvis[pre]))
-                if not np.isfinite(dfoot) or abs(dE) < 0.02:
+                if not np.isfinite(dneck) or abs(dneck) >= FEET_NECK_HELD_M:
+                    verdict = 'cannot evaluate: the neck moved'   # a stopping step moves the neck and the camera with it: the lowest foot says nothing about the origin there (slope flight, 20:00:14)
+                elif not np.isfinite(dfoot) or abs(dE) < 0.02:
                     verdict = 'cannot tell (the feet are not finite there, or E moved under 2 cm)'
                 elif dfoot <= 0 and abs(dfoot - dE) <= FOOT_MATCH * abs(dE):
                     verdict = 'model origin rose'
@@ -1007,8 +1036,21 @@ class Analysis:
             self.say('  view_under_neck episode %s (%s):' % (S.lt(t0), cause))
             for ln in lines:
                 self.say('    ' + ln)
-        moving = (speed > MOVING_MPS) & np.isfinite(slope) & np.isfinite(L.e[:, 1] - L.neck[:, 1])
-        self.say('  E over the animated neck by path slope, moving over %g m/s (%d rows):' % (MOVING_MPS, int(moving.sum())))
+        # Rows moving along the facing: the ground speed over MOVING_MPS and the path's horizontal part within FACING_COS of the body's forward row (a strafe or a stop is not the lever's).
+        facing_note = ''
+        if pin.has('fwd'):
+            fv = pin.f('fwd')[L.R].astype(np.float64)
+            with np.errstate(all='ignore'):
+                dh = d - vert[:, None] * u
+                fh = fv - (fv * u).sum(axis=1)[:, None] * u
+                cosf = (dh * fh).sum(axis=1) / (np.linalg.norm(dh, axis=1) * np.linalg.norm(fh, axis=1))
+            facing = np.isfinite(cosf) & (cosf > FACING_COS)
+        else:
+            facing = np.ones(n, bool)
+            facing_note = ' (no pin.fwd recorded: every direction counts)'
+        moving = (speed > MOVING_MPS) & facing & np.isfinite(slope) & np.isfinite(L.e[:, 1] - L.neck[:, 1])
+        self.say('  E over the animated neck by path slope, moving over %g m/s along the facing (cos over %.2f)%s (%d rows):' % (MOVING_MPS, FACING_COS, facing_note, int(moving.sum())))
+        self.lever = self.lever_view = None
         if moving.sum() >= 10:
             eon = (L.e[:, 1] - L.neck[:, 1])[moving]
             sl_ = slope[moving]
@@ -1016,10 +1058,66 @@ class Analysis:
                 m = (sl_ >= lo) & (sl_ < hi)
                 if m.sum():
                     self.say('    slope %+4.0f to %+4.0f deg: %4d rows, E over neck %s cm (sd %.1f)' % (lo, hi, m.sum(), fmt_cm(float(eon[m].mean())), 100 * float(eon[m].std())))
-            cc = float(np.corrcoef(eon, sl_)[0, 1]) if eon.std() > 0 and sl_.std() > 0 else float('nan')
-            self.say('    correlation of E over neck with the slope: %+.2f' % cc)
+            tan = np.tan(np.radians(sl_))
+            self.lever = self.say_lever('E over neck', tan, eon)
+            if pin.has('f214_state'):
+                self.lever_view = self.say_lever('view over neck', tan, (L.body - L.neck[:, 1])[moving])
         else:
             self.say('    too few rows')
+
+    def say_lever(self, what, tan, y):
+        """Fit y = a + b tan(slope) over the rows, say it, and return dict(a, b, r, n) (None when the slope did not vary)."""
+        if len(y) < 10 or not (np.std(tan) > 0 and np.std(y) > 0):
+            self.say('    %s = a + b tan(slope): not fitted (%d rows, no spread)' % (what, len(y)))
+            return None
+        b, a = np.polyfit(tan, y, 1)
+        r = float(np.corrcoef(tan, y)[0, 1])
+        self.say('    %s = %+.3f m + %.3f m x tan(slope), correlation %+.2f, over %d rows' % (what, a, b, r, len(y)))
+        return dict(a=float(a), b=float(b), r=r, n=int(len(y)))
+
+    # -- F214: the raise follows the neck while the body moves -------------------------------------------------------------------------------------------------------------------
+    def f214_section(self):
+        L, S = self.L, self.S
+        self.say('')
+        self.say('== view follows body while moving (F214)')
+        self.f214 = None
+        if not self.need('F214 section', REQ_F214):
+            self.say('  cannot evaluate: pin.f214_state missing (a recording from before F214)')
+            return
+        pin = S.tab('pin')
+        if not len(pin):
+            self.say('  no pin records')
+            return
+        st = pin.f('f214_state').astype(int)
+        names = S.enums.get('F214State', []) if hasattr(S, 'enums') else []
+        cnt = np.bincount(st, minlength=max(len(names), int(st.max()) + 1))
+        self.say('  pin calls by state: ' + ', '.join('%s %d' % (S.enum_name('F214State', i), int(c)) for i, c in enumerate(cnt) if c) + ' (%d calls)' % len(st))
+        fol = S.enum('F214State', 'followed')
+        if L is None:
+            self.say('  no height ledger: the followed view is not measured')
+            return
+        m = pin.f('f214_state')[L.R].astype(int) == fol
+        self.f214 = dict(followed=int(m.sum()), err_cm=None, bob_mm=None)
+        if m.sum() < 10:
+            self.say('  followed rows in the ledger: %d, too few to measure' % int(m.sum()))
+            return
+        try:
+            eye_cm = float(S.keys.get('fix.native_on_foot_eye_height_cm', EYE_HEIGHT_DEFAULT_CM))
+        except (TypeError, ValueError):
+            eye_cm = EYE_HEIGHT_DEFAULT_CM
+        if not 5.0 <= eye_cm <= 40.0:
+            eye_cm = EYE_HEIGHT_DEFAULT_CM
+        raise_ = S.tab('align').f('raise_m')[L.ai].astype(np.float64) if self.S.tab('align').has('raise_m') else None
+        err_cm, bob_mm = f214_measure(L.t, L.body, L.neck[:, 1], raise_, m, eye_cm * 0.01)
+        self.f214.update(err_cm=err_cm, bob_mm=bob_mm)
+        self.say('  followed rows %d: the view against neck + %.1f cm eye height, mean |error| %.1f cm; the raise\'s own bob (rms after a %.1f s moving mean) %s' % (
+            int(m.sum()), eye_cm, err_cm, F214_BOB_WINDOW_S, ('%.2f mm' % bob_mm) if bob_mm is not None else 'n/a (no align.raise_m)'))
+        t0 = float(L.t[m][0])
+        if err_cm > F214_ERR_CM:
+            self.findings.append(Finding(t0, float(L.t[m][-1]), 'f214_view_error', 'follow', 'F214: where the follow ran the view was off neck + %.1f cm by %.1f cm on average, limit %.1f cm (%d rows)' % (
+                eye_cm, err_cm, F214_ERR_CM, int(m.sum()))))
+        if bob_mm is not None and bob_mm > F214_BOB_MM:
+            self.findings.append(Finding(t0, float(L.t[m][-1]), 'f214_bob', 'follow', 'F214: where the follow ran the raise\'s own bob was %.2f mm rms, limit %.1f mm (%d rows)' % (bob_mm, F214_BOB_MM, int(m.sum()))))
 
     # -- bob ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def bob(self):
@@ -1372,6 +1470,7 @@ class Analysis:
             self.bob()
             self.view_rules()
             self.leak_gains()
+            self.f214_section()
         else:
             self.say('')
             self.say('== height excursions, bob, leak gains: not evaluated (no ledger)')
@@ -1600,7 +1699,7 @@ SYN_ENUMS = {
     'EyeSource': ['unarmed', 'unarmed_no_class', 'stance', 'standing_over_crouch', 'start', 'hunched', 'none'], 'F193Source': ['hip', 'legs', 'camera'],
     'IkExit': ['completed', 'ik_off', 'plan_torn', 'plan_mismatch', 'inputs_refused', 'bad_joint_count', 'f166_write', 'f180_write', 'f169_write', 'pin_write', 'span_write'],
     'IkRefuse': ['buffer', 'plan_torn', 'plan', 'fp_torn', 'fp_stale', 'g_torn', 'g_stale', 'side', 'singular', 'write', 'fp_rig', 'none'], 'PoleSrc': ['legacy_swivel', 'stable_seed', 'body_down'],
-    'PinState': ['still', 'walk', 'run', 'air', 'crouched'], 'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
+    'PinState': ['still', 'walk', 'run', 'air', 'crouched'], 'F214State': ['off', 'not_moving', 'filling', 'followed', 'held_aim', 'held_head', 'held_pose', 'held_posture', 'held_item', 'held_f138', 'held_away', 'not_run'], 'Hold': ['none', 'f69h', 'f192'], 'RecentreReason': ['applied', 'not_on_foot', 'stored_seat_due', 'rot_calibrate', 'head_untracked', 'replace_refused']}
 
 SYN_SCHEMA = collections.OrderedDict()
 SYN_SCHEMA['align'] = (1, _A('f32', 3, 'eye', 'run', 'ads_lock', 'sight', 'weapon_view', 'weapon_eye', 'virtual_neck') + _A('f32', 12, 'head_render', 'head_local') +
@@ -1612,10 +1711,10 @@ SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_v
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
-                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') +
+                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') +
                      _S('u8', 'valid') + _E('PinRefuse', 'refuse') + _S('u8', 'settled') + _E('SettleWhy', 'settle_why') + _S('u8', 'f138_refused') + _E('Stance', 'stance') +
                      _E('PinState', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
-                     _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known'))
+                     _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known') + _E('F214State', 'f214_state'))
 _ik = _S('u64', 'plan_x', 'fp_x') + _S('u32', 'plan_gen', 'fp_gen', 'fp_seq', 'fp_frame', 'g_frame', 'p1', 'item_serial', 'fp_age_ms', 'g_age_ms', 'joints') + \
     _S('f32', 'spine_w', 'spine_pitch_rad', 'spine_roll_rad', 'square_rad', 'f166_w', 'f180_w', 'f169_w', 'off_w', 'f167_release', 'armed_w', 'base_w') + _arm('l_') + _arm('r_')
 for _w in ('anim', 'final'):
@@ -2112,7 +2211,7 @@ def self_test():
         _make(d7, stamp, drop={'pin': ['heading']})
         S7, A7 = analyse(d7)
         check('cannot evaluate: pin.heading missing' in '\n'.join(A7.out), 'a missing heading says so')
-        # the head gain: near 0 is no finding (even with the head moving), a real follow is one
+        # the head gain is information, not a finding: near 0 says nothing, a real follow prints the info line (a quick move of the head does reach E)
         for follow, want in ((0.0, False), (0.5, True)):
             dg = fresh()
             sim = Sim()
@@ -2123,7 +2222,41 @@ def self_test():
             Sg, Ag = analyse(dg)
             has = [f for f in Ag.findings if f.kind == 'gain']
             check(Ag.L.gain_fit is not None and abs(Ag.L.gain_fit - follow) < 0.05, 'the fitted head gain of %.1f comes back: %s' % (follow, Ag.L.gain_fit))
-            check(bool(has) == want, 'a head gain of %.1f %s a finding: %s' % (follow, 'is' if want else 'is not', [f.detail for f in Ag.findings][:2]))
+            check(not has, 'a head gain of %.1f is not a finding: %s' % (follow, [f.detail for f in Ag.findings][:2]))
+            check(('info: pin.e[1] follows the physical head with a fitted gain' in '\n'.join(Ag.out)) == want, 'a head gain of %.1f %s the information line' % (follow, 'prints' if want else 'does not print'))
+
+        # physical_head: the head falls 14 cm and E with it (the slope flight's mark 6): the cause is the head, not the game's camera; the head moving a third of the move is not
+        def head_dip(fall, game):
+            def pre(s_):
+                s_.head_gain = 1.0
+                s_.head[s_.win(6.0, 6.5)] -= fall
+                s_.dgame[s_.win(6.0, 6.5)] -= game
+            return pre
+        d = fresh()
+        _make(d, stamp, [head_dip(0.14, 0.0)])
+        S, A = analyse(d)
+        hx = [f for f in A.findings if f.kind == 'height_excursion']
+        vn = [f for f in A.findings if f.kind == 'view_under_neck']
+        check(len(hx) == 1 and hx[0].cause == 'physical_head', 'a head that falls 14 cm with E is a physical_head excursion, not game_camera: %s' % [(f.kind, f.cause) for f in A.findings])
+        check(len(vn) == 1 and vn[0].cause == 'physical_head', 'and a physical_head view_under_neck: %s' % [(f.kind, f.cause) for f in A.findings])
+        d = fresh()
+        _make(d, stamp, [head_dip(0.04, 0.10)])
+        S, A = analyse(d)
+        hx = [f for f in A.findings if f.kind == 'height_excursion']
+        check(len(hx) == 1 and hx[0].cause == 'game_camera', 'a head holding under 60%% of the move (4 of 14 cm) leaves the game\'s camera the cause: %s' % [(f.kind, f.cause) for f in A.findings])
+        d = fresh()
+        _make(d, stamp, [head_dip(-0.14, 0.0)])
+        S, A = analyse(d)
+        hx = [f for f in A.findings if f.kind == 'height_excursion']
+        check(len(hx) == 1 and hx[0].cause == 'physical_head', 'a head that rises with E is physical_head too (the sign follows the move): %s' % [(f.kind, f.cause) for f in A.findings])
+        d = fresh()
+
+        def head_only(s_):
+            s_.head[s_.win(6.0, 6.5)] -= 0.14   # head_gain stays 0: pin.e does not move
+        _make(d, stamp, [head_only])
+        S, A = analyse(d)
+        hx = [f for f in A.findings if f.kind == 'height_excursion']
+        check(not hx, 'a head that moves where E does not (gain 0, as F87h absorbs a sustained offset) is no excursion: %s' % [(f.kind, f.cause) for f in A.findings])
 
         # the view against the neck and the hands: a camera that sinks, with the feet either following it or holding
         def sink(feet):
@@ -2148,6 +2281,22 @@ def self_test():
             check(len(ha) == 1 and ha[0].cause == 'view_under_neck', 'and hands_above_view because the view is low: %s' % [(f.kind, f.cause) for f in A.findings])
             check(want_feet in A.feet_verdicts, 'the feet say "%s": %s' % (want_feet, A.feet_verdicts))
             check(not [f for f in A.findings if f.kind.startswith('ik_')], 'a sinking camera makes no IK event: %s' % [(f.kind, f.cause) for f in A.findings if f.kind.startswith('ik_')])
+        # a stopping step moves the neck with the camera: no verdict on the feet where the neck moved 3 cm or more over the window
+        for feet, neck_fall in (('hold', 0.06), ('fall', 0.06), ('hold', 0.02)):
+            d = fresh()
+            pre, post0 = sink(feet)
+
+            def post(s_, post0=post0, neck_fall=neck_fall):
+                post0(s_)
+                ik = s_.tables['ik']
+                m = (ik['t'] >= 6.0) & (ik['t'] < 7.0)
+                ik['final_neck'] = ik['final_neck'] + np.where(m, 1.0, 0.0)[:, None] * np.array([0, -neck_fall, 0])
+            _make(d, stamp, [pre], [post])
+            S, A = analyse(d)
+            if neck_fall >= FEET_NECK_HELD_M:
+                check(A.feet_verdicts == ['cannot evaluate: the neck moved'], 'a neck that moved %.0f cm gives no feet verdict (%s feet): %s' % (100 * neck_fall, feet, A.feet_verdicts))
+            else:
+                check(len(A.feet_verdicts) == 1 and A.feet_verdicts[0] in ('camera fell', 'model origin rose'), 'a neck that moved %.0f cm still gives the feet verdict: %s' % (100 * neck_fall, A.feet_verdicts))
         # the same camera while the settle is starved: what moved is still the game's camera, and the starved settle is why nothing corrected it
         def starve(s_):
             m = s_.win(4.5, 8.0)
@@ -2189,6 +2338,56 @@ def self_test():
         S, A = analyse(d)
         rs = [f for f in A.findings if f.kind == 'raise_stale']
         check(len(rs) == 1 and rs[0].cause == 'from_crouched' and 12.0 <= rs[0].t0 < 12.3, 'a raise held from the crouch is raise_stale from crouched: %s' % [(f.kind, f.cause, round(f.t0, 2)) for f in A.findings])
+        # E over the neck by the path's slope: the lever (a = 0.09 m, b = 0.60 m) comes back from rows moving along the facing; a strafe and a stand, planted at E +0.5 m, are left out
+        def lever_post(s_):
+            dt = 1.0 / 90.0
+            th = np.radians(25.0 * np.sin(2 * np.pi * s_.t / 12.0))
+            side = s_.win(10.0, 12.0)
+            still = s_.win(16.0, 18.0)
+            vh = np.where(still, 0.0, 4.0)
+            x = np.cumsum(np.where(side, vh, 0.0)) * dt
+            z = np.cumsum(np.where(side, 0.0, vh)) * dt
+            y = np.cumsum(np.where(side | still, 0.0, vh * np.tan(th))) * dt
+            pin = s_.tables['pin']
+            pin['root'] = np.stack([x, y, z], 1)
+            pin['e'][:, 1] = pin['neck_anim'][:, 1] + np.where(side | still, 0.5, 0.09 + 0.60 * np.tan(th))
+        d = fresh()
+        _make(d, stamp, [], [lever_post])
+        S, A = analyse(d)
+        lv = A.lever
+        check(lv is not None and abs(lv['a'] - 0.09) < 0.03 and abs(lv['b'] - 0.60) < 0.03 and lv['r'] > 0.95, 'the planted lever comes back within 0.03: %s' % lv)
+        check(lv is not None and lv['n'] < 0.85 * A.L.t.size, 'the strafe and the stand are left out of the fit: %s of %d rows' % (lv and lv['n'], A.L.t.size))
+        check(A.lever_view is not None and 'view over neck = ' in '\n'.join(A.out), 'a recording with f214_state also fits the view over the neck')
+        d = fresh()
+        _make(d, stamp, [], [lever_post], drop={'pin': ['f214_state', 'f214_target']})
+        S, A = analyse(d)
+        check(A.lever is not None and A.lever_view is None and 'view over neck = ' not in '\n'.join(A.out), 'a recording from before F214 fits the lever and not the view')
+        # the F214 section: a recording without its fields says so; one with them counts the states and holds the two findings (each firing, each silent)
+        d = fresh()
+        _make(d, stamp, drop={'pin': ['f214_state', 'f214_target']})
+        S, A = analyse(d)
+        check('cannot evaluate: pin.f214_state missing' in '\n'.join(A.out) and A.f214 is None and not [f for f in A.findings if f.kind.startswith('f214')], 'a recording from before F214 says it cannot evaluate the section')
+
+        def f214_post(err_m, ripple_m, lo=4.0, hi=8.5):
+            def post(s_):
+                pin, al, p1 = s_.tables['pin'], s_.tables['align'], s_.tables['p1']
+                m = s_.win(lo, hi)
+                pin['f214_state'] = np.where(m, S.enum('F214State', 'followed'), S.enum('F214State', 'not_moving'))
+                pin['neck_anim'][m, 1] = p1['cam'][m, 1] - 0.15 + err_m
+                al['raise_m'] = al['raise_m'] + np.where(m, ripple_m * np.sin(2 * np.pi * 3.0 * s_.t), 0.0)
+            return post
+        for err_m, ripple_m, want in ((0.08, 0.012, {'f214_view_error', 'f214_bob'}), (0.08, 0.002, {'f214_view_error'}), (0.01, 0.012, {'f214_bob'}), (0.01, 0.002, set())):
+            d = fresh()
+            _make(d, stamp, [], [f214_post(err_m, ripple_m)])
+            S, A = analyse(d)
+            got = {f.kind for f in A.findings if f.kind.startswith('f214')}
+            check(got == want, 'F214 findings for a view %.0f cm off and a %.0f mm ripple in the raise: %s, want %s (%s)' % (100 * err_m, 1000 * ripple_m, sorted(got), sorted(want), A.f214))
+            if err_m == 0.01 and ripple_m == 0.002:
+                txt = '\n'.join(A.out)
+                check('pin calls by state:' in txt and 'followed 405' in txt and A.f214['followed'] == 405 and A.f214['err_cm'] < 2.0 and A.f214['bob_mm'] < F214_BOB_MM,
+                      'the section counts the calls by state and measures the followed rows: %s' % [l for l in A.out if 'F214' in l or 'followed' in l][:3])
+        err, bob = f214_measure(np.arange(100) / 90.0, np.full(100, 1.55), np.full(100, 1.40), np.zeros(100), np.ones(100, bool), 0.15)
+        check(abs(err) < 1e-9 and abs(bob) < 1e-9, 'a view exactly neck + eye height with a flat raise measures 0 and 0: %s %s' % (err, bob))
         # arms the IK did not write: a huge reach and swivel jumps make no event
         d = fresh()
 

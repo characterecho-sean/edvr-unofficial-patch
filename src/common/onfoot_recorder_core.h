@@ -93,6 +93,8 @@ ONF_ENUM(F193Source, "hip", "legs", "camera")
 ONF_ENUM(IkExit, "completed", "ik_off", "plan_torn", "plan_mismatch", "inputs_refused", "bad_joint_count", "f166_write", "f180_write", "f169_write", "pin_write", "span_write")
 // nofoot::pinState: the speed bin of a pin sample (world-axis speed and vy, so a slope can read it wrong: the body's up row is in the pin record)
 ONF_ENUM(PinState, "still", "walk", "run", "air", "crouched")
+// nofoot::f214::State: what the moving view follow did this call (not_run: the call never reached the step)
+ONF_ENUM(F214State, "off", "not_moving", "filling", "followed", "held_aim", "held_head", "held_pose", "held_posture", "held_item", "held_f138", "held_away", "not_run")
 // IkRefusal (native_on_foot.cpp): the last refusal the call counted, then none
 ONF_ENUM(IkRefuse, "buffer", "plan_torn", "plan", "fp_torn", "fp_stale", "g_torn", "g_stale", "side", "singular", "write", "fp_rig", "none")
 // SideOut::f98Source: where the elbow's swivel came from. F84's rifle support and the pistol's pole are body_down; F165, F192, F159 and F181 are the flags beside it.
@@ -103,7 +105,7 @@ ONF_ENUM(Hold, "none", "f69h", "f192")
 ONF_ENUM(RecentreReason, "applied", "not_on_foot", "stored_seat_due", "rot_calibrate", "head_untracked", "replace_refused")
 
 inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPinRefuseEnum, &kSettleWhyEnum, &kStanceEnum, &kSupportEnum, &kEyeSourceEnum,
-                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum, &kPinStateEnum};
+                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum, &kPinStateEnum, &kF214StateEnum};
 
 // ---- the records ----------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Order inside a list: 8-byte fields, then 4-byte, then 2-byte, then 1-byte, so a struct has no padding but its tail.
@@ -132,11 +134,11 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(f64, eye_y_selected) S(f64, raw_eye_y) S(f64, f98_eye_y) S(f64, raise_target) S(f64, f95_target) S(f64, wc) S(f64, f97_w) S(f64, f97_asked)           \
     S(f64, f179_stand_w) S(f64, f179_stand_raise) S(f64, f179_legs_room) S(f64, f193_neck_y) S(f64, f193_eye_ask)                                            \
     S(f64, guard_push_cm) S(f64, guard_pred_cm) S(f64, guard_dist_cm)                                                                                        \
-    S(f64, stored_neck_stand) S(f64, stored_neck_crouch) S(f64, stored_cam_stand) S(f64, stored_cam_crouch)                                                  \
+    S(f64, stored_neck_stand) S(f64, stored_neck_crouch) S(f64, stored_cam_stand) S(f64, stored_cam_crouch) S(f64, f214_target)                              \
     S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3)                                                                                                        \
     S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) E(PinState, pin_state) E(Support, support)    \
     E(EyeSource, eye_source) S(u8, hunched) S(u8, pin_capped_h) S(u8, pin_capped_v) S(u8, f97_capped) S(u8, f107_began) E(F193Source, f193_source)         \
-    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known)
+    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state)
 
 // ik: the Animate thread, once per local-body call, at the end of a completed call and at each early exit
 #define ONF_IK_ARM_F32(S, p)                                                                                                                                 \
