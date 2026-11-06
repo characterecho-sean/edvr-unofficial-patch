@@ -514,7 +514,7 @@ inline int flatOffscreenTests() {
                     {&runtime, "if(s.foreground.active() && !foregroundCandidate) {", "the foreground's after-world note needs an active probe"},
                     {&runtime, "if(s.projectionFrames)++s.projectionDraws;", "the projection draw count is the F10 audit's"},
                     {&runtime, "if(sceneExtent && k.color!=s.prefix.output && (k.format==9 || k.format==23 || k.format==26 || k.format==60)) {", "the coverage classification needs a scene-extent target of a screen format"},
-                    {&runtime, "if (pairFact.uiMayAsk) {", "the UI layer's decision needs a pair a family can name"},
+                    {&runtime, "if (pairFact.uiMayAsk || (pairFact.legacyGlassPair && cockpitGlassLegacyLive())) {", "the UI layer's decision needs a pair a family can name, or the legacy canopy pair under the legacy look"},
                     {&runtime, "else if (k.ps == flat_mono_detail::kCopyPs) {", "the UI layer's plain-copy branch needs the copy's pixel shader"},
                     {&runtime, "else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {", "the UI layer's tone probes need a fullscreen triangle"},
                     {&runtime, "const bool trailDraw = (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) || tone ||", "the back-off trail notes a fullscreen triangle or a tone"},

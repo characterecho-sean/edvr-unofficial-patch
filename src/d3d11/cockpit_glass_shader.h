@@ -14,7 +14,7 @@
 // links with it, and reads only what the game has already bound for that draw:
 //   b1  the frame block (333 registers; this reads 56, 90, 227-228, 245, 253, 261, 277-279, 291-326)
 //   b2  the material block (18 registers)
-//   b13 EDVR's own one register, the dirt level (cockpit_glass.cpp binds it with the streaks and puts back what was there)
+//   b13 EDVR's own two registers: the dirt level, then the layer-to-game pixel map (cockpit_glass.cpp binds it with the streaks and puts back what was there)
 //   t0  per-cluster probe lists (raw), t1 the directional light (raw: colour at +0, view-space direction at +16, stride 48),
 //   t2  the light and probe records (raw), t3 the probe cube array, t5 the moment shadow map
 //   the crack normal and alpha: t6 (intact) or t7 (ice, condensation); the blemish map: t9 (intact) or t11 (ice, condensation)
@@ -35,8 +35,10 @@ namespace edvr {
 constexpr char kCockpitGlassLegacyPsHlsl[] = R"HLSL(
 cbuffer Frame : register(b1) { float4 cb1[327]; }
 cbuffer Material : register(b2) { float4 cb2[18]; }
-// EDVR's own, bound by the swap: x is the dirt level (visual.cockpit_glass_dirt / 100, 1 = the look as shipped). Unbound it reads 0, which is no dirt.
-cbuffer Level : register(b13) { float4 dirtLevel; }
+// EDVR's own, bound by the swap: dirtLevel.x is the dirt level (visual.cockpit_glass_dirt / 100, 1 = the look as shipped). Unbound it reads 0, which is no dirt.
+// pixelMap maps the pixel this runs at onto the game's: game = pixel * pixelMap.xy + pixelMap.zw. The scene draw is the identity (1, 1, 0, 0). In the weapons layer SV_Position is in the layer's
+// pixels, and the light-cluster lookup is by the game's (probeAmbient). A scale of 0 (the block unbound, or too small to reach this register) reads as the identity.
+cbuffer Level : register(b13) { float4 dirtLevel; float4 pixelMap; }
 ByteAddressBuffer ClusterLists : register(t0);
 ByteAddressBuffer SunLight : register(t1);
 ByteAddressBuffer ProbeRecords : register(t2);
@@ -327,7 +329,8 @@ float4 main(PsIn i) : SV_Target {
     float glare = pow(saturate(dot(-lightDir, normalize(pv))), gloss) * (gloss + 6.0) * 0.03125;
     // The dirt is grey (R = G = B): the streak texture times the mask times the colour scale.
     float3 albedo = lerp((streak * dirtMask * kLegacyDirtColour * kDirtStrength * dirtLevel.x).xxx, cb2[8].yzw * cb1[56].y, crackA);
-    float3 ambient = probeAmbient(pv, nIn, i.position.xy);
+    float2 gamePixel = (pixelMap.x > 0.0 && pixelMap.y > 0.0) ? i.position.xy * pixelMap.xy + pixelMap.zw : i.position.xy;
+    float3 ambient = probeAmbient(pv, nIn, gamePixel);
     // The direct light is scaled by 1/pi, as live scales its Lambert and its lights loop; the probe ambient is radiance from the cube and is not.
     float3 direct = shadow * kInvPi * lightColour;
     float3 radiance = (ndl * direct + ambient) * albedo + specAmt * glare * direct;

@@ -44,7 +44,7 @@ inline int flatPairFactsTests() {
                        flat_mono_detail::kToneDofCompositePs, flat_mono_detail::kToneBloomCompositePs, flat_mono_detail::kToneEdhmGradePs,
                        flat_mono_detail::kCopyVs, flat_mono_detail::kCopyPs, kFlatUiMapToneVs, kFlatUiMapTonePs, kFlatUiScannerTonePs, kFlatUiSourceToneVsSteady,
                        kFlatUiSourceToneVsTransition, kFlatUiSourceTonePs, kFlatUiSourceTonePsEdhm, kFlatUiMapCanvasVs, kFlatUiMapCanvasPs,
-                       kFlatUiMapSpriteVs, kFlatUiMapSpritePsA, kFlatUiMapSpritePsB, kUiVsPanel, kUiVsLoader, kUiVsHolo, kUiVsFlightHud,
+                       kFlatUiMapSpriteVs, kFlatUiMapSpritePsA, kFlatUiMapSpritePsB, kUiVsLegacyGlass, kUiPsLegacyGlass, kUiVsPanel, kUiVsLoader, kUiVsHolo, kUiVsFlightHud,
                        kUiVsSprite, kUiVsGuiVector, kUiVsGuiText})
         h.push_back(x);
     for (uint64_t x : kUiPanelPs) h.push_back(x);
@@ -65,6 +65,15 @@ inline int flatPairFactsTests() {
     expect(supported > 0 && familyVs > 0 && unsupportedFamilyVs > 0 && tone > 0 && mapTone > 0 && sourceTone > 0 && copyPair > 0 && uiAsk > 0,
            "the corpus reaches every fact (a keyed pair, a family VS with another PS, a tone pass, the map tonemap, a source tone, the copy, a UI family)");
     expect(profileDiffers > 0, "the profile changes an answer for some pair (a flat-only or VR-only family row), so a memo blind to it can be caught");
+
+    // ---- the legacy canopy pair: the memo marks it and leaves uiMayAsk false, in both profiles (so the shortcuts that read uiMayAsk see it as they always did)
+    for (bool flat : {true, false}) {
+        const FlatPairFacts g = flatPairFactsFresh(kUiVsLegacyGlass, kUiPsLegacyGlass, flat);
+        expect(g.legacyGlassPair && !g.uiMayAsk, "the canopy pair is legacyGlassPair, and no family the memo names (uiMayAsk false): odyssey leaves its shortcuts untouched");
+        expect(!flatPairFactsFresh(kUiVsLegacyGlass, 0, flat).legacyGlassPair && !flatPairFactsFresh(0, kUiPsLegacyGlass, flat).legacyGlassPair, "...by the pair, not by either shader");
+        expect(flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, false, true, true) == UiLayerFamily::kLegacyGlass && flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, false, true, false) == UiLayerFamily::kNone,
+               "...and the family rule names it only with the legacy fact");
+    }
 
     // ---- the Full System Scanner's tonemap is the UI layer's table alone ------------------------------------------------------
     // (flatUiMapToneSlotOf: slot 0, like the map's). Not a registry tone, not an E894-layout source tone, not the copy, no UI family, and the
@@ -147,7 +156,7 @@ inline int flatPairFactsTests() {
         const size_t gate = layer.find("if (!flatUiLayerTakesFamily(family)) return g_lastAsk;", from);
         const std::string head = from == std::string::npos || gate == std::string::npos ? "" : layer.substr(from, gate - from);
         expect(!head.empty() && head.find("++g_w") == std::string::npos && head.find("Log::") == std::string::npos &&
-                   head.find("flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget)") != std::string::npos,
+                   head.find("flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget, cockpitGlassLegacyLive() && cockpitGlassSwapActive())") != std::string::npos,
                "flatUiLayerDecide returns at its family test before any counter or log: skipping it for a pair no family names changes nothing");
     }
     {
@@ -163,7 +172,10 @@ inline int flatPairFactsTests() {
         expect(body.find("engineVelocityPoolFamilyPair(k.vs") == std::string::npos && body.find("engineVelocityPoolFamilyVs(k.vs") == std::string::npos &&
                    body.find("flatUiMapToneSlotOf(k.vs, k.ps)") == std::string::npos && body.find("flatUiSourceTonePair(k.vs, k.ps)") == std::string::npos,
                "and no draw-time site in the constructor asks the replaced questions directly any more");
-        expect(count(body, "if (pairFact.uiMayAsk) {") == 1, "the UI layer's inputs are gathered and its decision asked only for a pair a family can name");
+        expect(count(body, "if (pairFact.uiMayAsk || (pairFact.legacyGlassPair && cockpitGlassLegacyLive())) {") == 1 && count(body, "if (pairFact.uiMayAsk) {") == 0,
+           "the UI layer's inputs are gathered and its decision asked only for a pair a family can name, or the legacy canopy pair while the legacy look is live (the one runtime-gated name)");
+        expect(count(body, "pairFact.uiMayAsk") >= 1 && count(runtime, "!pairFact.uiMayAsk && !pairFact.sourceTone)") >= 1 && count(runtime, "pair.uiMayAsk ||") >= 1,
+               "the producer-run shortcuts still read uiMayAsk alone: the canopy pair, which the memo leaves false, is treated by them exactly as before the family existed");
     }
     return failures;
 }

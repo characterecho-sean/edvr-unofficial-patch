@@ -709,6 +709,7 @@ enum class UiLayerFamily : uint8_t {
                        // family's number moves (docs\galaxy-map-vr-2026-11-03.md, Fix 2).
     kMapPlane,         // the System Map's flat icons (vs 88DCF1164C640EC3 with ps FEDE6C9825C3828E, n=6), drawn after the bodies with the depth test the game gave them, named only while the System Map's camera is up (UiFamilyFacts.mapSystem): the vertex shader is a general one, also drawn on the Galaxy Map and in the world.
     kMapGrid,          // the System Map's grid: the same pair at n=1014, drawn before most bodies at viewport depth 0. In the layer it takes no depth test; the bodies are cut out of the layer after it (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES). Both appended after kMapMarks (2026-11-05).
+    kLegacyGlass,      // the canopy under visual.cockpit_glass = legacy (vs 8C091FFD08644E02 with ps 4E4FF61E8A08FC7E; cockpit_glass.cpp swaps the pixel shader for EDVR's own at bind time): the whole draw is taken into the eye's additive weapons layer W, so the dirt leaves the upscaler. Flat only, and named only while UiFamilyFacts.legacyGlass is set, which only flat's rule sets and only while the legacy look is live (docs\cockpit-glass-legacy-port.md, "The dirt layer"). Appended after kMapGrid (2026-11-05).
     kCount
 };
 
@@ -737,6 +738,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kMapMarks: return "map rings and stems";
         case UiLayerFamily::kMapPlane: return "map plane icons";
         case UiLayerFamily::kMapGrid: return "map grid";
+        case UiLayerFamily::kLegacyGlass: return "legacy glass";
         default: return "none";
     }
 }
@@ -752,13 +754,15 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
            f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark ||
-           f == UiLayerFamily::kNormalSpaceDust || f == UiLayerFamily::kMapMarks || f == UiLayerFamily::kMapPlane || f == UiLayerFamily::kMapGrid;
+           f == UiLayerFamily::kNormalSpaceDust || f == UiLayerFamily::kMapMarks || f == UiLayerFamily::kMapPlane || f == UiLayerFamily::kMapGrid ||
+           f == UiLayerFamily::kLegacyGlass;
 }
 
-// The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
-// composited by the same tonemap difference, T(F_up + L) - T(F_up), after the upscale. The ONE list: the decision, the layer's draw path and the rigs' routing model ask it.
+// The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too, and the legacy
+// canopy's glare and dirt, whose replacement shader's output over a black layer is the same added light) and so composited by the same tonemap difference,
+// T(F_up + L) - T(F_up), after the upscale. The ONE list: the decision, the layer's draw path and the rigs' routing model ask it.
 inline bool uiLayerFamilyUsesWeaponsLayer(UiLayerFamily f) {
-    return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark;
+    return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark || f == UiLayerFamily::kLegacyGlass;
 }
 
 // Which half governs a family: the weapons fire is its own half, and so is the shield ripple (as a half of its own: `rippleOn` is its live state, with
@@ -1062,7 +1066,12 @@ struct UiFamilyFacts {
     bool mapSystem = false;       // VR: the System Map's camera is up, so its flat plane's pair is named
     bool mapPlaneIcon = false;    // that pair's draw is one of the plane's icons (n=6)
     bool mapPlaneGrid = false;    // or the grid (n=1014). Flat's census shows the pair at another count too, a mesh of 58416 indices: that stays in the scene
+    bool legacyGlass = false;     // flat only: visual.cockpit_glass is legacy (cockpitGlassLegacyLive), so the canopy pair is named. VR's rule never sets it, and with `odyssey` nothing does
 };
+
+// The canopy pair (holo_families.h kHoloCanopy; cockpit_glass_core.h kReplacedPsHash is the same pixel shader, which tools\cockpit_glass_test holds equal). The shadow records the game's
+// hashes, not the swapped shader's, so these are what a draw's key carries while the swap is in.
+constexpr uint64_t kUiVsLegacyGlass = kHoloCanopy, kUiPsLegacyGlass = 0x4E4FF61E8A08FC7Eull;
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
 enum class UiFamilyWhy : uint8_t {
@@ -1099,7 +1108,8 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
 inline bool uiLayerFamilyHdrVsMayWant(uint64_t vs) {
     return vs == kUiVsPanel || vs == kUiVsLoader || uiVsIsMapOverlay(vs) || vs == kUiVsMapPlane || vs == kUiVsMapLinesA || vs == kUiVsMapLinesB || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
            vs == kUiVsOrbitLines || vs == kUiVsSupercruiseBars || vs == kUiVsSpaceDust || vs == kVsNormalSpaceDust || weaponsFireVs(vs) || shieldRefractVs(vs) ||
-           uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark;
+           uiHoloGenericHash(vs) || vs == kHoloTargetSphere || uiOnFootHudVs(vs) || vs == kUiVsScopeMark ||
+           vs == kUiVsLegacyGlass;   // runtime-gated like the scope mark (UiFamilyFacts.legacyGlass): the byte holds hashes only, the facts decide per draw
 }
 
 inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why = nullptr) {
@@ -1115,7 +1125,10 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // is deliberately NOT on that list -- it sits in front of the whole
         // sky, and covering it would smear the stars behind it, the depth
         // pass's own reasoning -- and neither are the two the phase-3
-        // review refused. Two exact target-sphere pixel shaders are now
+        // review refused. The canopy is named below only under the legacy
+        // look and only by flat's rule (UiFamilyFacts.legacyGlass): it is
+        // taken into the additive layer, which adds light and covers nothing,
+        // so the stars behind it are not touched. Two exact target-sphere pixel shaders are now
         // considered separately: their original screen-depth address must be
         // repaired and all dependencies prepared before redirecting. Unknown
         // sphere variants and the shared world/cockpit corona remain stock.
@@ -1152,6 +1165,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
                   ? UiLayerFamily::kHoloGeneric
               : (f.nativeOnFoot && uiOnFootHudMatch(f.vs, f.ps)) ? UiLayerFamily::kOnFootHud
               : (f.scopeMark && f.vs == kUiVsScopeMark && f.ps == kUiPsScopeMark) ? UiLayerFamily::kScopeMark
+              : (f.legacyGlass && f.vs == kUiVsLegacyGlass && f.ps == kUiPsLegacyGlass) ? UiLayerFamily::kLegacyGlass
               : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
     } else if (f.excluded) {

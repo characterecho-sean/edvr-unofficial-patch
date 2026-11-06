@@ -69,6 +69,21 @@ inline float dirtLevelOf(int percent) {
 }
 // The pixel-shader constant-buffer slot the level lives in (b13, the last of D3D11's fourteen): the game's canopy shaders bind b1 and b2.
 constexpr unsigned kLevelSlot = 13;
+
+// The block at b13 (cockpit_glass_shader.h, cbuffer Level): two registers, 32 bytes. A block smaller than the declared cbuffer reads zeros past its end, so the whole block is always
+// made and uploaded at this size. Register 0 x is the dirt level. Register 1 maps the pixel the shader runs at onto the game's: game = pixel * (map[0], map[1]) + (map[2], map[3]). It is the
+// identity (1, 1, 0, 0) for every scene draw. While the weapons layer takes the canopy, SV_Position is in the layer's pixels, and the shader's light-cluster lookup (the probe ambient) needs
+// the game's, so the layer sets the map from ui_holo_remap::params (the target's size over the layer's, and the frame's jitter in the game's pixels) for that draw and clears it after.
+struct LevelBlock {
+    float dirt, pad[3];   // register 0: x the dirt level
+    float map[4];         // register 1: the pixel map
+};
+static_assert(sizeof(LevelBlock) == 32, "two float4 registers, as cbuffer Level declares them");
+inline void identityLevelMap(LevelBlock& b) { b.map[0] = b.map[1] = 1.0f; b.map[2] = b.map[3] = 0.0f; }
+inline bool levelBlockDiffers(const LevelBlock& a, const LevelBlock& b) {
+    return a.dirt != b.dirt || a.map[0] != b.map[0] || a.map[1] != b.map[1] || a.map[2] != b.map[2] || a.map[3] != b.map[3];
+}
+
 // Whether the Legacy glass dirt row is dimmed (and ignores steps and typing): the dirt is only drawn by the legacy shader.
 inline bool dirtRowDim(Look look) { return look != Look::Legacy; }
 

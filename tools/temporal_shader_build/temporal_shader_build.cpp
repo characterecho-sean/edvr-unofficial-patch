@@ -1399,7 +1399,7 @@ static void selfTest() {
                 bool bindings = ok && desc.ConstantBuffers == 3 && desc.BoundResources == 14 &&
                                 frameBuffer && SUCCEEDED(frameBuffer->GetDesc(&frame)) && frame.Size == 16u * cg::kFrameRegisters &&
                                 materialBuffer && SUCCEEDED(materialBuffer->GetDesc(&material)) && material.Size == 16u * cg::kMaterialRegisters &&
-                                levelBuffer && SUCCEEDED(levelBuffer->GetDesc(&level)) && level.Size == 16u &&
+                                levelBuffer && SUCCEEDED(levelBuffer->GetDesc(&level)) && level.Size == 32u &&
                                 SUCCEEDED(reflection->GetResourceBindingDescByName("Frame", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 1 &&
                                 SUCCEEDED(reflection->GetResourceBindingDescByName("Material", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == 2 &&
                                 SUCCEEDED(reflection->GetResourceBindingDescByName("Level", &bind)) && bind.Type == D3D_SIT_CBUFFER && bind.BindPoint == cg::kLevelSlot;
@@ -1413,7 +1413,7 @@ static void selfTest() {
                 for (const Slot& slot : slots)
                     bindings = bindings && SUCCEEDED(reflection->GetResourceBindingDescByName(slot.name, &bind)) && bind.Type == slot.type && bind.BindPoint == slot.point &&
                                bind.BindCount == 1;
-                check(bindings, "each legacy cockpit glass shader keeps the game's b1 (327 registers) and b2 (18), reads t0 to t3, t5, its crack and blemish maps and the streaks at t12, EDVR's one-register dirt level at b13, samples with s0 to s2, and binds nothing else");
+                check(bindings, "each legacy cockpit glass shader keeps the game's b1 (327 registers) and b2 (18), reads t0 to t3, t5, its crack and blemish maps and the streaks at t12, EDVR's two-register level block (dirt level, layer pixel map) at b13, samples with s0 to s2, and binds nothing else");
             }
         }
     }

@@ -11,6 +11,7 @@
 #include "../../src/d3d11/cockpit_glass_core.h"
 #include "../../src/d3d11/cockpit_glass_shader.h"
 #include "../../src/d3d11/cockpit_glass_streaks.h"
+#include "../../src/d3d11/ui_layer_math.h"   // the canopy pair's hashes the UI layer names, held equal to this port's
 #include "temporal_shader_bytecode.h"
 
 #include <windows.h>
@@ -19,6 +20,7 @@
 #include <wrl/client.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -83,6 +85,19 @@ static void testCore() {
               cg::overlayFor(0x3B4EDBBAF1BA87BFull) == cg::Overlay::None && cg::overlayFor(0x2A4B54153FBF97EEull) == cg::Overlay::None &&
               cg::overlayFor(cg::kReplacedPsHash) == cg::Overlay::None && cg::overlayFor(0) == cg::Overlay::None,
           "the quality 0-2 ice and condensation shaders (other slot layouts), the intact one and an unhashed bind are not overlaid");
+    // The UI layer names the canopy pair it takes into the weapons layer (flat, under the legacy look): the same pair this port swaps, hash for hash.
+    check(edvr::kUiVsLegacyGlass == cg::kCanopyVsHash && edvr::kUiPsLegacyGlass == cg::kReplacedPsHash, "the pair the UI layer takes (ui_layer_math.h) is the pair the swap replaces (the canopy VS and the intact quality-3 PS)");
+    // The block at b13: two registers, the second the layer-to-game pixel map, the identity for a scene draw.
+    check(sizeof(cg::LevelBlock) == 32 && offsetof(cg::LevelBlock, map) == 16 && offsetof(cg::LevelBlock, dirt) == 0, "the b13 block is cbuffer Level's two registers: the level, then the map at byte 16");
+    {
+        cg::LevelBlock a{0.5f, {0, 0, 0}, {2, 3, 4, 5}}, b = a;
+        check(!cg::levelBlockDiffers(a, b), "an unchanged block is not uploaded again");
+        cg::identityLevelMap(b);
+        check(b.map[0] == 1 && b.map[1] == 1 && b.map[2] == 0 && b.map[3] == 0 && b.dirt == 0.5f && cg::levelBlockDiffers(a, b), "the identity map keeps the level and is a change from a layer's map");
+        b = a;
+        b.dirt = 1.0f;
+        check(cg::levelBlockDiffers(a, b), "a moved dirt level is a change");
+    }
     check(cg::kLiveInputCount == 7 && cg::kLiveInputs[6].isPosition && cg::kLiveInputs[1].isUint, "the signature table has the game's seven inputs");
     for (size_t i = 0; i < cg::kLiveInputCount; ++i) check(cg::kLiveInputs[i].reg == i, "the game's inputs sit in registers 0 to 6 in order");
 }
@@ -175,6 +190,9 @@ struct Case {
     bool streaks = true;      // the streak texture bound at t12 (its texel is 1, so the dirt texture reads the legacy max, 0.09)
     bool levelBound = true;   // the dirt level block bound at b13
     float dirtLevel = 1.0f;   // its x: visual.cockpit_glass_dirt / 100, 1 = the look as shipped
+    float pixelMap[4] = {1, 1, 0, 0};   // the block's second register: game = pixel * xy + zw (identity for the scene; the weapons layer's map for a taken canopy)
+    uint32_t tile = 16, tilesX = 1, tilesY = 1;   // the light clusters' tile size in pixels and grid (one cluster covers the whole 4 x 4 target by default)
+    uint32_t probeCluster = 0;                    // the cluster that holds the probe
     float masks[4] = {0, 0, 0, 0};   // as the vertex shader of the variant passes them
     float normal[3] = {0, 0, 1}, position[3] = {0, 0, 5}, tangent[3] = {1, 0, 0};
     float tint = 0, alphaMultiplier = 1;
@@ -227,7 +245,7 @@ public:
         frame[56] = {{c.tint, c.alphaMultiplier, 0, 0}};
         frame[90] = {{0, 1.0f / 256.0f, 256.0f, 0}};
         frame[227] = {{0, 0, 1.0f, 0}};   // the cluster depth slice: log(z) * 1 + 0, clamped to the one slice
-        setu(228, 0, 1); setu(228, 1, 1); setu(228, 2, 1); setu(228, 3, 16);   // one tile column and row, one slice, 16 px tiles
+        setu(228, 0, c.tilesX); setu(228, 1, c.tilesY); setu(228, 2, 1); setu(228, 3, c.tile);   // the tile grid (one column and row by default), one slice, the tile size in pixels
         setu(245, 1, c.sunOn ? 1 : 0);
         setu(253, 1, 0); setu(253, 2, 1024);   // probe volumes at byte 0 of t2, their headers at byte 1024
         frame[261] = {{0.2f, 0.001f, 0, 0}};   // the moment shadow's light-bleed cutoff and bias
@@ -248,10 +266,11 @@ public:
         material[15] = {{1, 1, 0, 0}};
         material[17] = {{0, 0, 0.5f, 0}};   // crack threshold 0.5
         // t0: the cluster record 0 (count at +28, probe list at +2212), t1: the sun, t2: the probe volume and header.
-        std::vector<uint32_t> lists(4096 / 4, 0), sun(48 / 4, 0), records(2048 / 4, 0);
+        std::vector<uint32_t> lists(16384 / 4, 0), sun(48 / 4, 0), records(2048 / 4, 0);
         if (c.probe) {
-            lists[28 / 4] = 1;
-            lists[2212 / 4] = 0;   // probe id 0
+            const uint32_t base = c.probeCluster * 2372u;   // the cluster's record in t0
+            lists[(base + 28) / 4] = 1;
+            lists[(base + 2212) / 4] = 0;   // probe id 0
             const float centre[4] = {0, 0, 0, 0};
             for (int i = 0; i < 4; ++i) std::memcpy(&records[(80 + 4 * i) / 4], &centre[i], 4);
             const float axes[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
@@ -266,7 +285,7 @@ public:
         Float4 vsv[5] = {{{c.masks[0], c.masks[1], c.masks[2], c.masks[3]}}, {{c.normal[0], c.normal[1], c.normal[2], 0}}, {{c.position[0], c.position[1], c.position[2], 0}},
                          {{c.tangent[0], c.tangent[1], c.tangent[2], 0}}, {{0.5f, 0.5f, 0, 0}}};
         ComPtr<ID3D11Buffer> vcb = constantBuffer(vsv, sizeof vsv);
-        ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 4096), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 2048);
+        ComPtr<ID3D11ShaderResourceView> t0 = rawView(lists.data(), 16384), t1 = rawView(sun.data(), 48), t2 = rawView(records.data(), 2048);
         ComPtr<ID3D11ShaderResourceView> t3 = cubeArray(c.probeColour), t5 = moments(c.occluder);
         auto* ctx = rig.ctx.Get();
         const float clear[4] = {-1, -1, -1, -1};
@@ -281,7 +300,8 @@ public:
         ctx->PSSetShader(psh[c.variant].Get(), nullptr, 0);
         ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
         ctx->PSSetConstantBuffers(1, 2, cbs);
-        const Float4 levelData{{c.dirtLevel, 0, 0, 0}};
+        // The block is cbuffer Level's two registers, 32 bytes: a smaller one would read zeros past its end (the pixel map would be a scale of 0).
+        cg::LevelBlock levelData{c.dirtLevel, {0, 0, 0}, {c.pixelMap[0], c.pixelMap[1], c.pixelMap[2], c.pixelMap[3]}};
         ComPtr<ID3D11Buffer> levelCb = constantBuffer(&levelData, sizeof levelData);
         ID3D11Buffer* level = c.levelBound ? levelCb.Get() : nullptr;
         ctx->PSSetConstantBuffers(cg::kLevelSlot, 1, &level);
@@ -750,6 +770,39 @@ static void testShader() {
     dark.probe = false;
     const Pixel k = canopy.draw(dark);
     check(k.r == 0 && k.g == 0 && k.b == 0 && std::isfinite(k.a) && closeTo(k.a, kBaseAlpha, 0.01f), "with the sun off and no probe the dirt is dark and finite");
+
+    // The weapons layer's pixel map (the block's second register): in the layer SV_Position is in layer pixels, and the cluster lookup is by the game's. The 4 x 4 target is read as 2 x 2 tiles
+    // of 2 pixels here; the pixel read is (2.5, 2.5), tile (1, 1), cluster 3, and a probe sits in one cluster only.
+    {
+        Case grid = hangar;
+        grid.tile = 2; grid.tilesX = grid.tilesY = 2; grid.probeCluster = 3;
+        const Pixel mapLit = canopy.draw(grid);
+        check(mapLit.r > 0 && closeTo(mapLit.r, h.r, 0.001f), "the identity map reads the pixel's own cluster: a probe in cluster 3 lights the pixel in tile (1, 1), as the single-cluster case does");
+        Case mapped = grid;
+        mapped.pixelMap[0] = mapped.pixelMap[1] = 0.5f;   // a layer twice the game's size: this pixel stands for game pixel 1.25
+        const Pixel dim = canopy.draw(mapped);
+        check(dim.r == 0 && dim.g == 0 && dim.b == 0, "a mapped pixel reads the GAME's cluster (tile (0, 0), no probe), not the layer's own (cluster 3)");
+        Case grid0 = grid;
+        grid0.probeCluster = 0;
+        const Pixel unmappedElsewhere = canopy.draw(grid0);
+        check(unmappedElsewhere.r == 0, "control: without the map the same pixel reads cluster 3, which holds no probe in this case");
+        Case mapped0 = grid0;
+        mapped0.pixelMap[0] = mapped0.pixelMap[1] = 0.5f;
+        const Pixel same = canopy.draw(mapped0);
+        check(same.r > 0 && closeTo(same.r, h.r, 0.001f) && closeTo(same.a, h.a, 0.001f),
+              "a mapped pixel reads the same cluster as the unmapped game pixel it stands for: the light is the single-cluster case's, bit for bit within tolerance");
+        Case shifted = grid0;
+        shifted.pixelMap[0] = shifted.pixelMap[1] = 1.0f;
+        shifted.pixelMap[2] = shifted.pixelMap[3] = -2.0f;   // the frame's jitter and offset: game = layer - 2
+        check(canopy.draw(shifted).r > 0, "the bias term shifts the lookup: game = layer * scale + bias");
+        Case zeroMap = grid;
+        zeroMap.pixelMap[0] = zeroMap.pixelMap[1] = zeroMap.pixelMap[2] = zeroMap.pixelMap[3] = 0.0f;   // a block too small for the declared cbuffer reads zeros
+        check(closeTo(canopy.draw(zeroMap).r, mapLit.r, 0.001f), "a scale of 0 (a block that did not reach the register) is read as the identity, never as pixel (0, 0)");
+        Case dirtOnly = grid;
+        dirtOnly.dirtLevel = 0.5f;
+        mapped.dirtLevel = 0.5f;
+        check(closeTo(canopy.draw(dirtOnly).r, mapLit.r * 0.5f, 0.02f), "the map is a separate register: the dirt level still scales the dirt");
+    }
 
     // A crack: the vertex mask past its threshold and the crack texture's alpha full. The lit normal is the crack's (flat here, so the inward vertex normal),
     // alpha 1 (the crack on the base), the crack colour 0.3 lit by the whole sun over pi.

@@ -6,7 +6,8 @@
 // The swap is at bind time. vscreen.cpp's PSSetShader hook asks cockpitGlassPsFor() for the shader to hand the real call; the binding shadow still
 // records the game's own shader and hash, so the draw census and the glass probe see what the game bound. Off, the hook pays one load.
 //
-// visual.cockpit_glass_dirt (percent, 100 = the look as shipped) scales the legacy dirt. It reaches the shaders as a one-register constant buffer at b13, which the swap
+// visual.cockpit_glass_dirt (percent, 100 = the look as shipped) scales the legacy dirt. It reaches the shaders as a two-register constant buffer at b13 (the second register is the layer's
+// pixel map, cockpit_glass_core.h LevelBlock), which the swap
 // binds with the streak texture and puts back; it does nothing with `odyssey`, and the menus dim its row then (cockpit_glass_core.h dirtRowDim).
 //
 // Both profiles. Render thread, owner context only. The keys are read at the frame boundary (live): cockpitGlassFrameBoundary().
@@ -33,6 +34,16 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 // The game's shader hash when `actual` is the replacement the swap above hands the real call, else 0. A check of the actual binding against what the game bound
 // asks this: the swap is EDVR's own, so the binding is still the game's canopy.
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual);
+// True between the replacement's bind (cockpitGlassPsFor handing it back) and the next bind of another pixel shader or the frame boundary: the bound canopy shader is EDVR's, with t12 and
+// b13 ours. Owner context. The flat UI layer takes the canopy into the weapons layer (ui_layer_math.h kLegacyGlass) only while this holds, so a replacement that was refused leaves the game's own
+// stock canopy draw in the scene.
+bool cockpitGlassSwapActive();
+// The weapons layer takes the canopy draw (flat): its SV_Position is in the layer's pixels, and the shader looks up its light cluster by the game's. Sets the block at b13 so that
+// game = layer * (scaleX, scaleY) + (biasX, biasY) for the draw about to be issued (ui_holo_remap::params is the model: the target's size over the layer's, and the frame's jitter in the
+// game's pixels). Uploads on a change only. False when no swap is in or there is no block: nothing is changed. cockpitGlassClearLayerMap puts the identity back after the draw (a no-op when
+// no map is set); every scene bind of the block starts from the identity anyway.
+bool cockpitGlassSetLayerMap(ID3D11DeviceContext* ctx, float scaleX, float scaleY, float biasX, float biasY);
+void cockpitGlassClearLayerMap(ID3D11DeviceContext* ctx);
 // Before each draw on the owner context, while cockpitGlassLegacyLive(): the swap binds t12 and b13 at the shader's bind, and something can write t12 after that and before the draw
 // (flat, after a velocity change in normal space, every canopy draw until a reload: docs\cockpit-glass-legacy-port.md, "Clean glass after a supercruise exit"), which leaves the
 // legacy shader with no dirt. While the swap's inputs are bound this puts them back, and keeps what it found for the hand-back. One test and out at any other draw.

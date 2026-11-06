@@ -113,11 +113,12 @@ static void scopeMarkTests() {
     // A3: the mark rides the weapons layer, so the weapons half governs it (its arming is the scope zoom key, in the draw hook's facts) and fix.ui_quality's does not
     check(!uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, true, false) && uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true),
           "the weapons fire's half governs the mark (a stood-down weapons layer leaves it in the scene), fix.ui_quality's does not");
-    check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kWeaponsFire), "the mark and the weapons fire are drawn into the weapons layer");
+    check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kWeaponsFire) && uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kLegacyGlass),
+          "the mark, the weapons fire and the legacy canopy are drawn into the weapons layer");
     bool others = true;
     for (size_t i = 1; i < static_cast<size_t>(UiLayerFamily::kCount); ++i) {
         const UiLayerFamily fam = static_cast<UiLayerFamily>(i);
-        if (fam != UiLayerFamily::kScopeMark && fam != UiLayerFamily::kWeaponsFire) others = others && !uiLayerFamilyUsesWeaponsLayer(fam);
+        if (fam != UiLayerFamily::kScopeMark && fam != UiLayerFamily::kWeaponsFire && fam != UiLayerFamily::kLegacyGlass) others = others && !uiLayerFamilyUsesWeaponsLayer(fam);
     }
     check(others, "no other family is drawn into the weapons layer (the HUD's families and the shield ripple keep their own)");
 
@@ -330,10 +331,10 @@ static void scopeMarkTests() {
 static void mayWantTests() {
     std::vector<uint64_t> vss = {kUiVsPanel, kUiVsLoader, kUiVsHolo, kUiVsHoloGuiFxOff, kUiVsFlightHud, kUiVsSprite, kUiVsOrbitLines, kUiVsSupercruiseBars,
                                  kUiVsSpaceDust, kUiVsGuiVector, kUiVsGuiText, kUiVsGuiIcons, kUiVsOnFootHudA, kUiVsOnFootHudB, kUiVsScopeMark,
-                                 kUiVsShieldRefract, kHoloTargetSphere, 0};
+                                 kUiVsShieldRefract, kHoloTargetSphere, kUiVsLegacyGlass, 0};
     for (size_t i = 0; i < kWeaponPairCount; ++i) vss.push_back(kWeaponPairs[i].vs);
     for (uint64_t h : kHoloFamiliesTake) vss.push_back(h);
-    std::vector<uint64_t> pss = {0, kUiPsOrbitLines, kUiPsSupercruiseBars, kUiPsSpaceDust, kUiPsScopeMark, kUiPsShieldRefract, 0xEA02FAC2BD6C643Cull, 0xE95634B0F61D218Full};
+    std::vector<uint64_t> pss = {0, kUiPsOrbitLines, kUiPsSupercruiseBars, kUiPsSpaceDust, kUiPsScopeMark, kUiPsShieldRefract, kUiPsLegacyGlass, 0xEA02FAC2BD6C643Cull, 0xE95634B0F61D218Full};
     for (size_t i = 0; i < kWeaponPairCount; ++i) pss.push_back(kWeaponPairs[i].ps);
     uint64_t x = 0x2545F4914F6CDD1Dull;
     for (unsigned i = 0; i < 200; ++i) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; pss.push_back(x); vss.push_back(x); }
@@ -346,12 +347,13 @@ static void mayWantTests() {
         (may ? wanted : cleared) += 1;
         if (may) continue;
         for (uint64_t ps : pss)
-            for (unsigned flags = 0; flags < 16; ++flags) {
+            for (unsigned flags = 0; flags < 32; ++flags) {
                 UiFamilyFacts f = hdrFacts(vs, ps);
                 f.nativeOnFoot = (flags & 1) != 0;
                 f.scopeMark = (flags & 2) != 0;
                 f.learnedSurface = (flags & 4) != 0;
                 f.mapOpen = (flags & 8) != 0;
+                f.legacyGlass = (flags & 16) != 0;
                 check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "a clear UI family bit is kNone on the HDR target for every pixel shader and fact");
             }
     }
@@ -402,9 +404,9 @@ static void mayWantTests() {
     const size_t w0 = math.find("inline bool uiLayerFamilyHdrVsMayWant"), w1 = math.find("inline UiLayerFamily uiLayerFamilyFor");
     check(b0 != std::string::npos && b1 > b0 && w0 != std::string::npos && w1 > w0, "the rule and its may-want function are found in ui_layer_math.h");
     const std::string rule = math.substr(b0, b1 - b0), want = math.substr(w0, w1 - w0);
-    const char* tokens[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
+    const char* tokens[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "kUiVsLegacyGlass", "uiVsIsHoloPanel",
                             "uiHoloGenericHash", "weaponPairIndex", "shieldRefractPair", "uiOnFootHudMatch", "uiLayerMapFamilyOf"};
-    const char* mapped[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "uiVsIsHoloPanel",
+    const char* mapped[] = {"kUiVsFlightHud", "kUiVsSprite", "kUiVsOrbitLines", "kUiVsSupercruiseBars", "kUiVsSpaceDust", "kHoloTargetSphere", "kUiVsScopeMark", "kUiVsLegacyGlass", "uiVsIsHoloPanel",
                             "uiHoloGenericHash", "weaponsFireVs", "shieldRefractVs", "uiOnFootHudVs", "uiVsIsMapOverlay"};
     for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i)
         if (rule.find(tokens[i]) != std::string::npos)
@@ -652,8 +654,9 @@ static void ruleTests() {
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) == static_cast<int>(UiLayerFamily::kScopeMark) + 1 &&
               static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) &&
               static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) &&
-              static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03), the map marks (2026-11-04) and the System Map's plane icons and grid (2026-11-05) last (no older number moved)");
+              static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kLegacyGlass) &&
+              static_cast<int>(UiLayerFamily::kLegacyGlass) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the normal-space dust (2026-11-03), the map marks (2026-11-04), the System Map's plane icons and grid and the legacy canopy (2026-11-05) last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -685,7 +688,7 @@ static void keyTests() {
             for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
                 const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
                 const bool on = uiLayerFamilyEnabled(fam, q != 0, s != 0);
-                check(on == (fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kScopeMark ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0),
+                check(on == (fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kScopeMark || fam == UiLayerFamily::kLegacyGlass ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0),
                       "a family is enabled by its own half and by no other (the scope mark rides the weapons layer, so it is the weapons half's; the ripple, asked without its half, defaults on)");
                 UiLayerDrawFacts d;
                 d.family = fam;
@@ -1172,7 +1175,7 @@ static bool wiredLiveness(const std::string& t) {
 static bool wiredDecision(const std::string& t) {
     return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);") &&
            has(t, "uiLayerFamilyUsesWeaponsLayer(family)\n                    ? weaponsTakeReady(ctx, f.eye, family == UiLayerFamily::kScopeMark)") &&
-           has(t, "const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);") &&
+           has(t, "const bool cancel = !g_draw.weapons || family == UiLayerFamily::kLegacyGlass || weaponsFireJitterCancel(g_draw.vsHash);") &&
            has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") &&
            // the mark's stand-down of its own, for the press it happened in, after the half gate and before the decision
            has(t, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;") &&
@@ -1307,6 +1310,40 @@ static void flatTests() {
                       "the scope's gunsight mark rides the weapons half in flat's liveness too, as in the VR rule (one list: uiLayerFamilyUsesWeaponsLayer)");
             }
     check(!flatUiLayerTakesFamily(UiLayerFamily::kScopeMark), "...and flat never takes the mark: its lens is VR's, and the flat tick publishes none, so the family is never armed there");
+    // The legacy canopy (kLegacyGlass, 2026-11-05): the pair, named by flat's rule only with the legacy look live, taken into the weapons layer under the weapons half.
+    {
+        const UiLayerFamily g = UiLayerFamily::kLegacyGlass;
+        check(flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass, true) == g && flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, false, true, true) == g,
+              "legacy: the canopy pair is the legacy glass family when the legacy look is live");
+        check(flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass) == UiLayerFamily::kNone && flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass, false) == UiLayerFamily::kNone &&
+                  flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, false, true) == UiLayerFamily::kNone && flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, true, true, false) == UiLayerFamily::kNone,
+              "odyssey: the same pair names no family, with or without a map open: the game's own canopy draw is never asked");
+        check(flatUiFamilyOf(kUiVsLegacyGlass, kUiPsShieldRefract, true) == UiLayerFamily::kNone && flatUiFamilyOf(kUiVsWeaponBeams, kUiPsLegacyGlass, true) != g &&
+                  flatUiFamilyOf(kUiVsLegacyGlass, 0x3EAF4DB5B3E21089ull, true) == UiLayerFamily::kNone && flatUiFamilyOf(kUiVsLegacyGlass, 0x70F56E2EB7032E1Aull, true) == UiLayerFamily::kNone,
+              "...by the exact pair: the canopy vertex shader with another pixel shader (the quality 0-2 canopies) is not the family");
+        check(flatUiLayerTakesFamily(g) && uiLayerFamilyTakesHdr(g) && uiLayerFamilyUsesWeaponsLayer(g), "the family is taken by flat, goes to the HDR route and rides the weapons layer");
+        for (int q = 0; q < 2; ++q)
+            for (int w = 0; w < 2; ++w)
+                check(flatUiFamilyLive(g, q != 0, w != 0, true) == (w != 0) && uiLayerFamilyEnabled(g, q != 0, w != 0, true) == (w != 0),
+                      "the weapons half governs the canopy: fix.ui_quality off does not stop it, a stood-down weapons half does");
+        check(std::strcmp(uiLayerFamilyName(g), "legacy glass") == 0 && std::strcmp(uiLayerFamilyName(g), uiLayerFamilyName(UiLayerFamily::kMapGrid)) != 0, "the family has its own name");
+        // VR: its rule builds the facts itself and never sets legacyGlass, so the same pair on the HDR target is no family there.
+        UiFamilyFacts vr = hdrFacts(kUiVsLegacyGlass, kUiPsLegacyGlass);
+        check(uiLayerFamilyFor(vr) == UiLayerFamily::kNone, "VR: the canopy pair on the HDR target names no family (legacyGlass is flat's fact alone)");
+        vr.legacyGlass = true;
+        check(uiLayerFamilyFor(vr) == g, "...and with the fact set (flat's rule) it is named, so the fact is what keeps VR out");
+        check(!(readFile("src/d3d11/vscreen.cpp").find("legacyGlass") != std::string::npos), "vscreen.cpp (VR's facts) never mentions the fact");
+        // The weapons-fire jitter table does not name the canopy, and the layer cancels for it by name as well.
+        check(weaponsFireJitterCancel(kUiVsLegacyGlass) && weaponPairIndexByVs(kUiVsLegacyGlass) < 0, "the canopy is no weapons pair, and the table's default for it is the cancel");
+        check(has(readFile("src/d3d11/ui_layer.cpp"), "const bool cancel = !g_draw.weapons || family == UiLayerFamily::kLegacyGlass || weaponsFireJitterCancel(g_draw.vsHash);"),
+              "ui_layer.cpp: the canopy's jitter is cancelled in the layer by name");
+        // The loss of a layer holding only glass is a loss; glass never counts as weapons fire.
+        const WeaponsLayerLoss onlyGlass = weaponsLayerLoss(10, 0, 0, 9, 3);
+        check(onlyGlass.glass && !onlyGlass.fire && !onlyGlass.mark && !weaponsLayerLoss(10, 0, 0, 10, 3).glass && !weaponsLayerLoss(10, 0, 0, 9, 0).glass,
+              "a layer holding only glass that no re-issue published is lost as glass, not as weapons fire; a published one is not lost");
+        const WeaponsLayerLoss both = weaponsLayerLoss(10, 2, 0, 9, 3);
+        check(both.fire && both.glass, "a layer holding both reports both");
+    }
     // No setting and no row for the weapons fire (retired 2026-10-28): the flat panel has neither it nor a Weapons blend row.
     check(!flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has no Sharp weapons row and no Weapons blend row");
     int quality = -1, hud = -1;
@@ -1548,7 +1585,7 @@ static void dropTests() {
 }
 
 static bool wiredLost(const std::string& t) {
-    const size_t loss = t.find("++g_win.weaponsLost;\n            noteWeaponsLost(g_draw.eye, e, g_draw.seq);");
+    const size_t loss = t.find("            noteWeaponsLost(g_draw.eye, e, g_draw.seq);\n            // The missing-consumer deadline");
     size_t sights = 0, at = 0;
     while ((at = t.find("noteToneSight(seq, seenRes, ", at)) != std::string::npos) {
         ++sights;
@@ -1556,12 +1593,12 @@ static bool wiredLost(const std::string& t) {
     }
     return loss != std::string::npos && sights == 4 && has(t, "void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {") &&
            has(t, "if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;") && has(t, "e.wOtherTargets = 0;") && has(t, "if (!seenRes) seenRes = r.Get();") &&
-           has(t, "const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq);") &&
+           has(t, "const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq, e.wGlass);") &&
            has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") &&
-           has(t, "        e.wPubSeq = seq;\n        e.wPubMatched = plan.sourcePass;\n        if (e.wFires) e.wMissStreak = 0;\n        if (e.wMarks) e.wMarkMissStreak = 0;") &&
+           has(t, "        e.wPubSeq = seq;\n        e.wPubMatched = plan.sourcePass;\n        if (e.wFires || e.wGlass) e.wMissStreak = 0;\n        if (e.wMarks) e.wMarkMissStreak = 0;") &&
            has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);") &&
            // A3: the scope mark's loss is counted, noted and stood down apart from the weapons fire's, and its draws are counted apart from the fire's
-           has(t, "if (lost.fire) {\n            ++g_win.weaponsLost;") && has(t, "if (lost.mark) {\n            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);") &&
+           has(t, "if (lost.fire || lost.glass) {\n            if (lost.fire) ++g_win.weaponsLost;") && has(t, "if (lost.mark) {\n            if (!lost.fire && !lost.glass) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);") &&
            has(t, "if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {") && has(t, "markStandDown(g_draw.eye, e.wMarkMissStreak, why);") && has(t, "if (++e.wMissStreak >= kCrispHdrMissFrames) {") &&
            has(t, "                ++e.wMarks;   // the scope's gunsight mark shares the layer") && has(t, "                ++e.wFires;\n                ++g_win.weaponsTaken;") &&
            has(t, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {") && has(t, "if (hadWeapons && e.wFires) {") &&
@@ -1576,14 +1613,14 @@ static bool wiredLost(const std::string& t) {
 }
 static void lostPins(const std::string& layer) {
     check(wiredLost(layer), "ui_layer.cpp: a lost weapons layer prints the eye's state and the last tonemap-shaped draws, rate-limited, and every outcome of the admission is recorded");
-    check(!wiredLost(replaced(layer, "++g_win.weaponsLost;\n            noteWeaponsLost(g_draw.eye, e, g_draw.seq);", "++g_win.weaponsLost;")), "control: no line at the loss trips the pin");
+    check(!wiredLost(replaced(layer, "            noteWeaponsLost(g_draw.eye, e, g_draw.seq);\n            // The missing-consumer deadline, as the HUD layer's", "            // The missing-consumer deadline, as the HUD layer's")), "control: no line at the loss trips the pin");
     check(!wiredLost(replaced(layer, "        noteToneSight(seq, seenRes, eye, 3);\n", "")), "control: an unrecorded outcome trips the pin");
     check(!wiredLost(replaced(layer, "    noteToneSight(seq, seenRes, eye, 0);\n", "")), "control: an unrecorded admission trips the pin");
     check(!wiredLost(replaced(layer, "if (g_lostLines >= 24) return;", "")), "control: an unlimited line trips the pin");
-    check(!wiredLost(replaced(layer, "weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq)", "WeaponsLayerLoss{e.wSeq && e.wDraws && e.wToneSeq != e.wSeq, false}")),
+    check(!wiredLost(replaced(layer, "weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq, e.wGlass)", "WeaponsLayerLoss{e.wSeq && e.wDraws && e.wToneSeq != e.wSeq, false}")),
           "control: the frozen drop test (against the latest tonemap's frame) trips the pin");
     check(!wiredLost(replaced(layer, "    if (hadWeapons) {\n        // Stamped ONLY", "    {\n        // Stamped ONLY")), "control: a publication stamped by every re-issue trips the pin");
-    check(!wiredLost(replaced(layer, "if (e.wFires) e.wMissStreak = 0;", "e.wMissStreak = 0;")), "control: a frame that held a mark alone resetting the weapons fire's streak trips the pin");
+    check(!wiredLost(replaced(layer, "if (e.wFires || e.wGlass) e.wMissStreak = 0;", "e.wMissStreak = 0;")), "control: a frame that held a mark alone resetting the weapons fire's streak trips the pin");
     check(!wiredLost(replaced(layer, "                ++e.wMarks;   // the scope's gunsight mark shares the layer", "                ++e.wFires;   // the scope's gunsight mark shares the layer")),
           "control: a mark counted as weapons fire trips the pin");
     check(!wiredLost(replaced(layer, "if (hadWeapons && e.wFires) {", "if (hadWeapons) {")), "control: a mark's composite counted on the weapons line trips the pin");
