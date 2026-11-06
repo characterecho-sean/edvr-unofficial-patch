@@ -1421,6 +1421,14 @@ void testFlatLayerRules() {
                             UiLayerFamily::kMapSprite, UiLayerFamily::kSupercruiseBars, UiLayerFamily::kSpaceDust,
                             UiLayerFamily::kNormalSpaceDust, UiLayerFamily::kOrbitLines})
         check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
+    // 2026-11-05: the legacy canopy is asked for, but only under the legacy look: flat's rule names it with the fact and not without, the draw hook asks through the pair-facts bit and the
+    // live flag, and the memo's uiMayAsk (producer-run and offscreen shortcuts) stays false for it so `odyssey` is untouched (flat_temporal_test pins the memo).
+    check(flatUiLayerTakesFamily(UiLayerFamily::kLegacyGlass) && uiLayerFamilyTakesHdr(UiLayerFamily::kLegacyGlass) && flatUiSceneSlotOf(UiLayerFamily::kLegacyGlass) == -1 &&
+              flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass, true) == UiLayerFamily::kLegacyGlass &&
+              flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass, false) == UiLayerFamily::kNone && flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass) == UiLayerFamily::kNone,
+          "flat layer: the legacy canopy is asked for, named only with the legacy fact (odyssey names nothing), and has no scene slot");
+    check(flatUiLegacyGlassPair(kUiVsLegacyGlass, kUiPsLegacyGlass) && !flatUiLegacyGlassPair(kUiVsLegacyGlass, 0) && !flatUiLegacyGlassPair(0, kUiPsLegacyGlass),
+          "flat layer: the canopy pair is the pair, not either shader");
     check(flatUiSceneSlotOf(UiLayerFamily::kSupercruiseBars) == 0 && flatUiSceneSlotOf(UiLayerFamily::kSpaceDust) == 1 &&
               flatUiSceneSlotOf(UiLayerFamily::kNormalSpaceDust) == 2 && flatUiSceneSlotOf(UiLayerFamily::kOrbitLines) == 3 &&
               flatUiSceneSlotOf(UiLayerFamily::kHolo) == -1 && flatUiSceneSlotOf(UiLayerFamily::kMapCanvas) == -1,
@@ -2310,6 +2318,17 @@ void testFamilyRule() {
     f.vs = kHoloCanopy;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
           "the canopy is refused: not one of the take's eight, it sits in front of the whole sky");
+    // The legacy look names the canopy PAIR (kLegacyGlass) only through flat's fact, into the additive layer that covers nothing: the stars behind it are not touched. odyssey and VR never set it.
+    f.ps = kUiPsLegacyGlass;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "odyssey and VR: the canopy pair is no family without the legacy fact (the exclusion of holo_families.h stands)");
+    f.legacyGlass = true;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kLegacyGlass && why == UiFamilyWhy::kDirect,
+          "legacy (flat's rule): the canopy pair is the legacy glass family");
+    f.ps = 0x3EAF4DB5B3E21089ull;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "legacy: the quality 2 canopy pixel shader with the same vertex shader is not named");
+    f.legacyGlass = false;
+    f.ps = 0;
     f.vs = kHoloWorldMarkerReticle;
     f.ps = 0x2D037A047171BF3Bull;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
@@ -2530,11 +2549,11 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
                                fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark ||
-                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks || fam == UiLayerFamily::kMapPlane || fam == UiLayerFamily::kMapGrid;
+                               fam == UiLayerFamily::kNormalSpaceDust || fam == UiLayerFamily::kMapMarks || fam == UiLayerFamily::kMapPlane || fam == UiLayerFamily::kMapGrid || fam == UiLayerFamily::kLegacyGlass;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust, the VR map rings and stems, and the System Map's plane icons and grid");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple, the scope mark, the normal-space dust, the VR map rings and stems, the System Map's plane icons and grid, and the legacy canopy");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the two dusts have no width to give: they are exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
@@ -2837,8 +2856,8 @@ void testSupercruiseLines() {
     n.vs = kUiVsSupercruiseBars;
     n.ps = kUiPsSupercruiseBars;
     check(uiLayerFamilyFor(n) == UiLayerFamily::kSupercruiseBars, "ND1f: ...and the bars the bars");
-    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) && static_cast<int>(UiLayerFamily::kMapPlane) + 1 == static_cast<int>(UiLayerFamily::kMapGrid) && static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, and the System Map's plane icons and grid (2026-11-05) last before kCount (no older family's number moved)");
+    check(static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kNormalSpaceDust) && static_cast<int>(UiLayerFamily::kNormalSpaceDust) + 1 == static_cast<int>(UiLayerFamily::kMapMarks) && static_cast<int>(UiLayerFamily::kMapMarks) + 1 == static_cast<int>(UiLayerFamily::kMapPlane) && static_cast<int>(UiLayerFamily::kMapPlane) + 1 == static_cast<int>(UiLayerFamily::kMapGrid) && static_cast<int>(UiLayerFamily::kMapGrid) + 1 == static_cast<int>(UiLayerFamily::kLegacyGlass) && static_cast<int>(UiLayerFamily::kLegacyGlass) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "ND1g: the family is appended after the scope mark, the map marks (2026-11-04) after it, the System Map's plane icons and grid and the legacy canopy (2026-11-05) last before kCount (no older family's number moved)");
     check(uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kNormalSpaceDust, false, true) &&
               !uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kNormalSpaceDust),
           "ND1h: fix.ui_quality's half governs it (not the weapons layer's)");

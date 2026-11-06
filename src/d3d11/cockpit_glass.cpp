@@ -45,8 +45,10 @@ ID3D11PixelShader* g_ps = nullptr;                    // the intact replacement
 ID3D11PixelShader* g_overlayPs[2] = {nullptr, nullptr};   // ice, condensation
 ID3D11BlendState* g_overlayBlend = nullptr;           // colour ONE + ONE, RGB written, alpha untouched
 ID3D11ShaderResourceView* g_streakSrv = nullptr;
-ID3D11Buffer* g_levelCb = nullptr;                    // the dirt level, one register (16 bytes) at b13
-float g_levelUploaded = -1.0f;                        // the level g_levelCb holds; a different one is uploaded at the next bind
+ID3D11Buffer* g_levelCb = nullptr;                    // the block at b13, two registers (32 bytes): the dirt level, then the layer-to-game pixel map (cockpit_glass_core.h LevelBlock)
+LevelBlock g_levelUploaded = {-1.0f, {0, 0, 0}, {1, 1, 0, 0}};     // what g_levelCb holds; a different block is uploaded at the next bind or layer bracket
+LevelBlock g_levelWanted = {0.0f, {0, 0, 0}, {1, 1, 0, 0}};        // the dirt level now, and the map the layer set for the canopy draw it brackets (identity otherwise)
+bool g_mapSet = false;                               // the layer's map is in force (set by cockpitGlassSetLayerMap, cleared by cockpitGlassClearLayerMap or any scene bind)
 bool g_levelRefused = false;
 Replacement g_state = Replacement::NotTried;
 bool g_overlayRefused[2] = {false, false};
@@ -199,7 +201,8 @@ void dropDeviceObjects() {
     g_streakRefused = false;
     g_streakLogged = false;
     g_levelRefused = false;
-    g_levelUploaded = -1.0f;
+    g_levelUploaded = LevelBlock{-1.0f, {0, 0, 0}, {1, 1, 0, 0}};
+    g_mapSet = false;
 }
 
 // The device the objects were made on is this context's, or they are made again.
@@ -233,29 +236,36 @@ ID3D11PixelShader* replacementFor(ID3D11DeviceContext* ctx) {
     return g_ps;
 }
 
+// Brings the block up to date with g_levelWanted: an upload only on a change (the dirt level moved, or the layer set or cleared its map).
+void uploadLevel(ID3D11DeviceContext* ctx) {
+    if (!g_levelCb || !levelBlockDiffers(g_levelWanted, g_levelUploaded)) return;
+    const LevelBlock v = g_levelWanted;
+    guarded("cockpitGlass.level.update", [&] { vScreenUpdateSubresourceRaw(ctx, g_levelCb, 0, nullptr, &v, 0, 0); });
+    g_levelUploaded = v;
+}
+
 // The dirt level's block for this device, made the first time it is wanted and brought up to date with visual.cockpit_glass_dirt when the player has moved it (an upload
-// only on a change). Null when the device refused it; the shaders then read an unbound b13, which is no dirt, never the game's own glass.
+// only on a change). Null when the device refused it; the shaders then read an unbound b13, which is no dirt, never the game's own glass. This is the block for a SCENE bind (the swap,
+// the overlay): the pixel map is the identity, whatever a layer bracket left, since a scene draw's SV_Position is the game's own.
 ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
-    const float level = dirtLevelOf(g_dirtPercent);
+    g_levelWanted.dirt = dirtLevelOf(g_dirtPercent);
+    identityLevelMap(g_levelWanted);
+    g_mapSet = false;
     if (g_levelCb) {
-        if (level != g_levelUploaded) {
-            const float v[4] = {level, 0, 0, 0};
-            guarded("cockpitGlass.level.update", [&] { vScreenUpdateSubresourceRaw(ctx, g_levelCb, 0, nullptr, v, 0, 0); });
-            g_levelUploaded = level;
-        }
+        uploadLevel(ctx);
         return g_levelCb;
     }
     if (g_levelRefused) return nullptr;
     ID3D11Device* dev = nullptr;
+    const LevelBlock v = g_levelWanted;
     guarded("cockpitGlass.level.create", [&] {
         ctx->GetDevice(&dev);
         if (!dev) return;
-        const float v[4] = {level, 0, 0, 0};
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = sizeof v;
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        const D3D11_SUBRESOURCE_DATA init{v, 0, 0};
+        const D3D11_SUBRESOURCE_DATA init{&v, 0, 0};
         dev->CreateBuffer(&bd, &init, &g_levelCb);
     });
     if (dev) guarded("cockpitGlass.level.device.release", [&] { dev->Release(); });
@@ -264,7 +274,7 @@ ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
         Log::get().note("cockpit glass: the dirt level block was refused by the device; the legacy glass draws without dirt");
         return nullptr;
     }
-    g_levelUploaded = level;
+    g_levelUploaded = v;
     return g_levelCb;
 }
 
@@ -378,6 +388,26 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 }
 
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual) { return actual && actual == g_ps ? kReplacedPsHash : 0; }
+
+bool cockpitGlassSwapActive() { return g_t12Bound; }
+
+bool cockpitGlassSetLayerMap(ID3D11DeviceContext* ctx, float scaleX, float scaleY, float biasX, float biasY) {
+    if (!g_levelCb || !g_t12Bound) return false;   // no swap in, or no block: the draw has nothing of ours to map
+    g_levelWanted.map[0] = scaleX;
+    g_levelWanted.map[1] = scaleY;
+    g_levelWanted.map[2] = biasX;
+    g_levelWanted.map[3] = biasY;
+    g_mapSet = true;
+    uploadLevel(ctx);
+    return true;
+}
+
+void cockpitGlassClearLayerMap(ID3D11DeviceContext* ctx) {
+    if (!g_mapSet) return;   // every draw but a taken canopy's: this and out
+    g_mapSet = false;
+    identityLevelMap(g_levelWanted);
+    uploadLevel(ctx);
+}
 
 void cockpitGlassBeforeDraw(ID3D11DeviceContext* ctx) {
     if (!g_t12Bound) return;   // every draw but the canopy's: this and out

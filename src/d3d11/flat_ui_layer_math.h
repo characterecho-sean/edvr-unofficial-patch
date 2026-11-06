@@ -28,10 +28,12 @@ inline FlatUiTarget flatUiTargetClass(bool isBackBuffer, uint32_t w, uint32_t h,
 
 // The shared family rule, asked both ways (an HDR eye target, then the post-tonemap one) with no learned surface:
 // ui_layer_math.h's shader-pair recognitions, not a second hash table.
-inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
+// legacyGlass: visual.cockpit_glass is legacy (the caller's one load of cockpitGlassLegacyLive); false names no canopy, so `odyssey` leaves the game's own canopy draw unnamed.
+inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps, bool legacyGlass = false) {
     UiFamilyFacts f;
     f.vs = vs;
     f.ps = ps;
+    f.legacyGlass = legacyGlass;
     f.targetKind = 1;
     UiLayerFamily out = uiLayerFamilyFor(f);
     if (out != UiLayerFamily::kNone) return out;
@@ -63,10 +65,15 @@ inline UiLayerFamily flatUiMapFamilyOf(uint64_t vs, uint64_t ps, bool mapOpen, b
 }
 
 // A draw's family in the flat layer: the map families first (only with a map open, on the HDR target), then the shared rule.
-inline UiLayerFamily flatUiFamilyFor(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget) {
+// The canopy under the legacy look joins only through `legacyGlass`, which the pair-facts memo (flat_pair_facts.h) leaves false: a pure memo of the hashes never names the canopy, so
+// the producer-run and offscreen shortcuts that read uiMayAsk see the canopy pair exactly as they did before the family existed. The adapter asks for the canopy through
+// FlatPairFacts::legacyGlassPair and cockpitGlassLegacyLive() (flat_runtime.cpp), and the rule above names it only with `legacyGlass`.
+inline UiLayerFamily flatUiFamilyFor(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget, bool legacyGlass = false) {
     const UiLayerFamily map = flatUiMapFamilyOf(vs, ps, mapOpen, hdrTarget);
-    return map != UiLayerFamily::kNone ? map : flatUiFamilyOf(vs, ps);
+    return map != UiLayerFamily::kNone ? map : flatUiFamilyOf(vs, ps, legacyGlass);
 }
+// The canopy pair, as a draw's key carries it (the game's hashes: the swap is at bind time and the shadow records what the game bound).
+inline bool flatUiLegacyGlassPair(uint64_t vs, uint64_t ps) { return vs == kUiVsLegacyGlass && ps == kUiPsLegacyGlass; }
 
 // THE MAP FRAMES' TONEMAP, FOR THE UI LAYER ONLY (census, 2026-10-10, every map census of log 091943's build 9cc6b8ba): VS
 // CFA91824129ECBBC with PS C89DD4ED362D743F reads the scene in SRV slot 0 and writes a 3840x2160 RGBA8 target, issued 3-5
@@ -304,7 +311,7 @@ inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust || f == UiLayerFamily::kNormalSpaceDust ||
-           f == UiLayerFamily::kOrbitLines;
+           f == UiLayerFamily::kOrbitLines || f == UiLayerFamily::kLegacyGlass;   // the glass is named only under the legacy look (flatUiFamilyFor's legacyGlass)
 }
 // The four scene families (2026-11-03) the adapter keeps per-family reasons for beside the maps': 0 the supercruise bars, 1 the supercruise
 // space dust, 2 the normal-space dust, 3 the orbit lines. Their window slot (flat_ui_layer.cpp Window::sceneRefused / sceneDeclined, kFlatUiSceneSlots

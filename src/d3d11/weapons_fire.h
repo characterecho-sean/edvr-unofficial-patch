@@ -72,14 +72,17 @@ inline bool weaponsLayerDropped(uint64_t contentSeq, uint32_t draws, uint64_t pu
 // The scope's gunsight mark rides the weapons layer (A3), so a dropped layer may hold weapons fire, marks or both. What it lost is counted by kind: the weapons fire's loss, its
 // count and the stand-down its streak leads to are the fire's alone, and the mark's the mark's, so a frame that held a mark and no fire never counts toward the weapons fire's
 // stand-down. `fires` and `marks` are the draws of each kind the layer holds for frame contentSeq.
+// The legacy canopy (kLegacyGlass) shares the layer too, and its draws are content like the others: glass is the draws of that kind. A frame that held glass and nothing else is a layer a missing consumer can lose, and the loss is counted and stood down by the same
+// streak as the fire's (the consumer is the same tonemap re-issue), but never counted as weapons fire.
 struct WeaponsLayerLoss {
-    bool fire = false, mark = false;
+    bool fire = false, mark = false, glass = false;
 };
-inline WeaponsLayerLoss weaponsLayerLoss(uint64_t contentSeq, uint32_t fires, uint32_t marks, uint64_t publishedSeq) {
+inline WeaponsLayerLoss weaponsLayerLoss(uint64_t contentSeq, uint32_t fires, uint32_t marks, uint64_t publishedSeq, uint32_t glass = 0) {
     WeaponsLayerLoss l;
-    if (!weaponsLayerDropped(contentSeq, fires + marks, publishedSeq)) return l;
+    if (!weaponsLayerDropped(contentSeq, fires + marks + glass, publishedSeq)) return l;
     l.fire = fires != 0;
     l.mark = marks != 0;
+    l.glass = glass != 0;
     return l;
 }
 

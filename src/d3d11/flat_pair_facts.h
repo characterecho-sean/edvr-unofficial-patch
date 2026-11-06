@@ -34,9 +34,10 @@ struct FlatPairFacts {
     bool sourceTone = false;      // flatUiSourceTonePair: the UI-only LDR-source tone pairs (E894, 0D43)
     bool copyPair = false;        // the final copy's shader pair (the draw must also write the output to be the copy)
     bool uiMayAsk = false;        // flatUiFamilyFor names the pair for some (map open, HDR target)
+    bool legacyGlassPair = false; // the canopy pair (flatUiLegacyGlassPair): asked about only while the legacy look is live, a runtime fact the memo does not hold; uiMayAsk stays false for it
     friend bool operator==(const FlatPairFacts& a, const FlatPairFacts& b) {
         return a.supported == b.supported && a.familyVs == b.familyVs && a.toneSlot == b.toneSlot && a.mapToneSlot == b.mapToneSlot &&
-               a.sourceTone == b.sourceTone && a.copyPair == b.copyPair && a.uiMayAsk == b.uiMayAsk;
+               a.sourceTone == b.sourceTone && a.copyPair == b.copyPair && a.uiMayAsk == b.uiMayAsk && a.legacyGlassPair == b.legacyGlassPair;
     }
 };
 
@@ -51,6 +52,7 @@ inline FlatPairFacts flatPairFactsFresh(uint64_t vs, uint64_t ps, bool flat) noe
     f.mapToneSlot = flatUiMapToneSlotOf(vs, ps);
     f.sourceTone = flatUiSourceTonePair(vs, ps);
     f.copyPair = vs == flat_mono_detail::kCopyVs && ps == flat_mono_detail::kCopyPs;
+    f.legacyGlassPair = flatUiLegacyGlassPair(vs, ps);
     for (int map = 0; map < 2 && !f.uiMayAsk; ++map)
         for (int hdr = 0; hdr < 2 && !f.uiMayAsk; ++hdr)
             f.uiMayAsk = flatUiFamilyFor(vs, ps, map != 0, hdr != 0) != UiLayerFamily::kNone;

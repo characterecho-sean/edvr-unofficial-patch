@@ -7142,7 +7142,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
             // A pair the family rule cannot name for any (map open, HDR target) is never asked: flatUiLayerDecide would return kNotAsked at its
             // family test, before any counter or log (flat_pair_facts.h; pinned by the wiring scan), so its inputs are not gathered for it.
-            if (pairFact.uiMayAsk) {
+            // The legacy canopy is the one runtime-gated name: the memo holds the pair, the legacy look is live or not (visual.cockpit_glass), so with `odyssey` the draw never reaches the layer.
+            if (pairFact.uiMayAsk || (pairFact.legacyGlassPair && cockpitGlassLegacyLive())) {
             FlatUiLayerDraw ui;
             ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
             ui.format = k.format;

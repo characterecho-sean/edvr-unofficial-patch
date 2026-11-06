@@ -2,6 +2,7 @@
 // door and the composite are the VR layer's own (ui_layer.cpp), driven here as eye 0. The pure rules are
 // flat_ui_layer_math.h's.
 #include "flat_ui_layer.h"
+#include "cockpit_glass.h"        // cockpitGlassLegacyLive: the canopy is named only under the legacy look
 
 #include "flat_camera_phase.h"     // flatCameraMeasureRowShift: the jitter a draw's camera rows carry
 #include "flat_compute_readback.h" // FlatComputeInternalScope
@@ -62,6 +63,9 @@ struct Window {
     // same way: the adapter's and the shared decision's. Their asked/decided/taken/refused-at-issue are the family arrays above.
     uint64_t sceneRefused[kFlatUiSceneSlots][kRefusals] = {};
     uint64_t sceneDeclined[kFlatUiSceneSlots][kDecisions] = {};
+    // The legacy canopy's (2026-11-05, kLegacyGlass) refusals by reason, the same way; asked/decided/taken/refused-at-issue are the family arrays above.
+    uint64_t glassRefused[kRefusals] = {};
+    uint64_t glassDeclined[kDecisions] = {};
     // The candidates of the tonemaps flatUiMapToneSlotOf names (the maps', the Full System Scanner's): the tone reads the candidate
     // branch saw, and those that proved.
     uint64_t mapToneCandidates = 0, mapToneMatched = 0;
@@ -82,7 +86,8 @@ bool g_glowNoted = false;  // the once-only first feed line
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
 UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last kDecided draw (flatUiLayerNoteIssue's)
 bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
-bool g_sceneNoted[kFlatUiSceneSlots] = {};                // the once-only first take of each scene family (flatUiSceneSlotOf)
+bool g_glassNoted = false;                                // the once-only first take of the legacy canopy
+bool g_sceneNoted[kFlatUiSceneSlots] = {};              // the once-only first take of each scene family (flatUiSceneSlotOf)
 bool g_mapToneNoted[2] = {false, false};                  // the once-only first proof from a tonemap of this table: the maps', the scanner's
 bool g_mapFirstToneNoted[2] = {false, false};             // the once-only first candidate line of each (proved or not)
 FlatUiMapAaTally g_mapAa;                                 // temporal AA off on the maps and the Full System Scanner: the map line's counts
@@ -255,8 +260,9 @@ const char* flatUiLayerState() {
 FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
     g_lastAsk = FlatUiLayerAsk::kNotAsked;
     if (!ctx || !flatUiLayerOn()) return g_lastAsk;
-    // The map families first (only with a map open, on the HDR target); otherwise the shared family rule, as it always was.
-    const UiLayerFamily family = flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget);
+    // The map families first (only with a map open, on the HDR target); otherwise the shared family rule, as it always was. The legacy canopy joins it only under the legacy look with
+    // EDVR's shader actually bound (a refused replacement leaves the game's own canopy, which the additive layer would get wrong): `odyssey` names nothing here.
+    const UiLayerFamily family = flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget, cockpitGlassLegacyLive() && cockpitGlassSwapActive());
     if (!flatUiLayerTakesFamily(family)) return g_lastAsk;
     // The half of the shared layer that governs this family must be live: with fix.ui_quality off and the weapons fire on, the layer runs for the weapons alone
     // and the HUD stays in the game's frame (not asked, so not counted); the converse for the weapons.
@@ -276,6 +282,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
         flatUiTrailNoteRefuse(d.frame, r);
         if (ms >= 0) ++g_w.mapRefused[ms][static_cast<size_t>(r)];
         if (ss >= 0) ++g_w.sceneRefused[ss][static_cast<size_t>(r)];
+        if (family == UiLayerFamily::kLegacyGlass) ++g_w.glassRefused[static_cast<size_t>(r)];
         return g_lastAsk;
     };
     if (d.otherWork) return refuse(FlatUiRefuse::kOtherWork);
@@ -324,6 +331,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
             ++g_w.declined[static_cast<size_t>(decision)];
             if (ms >= 0) ++g_w.mapDeclined[ms][static_cast<size_t>(decision)];
             if (ss >= 0) ++g_w.sceneDeclined[ss][static_cast<size_t>(decision)];
+            if (family == UiLayerFamily::kLegacyGlass) ++g_w.glassDeclined[static_cast<size_t>(decision)];
         }
         return g_lastAsk;
     }
@@ -389,6 +397,13 @@ void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken) {
         g_sceneNoted[ss] = true;
         Log::get().note("flat ui layer: the first %s taken -- frame %llu, vs %016llX ps %016llX, into the flat HDR layer, composited "
                         "after the upscale; said once.",
+                        uiLayerFamilyName(g_decidedFamily), static_cast<unsigned long long>(g_takenFrame),
+                        static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps));
+    }
+    if (g_decidedFamily == UiLayerFamily::kLegacyGlass && !g_glassNoted) {
+        g_glassNoted = true;
+        Log::get().note("flat ui layer: the first %s taken -- frame %llu, vs %016llX ps %016llX, into the flat weapons layer, composited "
+                        "after the upscale with the weapons light; the dirt no longer goes through the upscaler; said once.",
                         uiLayerFamilyName(g_decidedFamily), static_cast<unsigned long long>(g_takenFrame),
                         static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps));
     }
@@ -959,6 +974,14 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         Log::get().note("flat ui layer scene: %s", text.c_str());
         const std::string layerText = "flat layer: " + barsLayer;
         supercruiseBarsLog(layerText.c_str());
+    }
+    // The legacy canopy (kLegacyGlass), the same counts with its reasons. ALWAYS printed: all zeros is `odyssey`, or a window with no canopy drawn.
+    {
+        const size_t fg = static_cast<size_t>(UiLayerFamily::kLegacyGlass);
+        Log::get().note("flat ui layer legacy glass: asked=%llu decided=%llu taken=%llu refused-at-issue=%llu refused=%llu (%s)", static_cast<unsigned long long>(w.asked[fg]),
+                        static_cast<unsigned long long>(w.decided[fg]), static_cast<unsigned long long>(w.taken[fg]), static_cast<unsigned long long>(w.atIssue[fg]),
+                        static_cast<unsigned long long>(refusedTotalOf(w.glassRefused, w.glassDeclined, w.atIssue[fg])),
+                        reasonsOf(w.glassRefused, w.glassDeclined, w.atIssue[fg]).c_str());
     }
     // The HUD's bloom feed: every first-level draw that asked for H' this window, by what the pass came to. "fed" is the draws that read H'; a
     // window with the layer live and the HUD taken but nothing here is a build that never ran it, or a game with Bloom off (no first level).

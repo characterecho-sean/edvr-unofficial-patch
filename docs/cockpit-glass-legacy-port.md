@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. Open: the dirt smears under the upscaler in flat. See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR is not done. See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -919,7 +919,7 @@ after the switch, falling to about 355 a window; how the dirt looked there was n
 reported. The probe's per-draw counts came out with the merge, and the rebind count
 stays in the window lines.
 
-A second report on the same flight, open: with the dirt staying, Sean sees it smear
+A second report on the same flight, fixed in flat under "The dirt layer": with the dirt staying, Sean sees it smear
 when the ship moves, in flat under DLSS. With anti-aliasing off the smear goes (Sean,
 2026-11-05). Open hypothesis: the canopy writes no depth, so the dirt is a transparent
 layer over the stars, and the one motion value per pixel cannot suit both. Evidence
@@ -946,3 +946,47 @@ pixels carried about 1 px of motion spreading from the centre with a sky depth.
   and are not ruled out. The sun's colour and direction stay nonzero.
 - ruled out: the SRVs t0 to t11 and the samplers and output state changing, because
   those lines are the same in samples 2 to 6.
+
+### The dirt layer (2026-11-05, FLOWN OK IN FLAT, merged to main; VR not done)
+
+Flown on `f4149bb4` (Frontier, flat, DLSS, log `edvr_gfx_20261105_184510`), Sean: "That's
+fixed". 2,314, 2,699 and 2,684 canopy draws in the three 30 s windows from 18:47:10 were
+in the layer, none left in the scene by the decision, all composited by tonemap
+difference. Weapons fire stayed in the layer with no stand-down (1,049 matched frames in
+one window). About 90 fps, as on the earlier flat flight; the GPU cost itself is not
+measured. Not reported: the strut edges, things in front of the glass, the look in a
+hangar. Canopy binds run 300-360 a window above the draws taken, about 12 a second: not
+explained; the new `flat ui layer legacy glass:` line prints the reasons. VR is unchanged,
+and whether the dirt smears there has not been reported.
+
+The smear is the dirt being a transparent layer over the stars under one motion value per pixel (the hypothesis above, not yet measured on the glass pixels). The design
+takes the whole canopy draw out of the upscaler instead of tuning around it. Flat only, `legacy` only, no key: it is behaviour.
+
+What was built. A new family `kLegacyGlass` (`ui_layer_math.h`, appended after `kMapGrid`) names the pair VS `8C091FFD08644E02` with PS `4E4FF61E8A08FC7E`, the game's hashes
+as the binding shadow records them (the swap is at bind time). The canopy's draw is issued once, by the game, into the eye's additive weapons layer W (the weapons fire's
+layer): `flatUiLayerDecide`, then `FlatRuntimeDrawScope::beginActualDraw`, then `uiLayerBegin` swap the target, viewport and blend. EDVR's own shader stays bound, so no
+second pass and no new shader variant. The blend is the canopy's SRC_ALPHA, INV_SRC_ALPHA (census `bl=15,6,1/5,6,1`: the leading 1 is the enable flag, then src 5, dst 6,
+op 1, and the same for alpha), which the layer converts as an over: colour as the game, alpha as transmittance. The shader writes radiance divided by alpha, so over the
+cleared layer the layer holds the radiance, the light the scene would have had added. W is composited by the existing tonemap difference, T(F_up + L) - T(F_up). The
+scene's 2 percent darkening from the alpha base (`kLegacyBaseAlpha`) is given up on purpose.
+
+When it is named. Only while `cockpitGlassLegacyLive()` and the swap is bound (`cockpitGlassSwapActive()`), through flat's rule alone (`UiFamilyFacts.legacyGlass`, set by
+`flatUiFamilyOf`). `holo_families.h` and `ui_layer_math.h` kept the canopy off the crisp take because covering it in the over-blended HUD layer would smear the stars behind
+it; the additive layer covers nothing, and `odyssey` and VR never set the fact, so the exclusion stands for them. The memo of pair facts leaves `uiMayAsk` false for the
+canopy, so the producer-run and offscreen shortcuts see the pair as before; the adapter asks through `FlatPairFacts::legacyGlassPair` and the live flag. Any refusal
+(layer not live, stand-down, tonemap unproven, no camera rows, a decision declined) leaves the draw in the scene as now. The ice and condensation overlay is untouched.
+
+Pixel position. In the layer SV_Position is in layer pixels, and the probe ambient looks its light cluster up by the game's. The block at b13 is now two registers (32 bytes):
+the dirt level, then `game = layer * xy + zw`, from `ui_holo_remap::params`. `beginInner` sets it before anything of the game's state is changed and `restore()` puts the
+identity back; every scene bind starts from the identity and uploads only on a change. A scale of 0 reads as the identity in the shader.
+
+What reaches the log. `flat ui layer: the first legacy glass taken`, the flat window's `legacy glass:` line (asked, decided, taken, refused-at-issue, refused with reasons,
+and the look), `legacy glass:` in the layer's own window (draws taken, left by reason, eye-frames by composite kind, layers lost) and a once-only line at the first composite.
+A window where the family was never asked says so, which a build that never ran it cannot print.
+
+Known and not established. (1) Whether the canopy tests depth, and against what, in the layer: if it does, the layer seeds a copy of the scene depth at the layer's size for it
+(`seedLayerDepth`), at the weapons fire's cost, and the first flight must read the `legacy glass` first-seen line's depth text. (2) Scene draws issued after the canopy now lie
+under the dirt instead of over it (the known limit of the HDR phase). (3) Whether the flat scope plans other work for the canopy pair, which would refuse it as `other-work`.
+(4) The GPU cost of drawing the canopy at the layer's size. (5) The loss path: a layer holding only glass is counted as lost glass and stands the weapons half down after 30
+frames, as the weapons fire does. The flight must show the family taken every frame in `legacy`, no `legacy glass` line in `odyssey`, the dirt not smearing under DLSS, and
+the weapons fire unchanged.
