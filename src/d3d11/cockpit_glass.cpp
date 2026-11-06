@@ -36,7 +36,7 @@ bool g_configRead = false;
 uint32_t g_configGeneration = 0;
 bool g_on = false;
 int g_dirtPercent = kDirtPercentDefault;   // visual.cockpit_glass_dirt, read with the look at the frame boundary
-float g_lightsLevel = 0.0f;                // TEMPORARY: experimental.cockpit_glass_lights, read with the look (lightsLevelOf)
+float g_lightsLevel = 0.0f;                // visual.cockpit_glass_lights, read with the look (lightsLevelOf)
 std::string g_unrecognisedSaid;   // the last unrecognised value the log has named, so a typo is said once and not every config change
 
 // Everything made on one device is kept as raw pointers on purpose, never released at exit (a static destructor that releases a D3D object during shutdown is the kind of
@@ -508,12 +508,12 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
             if (on && g_on)
                 Log::get().note("cockpit glass: dirt level %d%% (visual.cockpit_glass_dirt), from the next canopy bind", dirtPercent);
         }
-        // TEMPORARY: which local lights reach the dirt, said when it moves, whatever the look, with the value as read: a line naming `off` after a test ini was edited says the key did not take.
-        const std::string lights = cfg.getString("experimental.cockpit_glass_lights", "off");
+        // Which local lights reach the dirt, said when it moves, whatever the look, with the value as read.
+        const std::string lights = cfg.getString("visual.cockpit_glass_lights", "off");
         const float lightsLevel = lightsLevelOf(lights.c_str());
         if (lightsLevel != g_lightsLevel) {
             g_lightsLevel = lightsLevel;
-            Log::get().note("cockpit glass: local lights on the dirt: %s (experimental.cockpit_glass_lights = %s), from the next canopy bind",
+            Log::get().note("cockpit glass: local lights on the dirt: %s (visual.cockpit_glass_lights = %s), from the next canopy bind",
                             lightsLevel > 1.5f ? "spots and points" : lightsLevel > 0.5f ? "spots" : "none", lights.c_str());
         }
         if (on != g_on) {

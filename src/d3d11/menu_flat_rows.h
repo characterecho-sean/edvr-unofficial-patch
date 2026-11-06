@@ -64,6 +64,8 @@ inline constexpr FlatPageRow kFlatVisualRows[] = {
     {"visual", "cockpit_glass", FlatRowRead::Allowlist},
     // Legacy glass dirt (2026-11-05): how much dirt the legacy look draws, in percent. Dimmed unless cockpit_glass is legacy (menu.cpp cockpitGlassDirtRowDisabled).
     {"visual", "cockpit_glass_dirt", FlatRowRead::Allowlist},
+    // Legacy glass lights (2026-11-06): which lights reach that dirt. Dimmed unless cockpit_glass is legacy, as the row above.
+    {"visual", "cockpit_glass_lights", FlatRowRead::Allowlist},
     {"fix", "particle_billboard", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatVisualRowCount = sizeof(kFlatVisualRows) / sizeof(kFlatVisualRows[0]);

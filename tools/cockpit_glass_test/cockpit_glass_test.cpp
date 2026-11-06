@@ -98,8 +98,8 @@ static void testCore() {
         b.dirt = 1.0f;
         check(cg::levelBlockDiffers(a, b), "a moved dirt level is a change");
     }
-    check(cg::lightsLevelOf("off") == 0.0f && cg::lightsLevelOf("spots") == 1.0f && cg::lightsLevelOf("all") == 2.0f && cg::lightsLevelOf("on") == 0.0f && cg::lightsLevelOf(nullptr) == 0.0f,
-          "the local lights key: off, spots or all; anything else is off");
+    check(cg::lightsLevelOf("off") == 0.0f && cg::lightsLevelOf("station") == 1.0f && cg::lightsLevelOf("all") == 2.0f && cg::lightsLevelOf("on") == 0.0f && cg::lightsLevelOf("spots") == 0.0f && cg::lightsLevelOf(nullptr) == 0.0f,
+          "the local lights key: off, station or all; anything else is off");
     {
         cg::LevelBlock a{0.5f, 0.0f, {0, 0}, {1, 1, 0, 0}}, b = a;
         b.lights = 1.0f;
@@ -747,7 +747,7 @@ static void testShader() {
     const Pixel zero = canopy.draw(none);
     check(zero.r == 0 && zero.g == 0 && zero.b == 0 && closeTo(zero.a, kBaseAlpha, 0.01f), "no mask draws the legacy alpha base and no colour");
 
-    // The local lights (experimental.cockpit_glass_lights). The pixel at (0, 0, 5) with the lit normal (0, 0, -1), and the game's falloff: a light of radius 10 at distance 5 has k^2 / d^2 = 0.03515625. So intensity
+    // The local lights (visual.cockpit_glass_lights). The pixel at (0, 0, 5) with the lit normal (0, 0, -1), and the game's falloff: a light of radius 10 at distance 5 has k^2 / d^2 = 0.03515625. So intensity
     // 1000 / that is a light of 1000 at the glass, and it must draw exactly what a sun of 1000 from the same direction draws: same Lambert, same 1/pi, same glare.
     {
         const float atFive = 0.9375f * 0.9375f / 25.0f;
@@ -821,11 +821,11 @@ static void testShader() {
         ahead.direction = 2u | 4u;   // axis 2, negative: back along the view
         smudge.spots.push_back(ahead);
         check(closeTo(canopy.draw(smudge).r, glareSun.r, 0.02f), "a light straight ahead draws the sun's glare");
-        // Points: spots only leaves them out.
+        // Points: `station` leaves them out.
         Case point = base;
         point.points.push_back(one);
         point.lights = 1;
-        check(canopy.draw(point).r == 0, "`spots` leaves the point lights out");
+        check(canopy.draw(point).r == 0, "`station` leaves the point lights out");
         point.lights = 2;
         check(closeTo(canopy.draw(point).r, sunLit.r, 0.02f), "`all` draws a point light as a sun of the same strength");
         point.spots.push_back(one);

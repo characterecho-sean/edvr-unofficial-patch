@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's point and spot lists hold the pad's lights at the glass's depths, FLOWN on `ea6efed8`; an unshadowed light loop is built behind the temporary key `experimental.cockpit_glass_lights`, `spots` FLOWN OK by eye in flat on `3eb20d23`, VR and its cost not flown, not merged ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR FLOWN OK by eye on `d006d0e3`, on main `82ae83dd` ("The dirt layer in VR", end of the doc). Open 2026-11-06: station and hangar lights do not light the dirt, because neither this shader nor the game's reads local lights; the game's point and spot lists hold the pad's lights at the glass's depths, FLOWN on `ea6efed8`; an unshadowed light loop is the Visual option `visual.cockpit_glass_lights`, shipped off; `station` FLOWN OK by eye in flat on `3eb20d23` under its test name, VR and its cost not flown, not merged ("Station lights", end of the doc). See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -1081,6 +1081,9 @@ Unproven: that 1/pi fits (the game's own spot loop in `26EA073903FD8909` is spec
 Flown on `3eb20d23` (Frontier, FLAT, DLAA-sized DLSS route, log `edvr_gfx_20261106_073717`), `spots` for the whole flight, Sean: "That looks really good". About 4,300 canopy draws a window in the layer, none left in
 the scene. Presents held 6.94 ms (p95 6.98), the 144 fps cap, so that says only that the cap was met, not what the loop costs. The census does not time the canopy draw on its own in flat. Not flown: VR with the loop, where the
 canopy is shaded at 4032x4034 twice a frame; `all`; `off` to compare.
+
+Made a Visual option on Sean's word (2026-11-06, NOT FLOWN as a row): `visual.cockpit_glass_lights = off | station | all`, shipped `off`, the row "Legacy glass lights" under Legacy glass dirt in both menus, dimmed unless
+the look is `legacy`. It replaces `experimental.cockpit_glass_lights`, whose `spots` is `station` here. Whether to ship it on waits for the VR cost.
 
 The 300-360 canopy binds a window above the draws taken (open since "The dirt layer") are named by this log: `refused=360 (not-hdr-target=360)`. About 12 a second the canopy pair is drawn into a target that is not the HDR
 one, and that draw stays in the scene. What that target is, and whether its dirt shows, is not known.

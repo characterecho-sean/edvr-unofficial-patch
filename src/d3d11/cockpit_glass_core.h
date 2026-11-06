@@ -84,11 +84,11 @@ inline bool levelBlockDiffers(const LevelBlock& a, const LevelBlock& b) {
     return a.dirt != b.dirt || a.lights != b.lights || a.map[0] != b.map[0] || a.map[1] != b.map[1] || a.map[2] != b.map[2] || a.map[3] != b.map[3];
 }
 
-// TEMPORARY (experimental.cockpit_glass_lights, docs\cockpit-glass-legacy-port.md, "Station lights"): which of the game's local lights reach the dirt. off, spots, or all (spots and the point
+// visual.cockpit_glass_lights (docs\cockpit-glass-legacy-port.md, "Station lights"): which of the game's local lights reach the dirt. off, station (the spot lights), or all (those and the point
 // lights, which are mostly the cockpit's own). Anything else reads as off. The value is register 0's y: the shader tests 0.5 and 1.5.
 inline float lightsLevelOf(const char* v) {
     if (!v) return 0.0f;
-    if (std::strcmp(v, "spots") == 0) return 1.0f;
+    if (std::strcmp(v, "station") == 0) return 1.0f;
     if (std::strcmp(v, "all") == 0) return 2.0f;
     return 0.0f;
 }

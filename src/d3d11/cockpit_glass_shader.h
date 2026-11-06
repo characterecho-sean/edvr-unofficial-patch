@@ -36,7 +36,7 @@ constexpr char kCockpitGlassLegacyPsHlsl[] = R"HLSL(
 cbuffer Frame : register(b1) { float4 cb1[327]; }
 cbuffer Material : register(b2) { float4 cb2[18]; }
 // EDVR's own, bound by the swap: dirtLevel.x is the dirt level (visual.cockpit_glass_dirt / 100, 1 = the look as shipped). Unbound it reads 0, which is no dirt. dirtLevel.y is which local lights reach the
-// dirt (experimental.cockpit_glass_lights): 0 none, 1 spots, 2 spots and points.
+// dirt (visual.cockpit_glass_lights): 0 none, 1 spots, 2 spots and points.
 // pixelMap maps the pixel this runs at onto the game's: game = pixel * pixelMap.xy + pixelMap.zw. The scene draw is the identity (1, 1, 0, 0). In the weapons layer SV_Position is in the layer's
 // pixels, and the light-cluster lookup is by the game's (probeAmbient). A scale of 0 (the block unbound, or too small to reach this register) reads as the identity.
 cbuffer Level : register(b13) { float4 dirtLevel; float4 pixelMap; }
@@ -270,7 +270,7 @@ float3 probeAmbient(float3 viewPos, float3 nView, float2 pixel) {
     return acc * cb1[90].z;
 }
 )HLSL" R"HLSL(
-// The local lights (TEMPORARY key experimental.cockpit_glass_lights; docs\cockpit-glass-legacy-port.md, "Station lights"): the game's clustered spot and point lists and records, read as its forward-lit
+// The local lights (visual.cockpit_glass_lights; docs\cockpit-glass-legacy-port.md, "Station lights"): the game's clustered spot and point lists and records, read as its forward-lit
 // shaders read them (26EA073903FD8909), with no shadow or cookie, whose textures the canopy has not bound. The falloff and the cone are the game's. Each light is summed for the Lambert and the glare, with the
 // same 1/pi the sun has in main. A cluster holds up to 128 of each; the loops stop at these.
 static const uint kMaxLocalLights = 16;

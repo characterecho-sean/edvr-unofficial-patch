@@ -523,11 +523,11 @@ bool isStarGlowRow(const MenuRowDef& d) {
     return strcmp(d.section, "visual") == 0 && strcmp(d.key, "star_glow") == 0;
 }
 
-// visual.cockpit_glass_dirt (the Legacy glass dirt row, both menus' Visual page, directly under Cockpit glass). Only the legacy canopy shader draws that dirt, so with
-// visual.cockpit_glass = odyssey the row stays on the page, dimmed, and stops responding to steps, typing and reset, the way the Sharpening row does with the anti-aliasing
-// off. The look is read as the glass reads it (parseLook: anything but "legacy" is odyssey), live, every time the page is drawn or the row is touched.
+// visual.cockpit_glass_dirt and visual.cockpit_glass_lights (the Legacy glass dirt and Legacy glass lights rows, both menus' Visual page, directly under Cockpit glass). Only the legacy canopy
+// shader draws that dirt, so with visual.cockpit_glass = odyssey the rows stay on the page, dimmed, and stop responding to steps, typing and reset, the way the Sharpening row does with the
+// anti-aliasing off. The look is read as the glass reads it (parseLook: anything but "legacy" is odyssey), live, every time the page is drawn or a row is touched.
 bool isCockpitGlassDirtRow(const MenuRowDef& d) {
-    return strcmp(d.section, "visual") == 0 && strcmp(d.key, "cockpit_glass_dirt") == 0;
+    return strcmp(d.section, "visual") == 0 && (strcmp(d.key, "cockpit_glass_dirt") == 0 || strcmp(d.key, "cockpit_glass_lights") == 0);
 }
 
 bool cockpitGlassDirtRowDisabled() {
@@ -536,7 +536,7 @@ bool cockpitGlassDirtRowDisabled() {
 
 const char* cockpitGlassDirtHint() { return "Needs Cockpit glass set to Legacy: choose it above to use this."; }
 
-const char* cockpitGlassDirtRefusal() { return "Legacy glass dirt is inactive: set Cockpit glass to Legacy above first."; }
+const char* cockpitGlassDirtRefusal() { return "This row is inactive: set Cockpit glass to Legacy above first."; }
 
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
 // this is not a headset row despite living beside one in the ini. The height

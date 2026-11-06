@@ -41,6 +41,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The legacy glass's dirt level (visual.cockpit_glass_dirt, cockpit_glass.cpp): percent, 0 to 300, read live with the look, in both profiles. The row under it.
         // Unlisted, getIntInRange answers 0 here whatever the file says, which is a clean pane, and the row could never raise it.
         std::strcmp(key, "visual.cockpit_glass_dirt") == 0 ||
+        // Which lights reach that dirt (visual.cockpit_glass_lights, cockpit_glass_core.h lightsLevelOf): off | station | all, read live with the look, in both profiles. The row under that.
+        // Unlisted, getString answers "off" here whatever the file says, and the row could never turn them on.
+        std::strcmp(key, "visual.cockpit_glass_lights") == 0 ||
         // The smoke and steam plumes, and the other camera-facing billboards (particle_fix.cpp, docs\particle-billboards.md): steady | stock, in both
         // profiles, the Visual tab's Billboards row. Unlisted, getString answers "off" here, which the reader takes for "not stock or steady;
         // running stock", so the row could never turn the fix on.
@@ -63,8 +66,6 @@ inline bool flatProfileReadsKey(const char* key) {
         // TEMPORARY (cockpit_glass_probe.h, docs\cockpit-glass-legacy-port.md): the canopy draw's state and constants, flat and VR alike.
         // Unlisted, getString answers "off" here and the probe never arms in flat. Remove with the probe.
         std::strcmp(key, "experimental.cockpit_glass_probe") == 0 ||
-        // TEMPORARY (cockpit_glass_core.h lightsLevelOf): which local lights reach the legacy glass's dirt, flat and VR alike. Unlisted, getString answers "off" here. Remove with the choice.
-        std::strcmp(key, "experimental.cockpit_glass_lights") == 0 ||
         // The HUD layer's edge smoothing (flat_ui_layer.cpp, ui_layer_smaa.h): on | off, off by default, read live a frame at a time. The HUD Anti-Aliasing row
         // of the flat panel's Performance tab, directly under UI quality. Unlisted, getBool answers false here whatever the file says, which reads as off, so the
         // row could never turn it on, and the 30 s "flat ui layer smaa:" line shows key=off.
