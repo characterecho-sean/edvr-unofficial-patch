@@ -1089,6 +1089,8 @@ Flown in VR on `153ebf3f` (Frontier, Pimax Crystal Super, 90 Hz, DLSS 2016x2017 
 
 Options, none built: (1) draw the whole canopy at the render's size and add it to the layer bilinearly, a quarter of the pixels for all of its shading, the probes and the moment shadow as well as the loop, and no depth seed for it; the question is whether the streaks stay sharp enough, and it gains nothing where the layer is the render's size. (2) a light-only pass into a small target, sampled by the full shader; it cuts the loop alone, for one more draw. (3) a lower cap and earlier rejection, a modest gain. The next build needs a canopy timer in the census first, so any gain is measured.
 
+Which side the dirt is lit from is not settled. Sean, 2026-11-06: no dirt from the cockpit lights with `all`, and the dirt brightens more when a lamp faces him. That leans to the outer side, as Lambert with an outward normal would leave a light inside at zero, but a spot's cone and the glare lobe also brighten toward a lamp facing the viewer. The cockpit lights are also weak: about 100 at most on a small patch, against about 500 for a warm spot. Temporary key `experimental.cockpit_glass_lights_sides = one | both` (default one, local lights only, not the sun) lets one flight compare. A lamp behind the ship lighting the dirt with `one` would mean the inner side.
+
 The 300-360 canopy binds a window above the draws taken (open since "The dirt layer") are named by this log: `refused=360 (not-hdr-target=360)`. About 12 a second the canopy pair is drawn into a target that is not the HDR
 one, and that draw stays in the scene. What that target is, and whether its dirt shows, is not known.
 

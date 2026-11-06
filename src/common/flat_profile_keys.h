@@ -69,6 +69,8 @@ inline bool flatProfileReadsKey(const char* key) {
         // TEMPORARY (ui_layer.cpp, docs\cockpit-glass-legacy-port.md, "Station lights"): full | half, read live; half draws the legacy canopy at the draw target's size and adds it into the weapons
         // layer. Unlisted, getString answers "off" here, which is read as full, so the flat profile could never take the half route. Remove with the arc.
         std::strcmp(key, "experimental.cockpit_glass_resolution") == 0 ||
+        // TEMPORARY (cockpit_glass_core.h sidesLevelOf): whether local lights reach the legacy glass's dirt from both sides, flat and VR alike. Remove with the choice.
+        std::strcmp(key, "experimental.cockpit_glass_lights_sides") == 0 ||
         // The HUD layer's edge smoothing (flat_ui_layer.cpp, ui_layer_smaa.h): on | off, off by default, read live a frame at a time. The HUD Anti-Aliasing row
         // of the flat panel's Performance tab, directly under UI quality. Unlisted, getBool answers false here whatever the file says, which reads as off, so the
         // row could never turn it on, and the 30 s "flat ui layer smaa:" line shows key=off.

@@ -37,6 +37,7 @@ uint32_t g_configGeneration = 0;
 bool g_on = false;
 int g_dirtPercent = kDirtPercentDefault;   // visual.cockpit_glass_dirt, read with the look at the frame boundary
 float g_lightsLevel = 0.0f;                // visual.cockpit_glass_lights, read with the look (lightsLevelOf)
+float g_sidesLevel = 0.0f;                 // TEMPORARY: experimental.cockpit_glass_lights_sides, read with the look (sidesLevelOf)
 std::string g_unrecognisedSaid;   // the last unrecognised value the log has named, so a typo is said once and not every config change
 
 // Everything made on one device is kept as raw pointers on purpose, never released at exit (a static destructor that releases a D3D object during shutdown is the kind of
@@ -47,8 +48,8 @@ ID3D11PixelShader* g_overlayPs[2] = {nullptr, nullptr};   // ice, condensation
 ID3D11BlendState* g_overlayBlend = nullptr;           // colour ONE + ONE, RGB written, alpha untouched
 ID3D11ShaderResourceView* g_streakSrv = nullptr;
 ID3D11Buffer* g_levelCb = nullptr;                    // the block at b13, two registers (32 bytes): the dirt level, then the layer-to-game pixel map (cockpit_glass_core.h LevelBlock)
-LevelBlock g_levelUploaded = {-1.0f, 0.0f, {0, 0}, {1, 1, 0, 0}};  // what g_levelCb holds; a different block is uploaded at the next bind or layer bracket
-LevelBlock g_levelWanted = {0.0f, 0.0f, {0, 0}, {1, 1, 0, 0}};     // the dirt level and local lights now, and the map the layer set for the canopy draw it brackets (identity otherwise)
+LevelBlock g_levelUploaded = {-1.0f, 0.0f, 0.0f, 0.0f, {1, 1, 0, 0}};  // what g_levelCb holds; a different block is uploaded at the next bind or layer bracket
+LevelBlock g_levelWanted = {0.0f, 0.0f, 0.0f, 0.0f, {1, 1, 0, 0}};     // the dirt level and local lights now, and the map the layer set for the canopy draw it brackets (identity otherwise)
 bool g_mapSet = false;                               // the layer's map is in force (set by cockpitGlassSetLayerMap, cleared by cockpitGlassClearLayerMap or any scene bind)
 bool g_levelRefused = false;
 Replacement g_state = Replacement::NotTried;
@@ -202,7 +203,7 @@ void dropDeviceObjects() {
     g_streakRefused = false;
     g_streakLogged = false;
     g_levelRefused = false;
-    g_levelUploaded = LevelBlock{-1.0f, 0.0f, {0, 0}, {1, 1, 0, 0}};
+    g_levelUploaded = LevelBlock{-1.0f, 0.0f, 0.0f, 0.0f, {1, 1, 0, 0}};
     g_mapSet = false;
 }
 
@@ -251,6 +252,7 @@ void uploadLevel(ID3D11DeviceContext* ctx) {
 ID3D11Buffer* levelBuffer(ID3D11DeviceContext* ctx) {
     g_levelWanted.dirt = dirtLevelOf(g_dirtPercent);
     g_levelWanted.lights = g_lightsLevel;
+    g_levelWanted.sides = g_sidesLevel;
     identityLevelMap(g_levelWanted);
     g_mapSet = false;
     if (g_levelCb) {
@@ -507,6 +509,13 @@ void cockpitGlassFrameBoundary(ID3D11DeviceContext* ctx) {
             g_dirtPercent = dirtPercent;
             if (on && g_on)
                 Log::get().note("cockpit glass: dirt level %d%% (visual.cockpit_glass_dirt), from the next canopy bind", dirtPercent);
+        }
+        // TEMPORARY: whether they reach it from both sides of the glass, said when it moves.
+        const std::string sides = cfg.getString("experimental.cockpit_glass_lights_sides", "one");
+        const float sidesLevel = sidesLevelOf(sides.c_str());
+        if (sidesLevel != g_sidesLevel) {
+            g_sidesLevel = sidesLevel;
+            Log::get().note("cockpit glass: local lights reach the dirt from %s (experimental.cockpit_glass_lights_sides = %s), from the next canopy bind", sidesLevel > 0.5f ? "both sides" : "the lit side", sides.c_str());
         }
         // Which local lights reach the dirt, said when it moves, whatever the look, with the value as read.
         const std::string lights = cfg.getString("visual.cockpit_glass_lights", "off");

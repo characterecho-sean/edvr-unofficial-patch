@@ -90,7 +90,7 @@ static void testCore() {
     // The block at b13: two registers, the second the layer-to-game pixel map, the identity for a scene draw.
     check(sizeof(cg::LevelBlock) == 32 && offsetof(cg::LevelBlock, map) == 16 && offsetof(cg::LevelBlock, dirt) == 0, "the b13 block is cbuffer Level's two registers: the level, then the map at byte 16");
     {
-        cg::LevelBlock a{0.5f, 0.0f, {0, 0}, {2, 3, 4, 5}}, b = a;
+        cg::LevelBlock a{0.5f, 0.0f, 0.0f, 0.0f, {2, 3, 4, 5}}, b = a;
         check(!cg::levelBlockDiffers(a, b), "an unchanged block is not uploaded again");
         cg::identityLevelMap(b);
         check(b.map[0] == 1 && b.map[1] == 1 && b.map[2] == 0 && b.map[3] == 0 && b.dirt == 0.5f && cg::levelBlockDiffers(a, b), "the identity map keeps the level and is a change from a layer's map");
@@ -101,9 +101,13 @@ static void testCore() {
     check(cg::lightsLevelOf("off") == 0.0f && cg::lightsLevelOf("station") == 1.0f && cg::lightsLevelOf("all") == 2.0f && cg::lightsLevelOf("on") == 0.0f && cg::lightsLevelOf("spots") == 0.0f && cg::lightsLevelOf(nullptr) == 0.0f,
           "the local lights key: off, station or all; anything else is off");
     {
-        cg::LevelBlock a{0.5f, 0.0f, {0, 0}, {1, 1, 0, 0}}, b = a;
+        cg::LevelBlock a{0.5f, 0.0f, 0.0f, 0.0f, {1, 1, 0, 0}}, b = a;
         b.lights = 1.0f;
         check(cg::levelBlockDiffers(a, b), "a moved local lights setting is a change");
+        b = a;
+        b.sides = 1.0f;
+        check(cg::levelBlockDiffers(a, b), "a moved sides setting is a change");
+        check(cg::sidesLevelOf("both") == 1.0f && cg::sidesLevelOf("one") == 0.0f && cg::sidesLevelOf("on") == 0.0f && cg::sidesLevelOf(nullptr) == 0.0f, "the sides key: both, or anything else is one");
     }
     check(cg::kLiveInputCount == 7 && cg::kLiveInputs[6].isPosition && cg::kLiveInputs[1].isUint, "the signature table has the game's seven inputs");
     for (size_t i = 0; i < cg::kLiveInputCount; ++i) check(cg::kLiveInputs[i].reg == i, "the game's inputs sit in registers 0 to 6 in order");
@@ -222,6 +226,7 @@ struct Case {
     float probeColour[3] = {0, 0, 0};
     bool crack = false;   // the crack texture's alpha is full and its normal flat, and the crack colour is 0.3 grey
     float lights = 0;     // the block's y: 0 none, 1 spots, 2 spots and points
+    float sides = 0;      // the block's z: 1 lets a local light reach the dirt from both sides
     std::vector<RigLight> spots, points;   // in the first cluster's lists, ids in order
 };
 
@@ -350,7 +355,7 @@ public:
         ID3D11Buffer* cbs[2] = {cb1.Get(), cb2.Get()};
         ctx->PSSetConstantBuffers(1, 2, cbs);
         // The block is cbuffer Level's two registers, 32 bytes: a smaller one would read zeros past its end (the pixel map would be a scale of 0).
-        cg::LevelBlock levelData{c.dirtLevel, c.lights, {0, 0}, {c.pixelMap[0], c.pixelMap[1], c.pixelMap[2], c.pixelMap[3]}};
+        cg::LevelBlock levelData{c.dirtLevel, c.lights, c.sides, 0.0f, {c.pixelMap[0], c.pixelMap[1], c.pixelMap[2], c.pixelMap[3]}};
         ComPtr<ID3D11Buffer> levelCb = constantBuffer(&levelData, sizeof levelData);
         ID3D11Buffer* level = c.levelBound ? levelCb.Get() : nullptr;
         ctx->PSSetConstantBuffers(cg::kLevelSlot, 1, &level);
@@ -821,6 +826,16 @@ static void testShader() {
         ahead.direction = 2u | 4u;   // axis 2, negative: back along the view
         smudge.spots.push_back(ahead);
         check(closeTo(canopy.draw(smudge).r, glareSun.r, 0.02f), "a light straight ahead draws the sun's glare");
+        // The sides. The same light from the far side of the glass: none on the dirt with one side, the same as from the near side with both.
+        Case farSide = spot;
+        farSide.spots[0].pos[2] = 10.0f;
+        farSide.spots[0].direction = 2u | 4u;
+        check(canopy.draw(farSide).r == 0, "from the other side of the glass, one side leaves the dirt unlit");
+        farSide.sides = 1;
+        check(closeTo(canopy.draw(farSide).r, sunLit.r, 0.02f), "with both sides it lights the dirt as from the near side");
+        Case nearSide = spot;
+        nearSide.sides = 1;
+        check(closeTo(canopy.draw(nearSide).r, sunLit.r, 0.02f), "both sides does not change a light on the near side");
         // Points: `station` leaves them out.
         Case point = base;
         point.points.push_back(one);
