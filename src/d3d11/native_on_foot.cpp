@@ -99,6 +99,7 @@
 #include "native_on_foot_f215.h"   // F215: unarmed and upright, the body follows the view: the whole skeleton moves vertically so the view stays the game's camera plus a constant (the rule, the log line, the shifted write: pure parts)
 #include "native_on_foot_f216.h"   // F216: the view's running bob taken out of the camera (the filter, the seated term, its history by serial, the log line: pure parts)
 #include "native_on_foot_f218.h"   // F218: with the laser rifle at the hip the torso stays on one solution, and a switch slides (the hold, the slide, the log line: pure parts)
+#include "native_on_foot_f221.h"   // F221: with the arc cutter the left elbow hangs from the body-down pole (the name, the ramp, the log line: pure parts)
 #include "native_on_foot_f219.h"   // F219: at the hip the elbow's swing about the shoulder-to-hand axis is limited per frame (the angle, the memory, the log line: pure parts)
 #include "native_on_foot_f205.h"   // F205: the full-detail scope takes both eyes (the effective sight eye) and every ADS press shows its view inside a circle sized as flat's ADS FOV (pure parts)
 #include "../common/view_circle.h" // F206: the circle's request (its centre) between the halves
@@ -291,6 +292,8 @@ nofoot::f218::RestHold g_f218Hold;                            // F218: how long 
 nofoot::f218::Slide g_f218Slide;                              // F218: the offset that keeps the body continuous across a switch of solution (same writer)
 nofoot::f171c::Mailbox<nofoot::f218::Stats> g_f218Box;        // F218: the hook's window of rifle calls for the log line (the frame thread takes it)
 uint64_t g_f218LineMs = 0;                                    // F218: the log window's start (frame thread)
+nofoot::f171c::Mailbox<nofoot::f221::Stats> g_f221Box;        // F221: the arm solve's window of arc cutter solves for the log line (the frame thread takes it)
+uint64_t g_f221LineMs = 0;                                    // F221: the log window's start (frame thread)
 nofoot::f171c::Mailbox<nofoot::f219::Stats> g_f219Box;        // F219: the arm solve's window of hip solves for the log line (the frame thread takes it)
 uint64_t g_f219LineMs = 0;                                    // F219: the log window's start (frame thread)
 std::atomic<bool> g_f216Keep{false};                        // F216: fix.native_on_foot_view_bob is on (the view keeps the game's bob); off (the default) is the filter wanted (set on the frame thread, read by the P1 hook)
@@ -11054,6 +11057,7 @@ struct OpticHeldItemPub { std::atomic<uint32_t> seq{0}; uint32_t serial = 0; cha
 OpticHeldItemPub g_opticHeldItem;
 bool opticItemRead(uint32_t* serial, char name[64]) noexcept;
 std::atomic<uint8_t> g_supportCupMode{nofoot::kSupportNone};
+std::atomic<bool> g_arcCutterHeld{false};          // F221: the held item is the arc cutter (the left elbow hangs from the body-down pole)
 std::atomic<bool> g_gameAuthoredLeftArm{false};   // Energy Link and Profile Analyser: preserve the game's relaxed left-arm pose
 void pinInPublish(const float cam[3], const float camRaw[3], const float weaponViewWorld[3], const float m3p[16], uint64_t nowMs, double f94SeatedY,
                   uint8_t f94Source, const double f137Seated[3], uint8_t f137Source) noexcept {
@@ -14338,6 +14342,7 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     if (!active) {
         g_supportCupMode.store(nofoot::kSupportNone, std::memory_order_relaxed);
         g_gameAuthoredLeftArm.store(false, std::memory_order_relaxed);
+        g_arcCutterHeld.store(false, std::memory_order_relaxed);
         g_f66aKindLast = -1;
         g_f66aNameLast[0] = '\0';
         g_f66aLineMs = 0;
@@ -14347,6 +14352,7 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
                         kind == kHeldUnknown ? " [unknown]" : kind == kHeldNone ? " [fists]" : "", nativePrimary ? " [native primary selection]" : "", journalStatusSamples());
         g_supportCupMode.store(static_cast<uint8_t>(nofoot::supportItem(name)), std::memory_order_relaxed);
         g_gameAuthoredLeftArm.store(nofoot::gameAuthoredLeftArm(name), std::memory_order_relaxed);
+        g_arcCutterHeld.store(nofoot::f221::arcCutter(name), std::memory_order_relaxed);
         if (g_f66aKindLast >= 0) f68dFlip(now, static_cast<int>(kind), name);   // F68d: the onset window (not for the first reading)
         g_f66aKindLast = static_cast<int>(kind);
         std::memcpy(g_f66aNameLast, name, sizeof(g_f66aNameLast));
@@ -20491,6 +20497,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const uint64_t itemChangedMsForCall = g_heldItemChangedMs.load(std::memory_order_relaxed);
     const nofoot::SupportItem supportKindForCall = static_cast<nofoot::SupportItem>(g_supportCupMode.load(std::memory_order_relaxed));
     const bool authoredLeftForCall = g_gameAuthoredLeftArm.load(std::memory_order_relaxed);
+    const bool arcCutterForCall = g_arcCutterHeld.load(std::memory_order_relaxed);   // F221
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const bool bendRun = g_bendRun.load(std::memory_order_relaxed);   // F58: the spine bend rides this path (its plan and its writes)
     t_ikLastRefuse = kIkRefKinds;   // F213
@@ -20688,6 +20695,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         // F181a: this solve was the left hand's with a two-handed gun at the hip (the cap's solves), the cap turned the swivel, and the plane angle it cut (deg)
         bool f181Hip = false, f181Capped = false;
         double f181CutDeg = 0.0;
+        // F221: the arc cutter's body-down pole weight this solve used, the blend applied under it, the ceiling clamp moved the elbow, the previous radial was used, and the written elbow over the hand (cm)
+        double f221W = 0.0, f221OverHandCm = 0.0;
+        bool f221Applied = false, f221Guarded = false, f221Fallback = false;
         // F219: the elbow's swing about the shoulder-to-hand axis was held to the per-frame limit at the hip, and the angle taken off it (deg)
         bool f219Limited = false;
         double f219CutDeg = 0.0;
@@ -20841,6 +20851,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const double supportDt = std::min(0.05, supportDtRaw);
     s_supportQpc = supportQpc;
     const double supportStep = supportDt > 0.0 ? supportDt / 0.15 : 0.0;
+    // F221: the arc cutter's body-down pole weight, 0 to 1 over 0.2 s (one writer: the arm solve, under g_pfzBusy)
+    static nofoot::f221::Ramp s_f221Ramp;
+    const double w221 = s_f221Ramp.step(arcCutterForCall && armedNow, supportDt);
     const uint32_t supportItem = itemSerialForCall;
     if (s_support3Gen != pl.generation || s_supportFpGen != fpHands.generation || s_supportItem != supportItem || s_supportArmed != armedNow) {
         s_support3Gen = pl.generation; s_supportFpGen = fpHands.generation; s_supportItem = supportItem; s_supportArmed = armedNow;
@@ -21936,13 +21949,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     const double dh = nofoot::f192::usedWeight(f192Dh, supportCup, authoredPistolSupport);
                     o.f192Dh = dh;
                     o.f192AnimElbowDy = F0[1] - S[1];   // the game's animated left elbow over its shoulder (m): the draw carries the arm across the body, and this shows how far out of place it is
-                    const double wBlend = nofoot::f192::blendWeight(w165, dh);
+                    o.f221W = w221;
+                    const double wBlend = nofoot::f192::blendWeight(nofoot::f192::blendWeight(w165, dh), w221);   // F221: the arc cutter's weight joins the larger of the others; at 0 it is the old expression
                     if (wBlend > 0.0) {
                         const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, wBlend, seed.previous, outSign, elbowOutM, trimRad);
                         if (mix.applied) {
                             theta = wSolve * mix.theta;
                             o.f165Applied = w165 > 0.0;   // F165's own count: the blend under its weight (a draw hold alone is F192's)
                             o.f192Applied = dh > 0.0;
+                            o.f221Applied = w221 > 0.0;
+                            o.f221Guarded = w221 > 0.0 && mix.guarded;
+                            o.f221Fallback = w221 > 0.0 && mix.fallback;
                             o.poseOutWaived = true;
                         }
                     }
@@ -21953,7 +21970,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // arm is now, not on how it got there. Only the previous radial (the fallback's) moves with the arm.
                 physicalPoleCommit[side] = seed;
                 o.f98SeedKept = true;
-                o.f98Source = (o.f165Applied && o.f165W >= 0.5) || (o.f192Applied && o.f192Dh >= 0.5) ? 2 : 1;   // F165, F192: mostly the body-down pole (counted with F84's and the pistol's, F124's near-vertical figures)
+                o.f98Source = (o.f165Applied && o.f165W >= 0.5) || (o.f192Applied && o.f192Dh >= 0.5) || (o.f221Applied && o.f221W >= 0.5) ? 2 : 1;   // F165, F192: mostly the body-down pole (counted with F84's and the pistol's, F124's near-vertical figures)
                 {
                     double sa[3];
                     o.f98SeedSpanDeg = nofoot::ikUnit(seed.axis, sa) ? std::acos(std::fmax(-1.0, std::fmin(1.0, nofoot::ikDot(sa, tb.dir)))) * 180.0 / nofoot::kIkPi : 0.0;
@@ -22018,7 +22035,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             o.f181PlaneBeforeDeg = planeBefore;   // F192: the plane angle the cap looked at, for the per-frame record
             // F192: the cap's share is scaled by (1 - the draw hold): the plane angle is measured against the game's ANIMATED arm, which is itself out of place through a draw, and a cap measured
             // against it would drag the elbow toward that pose (the held pole is body-down); after the hold the share is F181's whole again
-            const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), o.f192Dh));
+            const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), nofoot::f192::blendWeight(o.f192Dh, w221)));
             if (target < planeBefore) {
                 const auto planeAt = [&](double th) noexcept {
                     double Ec[3];
@@ -22193,6 +22210,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 mem.remember(relNow, now, f219Item, pl.generation);
                 s_f219Qpc[side] = f219Q;
             }
+        }
+        // F221: the arc cutter's solves, with what was written after F219's limit: the elbow over the hand (cm)
+        if (side == 0 && o.f221W > 0.0 && doSolveWrite) {
+            o.f221OverHandCm = (E[1] - tb.hand[1]) * 100.0;
+            g_f221Box.write([&](nofoot::f221::Stats& win) noexcept { win.add(o.f221Applied, o.f221W, o.f221Guarded, o.f221Fallback, o.f221OverHandCm); });
         }
         // The verification of the hinge row: which of the forearm joint matrix's three rotation rows is parallel to the animated hinge, counted on
         // bent samples (animated flexion over 25 deg); learned once 30 samples agree (80% on one row, mean angle under 10 deg).
@@ -22866,7 +22888,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             f.yawMax = std::max(f.yawMax, std::fabs(yawDeg));
             f.planeSum += so[0].hPlane;
             f.planeMax = std::max(f.planeMax, so[0].hPlane);
-            if (so[0].f181Hip && !(so[0].f192Dh > 0.0)) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane, static_cast<double>(g_hipElbowSwivelMaxDeg.load(std::memory_order_relaxed)));   // F181a: the cap's solves (F192: not those of a draw hold, where the cap's share is scaled down: they are F192's)
+            if (so[0].f181Hip && !(so[0].f192Dh > 0.0) && !(so[0].f221W > 0.0)) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane, static_cast<double>(g_hipElbowSwivelMaxDeg.load(std::memory_order_relaxed)));   // F181a: the cap's solves (F192: not those of a draw hold, where the cap's share is scaled down: they are F192's)
             if (so[0].f192Gate) f.f192.add(so[0].f192Dh, so[0].f192Applied);   // F192: the left hand's stable-pole solves with a two-handed gun, those held
             if (f192Began) ++f.f192.begun;                                     // F192: a draw's hold began in this call
             if (so[0].hPlane > 45.0) f.planeOver45 += 1.0;
@@ -25971,7 +25993,8 @@ void f138Line(uint64_t now) noexcept {
         g_f216Box.clearPending.store(true, std::memory_order_relaxed);   // F216: nor the bob's
         g_f220LineMs = 0;
         g_f220Box.clearPending.store(true, std::memory_order_relaxed);   // F220: nor the HUD shift's
-        g_f218LineMs = g_f219LineMs = 0;
+        g_f218LineMs = g_f219LineMs = g_f221LineMs = 0;
+        g_f221Box.clearPending.store(true, std::memory_order_relaxed);   // F221: nor the tool elbow's
         g_f218Box.clearPending.store(true, std::memory_order_relaxed);   // F218: nor the rifle torso's
         g_f219Box.clearPending.store(true, std::memory_order_relaxed);   // F219: nor the elbow step's
         g_f138Box.clearPending.store(true, std::memory_order_relaxed);   // F170: the window the edge left is not the next second's
@@ -26084,6 +26107,14 @@ void f138Line(uint64_t now) noexcept {
             char stepLine[400];
             nofoot::f219::formatLine(stepLine, sizeof(stepLine), secs219, ew);
             Log::get().note("%s", stepLine);
+        }
+    }
+    if (const uint32_t secs221 = nofoot::logwin::window(g_f221LineMs, now)) {
+        nofoot::f221::Stats tw;
+        if (g_f221Box.take(&tw) && tw.any()) {
+            char toolLine[400];
+            nofoot::f221::formatLine(toolLine, sizeof(toolLine), secs221, tw);
+            Log::get().note("%s", toolLine);
         }
     }
     for (int m = 0; m < 2; ++m)

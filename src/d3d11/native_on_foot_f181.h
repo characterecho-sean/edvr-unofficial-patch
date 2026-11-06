@@ -11,7 +11,7 @@
 // use) at the hip, a solve whose plane angle p is over the cap c is brought to p - hipShare x (p - c), the hip share being 1 less the detach weight: the cap whole at the hip, none in the
 // sights (F180a's body-down blend rules there), continuous between. It turns the pole about the shoulder-to-hand axis (the swivel) toward the plane, from where the pole is, along the way the
 // plane angle falls, to the first swivel where the plane angle is the target, within 45 deg of the pole (kMaxTurnRad; past that the closest approach decides): it cannot pass through the plane, so the elbow keeps its side. A plane angle already at or under the cap, a cap of
-// 90 (off), the sights, a pistol, a tool, unarmed: the swivel is not touched, bit for bit. The pole's seed (axis, reference) is not touched: the cap is made again on every solve from the
+// 90 (off), the sights, a pistol, a tool (the arc cutter has F221's body-down pole and no cap), unarmed: the swivel is not touched, bit for bit. The pole's seed (axis, reference) is not touched: the cap is made again on every solve from the
 // pole, so leaving the cap's reach (the key at 90, the sights) returns along the pole's own angle.
 #pragma once
 

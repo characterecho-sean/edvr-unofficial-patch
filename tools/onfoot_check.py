@@ -153,6 +153,11 @@ F218_MAX_MPS = 12.0         # a speed over this is the root jumping (a ship, a t
 F218_MIN_CLASS_S = 1.0      # a class with less left-arm writing than this is left out
 F218_SPINE_FLIP = 0.5       # a step of the spine weight over this is a flip
 F218_FINDING_MIN_S = 2.0    # F218 finding: an item with this much left-arm writing at speed ...
+F221_STRAFE_MPS = 1.0         # F221: a strafe: the root moving this fast or more along the body's right (or left) ...
+F221_STRAFE_SPAN_S = 0.2    # ... measured over the last this many seconds
+F221_OVER_HAND_CM = 3.0     # F221 finding: the left elbow this far over the hand, at the hip ...
+F221_OVER_HAND_MIN_S = 0.1  # ... for this long
+F221_ITEM_SETTLE_S = 1.0    # ... and later than this after an item change
 F218_FINDING_STEPS_PER_S = 1.0   # ... and more elbow steps over 5 cm a second than this (a starting guess; the flown walk with the arc cutter read 1.1, the rifle 4.6)
 EYE_HEIGHT_DEFAULT_CM = 15.0  # fix.native_on_foot_eye_height_cm when the recording's header does not carry it
 SLOPE_BINS = (-90.0, -15.0, -5.0, 5.0, 15.0, 90.1)
@@ -1532,6 +1537,24 @@ class Analysis:
             self.findings.append(Finding(min(r['t0'] for r in rr), max(r['t1'] for r in rr), 'f216_sprint_bob', 'bob', 'F216: with the key off a level sprint (%g m/s and over) leaves %.1f mm rms of %.1f to %.1f Hz bob in the view '
                                          '(the camera had %.1f mm), limit %.1f mm (%d stretch(es))' % (F216_SPEED_SPLIT_MPS, sprint['view_mm'], F216_BAND_HZ[0], F216_BAND_HZ[1], sprint['cam_mm'], F216_SPRINT_MM, sprint['n'])))
 
+    # -- F221: the left elbow's angle from straight down and its height over the hand -----------------------------------------------------------------------------------------
+    @staticmethod
+    def f221_elbow(S_, E_, H_):
+        """The elbow's angle from straight down about the shoulder-to-hand axis (deg, signed; the elbow hung under the axis reads 0) and its height over the hand (cm), per row, from model-space joints
+        (y up): ax = unit(H - S); off = (E - S) less its part along ax; d = unit(down less its part along ax); side = ax x d; angle = atan2(off . side, off . d)."""
+        with np.errstate(all='ignore'):
+            ax = H_ - S_
+            ax = ax / np.maximum(np.linalg.norm(ax, axis=1), 1e-9)[:, None]
+            v = E_ - S_
+            off = v - (v * ax).sum(axis=1)[:, None] * ax
+            down = np.tile(np.array([0.0, -1.0, 0.0]), (len(ax), 1))
+            d = down - (down * ax).sum(axis=1)[:, None] * ax
+            d = d / np.maximum(np.linalg.norm(d, axis=1), 1e-9)[:, None]
+            sd = np.cross(ax, d)
+            ang = np.degrees(np.arctan2((off * sd).sum(axis=1), (off * d).sum(axis=1)))
+            over = (E_[:, 1] - H_[:, 1]) * 100.0
+        return ang, over
+
     # -- F218, F219: the left elbow against the chest, by item and speed -------------------------------------------------------------------------------------------------------------
     def f218_section(self):
         """Per item serial and speed class (the root's plane speed over the last F218_SPEED_S: walk F218_WALK_MPS to F218_SPRINT_MPS, sprint over), with the left arm writing: seconds; the left elbow's
@@ -1542,7 +1565,7 @@ class Analysis:
         S = self.S
         self.f218 = None
         self.say('')
-        self.say('== left elbow (F218, F219): against the chest, by item and speed, with the left arm writing')
+        self.say('== left elbow (F218, F219, F221): against the chest, by item and speed, with the left arm writing')
         ik, pin = S.tab('ik'), S.tab('pin')
         need_ik = ['item_serial', 'final_chest', 'final_l_fore', 'spine_w', 'l_reach_ratio', 'l_wrote', 'final_valid']
         miss = [('ik.' + f) for f in need_ik if not ik.has(f)] + [('pin.' + f) for f in ('root', 'item_serial') if not pin.has(f)]
@@ -1585,6 +1608,43 @@ class Analysis:
         vs = np.zeros(n, bool)
         vs[1:] = elig[1:] & elig[:-1] & (ser[1:] == ser[:-1]) & (cls_ik[1:] == cls_ik[:-1]) & (cls_ik[1:] >= 1) & (dt[1:] > 0.0) & (dt[1:] < 0.1) & np.isfinite(stp[1:])
         lim = ik.f('l_swivel_limited') if ik.has('l_swivel_limited') else None
+        # F221: the elbow's angle from straight down and its height over the hand, rows at the hip (the detach weight under 0.05), and the strafe class of each row (the root's speed along the body's right)
+        have_f221 = all(ik.has(f) for f in ('final_l_upper', 'final_l_fore', 'final_l_hand'))
+        ang = over_cm = None
+        if have_f221:
+            ang, over_cm = self.f221_elbow(ik.f('final_l_upper').astype(np.float64), ik.f('final_l_fore').astype(np.float64), ik.f('final_l_hand').astype(np.float64))
+        hip = np.ones(n, bool)
+        if pin.has('detach_w'):
+            dw = np.where(near, pin.f('detach_w').astype(np.float64)[np.maximum(pi, 0)], np.nan)
+            hip = np.isfinite(dw) & (dw < 0.05)
+        down_src = (ik.f('l_pole_src') == 2) if ik.has('l_pole_src') else None
+        strafe_cls = np.zeros(n, int)   # 1 right, 2 left
+        have_strafe = pin.has('fwd') and pin.has('up')
+        if have_strafe:
+            fwd = pin.f('fwd').astype(np.float64)
+            with np.errstate(all='ignore'):
+                right = np.cross(up, fwd)
+                right = right / np.maximum(np.linalg.norm(right, axis=1), 1e-9)[:, None]
+                j2 = np.searchsorted(t_pin, t_pin - F221_STRAFE_SPAN_S, 'left')
+                sp = t_pin - t_pin[j2]
+                side = np.where(sp >= 0.5 * F221_STRAFE_SPAN_S, ((root - root[j2]) * right).sum(axis=1) / np.maximum(sp, 1e-3), np.nan)
+            side_ik = np.where(near, side[np.maximum(pi, 0)], np.nan)
+            with np.errstate(invalid='ignore'):
+                strafe_cls = np.where(side_ik >= F221_STRAFE_MPS, 1, np.where(side_ik <= -F221_STRAFE_MPS, 2, 0))
+
+        def f221_text(mk):
+            mk = mk & hip
+            if ang is None or not mk.any():
+                return '', None
+            a, o = np.abs(ang[mk]), over_cm[mk]
+            a, o = a[np.isfinite(a)], o[np.isfinite(o)]
+            if not len(a) or not len(o):
+                return '', None
+            fig = dict(ang_med=float(np.median(a)), ang_p99=float(np.percentile(a, 99)), oh_med=float(np.median(o)), oh_max=float(o.max()),
+                       down=(float(np.mean(down_src[mk])) if down_src is not None else None))
+            txt = '; F221 at the hip: elbow from straight down median %.0f deg, 99th percentile %.0f deg; elbow over the hand median %+.1f cm, highest %+.1f cm' % (fig['ang_med'], fig['ang_p99'], fig['oh_med'], fig['oh_max'])
+            txt += ('; body-down pole on %.0f%% of rows' % (100.0 * fig['down'])) if fig['down'] is not None else '; l_pole_src absent'
+            return txt, fig
         have_f218 = all(pin.has(f) for f in ('f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'))
         pser = pin.f('item_serial').astype(np.int64)
         names = ('standing', 'walk', 'sprint')
@@ -1608,13 +1668,31 @@ class Analysis:
                     h, a, rf = int((pin.f('f218_held')[pm] == 1).sum()), int((pin.f('f218_applied')[pm] == 1).sum()), int((pin.f('f218_refused')[pm] == 1).sum())
                     if h + a + rf:
                         line += '; F218 over %d pin calls: rest applied %d, refused %d, held back %d, largest slide %.1f cm' % (int(pm.sum()), a, rf, h, 100.0 * float(np.nanmax(pin.f('f218_offset_m')[pm])))
+                f221_line, f221_fig = f221_text(m)
+                line += f221_line
                 self.say(line)
-                self.f218['items'][(int(s), names[c])] = dict(secs=secs, r2=r2, r5=r5, flips=fl, reach=float(np.nanmean(reach[m])), limited=limited)
+                self.f218['items'][(int(s), names[c])] = dict(secs=secs, r2=r2, r5=r5, flips=fl, reach=float(np.nanmean(reach[m])), limited=limited, f221=f221_fig)
                 acc = per_item.setdefault(int(s), dict(secs=0.0, n5=0.0, nflip=0.0, rows=[]))
                 acc['secs'] += secs
                 acc['n5'] += float((stp[m] > 0.05).sum())
                 acc['nflip'] += float(flip[m].sum())
                 acc['rows'].append(np.flatnonzero(m))
+        # F221: strafe right and left, at the hip with the left arm writing (the root 1 m/s or more along the body's right or left, over the last 0.2 s)
+        self.f218['strafe'] = {}
+        if not have_strafe:
+            self.say('  pin.up or pin.fwd missing: a recording from before F213; no strafe bins')
+        elif not have_f221:
+            self.say('  ik.final_l_upper, final_l_fore or final_l_hand missing: no F221 figures')
+        else:
+            for s in sorted(set(ser[elig & (strafe_cls > 0)].tolist())):
+                for c, nm in ((1, 'strafe right'), (2, 'strafe left')):
+                    m = elig & hip & (ser == s) & (strafe_cls == c) & (dt > 0.0)
+                    secs = float(dt[m].sum())
+                    if secs < F218_MIN_CLASS_S:
+                        continue
+                    txt, fig = f221_text(m)
+                    self.say('  item %d, %s (%g m/s or more along the body\'s %s): %.1f s%s' % (s, nm, F221_STRAFE_MPS, nm.split()[1], secs, txt))
+                    self.f218['strafe'][(int(s), nm)] = dict(secs=secs, f221=fig)
         if not self.f218['items']:
             self.say('  no item with %.0f s or more of left-arm writes at %g m/s or more (the root\'s plane speed over %.1f s): nothing to read' % (F218_MIN_CLASS_S, F218_WALK_MPS, F218_SPEED_S))
         if not have_f218:
@@ -1628,6 +1706,41 @@ class Analysis:
                 cause = 'torso' if acc['nflip'] / acc['secs'] > 0.5 else 'elbow'
                 self.findings.append(Finding(t_ik[idx].min(), t_ik[idx].max(), 'elbow_steps', cause, 'F218/F219: item %d, the left elbow stepped over 5 cm against the chest %.1f times a second over %.1f s of writes at '
                                              '%g m/s or more (limit %.1f); the spine weight flipped %.1f times a second' % (s, rate, acc['secs'], F218_WALK_MPS, F218_FINDING_STEPS_PER_S, acc['nflip'] / acc['secs'])))
+
+        # F221 finding elbow_over_hand: at the hip, armed, the left arm writing, later than 1 s after an item change, the elbow 3 cm or more over the hand for 100 ms or more: one finding per episode
+        if have_f221:
+            self.f221_over_hand_findings(t_ik, ser, elig, hip, ik, pin, over_cm, near, pi)
+
+    def f221_over_hand_findings(self, t_ik, ser, elig, hip, ik, pin, over_cm, near, pi):
+        n = len(t_ik)
+        if ik.has('armed'):
+            armed = ik.f('armed') == 1
+        elif pin.has('armed'):
+            armed = np.where(near, pin.f('armed')[np.maximum(pi, 0)] == 1, False)
+        else:
+            armed = np.ones(n, bool)
+        chg = np.zeros(n)
+        last = t_ik[0] - 1e9 if n else 0.0
+        for i in range(n):
+            if i and ser[i] != ser[i - 1]:
+                last = t_ik[i]
+            chg[i] = t_ik[i] - last
+        bad = elig & hip & armed & (chg > F221_ITEM_SETTLE_S) & np.isfinite(over_cm) & (over_cm >= F221_OVER_HAND_CM)
+        i = 0
+        while i < n:
+            if not bad[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and bad[j + 1] and t_ik[j + 1] - t_ik[j] < 0.1 and ser[j + 1] == ser[i]:
+                j += 1
+            if t_ik[j] - t_ik[i] >= F221_OVER_HAND_MIN_S:
+                pole = ''
+                if ik.has('l_pole_src'):
+                    pole = ', body-down pole on %.0f%% of the rows' % (100.0 * float(np.mean(ik.f('l_pole_src')[i:j + 1] == 2)))
+                self.findings.append(Finding(t_ik[i], t_ik[j], 'elbow_over_hand', 'elbow', 'F221: item %d, the left elbow over the hand by up to %.1f cm for %.2f s at the hip (limit %.0f cm for %.1f s)%s' % (
+                    int(ser[i]), float(np.max(over_cm[i:j + 1])), t_ik[j] - t_ik[i], F221_OVER_HAND_CM, F221_OVER_HAND_MIN_S, pole)))
+            i = j + 1
 
     # -- bob ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def bob(self):
@@ -3098,6 +3211,53 @@ def self_test():
         _make(d, stamp)
         S, A = analyse(d)
         check('nothing to read' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'elbow_steps'], 'a session with no left-arm writing at speed reads nothing and names no finding')
+        # F221: the left elbow's angle from straight down, its height over the hand, and the strafe bins. An item (serial 3) at the hip, armed, moving 1.5 m/s along the body's right from t = 2 s: the elbow
+        # hung under the shoulder-to-hand axis reads an angle near 0 and no finding; the elbow 5 cm over the hand for 0.3 s is one elbow_over_hand finding.
+        def f221_post(flare):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                n = len(t)
+                pin['root'] = np.stack([np.clip(t - 1.0, 0.0, 9.0) * 1.5, np.zeros(n), np.zeros(n)], 1)
+                m = (t >= 2.0) & (t < 9.0)
+                ik['item_serial'], pin['item_serial'] = np.where(m, 3, 0), np.where(m, 3, 0)
+                ik['armed'] = np.ones(n, int)
+                pin['detach_w'] = np.zeros(n)
+                ik['l_wrote'] = np.ones(n, int)
+                chest = ik['final_chest']
+                S_ = chest + np.array([-0.18, 0.0, 0.0])
+                H_ = chest + np.array([-0.15, -0.20, 0.45])
+                ax = (H_ - S_) / np.linalg.norm(H_ - S_, axis=1)[:, None]
+                d = np.array([0.0, -1.0, 0.0]) - (ax[:, 1])[:, None] * (-1.0) * ax
+                d = d / np.linalg.norm(d, axis=1)[:, None]
+                E_ = 0.5 * (S_ + H_) + 0.14 * d
+                if flare:
+                    w = (t >= 5.0) & (t < 5.3)
+                    E_ = np.where(w[:, None], np.stack([E_[:, 0], H_[:, 1] + 0.05, E_[:, 2]], 1), E_)
+                ik['final_l_upper'], ik['final_l_hand'], ik['final_l_fore'] = S_, H_, E_
+                ik['l_pole_src'] = np.where(m, 2, 0)
+            return post
+        d = fresh()
+        _make(d, stamp, [], [f221_post(False)])
+        S, A = analyse(d)
+        txt = '\n'.join(A.out)
+        sr = (A.f218 or {}).get('strafe', {}).get((3, 'strafe right'))
+        wk = (A.f218 or {}).get('items', {}).get((3, 'walk'))
+        check(sr is not None and sr['f221'] is not None and sr['f221']['ang_p99'] < 2.0 and sr['f221']['oh_max'] < 0.0 and sr['f221']['down'] > 0.99 and 'item 3, strafe right' in txt and 'body-down pole on 100% of rows' in txt and
+              (A.f218 or {}).get('strafe', {}).get((3, 'strafe left')) is None and not [f for f in A.findings if f.kind == 'elbow_over_hand'],
+              'F221: an elbow hung under the axis reads an angle near 0 in the strafe right bin, under the hand, no finding, no strafe left: %s' % (sr,))
+        check(wk is not None and wk['f221'] is not None and wk['f221']['ang_med'] < 2.0, 'F221: the walk line carries the same figures: %s' % (wk,))
+        d = fresh()
+        _make(d, stamp, [], [f221_post(True)])
+        S, A = analyse(d)
+        fs = [f for f in A.findings if f.kind == 'elbow_over_hand']
+        check(len(fs) == 1 and 'item 3' in fs[0].detail and 'up to 5.0 cm' in fs[0].detail and 4.9 < fs[0].t0 < 5.1 and 0.25 < fs[0].t1 - fs[0].t0 < 0.4,
+              'F221: the elbow 5 cm over the hand for 0.3 s is one elbow_over_hand finding with its peak and item: %s' % ([(f.t0, f.t1, f.detail) for f in fs],))
+        d = fresh()
+        _make(d, stamp, [], [f221_post(True)], drop={'ik': ['final_l_upper'], 'pin': ['fwd']})
+        S, A = analyse(d)
+        txt = '\n'.join(A.out)
+        check('item 3, walk' in txt and 'no strafe bins' in txt and not [f for f in A.findings if f.kind == 'elbow_over_hand'], 'F221: a recording without the arm joints or the body axes still prints the section and names no F221 finding')
         # arms the IK did not write: a huge reach and swivel jumps make no event
         d = fresh()
 

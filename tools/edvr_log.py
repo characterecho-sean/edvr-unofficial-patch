@@ -12820,6 +12820,36 @@ def _hj_f219(rows, ctx):
     return ("OK", text)
 
 
+# F221: the arc cutter's left elbow hung from the body-down pole (formatLine in src/d3d11/native_on_foot_f221.h): solves with the arc cutter, those hung and their weight mean, the ceiling clamp, the
+# vertical axis (previous radial) and the elbow over the hand.
+H221_LABEL = "native on foot tool elbow (F221)"
+H221_RE = (r"native on foot tool elbow \(F221\) (?P<wl>\d+) s: (?P<n>\d+) solves with the arc cutter, hung (?P<hung>\d+) \(weight mean (?P<wm>%s)\), guarded (?P<g>\d+), axis vertical (?P<fb>\d+); "
+           r"the elbow over the hand mean (?P<om>%s) cm, highest (?P<ox>%s) cm$" % (_HN, _HN, _HN))
+H221_MIN_SOLVES = 30
+
+
+def _hj_f221(rows, ctx):
+    """F221: with the arc cutter the left elbow hangs from the body-down pole (ramped over 0.2 s), the F181a cap's share falling with it. The window line counts the left-arm solves with the
+    weight above 0, those the blend applied to, the weight's mean, the ceiling clamp, the vertical axis, and the written elbow over the hand (cm). No line is not present (no arc cutter).
+    IDLE under 30 solves; NEVER APPLIED with 30 or more solves and none hung; OK otherwise with the figures."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["n"]) for r in sec)
+    hung = sum(int(r["hung"]) for r in sec)
+    g = sum(int(r["g"]) for r in sec)
+    fb = sum(int(r["fb"]) for r in sec)
+    wm = sum(int(r["n"]) * float(r["wm"]) for r in sec) / n if n else 0.0
+    om = sum(int(r["n"]) * float(r["om"]) for r in sec) / n if n else 0.0
+    ox = max(float(r["ox"]) for r in sec)
+    text = "%d s: %d solves with the arc cutter, hung %d (weight mean %.2f), guarded %d, axis vertical %d; the elbow over the hand mean %+.1f cm, highest %+.1f cm" % (_hsecs(sec), n, hung, wm, g, fb, om, ox)
+    if n < H221_MIN_SOLVES:
+        return ("IDLE", text + "; under %d solves: little to judge" % H221_MIN_SOLVES)
+    if hung == 0:
+        return ("NEVER APPLIED", text + "; %d solves with the arc cutter and the body-down pole never applied (F221)" % n)
+    return ("OK", text)
+
+
 H_F213 = "on-foot recording (F213)"
 F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
 
@@ -15512,7 +15542,9 @@ def _hj_f181a_hip_cap(rows, ctx):
     swivel from the stance's plane at 52 to 55 deg at the hip with the plasma assault rifle (over 45 deg in every solve), the forearm climbing steeply to the foregrip. A solve over the cap is
     brought to the plane angle p - (hip share) x (p - cap) by turning the pole about the shoulder-to-hand axis toward the plane, on the side it was on. Reads the F98a line's ending: the
     two-handed hip solves, those capped, the cut (mean, largest), the cap, and the solves still 2 deg or more over the cap after it. Per item. NEVER APPLIED when 30 or more two-handed hip
-    solves were still 2 deg or more over the cap after it (the cap did not hold); IDLE under 30 two-handed hip solves (none included); OK with the figures. A line without the ending (a build
+    solves were still 2 deg or more over the cap after it, and they were a quarter or more of the item's hip solves (the cap did not hold); IDLE under 30 two-handed hip solves (none
+    included); OK with the figures. Since F219 limits the cap's turn to 45 deg per search the closest approach stands in for the target by design, so a few solves stay over: the flight
+    20261106_132805 had 289 of 4964 and 671 of 13295 still over (6 and 5 percent) with the cap working. A line without the ending (a build
     before F181) gives no verdict."""
     sec = [r for r in rows.get("sec", []) if r.get("cap_n") is not None]
     if not sec:
@@ -15533,7 +15565,7 @@ def _hj_f181a_hip_cap(rows, ctx):
         plane = sum(int(r["n"]) * float(r["plane"]) for r in rs) / sum(int(r["n"]) for r in rs) if sum(int(r["n"]) for r in rs) else 0.0
         parts.append("%s %d s: %d two-handed hip solves, capped %d (%.0f%%; the cut mean %.1f deg, largest %.1f), the cap %s, %d still 2 deg or more over it after; the swivel from the stance's plane "
                      "over all this item's solves %.1f deg" % (item, _hsecs(rs), hip, capped, 100.0 * capped / hip if hip else 0.0, cut, cutmax, capt, over, plane))
-        if hip >= 30 and over >= 30:
+        if over >= 30 and over >= 0.25 * hip:
             never.append("%d of %d two-handed hip solves with %s were still 2 deg or more over the cap after it (the cap did not hold)" % (over, hip, item))
     text = "; ".join(parts)
     if never:
@@ -18003,6 +18035,9 @@ HEALTH_RULES = (
     _hrule("elbow step (F219)", ("F219",), (H219_LABEL,), (
         ("sec", H219_RE),
     ), _hj_f219),
+    _hrule("tool elbow (F221)", ("F221",), (H221_LABEL,), (
+        ("sec", H221_RE),
+    ), _hj_f221),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -21466,8 +21501,10 @@ def self_test_health():
               has=[RIFLE181 + " 1 s: 900 two-handed hip solves, capped 900 (100%; the cut mean 28.0 deg, largest 31.0), the cap 25 deg, 0 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: the shotgun under the cap is not touched: 0 of 900 capped", [elbow98("$wpn_m_shotgun_plasma_doublebarrel_name;", plane=18.5, n=900, cap=(900, 0, 0.0, 0.0, 25.0, 0))], 0,
               [("OK", F181A)], has=["two-handed hip solves, capped 0 (0%; the cut mean 0.0 deg, largest 0.0)"], lacks=["UNPARSED", "NEVER"])
-        check("F181a cap: a cap that did not hold: 40 of 900 hip solves still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 40))], 3,
-              [("NEVER APPLIED", F181A)], has=["40 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: a cap that did not hold: 225 of 900 hip solves (a quarter) still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 225))], 3,
+              [("NEVER APPLIED", F181A)], has=["225 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: 45 of 900 hip solves (5 percent) still over is the closest approach by design and is OK with the figures", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 45))], 0,
+              [("OK", F181A)], has=["45 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: 29 solves still over is not yet 30", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 29))], 0, [("OK", F181A)], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: under 30 two-handed hip solves is too few to judge", [elbow98(RIFLE181, n=20, cap=(20, 20, 25.0, 30.0, 25.0, 0))], 0, [("IDLE", F181A)],
               has=["under 30 two-handed hip solves: little to judge"], lacks=["UNPARSED"])
@@ -24559,6 +24596,23 @@ def self_test_health():
         check("F219: window lines with no solve at the hip are IDLE", [win219(ls=0, ll=0, lc=0.0, rs=0, rl=0, rc=0.0)], 0, [("IDLE", F219)], has=["nothing to limit"], lacks=["PARTIAL", "UNPARSED"])
         check("F219: no window line (no arm solve at the hip) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["PARTIAL", "NEVER APPLIED"])
         check("F219: a window line that drifted from its pattern is UNPARSED", [win219().replace("left solves", "left")], 4, [("UNPARSED", F219)])
+        # ---- F221: the arc cutter's left elbow; its window line is rendered from the C format string in native_on_foot_f221.h ----
+        f221src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f221.h"))
+        F221 = "tool elbow (F221)"
+
+        def win221(n=300, hung=290, wm=0.97, g=3, fb=0, om=-12.5, ox=-4.0, wl=10):
+            fmt = health_c_format(f221src, "native on foot tool elbow (F221) %.0f s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f221.h has no format holding the F221 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (float(wl), n, hung, float(wm), g, fb, float(om), float(ox)))
+        check("F221: a window of arc cutter solves with the pole applied is OK with the figures", [win221()], 0, [("OK", F221)],
+              has=["10 s: 300 solves with the arc cutter, hung 290 (weight mean 0.97), guarded 3, axis vertical 0; the elbow over the hand mean -12.5 cm, highest -4.0 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F221: 30 or more solves and none hung is NEVER APPLIED", [win221(n=300, hung=0, wm=0.0)], 3, [("NEVER APPLIED", F221)], has=["the body-down pole never applied"], lacks=["UNPARSED"])
+        check("F221: under 30 solves is IDLE, even with none hung", [win221(n=20, hung=0, wm=0.0)], 0, [("IDLE", F221)], has=["under 30 solves"], lacks=["NEVER", "UNPARSED"])
+        check("F221: windows add up, the mean weighted by the solves", [win221(n=100, wm=1.0, om=-10.0, ox=-2.0), win221(n=300, wm=0.5, om=-20.0, ox=1.5)], 0, [("OK", F221)],
+              has=["20 s: 400 solves", "weight mean 0.62", "mean -17.5 cm, highest +1.5 cm"], lacks=["UNPARSED"])
+        check("F221: no window line (no arc cutter) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F221: a window line that drifted from its pattern is UNPARSED", [win221().replace("solves with", "solves of")], 4, [("UNPARSED", F221)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

@@ -281,11 +281,11 @@ inline void run192(Check&& check) {
         const size_t identityAt = at("const uint64_t physicalPoleIdentity = f83NativeEpochIdentity ?"), stepAt = at("s_f192Hold.step("), useAt = at("const double dh = nofoot::f192::usedWeight(f192Dh, supportCup, authoredPistolSupport);");
         check(identityAt != std::string::npos && stepAt != std::string::npos && useAt != std::string::npos && identityAt < stepAt && stepAt < useAt,
               "F192: the weight is made after the pole's identity and before the solves that use it");
-        check(has("const double wBlend = nofoot::f192::blendWeight(w165, dh);") && has("blendPole(tb, poleTheta165, wBlend, seed.previous, outSign, elbowOutM, trimRad)") &&
+        check(has("const double wBlend = nofoot::f192::blendWeight(nofoot::f192::blendWeight(w165, dh), w221);") && has("blendPole(tb, poleTheta165, wBlend, seed.previous, outSign, elbowOutM, trimRad)") &&
                   has("o.f165Applied = w165 > 0.0;") && has("o.f192Applied = dh > 0.0;") &&
-                  has("nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), o.f192Dh))"),
+                  has("nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), nofoot::f192::blendWeight(o.f192Dh, w221)))"),
               "F192: the left stable pole blends by the larger of F180's weight and the hold (F165's count stays F165's) and F181's share is scaled by (1 - dh)");
-        check(has("if (so[0].f181Hip && !(so[0].f192Dh > 0.0)) f.f181.add(") && has("if (so[0].f192Gate) f.f192.add(so[0].f192Dh, so[0].f192Applied);") && has("if (f192Began) ++f.f192.begun;") &&
+        check(has("if (so[0].f181Hip && !(so[0].f192Dh > 0.0) && !(so[0].f221W > 0.0)) f.f181.add(") && has("if (so[0].f192Gate) f.f192.add(so[0].f192Dh, so[0].f192Applied);") && has("if (f192Began) ++f.f192.begun;") &&
                   has("nofoot::f192::appendSummary(line159, sizeof(line159), f98.f192);") && has("nofoot::f192::Counters f192;"),
               "F192: the window counts the held solves (F181's count leaves them out), prints them on the F159 line and counts the draws begun");
         check(has("sample.f192Dh = so[0].f192Dh;") && has("sample.f192AnimElbowDyM = so[0].f192AnimElbowDy;") && has("sample.f181PlaneBeforeDeg = so[0].f181PlaneBeforeDeg;") &&

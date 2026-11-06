@@ -81,6 +81,7 @@
 #include "f215_checks.h"    // F215: unarmed and upright, the body follows the view (TEMPORARY A/B key): level ground, a slope term, a turn on the spot, the releases and holds, the key off, the rate limit and cap, the shifted write, the line, the sites
 #include "f218_checks.h"    // F218: the rifle's torso: the rest solution held back after a refusal (1 s, extended while moving), the slide across a switch (continuity, decay, the 20 cm limit, dt), the line, the sites
 #include "f219_checks.h"    // F219: the elbow's swing limited per frame at the hip: the signed angle, the limit, the memory, a 15 deg hop to 4 deg on the real two-bone frame, F181's 45 deg search, the line, the sites
+#include "f221_checks.h"    // F221: the arc cutter's left elbow from the body-down pole: the name, the ramp, the cap share and blend weight at 0 and 1, the real two-bone frame, the line, the sites
 #include "f216_checks.h"    // F216: the view bob (user setting): the filter on a 3.4 Hz sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets, the seated sign through adsUnlockedCam, the history by serial, the line, the sites
 #include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
@@ -7775,6 +7776,8 @@ int wmain(int argc, wchar_t** argv) {
     f218test::run218(check);
     // F219: the elbow's swing limited at the hip: the angle's sign and degenerate parts, the limit, the step, the memory, the limit on the real two-bone frame, F181's search held to 45 deg, the line, the sites.
     f219test::run219(check);
+    // F221: the arc cutter's left elbow: the name, the ramp, the weight at 0 (nothing changes) and 1 (no cap), the two-bone frame, the line, the sites.
+    f221test::run221(check);
     // F216: the view bob filter on a sprint (a sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets), the seated sign, the history by serial, the line, the sites.
     f216test::run216(check);
     // F205: the effective sight eye and the ADS view circle.
