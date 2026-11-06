@@ -2,6 +2,8 @@
 
 ## Status
 
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. Open: the dirt smears under the upscaler in flat. See "Clean glass after a supercruise exit", last section.
+
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
 own pixel shader (`cockpit_glass_shader.h`) is handed to the real `PSSetShader` in place of the game's intact
@@ -853,3 +855,94 @@ follow the level as the intact canopy does.
 - ruled out: lighting the canopy from t1 alone in a hangar, because the
   sun's colour there is 1e-13; hangar light reaches the glass only
   through local lights and probes (section 7).
+
+## Clean glass after a supercruise exit (2026-11-05)
+
+Report (Sean, flat, Frontier, `v0.22.0-rc.7`): the dirt is there when he drops out of
+supercruise, goes when he changes velocity in normal space, and comes back only after
+a trip to the main menu. Toggling the key at 15:28 did not appear to bring it back.
+Evidence: log `edvr_gfx_20261105_154759` with `experimental.cockpit_glass_probe` on,
+supercruise exit 15:50:52, Shift+NumLock 15:51:20; also `edvr_gfx_20261105_151811`.
+
+The capture's frame (`flat_pixels\20261105_225120_427_23036_1`, frame 17528) has clean
+glass with the sun ahead of the ship.
+
+The test (Sean's screen recording, 16:02:44, log `edvr_gfx_20261105_155949`, exit
+16:02:13): after losing the dirt he turned away from the star and back, and it
+flickers. The recording is 30 fps, so it drops most of the game's frames. Video frame
+56 has the full streaks over the pane; 55 and 57 have none, with the sun ahead of the
+ship. None of the seven other frames checked has them. So the streak texture and the
+dirt level can both still reach the pixels, and the replacement can still draw dirt
+in the bad state. Sean's description has not separated what turning away does.
+
+Open, each per frame: (a) the sun's shadow term, `sunShadow` returning about 0 on most
+frames; (b) `probeAmbient`, whose buffers' contents the probe does not log; (c) t12 or
+b13 overwritten between the bind and the draw on most frames, which the probe does not
+read either (it stops at t11 and b2). The flash with the sun ahead also means this
+doc's first guess was wrong that a sun ahead gives the dirt no direct light through
+`ndl`, unless the flash is (b).
+
+The test build `a2dcd3ef` (log `edvr_gfx_20261105_163445`) counted, at every canopy
+draw, what was really bound:
+
+| Window ending | Binds | All ours | t12 not the streaks | b13 or PS wrong |
+|---|---|---|---|---|
+| 16:36:45 | 1394 | 1394 | 0 | 0 |
+| 16:37:15 (exit 16:37:10, then the velocity change) | 2996 | 2415 | 581 | 0 |
+| 16:37:45 | 3058 | 0 | 3058 | 0 |
+
+So it is (c), for t12 alone: something writes t12 after the swap's bind and before the
+draw, and the streak sample then reads something else, or 0, so the albedo has no dirt.
+The bind happens only at the pixel shader's bind, so nothing puts it back. What writes
+t12 is not known yet, and neither is why a velocity change starts it. The single-frame
+flash fits a frame where the write fell before the bind.
+
+The fix: `cockpitGlassBeforeDraw`, before each draw while the swap's inputs are bound,
+checks t12 and b13, binds the swap's own again, and keeps what it found for the
+hand-back at the next pixel shader, which also closes #188's stale t12 restore. The
+build logs the first view it finds and counts these draws in each 30 s window, so the
+flight names the writer's view. The temporary `no_shadow` switch from the test build
+came out with this: the dirt needs t12 whatever the shadow does.
+
+What the flight must show: the dirt stays through a velocity change; the probe's t12
+count is 0 with `cockpit glass: canopy draws that found another binding` counting; and
+nothing else that uses t12 changes, since it gets its binding back at the next pixel
+shader bind.
+
+Flown on `ddb725c0` (Frontier, flat, log `edvr_gfx_20261105_165800`), Sean: "Dirt stays
+on now". The first rebind is at 17:00:02.6, about 0.8 s before the supercruise edge, so
+supercruise is not what starts it: t12 was empty, not another view, so whatever writes
+it is clearing the slot. In the window to 17:00:31, 2032 canopy draws found it empty and
+were put right, and the probe's t12 count is 0 of 3057. What clears it is still not
+named. VR on the same flight: t12 was found empty on 4,801 of 4,816 canopy draws just
+after the switch, falling to about 355 a window; how the dirt looked there was not
+reported. The probe's per-draw counts came out with the merge, and the rebind count
+stays in the window lines.
+
+A second report on the same flight, open: with the dirt staying, Sean sees it smear
+when the ship moves, in flat under DLSS. With anti-aliasing off the smear goes (Sean,
+2026-11-05). Open hypothesis: the canopy writes no depth, so the dirt is a transparent
+layer over the stars, and the one motion value per pixel cannot suit both. Evidence
+wanted: a Shift+NumLock capture during a turn, for the motion on the glass pixels. Seen
+already and not explained: at 15:51, flying straight with the dirt gone, the glass
+pixels carried about 1 px of motion spreading from the centre with a sky depth.
+
+- ruled out: the legacy shader itself as the smear, because the smear goes with
+  anti-aliasing off, with the same shader and the same dirt.
+- ruled out as the main cause of the lost dirt: (a) and (b), because the dirt's albedo
+  is zero without t12 at every one of those draws, whatever the light does.
+
+- ruled out: the swap stopping, because binds equal canopy-seen in every window of
+  both logs, about 3,000 in 30 s, after the exit as before.
+- ruled out: another EDVR scope rebinding the stock shader (#188), because the
+  capture's canopy draws have actual PS `D41DCE1D76396A60`, the replacement, in the
+  bad state.
+- ruled out: another pixel shader painting the canopy, because the probe has
+  `other-ps=0` and only `4E4FF61E8A08FC7E` with `8C091FFD08644E02` in every window.
+- ruled out: the constants the shader reads from cb1 and cb2 changing, because
+  cb1[56], [90], [245], [261] and cb2[0], [6], [7], [8], [13], [15] are the same in
+  samples 1 to 6, and cb2[17] moves only in its unused w. Samples 5 and 6 are after
+  the capture of the bad state. cb1[227], [228] and [253] were not in the table read
+  and are not ruled out. The sun's colour and direction stay nonzero.
+- ruled out: the SRVs t0 to t11 and the samplers and output state changing, because
+  those lines are the same in samples 2 to 6.

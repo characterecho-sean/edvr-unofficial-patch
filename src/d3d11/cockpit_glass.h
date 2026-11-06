@@ -33,6 +33,10 @@ ID3D11PixelShader* cockpitGlassPsFor(ID3D11DeviceContext* ctx, ID3D11PixelShader
 // The game's shader hash when `actual` is the replacement the swap above hands the real call, else 0. A check of the actual binding against what the game bound
 // asks this: the swap is EDVR's own, so the binding is still the game's canopy.
 uint64_t cockpitGlassReplacedHash(ID3D11PixelShader* actual);
+// Before each draw on the owner context, while cockpitGlassLegacyLive(): the swap binds t12 and b13 at the shader's bind, and something can write t12 after that and before the draw
+// (flat, after a velocity change in normal space, every canopy draw until a reload: docs\cockpit-glass-legacy-port.md, "Clean glass after a supercruise exit"), which leaves the
+// legacy shader with no dirt. While the swap's inputs are bound this puts them back, and keeps what it found for the hand-back. One test and out at any other draw.
+void cockpitGlassBeforeDraw(ID3D11DeviceContext* ctx);
 
 // The ice and condensation draws (docs\cockpit-glass-legacy-port.md section 11). The game draws the canopy with its own ice or condensation shader while they show, so the replacement
 // is not bound and the legacy dirt would vanish. While `legacy`, the draw thunks (owner context) call cockpitGlassOverlayBegin() after the game's draw: when the bound pixel shader is the
