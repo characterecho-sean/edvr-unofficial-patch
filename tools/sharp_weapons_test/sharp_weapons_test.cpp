@@ -1310,7 +1310,7 @@ static void flatTests() {
                       "the scope's gunsight mark rides the weapons half in flat's liveness too, as in the VR rule (one list: uiLayerFamilyUsesWeaponsLayer)");
             }
     check(!flatUiLayerTakesFamily(UiLayerFamily::kScopeMark), "...and flat never takes the mark: its lens is VR's, and the flat tick publishes none, so the family is never armed there");
-    // The legacy canopy (kLegacyGlass, 2026-11-05): the pair, named by flat's rule only with the legacy look live, taken into the weapons layer under the weapons half.
+    // The legacy canopy (kLegacyGlass, 2026-11-05): the pair, named only with the legacy look live, taken into the weapons layer under the weapons half.
     {
         const UiLayerFamily g = UiLayerFamily::kLegacyGlass;
         check(flatUiFamilyOf(kUiVsLegacyGlass, kUiPsLegacyGlass, true) == g && flatUiFamilyFor(kUiVsLegacyGlass, kUiPsLegacyGlass, false, true, true) == g,
@@ -1327,12 +1327,15 @@ static void flatTests() {
                 check(flatUiFamilyLive(g, q != 0, w != 0, true) == (w != 0) && uiLayerFamilyEnabled(g, q != 0, w != 0, true) == (w != 0),
                       "the weapons half governs the canopy: fix.ui_quality off does not stop it, a stood-down weapons half does");
         check(std::strcmp(uiLayerFamilyName(g), "legacy glass") == 0 && std::strcmp(uiLayerFamilyName(g), uiLayerFamilyName(UiLayerFamily::kMapGrid)) != 0, "the family has its own name");
-        // VR: its rule builds the facts itself and never sets legacyGlass, so the same pair on the HDR target is no family there.
+        // VR: its rule sets the fact only with the legacy look live and the replacement bound, the same two tests as flat's, and the pair is read for that draw alone.
         UiFamilyFacts vr = hdrFacts(kUiVsLegacyGlass, kUiPsLegacyGlass);
-        check(uiLayerFamilyFor(vr) == UiLayerFamily::kNone, "VR: the canopy pair on the HDR target names no family (legacyGlass is flat's fact alone)");
+        check(uiLayerFamilyFor(vr) == UiLayerFamily::kNone, "VR: without the fact (`odyssey`, or a refused swap) the canopy pair on the HDR target names no family");
         vr.legacyGlass = true;
-        check(uiLayerFamilyFor(vr) == g, "...and with the fact set (flat's rule) it is named, so the fact is what keeps VR out");
-        check(!(readFile("src/d3d11/vscreen.cpp").find("legacyGlass") != std::string::npos), "vscreen.cpp (VR's facts) never mentions the fact");
+        check(uiLayerFamilyFor(vr) == g, "...and with the fact set it is named on the HDR target");
+        vr.targetKind = 2;
+        check(uiLayerFamilyFor(vr) != g, "...and never on the post-tonemap target");
+        check(has(readFile("src/d3d11/vscreen.cpp"), "f.targetKind == 1 && f.vs == kUiVsLegacyGlass && cockpitGlassLegacyLive() && cockpitGlassSwapActive()"),
+              "vscreen.cpp: VR names the canopy only on the HDR target, under the legacy look, with the replacement bound");
         // The weapons-fire jitter table does not name the canopy, and the layer cancels for it by name as well.
         check(weaponsFireJitterCancel(kUiVsLegacyGlass) && weaponPairIndexByVs(kUiVsLegacyGlass) < 0, "the canopy is no weapons pair, and the table's default for it is the cancel");
         check(has(readFile("src/d3d11/ui_layer.cpp"), "const bool cancel = !g_draw.weapons || family == UiLayerFamily::kLegacyGlass || weaponsFireJitterCancel(g_draw.vsHash);"),

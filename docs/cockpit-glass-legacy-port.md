@@ -2,7 +2,7 @@
 
 ## Status
 
-Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR is not done. See "Clean glass after a supercruise exit", last section.
+Open 2026-11-05: in flat the dirt goes after a velocity change in normal space, until a reload. Cause measured: t12 is emptied after the swap's bind. Fix FLOWN OK in flat 2026-11-05 on `ddb725c0`, merged to main that day, ran in VR. The dirt's smear under the upscaler: FLOWN OK in flat, merged: under legacy the whole canopy draw goes into the post-upscale weapons layer ("The dirt layer", last section). VR was reported smearing 2026-11-06 (no log); the same route for VR is built on `claude/vr-glass-layer`, NOT FLOWN ("The dirt layer in VR", end of the doc). See "Clean glass after a supercruise exit", last section.
 
 State 2026-11-04: **FLOWN ON STEAM FLAT, NOT FLOWN IN VR, MERGING TO MAIN FOR USER FEEDBACK.** `visual.cockpit_glass = odyssey | legacy` (default `odyssey`, the game
 unchanged), flat and VR, Visual tab. Branch `claude/cockpit-glass-shader-port-1852e3`. With `legacy`, EDVR's
@@ -990,3 +990,25 @@ under the dirt instead of over it (the known limit of the HDR phase). (3) Whethe
 (4) The GPU cost of drawing the canopy at the layer's size. (5) The loss path: a layer holding only glass is counted as lost glass and stands the weapons half down after 30
 frames, as the weapons fire does. The flight must show the family taken every frame in `legacy`, no `legacy glass` line in `odyssey`, the dirt not smearing under DLSS, and
 the weapons fire unchanged.
+
+### The dirt layer in VR (2026-11-06, BUILT, NOT FLOWN)
+
+A user reported the smear in VR, with no log, headset or AA setting. Sean's last VR log (Frontier, `edvr_gfx_20261105_143434`) ran DLSS at 50% per axis, 2016x2017 to 4032x4034, so
+the upscaler has less to work with than in flat. That the upscaler is the cause in VR is a hypothesis.
+
+What was built: VR's family rule (`uiLayerFamilyOf`, `vscreen.cpp`) sets `UiFamilyFacts.legacyGlass` for the canopy vertex shader on the HDR target, with `cockpitGlassLegacyLive()` and
+`cockpitGlassSwapActive()`, the same two tests as flat. The decision, the layer, the pixel map and the `legacy glass:` line are the code flat flew. Still no key: it is behaviour.
+
+What one flight separates, with the runtime's motion smoothing off and DLSS on:
+
+| What the flight shows | Reading |
+|---|---|
+| `legacy glass:` draws taken every window, none left, smear gone | the upscaler was the cause; the fix works |
+| Draws taken, smear still there | ruled out: the upscaler; next is the runtime's reprojection |
+| Draws left in the scene | read the reasons in the line; the test says nothing about the cause |
+
+What VR adds to flat's unknowns. (1) Flat flew at a layer the same size as its target (3840x2160 both), so a pixel map other than 1:1 has not flown; at 2:1 it moves the probe ambient's
+lookup, so a wrong map shows as dirt lit from the wrong place. (2) The depth test: the canopy tests the seeded copy, which comes from the 2016x2017 depth in VR, so the dirt's edge against
+struts and anything nearer may step at render pixels. (3) The canopy's matrices carrying the eye's jitter was read from flat's recipes; if VR's do not, the cancel adds jitter and the dirt
+shimmers. (4) The cost: four times the pixels shaded per eye at this render scale, a depth seed, the composite on both eyes every frame the canopy draws and the two 130.1 MB layers and
+their scratch from the first canopy draw. Compare the `EDVR GPU census` with `odyssey`. (5) A lost layer of glass counts toward the weapons half's stand-down in VR too.

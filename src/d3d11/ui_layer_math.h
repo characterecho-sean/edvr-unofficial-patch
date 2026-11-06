@@ -709,7 +709,7 @@ enum class UiLayerFamily : uint8_t {
                        // family's number moves (docs\galaxy-map-vr-2026-11-03.md, Fix 2).
     kMapPlane,         // the System Map's flat icons (vs 88DCF1164C640EC3 with ps FEDE6C9825C3828E, n=6), drawn after the bodies with the depth test the game gave them, named only while the System Map's camera is up (UiFamilyFacts.mapSystem): the vertex shader is a general one, also drawn on the Galaxy Map and in the world.
     kMapGrid,          // the System Map's grid: the same pair at n=1014, drawn before most bodies at viewport depth 0. In the layer it takes no depth test; the bodies are cut out of the layer after it (galaxy_map_vs.h, THE CUT-OUT BEHIND THE BODIES). Both appended after kMapMarks (2026-11-05).
-    kLegacyGlass,      // the canopy under visual.cockpit_glass = legacy (vs 8C091FFD08644E02 with ps 4E4FF61E8A08FC7E; cockpit_glass.cpp swaps the pixel shader for EDVR's own at bind time): the whole draw is taken into the eye's additive weapons layer W, so the dirt leaves the upscaler. Flat only, and named only while UiFamilyFacts.legacyGlass is set, which only flat's rule sets and only while the legacy look is live (docs\cockpit-glass-legacy-port.md, "The dirt layer"). Appended after kMapGrid (2026-11-05).
+    kLegacyGlass,      // the canopy under visual.cockpit_glass = legacy (vs 8C091FFD08644E02 with ps 4E4FF61E8A08FC7E; cockpit_glass.cpp swaps the pixel shader for EDVR's own at bind time): the whole draw is taken into the eye's additive weapons layer W, so the dirt leaves the upscaler. Named only while UiFamilyFacts.legacyGlass is set, which flat's rule and VR's set only while the legacy look is live (docs\cockpit-glass-legacy-port.md, "The dirt layer"). Appended after kMapGrid (2026-11-05).
     kCount
 };
 
@@ -1066,7 +1066,7 @@ struct UiFamilyFacts {
     bool mapSystem = false;       // VR: the System Map's camera is up, so its flat plane's pair is named
     bool mapPlaneIcon = false;    // that pair's draw is one of the plane's icons (n=6)
     bool mapPlaneGrid = false;    // or the grid (n=1014). Flat's census shows the pair at another count too, a mesh of 58416 indices: that stays in the scene
-    bool legacyGlass = false;     // flat only: visual.cockpit_glass is legacy (cockpitGlassLegacyLive), so the canopy pair is named. VR's rule never sets it, and with `odyssey` nothing does
+    bool legacyGlass = false;     // visual.cockpit_glass is legacy (cockpitGlassLegacyLive) and the replacement is bound, so the canopy pair is named; with `odyssey` nothing sets it
 };
 
 // The canopy pair (holo_families.h kHoloCanopy; cockpit_glass_core.h kReplacedPsHash is the same pixel shader, which tools\cockpit_glass_test holds equal). The shadow records the game's
@@ -1126,7 +1126,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // sky, and covering it would smear the stars behind it, the depth
         // pass's own reasoning -- and neither are the two the phase-3
         // review refused. The canopy is named below only under the legacy
-        // look and only by flat's rule (UiFamilyFacts.legacyGlass): it is
+        // look (UiFamilyFacts.legacyGlass): it is
         // taken into the additive layer, which adds light and covers nothing,
         // so the stars behind it are not touched. Two exact target-sphere pixel shaders are now
         // considered separately: their original screen-depth address must be
