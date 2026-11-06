@@ -358,7 +358,7 @@ void rotationAndRealTimerCase(Device& d) {
     for (size_t i = 0; i < kSections; ++i) {
         // The VR world route's and the second skin's sections are turns only once called this window (nextTurnOwner): none was here.
         // The scope lens's door section (A1) is the same: a turn only once called this window.
-        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
+        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection || i == kLegacyGlassSection) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
         if (turnOwnerOf(static_cast<GpuCensusSection>(i)) == static_cast<GpuCensusSection>(i)) ownersVisited = ownersVisited && visited[i];
         else membersSkipped = membersSkipped && !visited[i];
     }
@@ -367,6 +367,21 @@ void rotationAndRealTimerCase(Device& d) {
               visited[static_cast<size_t>(GpuCensusSection::AlteredFixFirst)],
           "altered: the frame rotation visits every turn, the altered-draw ones and the fix sections' shared one too");
     check(membersSkipped, "altered: the fix sections after the first are not turns of their own: the rotation never lands on them");
+    // The legacy canopy's section: not one of the summed altered classes, no turn until called this window, a turn of its own once called.
+    {
+        check(kAlteredTogetherClasses == 3 && kLegacyGlassSection == kAlteredFirst + kAlteredTogetherClasses && turnOwnerOf(GpuCensusSection::AlteredLegacyGlass) == GpuCensusSection::AlteredLegacyGlass &&
+                  alteredSectionOf(AlteredDrawClass::UiLayer) != GpuCensusSection::AlteredLegacyGlass,
+              "legacy glass: the canopy's section follows the three summed classes, owns its turn, and no draw class maps onto it (ui_layer.cpp times it itself)");
+        g_section[kLegacyGlassSection].occurrences = 1;
+        bool seen = false;
+        int at = 0;
+        for (size_t k = 0; k < kSections + 2; ++k) {
+            at = nextTurnOwner(at);
+            seen = seen || at == static_cast<int>(kLegacyGlassSection);
+        }
+        check(seen, "legacy glass: once the canopy has been called this window the rotation gives its section a turn");
+        g_section[kLegacyGlassSection].occurrences = 0;
+    }
 
     gpuCensusShutdown();
     check(gpuTimingShutdown(d.ctx.Get()), "explicit owner shutdown");
@@ -805,8 +820,8 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - 1 /* native on foot's depth readers' */ - static_cast<unsigned>(kSkinSections) - 1 /* the scope lens's */ && cycle == 24,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal, second-skin and scope lens ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - 1 /* native on foot's depth readers' */ - static_cast<unsigned>(kSkinSections) - 1 /* the scope lens's */ - 1 /* the legacy glass canopy's */ && cycle == 24,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal, second-skin, scope lens and legacy glass canopy ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
     // The same cycle once the VR world route's three sections have been called this window: they take turns, 27.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
     at = 0;
@@ -1508,7 +1523,7 @@ void instrumentCases() {
     check(kDoorBreakdownCount == 12, "instruments: twelve door items after the temporal whole (the profiler's ten, then the sky ring and the scope lens)");
     check(GpuCensusSection::AlteredHdrHud > GpuCensusSection::AlteredUiLayer && GpuCensusSection::AlteredHdrHud < GpuCensusSection::AlteredFixFirst,
           "instruments: the moved HDR draw is an altered class, before the fix sections");
-    check(kAlteredClassSections == 3 && std::strstr(kAlteredNames[2], "HDR HUD") != nullptr, "instruments: the altered class has its name");
+    check(kAlteredClassSections == 4 && kAlteredTogetherClasses == 3 && std::strstr(kAlteredNames[2], "HDR HUD") != nullptr, "instruments: the altered class has its name, and the canopy's section is the fourth, outside the summed three");
 
     // The issued counter: real passes only. Three occurrences in the window: two issued a pass, one was an empty scope (no note).
     SectionState& st = g_section[static_cast<size_t>(GpuCensusSection::FrameUiLayerReissues)];

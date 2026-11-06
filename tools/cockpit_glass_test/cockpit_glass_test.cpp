@@ -836,6 +836,54 @@ static void testShader() {
         for (int i = 0; i < 20; ++i) many.spots.push_back(one);
         for (int i = 0; i < 20; ++i) many.points.push_back(one);
         check(closeTo(canopy.draw(many).r, sunLit.r * 32.0f, 0.02f), "16 spots and 16 points at most reach a pixel");
+        // The cheap rejection: a light whose strength times its brightest colour channel is under 1.0 is skipped, and one above it is drawn as before. The sun here is 1000, so 1.2 is 0.12 percent of it.
+        {
+            const float onePerAtFive = 1.0f / atFive;
+            RigLight dim = one;
+            dim.intensity = 0.8f * onePerAtFive;
+            Case below = base;
+            below.lights = 2;
+            below.spots.push_back(dim);
+            below.points.push_back(dim);
+            check(canopy.draw(below).r == 0, "a spot and a point of strength 0.8 are rejected");
+            RigLight bright = one;
+            bright.intensity = 1.2f * onePerAtFive;
+            Case above = base;
+            above.lights = 1;
+            above.spots.push_back(bright);
+            check(closeTo(canopy.draw(above).r, sunLit.r * 1.2f / sun, 0.02f), "a spot of strength 1.2 is drawn exactly as the loop drew it: strength / 1000 of the sun");
+            above.lights = 2;
+            above.spots.clear();
+            above.points.push_back(bright);
+            check(closeTo(canopy.draw(above).r, sunLit.r * 1.2f / sun, 0.02f), "a point of strength 1.2 is drawn exactly as the loop drew it");
+            // The brightest channel counts, not the sum or the red: a colour of (0.5, 0, 0) at strength 1.4 is 0.7 and is rejected; at 2.4 it is 1.2 and drawn at half red.
+            RigLight half = one;
+            half.colour = 511u;
+            half.intensity = 1.4f * onePerAtFive;
+            Case halfRed = base;
+            halfRed.lights = 1;
+            halfRed.spots.push_back(half);
+            check(canopy.draw(halfRed).r == 0, "strength 1.4 of a half-bright colour (peak 0.7) is rejected");
+            halfRed.spots[0].intensity = 2.4f * onePerAtFive;
+            check(closeTo(canopy.draw(halfRed).r, sunLit.r * 2.4f / sun * (511.0f / 1023.0f), 0.02f), "strength 2.4 of a half-bright colour (peak 1.2) is drawn at half red");
+            // The cone and the exponent lower the strength before the test: a spot of 1.4 whose cone factor is 0.62 (the tilted direction, exponent 2) is 0.87 and rejected; with exponent 0 it is 1.4 and drawn.
+            RigLight cone = one;
+            cone.intensity = 1.4f * onePerAtFive;
+            cone.direction = (8192u << 17) | 2u;
+            cone.exponentHalf = 0x4000;
+            Case coned = base;
+            coned.lights = 1;
+            coned.spots.push_back(cone);
+            check(canopy.draw(coned).r == 0, "the cone factor is applied before the test: 1.4 x 0.62 is rejected");
+            coned.spots[0].exponentHalf = 0;
+            check(canopy.draw(coned).r > 0, "with the exponent 0 the same spot is 1.4 and drawn");
+            // Lights above the threshold stay summed with the ones below it left out: 20 dim lights add nothing, one bright one adds its own.
+            Case mixed = base;
+            mixed.lights = 2;
+            for (int i = 0; i < 12; ++i) mixed.spots.push_back(dim);
+            mixed.spots.push_back(bright);
+            check(closeTo(canopy.draw(mixed).r, sunLit.r * 1.2f / sun, 0.02f), "lights below the threshold add nothing to the sum of those above it");
+        }
     }
 
     // Dirt under the sun: the dirt mask from live's mask, the streak texel 1 (so 0.09), Lambert on the legacy normal over pi, divided by the alpha written.

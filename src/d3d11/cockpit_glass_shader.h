@@ -274,6 +274,13 @@ float3 probeAmbient(float3 viewPos, float3 nView, float2 pixel) {
 // shaders read them (26EA073903FD8909), with no shadow or cookie, whose textures the canopy has not bound. The falloff and the cone are the game's. Each light is summed for the Lambert and the glare, with the
 // same 1/pi the sun has in main. A cluster holds up to 128 of each; the loops stop at these.
 static const uint kMaxLocalLights = 16;
+// A local light whose strength times its brightest colour channel is under this is skipped: the sun is about 300 to 2,400 in these units, and the dirt's albedo is small.
+static const float kMinLocalLight = 1.0;
+
+// The brightest of a packed 10:10:10 colour, 0 to 1.
+float maxColour(uint packed) {
+    return (float)max(max(packed & 1023u, (packed >> 10) & 1023u), (packed >> 20) & 1023u) / 1023.0;
+}
 
 float localFalloff(float d2, float radius, float sourceRadius) {
     float x = d2 / (radius * radius);
@@ -310,12 +317,19 @@ void localLights(float3 viewPos, float2 pixel, float3 nIn, float gloss, bool poi
         if (d2 > radius * radius || d2 < 0.000001) continue;
         uint4 rb = ProbeRecords.Load4(b);
         uint halves = ProbeRecords.Load(b + 16u);
+        // The cheap rejection: a light whose strength times its brightest colour channel is under kMinLocalLight adds nothing worth the Lambert and the glare (the sun is 300 to 2,400 here). The cone
+        // is at most 1 and the exponent not negative, so the strength before the cone bounds it from above and the cone's work is skipped for a light that bound already rejects.
+        float falloff = localFalloff(d2, radius, asfloat(rb.z));
+        float exponent = f16tof32(halves & 0xFFFFu), scale = f16tof32(halves >> 16);
+        float peak = maxColour(rb.y);
+        if (asfloat(rb.x) * falloff * scale * peak < kMinLocalLight && exponent >= 0.0) continue;
         float cosOuter = (float)(rb.w & 0xFFFFu) / 65535.0, cosInner = (float)(rb.w >> 16) / 65535.0;
         float along = dot(spotDirection(ra.w), -toLight / sqrt(d2));
         float cone = saturate((along - cosOuter) / max(cosInner - cosOuter, 0.0001));
         if (cone <= 0.0) continue;
+        float strength = asfloat(rb.x) * falloff * pow(cone, exponent) * scale;
+        if (strength * peak < kMinLocalLight) continue;
         float3 colour = float3(rb.y & 1023u, (rb.y >> 10) & 1023u, (rb.y >> 20) & 1023u) / 1023.0;
-        float strength = asfloat(rb.x) * localFalloff(d2, radius, asfloat(rb.z)) * pow(cone, f16tof32(halves & 0xFFFFu)) * f16tof32(halves >> 16);
         addLocalLight(toLight, d2, colour * strength, nIn, viewDir, gloss, lambert, glareSum);
     }
     if (!points) return;
@@ -327,8 +341,9 @@ void localLights(float3 viewPos, float2 pixel, float3 nIn, float gloss, bool poi
         float d2 = dot(toLight, toLight);
         if (d2 > ra.w * ra.w || d2 < 0.000001) continue;
         uint4 rb = ProbeRecords.Load4(id + asuint(cb1[249].w));
-        float3 colour = float3(rb.y & 1023u, (rb.y >> 10) & 1023u, (rb.y >> 20) & 1023u) / 1023.0;
         float strength = asfloat(rb.x) * localFalloff(d2, ra.w, f16tof32(rb.z & 0xFFFFu)) * f16tof32(rb.z >> 16);
+        if (strength * maxColour(rb.y) < kMinLocalLight) continue;
+        float3 colour = float3(rb.y & 1023u, (rb.y >> 10) & 1023u, (rb.y >> 20) & 1023u) / 1023.0;
         addLocalLight(toLight, d2, colour * strength, nIn, viewDir, gloss, lambert, glareSum);
     }
 }
