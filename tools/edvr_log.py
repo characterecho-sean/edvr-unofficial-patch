@@ -12738,6 +12738,58 @@ def _hj_f216(rows, ctx):
     return ("OK", text + "; removing in %d of %d frames at a run (%.0f%%)" % (rem_off, run, 100.0 * rem_off / run))
 
 
+# F218: the laser rifle's torso at the hip (formatLine in src/d3d11/native_on_foot_f218.h). The window line counts the pin calls that moved the pose with the rifle held, those on the rest solution
+# (applied), refused or held back, the changes of solution (switches) and the slide's largest offset.
+H218_LABEL = "native on foot rifle torso (F218)"
+H218_RE = (r"native on foot rifle torso \(F218\) (?P<wl>\d+) s: rifle calls (?P<calls>\d+), rest applied (?P<app>\d+), refused (?P<ref>\d+), held (?P<held>\d+); switches (?P<sw>\d+); "
+           r"largest slide (?P<slide>%s) cm$" % _HN)
+H218_MIN_CALLS = 90      # rifle calls (a second at 90 Hz) under which there is little to judge
+H218_SWITCH_PER_S = 1.0  # more changes of solution than this a second is a torso that did not stay on one
+
+
+def _hj_f218(rows, ctx):
+    """F218: the rifle's torso stays on one solution. The window line counts the calls with a rifle held that moved the pose, those on F82's rest solution, those where it was refused and those where
+    it was held back after a refusal, the changes of solution and the largest slide. IDLE: no rifle at the hip (no window line), or under 90 calls in all. PARTIAL: more than one change of solution a
+    second (the hold did not keep the torso on one solution), named with the count. OK otherwise, with the counts."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None   # no rifle at the hip: no window line (reported as not present; a label with no matching pattern is UNPARSED)
+    g = lambda k: sum(int(r[k]) for r in sec)
+    secs = max(_hsecs(sec), 1)
+    calls, sw = g("calls"), g("sw")
+    text = "%d s: %d rifle calls, rest applied %d, refused %d, held back %d; %d switches of solution; largest slide %.1f cm" % (secs, calls, g("app"), g("ref"), g("held"), sw, max(float(r["slide"]) for r in sec))
+    if calls < H218_MIN_CALLS:
+        return ("IDLE", text + "; under %d rifle calls: little to judge" % H218_MIN_CALLS)
+    if sw > H218_SWITCH_PER_S * secs:
+        return ("PARTIAL", text + "; %d switches in %d s (%.1f a second, over %.0f): the torso did not stay on one solution" % (sw, secs, sw / float(secs), H218_SWITCH_PER_S))
+    return ("OK", text + "; %.1f switches a second" % (sw / float(secs)))
+
+
+# F219: the elbow's swing limited per frame at the hip (formatLine in src/d3d11/native_on_foot_f219.h). The window line counts each side's solves at the hip, those limited and the largest cut.
+H219_LABEL = "native on foot elbow step (F219)"
+H219_RE = (r"native on foot elbow step \(F219\) (?P<wl>\d+) s: left solves (?P<ls>\d+) limited (?P<ll>\d+) largest cut (?P<lc>%s) deg; right solves (?P<rs>\d+) limited (?P<rl>\d+) "
+           r"largest cut (?P<rc>%s) deg$" % (_HN, _HN))
+H219_LIMITED_SHARE = 0.25   # a side with more than this share of its solves limited is a swing that was often over the limit
+
+
+def _hj_f219(rows, ctx):
+    """F219: the elbow's swing about the shoulder-to-hand axis is limited per frame at the hip. The window line counts each side's solves at the hip, those limited and the largest cut (deg).
+    No window line (no arm solve at the hip) is not present; IDLE is window lines with no solves in them. PARTIAL: over a quarter of a side's solves limited, the side named (the solver asks for hops the limit keeps taking off).
+    OK otherwise, with each side's counts."""
+    sec = rows.get("sec", [])
+    sides = (("left", "ls", "ll", "lc"), ("right", "rs", "rl", "rc"))
+    tot = {n: (sum(int(r[s]) for r in sec), sum(int(r[l]) for r in sec), max([float(r[c]) for r in sec] or [0.0])) for n, s, l, c in sides}
+    if not sec:
+        return None   # no arm solve at the hip: no window line
+    if not any(v[0] for v in tot.values()):
+        return ("IDLE", "window lines with no arm solve at the hip: nothing to limit")
+    text = "%d s: " % _hsecs(sec) + "; ".join("%s %d solves, %d limited (%.0f%%), largest cut %.1f deg" % (n, tot[n][0], tot[n][1], 100.0 * tot[n][1] / tot[n][0] if tot[n][0] else 0.0, tot[n][2]) for n, _, _, _ in sides)
+    over = [n for n, _, _, _ in sides if tot[n][0] and tot[n][1] > H219_LIMITED_SHARE * tot[n][0]]
+    if over:
+        return ("PARTIAL", text + "; the %s arm: over a quarter of its solves were limited" % " and ".join(over))
+    return ("OK", text)
+
+
 H_F213 = "on-foot recording (F213)"
 F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
 
@@ -17911,6 +17963,12 @@ HEALTH_RULES = (
     _hrule("view bob (F216)", ("F216",), (H216_LABEL,), (
         ("sec", H216_RE),
     ), _hj_f216),
+    _hrule("rifle torso (F218)", ("F218",), (H218_LABEL,), (
+        ("sec", H218_RE),
+    ), _hj_f218),
+    _hrule("elbow step (F219)", ("F219",), (H219_LABEL,), (
+        ("sec", H219_RE),
+    ), _hj_f219),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -24413,6 +24471,43 @@ def self_test_health():
         check("F216: a window with the key on beside one with it off is judged on the off window", [win216(key="on", rem=0, moves=(0,) * 6, clamp=0), win216()], 0, [("OK", F216)],
               has=["20 s: 1800 game frames"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F216: a window line that drifted from its pattern is UNPARSED", [win216().replace("game frames", "frames")], 4, [("UNPARSED", F216)])
+        # ---- F218: the rifle's torso; its window line is rendered from the C format string in native_on_foot_f218.h ----
+        f218src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f218.h"))
+        F218 = "rifle torso (F218)"
+
+        def win218(calls=900, app=700, ref=40, held=160, sw=6, slide=3.5, wl=10):
+            fmt = health_c_format(f218src, "native on foot rifle torso (F218) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f218.h has no format holding the F218 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, calls, app, ref, held, sw, float(slide)))
+        check("F218: a rifle held on the rest solution with a few switches is OK and names the counts", [win218()], 0, [("OK", F218)],
+              has=["10 s: 900 rifle calls, rest applied 700, refused 40, held back 160; 6 switches of solution; largest slide 3.5 cm", "0.6 switches a second"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F218: more than one change of solution a second is PARTIAL and names the rate", [win218(sw=25, app=400, ref=250, held=0)], 0, [("PARTIAL", F218)],
+              has=["25 switches in 10 s (2.5 a second, over 1)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F218: exactly one a second is not PARTIAL", [win218(sw=10)], 0, [("OK", F218)], lacks=["PARTIAL", "UNPARSED"])
+        check("F218: under 90 rifle calls is IDLE, even with switches", [win218(calls=60, app=30, ref=10, held=20, sw=40)], 0, [("IDLE", F218)],
+              has=["under 90 rifle calls"], lacks=["PARTIAL", "UNPARSED"])
+        check("F218: no rifle at the hip (no window line) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["PARTIAL", "NEVER APPLIED"])
+        check("F218: windows add up before they are judged", [win218(calls=500, sw=3), win218(calls=500, sw=4)], 0, [("OK", F218)], has=["20 s: 1000 rifle calls", "7 switches"], lacks=["UNPARSED"])
+        check("F218: a window line that drifted from its pattern is UNPARSED", [win218().replace("rifle calls", "calls")], 4, [("UNPARSED", F218)])
+        # ---- F219: the elbow's swing limit; its window line is rendered from the C format string in native_on_foot_f219.h ----
+        f219src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f219.h"))
+        F219 = "elbow step (F219)"
+
+        def win219(ls=800, ll=40, lc=12.5, rs=800, rl=5, rc=6.0, wl=10):
+            fmt = health_c_format(f219src, "native on foot elbow step (F219) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f219.h has no format holding the F219 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, ls, ll, float(lc), rs, rl, float(rc)))
+        check("F219: arm solves at the hip with a few limited is OK and names each side", [win219()], 0, [("OK", F219)],
+              has=["10 s: left 800 solves, 40 limited (5%), largest cut 12.5 deg; right 800 solves, 5 limited (1%), largest cut 6.0 deg"], lacks=["UNPARSED", "PARTIAL"])
+        check("F219: over a quarter of the left arm's solves limited is PARTIAL and names the side", [win219(ll=300)], 0, [("PARTIAL", F219)],
+              has=["the left arm: over a quarter of its solves were limited"], lacks=["UNPARSED", "right arm"])
+        check("F219: both sides over a quarter names both", [win219(ll=300, rl=400)], 0, [("PARTIAL", F219)], has=["the left and right arm"], lacks=["UNPARSED"])
+        check("F219: exactly a quarter is not PARTIAL", [win219(ll=200, rl=200)], 0, [("OK", F219)], lacks=["PARTIAL", "UNPARSED"])
+        check("F219: window lines with no solve at the hip are IDLE", [win219(ls=0, ll=0, lc=0.0, rs=0, rl=0, rc=0.0)], 0, [("IDLE", F219)], has=["nothing to limit"], lacks=["PARTIAL", "UNPARSED"])
+        check("F219: no window line (no arm solve at the hip) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["PARTIAL", "NEVER APPLIED"])
+        check("F219: a window line that drifted from its pattern is UNPARSED", [win219().replace("left solves", "left")], 4, [("UNPARSED", F219)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

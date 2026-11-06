@@ -96,8 +96,15 @@ inline void run181(Check&& check) {
         }
         check(continuous && eq(last, 53.0, 1e-9), "F181a: the plane angle after the cap rises without a step from the cap (25 at the hip) to the pole's own (53 in the sights) as the detach weight rises");
         // a cap of 0: into the plane; the cap off: not applied
-        const f181::Cap zero = f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 0.0, 1.0), vee);
-        check(zero.applied && vee(zero.theta) < 1e-3, "F181a: a cap of 0 puts the elbow in the stance's plane");
+        const double nearStart = thetaZ + rad(40.0);   // F218: a turn of 40 deg is inside the search; the 53 deg start above needs 53, past kMaxTurnRad
+        const f181::Cap zero = f181::capSwivel(nearStart, vee(nearStart), f181::targetDeg(vee(nearStart), 0.0, 1.0), vee);
+        check(zero.applied && vee(zero.theta) < 1e-3, "F181a: a cap of 0 puts the elbow in the stance's plane (from 40 deg off it)");
+        // F219: the search turns the pole at most 45 deg; a cap whose first swivel lies further round takes the closest approach inside the turn
+        const f181::Cap longTurn = f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 0.0, 1.0), vee);
+        check(longTurn.applied && longTurn.turnedDeg <= 45.0 + 1e-6 && eq(longTurn.turnedDeg, 45.0, 1e-3) && eq(vee(longTurn.theta), 8.0, 1e-3) && nf::ikWrapPi(longTurn.theta - thetaZ) > 0.0,
+              "F219: the cap's search is held to 45 deg of turn: 53 deg off the plane with a cap of 0 comes to 8 deg off it (the closest approach inside 45), not into the plane");
+        const auto veeFar = [&](double th) { return std::fabs(nf::ikWrapPi(th - thetaZ)) * 180.0 / kPi * 0.01 + 60.0; };   // 60 to 61.8 deg wherever it is: no gain of 1 deg inside the turn
+        check(!f181::capSwivel(start, veeFar(start), 25.0, veeFar).applied, "F219: a pose that gains under 1 deg inside the 45 deg turn is not applied");
         check(!f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 90.0, 1.0), vee).applied, "F181a: the cap at 90 is off: not applied");
         // across the wrap of the swivel's angle
         const double zWrap = rad(170.0);

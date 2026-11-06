@@ -144,7 +144,15 @@ F216_BAND_HZ = (2.5, 6.0)   # the bob's band
 F216_SIDE_BAND_HZ = (1.0, 6.0)   # the side's band: the sway runs at half the stride's rate, about 1.7 Hz at a sprint
 F216_SPRINT_MM = 4.0        # F216 finding: a level sprint leaves more than this in the view with the key off (a starting guess)
 F216_CLAMP_M = 0.05         # nofoot::f216::kClampM, for the clamp share
-EYE_HEIGHT_DEFAULT_CM = 15.0   # fix.native_on_foot_eye_height_cm when the recording's header does not carry it
+F218_SPEED_S = 0.5          # F218/F219 section: the root's plane speed is taken over the last this many seconds
+F218_WALK_MPS = 0.3         # walk: from this speed ...
+F218_SPRINT_MPS = 4.0       # ... sprint: from this speed
+F218_MAX_MPS = 12.0         # a speed over this is the root jumping (a ship, a teleport), not a class
+F218_MIN_CLASS_S = 1.0      # a class with less left-arm writing than this is left out
+F218_SPINE_FLIP = 0.5       # a step of the spine weight over this is a flip
+F218_FINDING_MIN_S = 2.0    # F218 finding: an item with this much left-arm writing at speed ...
+F218_FINDING_STEPS_PER_S = 1.0   # ... and more elbow steps over 5 cm a second than this (a starting guess; the flown walk with the arc cutter read 1.1, the rifle 4.6)
+EYE_HEIGHT_DEFAULT_CM = 15.0  # fix.native_on_foot_eye_height_cm when the recording's header does not carry it
 SLOPE_BINS = (-90.0, -15.0, -5.0, 5.0, 15.0, 90.1)
 MAX_LISTED = 60             # findings listed per report before "... N more"
 
@@ -179,8 +187,11 @@ REQ_NEW = {'pin': ['up', 'fwd'], 'ik': ['anim_pelvis', 'anim_l_foot', 'anim_r_fo
 REQ_F214 = {'pin': ['f214_state', 'f214_target']}   # recorded from F214 on
 REQ_F215 = {'pin': ['f215_state', 'f215_body_y', 'f215_target']}   # recorded from F215 on; older recordings read 0 for the body's shift
 REQ_F216 = {'align': ['bob_seated', 'bob_w'], 'p1': ['sub_bob', 'bob_w']}   # recorded from F216 on; older recordings read 0 for the bob term
+# recorded from F218 and F219 on; older recordings lack them, and the F218/F219 section says so and gives no finding for the figures that need them (the step figures need only the first group)
+REQ_F218 = {'pin': ['root', 'item_serial', 'f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'],
+            'ik': ['item_serial', 'spine_w', 'l_reach_ratio', 'l_wrote', 'final_l_fore', 'final_chest', 'final_valid', 'l_swivel_limited', 'r_swivel_limited', 'l_swivel_cut_deg', 'r_swivel_cut_deg']}
 REQ_ALL = {}
-for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216):
+for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216, REQ_F218):
     for _k, _v in _d.items():
         REQ_ALL.setdefault(_k, [])
         REQ_ALL[_k] = sorted(set(REQ_ALL[_k]) | set(_v))
@@ -435,7 +446,7 @@ class Analysis:
         self.leak = {}
         self.cannot = []
         self.ik = None
-        self.f215 = self.f216 = None   # the F215 and F216 sections' figures
+        self.f215 = self.f216 = self.f218 = None   # the F215, F216 and F218/F219 sections' figures
         self.lever = self.lever_view = self.f214 = None   # the E / view over neck fits on the slope, and the F214 section's figures
 
     def say(self, s=''):
@@ -1503,6 +1514,103 @@ class Analysis:
             self.findings.append(Finding(min(r['t0'] for r in rr), max(r['t1'] for r in rr), 'f216_sprint_bob', 'bob', 'F216: with the key off a level sprint (%g m/s and over) leaves %.1f mm rms of %.1f to %.1f Hz bob in the view '
                                          '(the camera had %.1f mm), limit %.1f mm (%d stretch(es))' % (F216_SPEED_SPLIT_MPS, sprint['view_mm'], F216_BAND_HZ[0], F216_BAND_HZ[1], sprint['cam_mm'], F216_SPRINT_MM, sprint['n'])))
 
+    # -- F218, F219: the left elbow against the chest, by item and speed -------------------------------------------------------------------------------------------------------------
+    def f218_section(self):
+        """Per item serial and speed class (the root's plane speed over the last F218_SPEED_S: walk F218_WALK_MPS to F218_SPRINT_MPS, sprint over), with the left arm writing: seconds; the left elbow's
+        step against the chest (final_l_fore - final_chest, between consecutive ik records) over 2 and over 5 cm a second; the spine weight's flips a second (a step over 0.5); the left reach ratio's
+        mean; the share of solves F219 limited; and, where F218's fields are in the recording, the rifle's rest solution applied, refused and held back and the slide's largest offset. A class under
+        1 s is left out. Finding elbow_steps: an item with F218_FINDING_MIN_S or more reads over F218_FINDING_STEPS_PER_S steps over 5 cm a second. A recording without the new fields still prints the
+        step figures; the figures that need them say they are absent and give no finding."""
+        S = self.S
+        self.f218 = None
+        self.say('')
+        self.say('== left elbow (F218, F219): against the chest, by item and speed, with the left arm writing')
+        ik, pin = S.tab('ik'), S.tab('pin')
+        need_ik = ['item_serial', 'final_chest', 'final_l_fore', 'spine_w', 'l_reach_ratio', 'l_wrote', 'final_valid']
+        miss = [('ik.' + f) for f in need_ik if not ik.has(f)] + [('pin.' + f) for f in ('root', 'item_serial') if not pin.has(f)]
+        if not len(ik) or not len(pin) or miss:
+            self.say('  cannot evaluate: %s' % (', '.join(miss) if miss else 'no ik or pin records'))
+            return
+        t_ik, t_pin = S.t('ik'), S.t('pin')
+        root = pin.f('root').astype(np.float64)
+        if pin.has('up'):
+            up = pin.f('up').astype(np.float64)
+            nn = np.linalg.norm(up, axis=1)
+            up = np.where((nn > 0.5)[:, None], up / np.maximum(nn, 1e-9)[:, None], np.array([0.0, 1.0, 0.0]))
+        else:
+            up = np.tile(np.array([0.0, 1.0, 0.0]), (len(t_pin), 1))
+        j0 = np.searchsorted(t_pin, t_pin - F218_SPEED_S, 'left')
+        with np.errstate(all='ignore'):
+            d = root - root[j0]
+            dh = d - (d * up).sum(axis=1)[:, None] * up
+            span = t_pin - t_pin[j0]
+            speed = np.where(span >= 0.5 * F218_SPEED_S, np.linalg.norm(dh, axis=1) / np.maximum(span, 1e-3), np.nan)
+        speed = np.where(speed <= F218_MAX_MPS, speed, np.nan)
+        pi = np.searchsorted(t_pin, t_ik, 'right') - 1
+        near = (pi >= 0) & (t_ik - t_pin[np.maximum(pi, 0)] < 0.2)
+        v_ik = np.where(near, speed[np.maximum(pi, 0)], np.nan)
+        cls_of = lambda v: np.where(np.isfinite(v), np.where(v >= F218_SPRINT_MPS, 2, np.where(v >= F218_WALK_MPS, 1, 0)), -1)
+        cls_ik, cls_pin = cls_of(v_ik), cls_of(speed)
+        n = len(t_ik)
+        dt = np.zeros(n)
+        dt[1:] = np.clip(np.diff(t_ik), 0.0, 0.1)
+        ser = ik.f('item_serial').astype(np.int64)
+        elig = (ik.f('l_wrote') == 1) & (ik.f('final_valid') == 1)
+        rel = ik.f('final_l_fore').astype(np.float64) - ik.f('final_chest').astype(np.float64)
+        spine = ik.f('spine_w').astype(np.float64)
+        reach = ik.f('l_reach_ratio').astype(np.float64)
+        stp = np.zeros(n)
+        stp[1:] = np.linalg.norm(rel[1:] - rel[:-1], axis=1)
+        flip = np.zeros(n, bool)
+        flip[1:] = np.abs(spine[1:] - spine[:-1]) > F218_SPINE_FLIP
+        # a step is between two rows of one item and one speed class, both with the arm writing, 90 Hz apart, not across a gap
+        vs = np.zeros(n, bool)
+        vs[1:] = elig[1:] & elig[:-1] & (ser[1:] == ser[:-1]) & (cls_ik[1:] == cls_ik[:-1]) & (cls_ik[1:] >= 1) & (dt[1:] > 0.0) & (dt[1:] < 0.1) & np.isfinite(stp[1:])
+        lim = ik.f('l_swivel_limited') if ik.has('l_swivel_limited') else None
+        have_f218 = all(pin.has(f) for f in ('f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'))
+        pser = pin.f('item_serial').astype(np.int64)
+        names = ('standing', 'walk', 'sprint')
+        self.f218 = dict(items={}, have_f218=have_f218, have_limited=lim is not None)
+        per_item = {}
+        for s in sorted(set(ser[vs].tolist())):
+            for c in (1, 2):
+                m = vs & (ser == s) & (cls_ik == c)
+                secs = float(dt[m].sum())
+                if secs < F218_MIN_CLASS_S:
+                    continue
+                r2, r5 = float((stp[m] > 0.02).sum()) / secs, float((stp[m] > 0.05).sum()) / secs
+                fl = float(flip[m].sum()) / secs
+                rng = ('%g to %g m/s' % (F218_WALK_MPS, F218_SPRINT_MPS)) if c == 1 else ('%g m/s and over' % F218_SPRINT_MPS)
+                line = ('  item %d, %s (%s): %.1f s; left elbow steps against the chest over 2 cm %.1f/s, over 5 cm %.1f/s; spine weight flips %.1f/s; left reach ratio mean %.2f' % (
+                    s, names[c], rng, secs, r2, r5, fl, float(np.nanmean(reach[m]))))
+                limited = float(np.mean(lim[m] == 1)) if lim is not None else None
+                line += ('; swivel limited %.0f%% of solves' % (100.0 * limited)) if limited is not None else '; l_swivel_limited absent (a recording from before F219)'
+                if have_f218:
+                    pm = (pser == s) & (cls_pin == c)
+                    h, a, rf = int((pin.f('f218_held')[pm] == 1).sum()), int((pin.f('f218_applied')[pm] == 1).sum()), int((pin.f('f218_refused')[pm] == 1).sum())
+                    if h + a + rf:
+                        line += '; F218 over %d pin calls: rest applied %d, refused %d, held back %d, largest slide %.1f cm' % (int(pm.sum()), a, rf, h, 100.0 * float(np.nanmax(pin.f('f218_offset_m')[pm])))
+                self.say(line)
+                self.f218['items'][(int(s), names[c])] = dict(secs=secs, r2=r2, r5=r5, flips=fl, reach=float(np.nanmean(reach[m])), limited=limited)
+                acc = per_item.setdefault(int(s), dict(secs=0.0, n5=0.0, nflip=0.0, rows=[]))
+                acc['secs'] += secs
+                acc['n5'] += float((stp[m] > 0.05).sum())
+                acc['nflip'] += float(flip[m].sum())
+                acc['rows'].append(np.flatnonzero(m))
+        if not self.f218['items']:
+            self.say('  no item with %.0f s or more of left-arm writes at %g m/s or more (the root\'s plane speed over %.1f s): nothing to read' % (F218_MIN_CLASS_S, F218_WALK_MPS, F218_SPEED_S))
+        if not have_f218:
+            self.say('  pin.f218_* missing: a recording from before F218; the rifle\'s torso figures are absent and give no finding')
+        for s, acc in sorted(per_item.items()):
+            if acc['secs'] < F218_FINDING_MIN_S:
+                continue
+            rate = acc['n5'] / acc['secs']
+            if rate > F218_FINDING_STEPS_PER_S:
+                idx = np.concatenate(acc['rows'])
+                cause = 'torso' if acc['nflip'] / acc['secs'] > 0.5 else 'elbow'
+                self.findings.append(Finding(t_ik[idx].min(), t_ik[idx].max(), 'elbow_steps', cause, 'F218/F219: item %d, the left elbow stepped over 5 cm against the chest %.1f times a second over %.1f s of writes at '
+                                             '%g m/s or more (limit %.1f); the spine weight flipped %.1f times a second' % (s, rate, acc['secs'], F218_WALK_MPS, F218_FINDING_STEPS_PER_S, acc['nflip'] / acc['secs'])))
+
     # -- bob ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def bob(self):
         L = self.L
@@ -1860,6 +1968,7 @@ class Analysis:
         else:
             self.say('')
             self.say('== height excursions, bob, leak gains: not evaluated (no ledger)')
+        self.f218_section()
         self.ik_events()
         if since is not None or until is not None:
             lo = since if since is not None else 0.0
@@ -2070,11 +2179,11 @@ def _E(en, name):
 
 
 def _arm(p):
-    return (_S('f32', *[p + x for x in ('reach_ratio', 'shortfall_cm', 'w_arm', 'swivel_deg', 'elbow_deg', 'clav_deg', 'grip_err_cm')]) + [])
+    return (_S('f32', *[p + x for x in ('reach_ratio', 'shortfall_cm', 'w_arm', 'swivel_deg', 'elbow_deg', 'clav_deg', 'grip_err_cm', 'swivel_cut_deg')]) + [])
 
 
 def _arm8(p):
-    return _S('u8', p + 'ok', p + 'wrote') + _E('PoleSrc', p + 'pole_src') + _S('u8', *[p + x for x in ('swivel_capped', 'swivel_min_violation', 'swivel_fallback', 'reach_limited', 'assisted',
+    return _S('u8', p + 'ok', p + 'wrote') + _E('PoleSrc', p + 'pole_src') + _S('u8', *[p + x for x in ('swivel_capped', 'swivel_limited', 'swivel_min_violation', 'swivel_fallback', 'reach_limited', 'assisted',
                                                                                                           'f98_seed_kept', 'f159_reseed', 'f165_applied', 'f192_applied')]) + _E('Hold', p + 'hold')
 
 
@@ -2097,10 +2206,10 @@ SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_v
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
-                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') +
+                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') + _S('f32', 'f218_offset_m') +
                      _S('u8', 'valid') + _E('PinRefuse', 'refuse') + _S('u8', 'settled') + _E('SettleWhy', 'settle_why') + _S('u8', 'f138_refused') + _E('Stance', 'stance') +
                      _E('PinState', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
-                     _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known') + _E('F214State', 'f214_state') + _E('F215State', 'f215_state'))
+                     _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known') + _E('F214State', 'f214_state') + _E('F215State', 'f215_state') + _S('u8', 'f218_held', 'f218_applied', 'f218_refused'))
 _ik = _S('u64', 'plan_x', 'fp_x') + _S('u32', 'plan_gen', 'fp_gen', 'fp_seq', 'fp_frame', 'g_frame', 'p1', 'item_serial', 'fp_age_ms', 'g_age_ms', 'joints') + \
     _S('f32', 'spine_w', 'spine_pitch_rad', 'spine_roll_rad', 'square_rad', 'f166_w', 'f180_w', 'f169_w', 'off_w', 'f167_release', 'armed_w', 'base_w') + _arm('l_') + _arm('r_')
 for _w in ('anim', 'final'):
@@ -2903,6 +3012,50 @@ def self_test():
         check('align.bob_seated missing' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'f216_sprint_bob'], 'a recording from before F216 reads the view as the camera and names no sprint finding')
         check(abs(Analysis.band_rms(np.arange(128) / 90.0, 0.010 * np.sin(2 * np.pi * 3.4 * np.arange(128) / 90.0), 2.5, 6.0) * 1000 - 7.07) < 0.7 and
               Analysis.band_rms(np.arange(128) / 90.0, 0.010 * np.sin(2 * np.pi * 0.7 * np.arange(128) / 90.0), 2.5, 6.0) * 1000 < 0.5, 'the band rms reads a 3.4 Hz 10 mm sine as 7.07 mm and a 0.7 Hz one as nothing')
+        # F218, F219: the left elbow against the chest, by item and speed. A rifle (serial 3) walked 1.5 m/s for 7 s: with the torso flipping between two solutions three times a second (the elbow 8 cm
+        # each time, the spine weight 0 to 1) it is a finding; held on one solution it is not.
+        def torso_post(flips):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                n = len(t)
+                pin['root'] = np.stack([np.zeros(n), np.zeros(n), np.clip(t - 1.0, 0.0, 9.0) * 1.5], 1)
+                m = (t >= 2.0) & (t < 9.0)
+                ik['item_serial'], pin['item_serial'] = np.where(m, 3, 0), np.where(m, 3, 0)
+                sq = ((np.floor((t - 2.0) * 3.0).astype(int) % 2) == 1).astype(float) if flips else np.zeros(n)
+                ik['final_l_fore'] = ik['final_l_fore'] + sq[:, None] * np.array([0.08, 0.0, 0.0])
+                ik['spine_w'] = sq
+                ik['l_reach_ratio'] = np.where(sq > 0, 0.97, 1.06)
+                ik['l_swivel_limited'] = (m & (np.arange(n) % 10 == 0)).astype(int)
+                pin['f218_applied'] = (m & (sq == 0)).astype(int)
+                pin['f218_refused'] = (m & (sq > 0)).astype(int)
+                pin['f218_held'] = np.zeros(n, int)
+                pin['f218_offset_m'] = np.where(m & (sq > 0), 0.06, 0.0)
+            return post
+        for flips, want in ((True, {'elbow_steps'}), (False, set())):
+            d = fresh()
+            _make(d, stamp, [], [torso_post(flips)])
+            S, A = analyse(d)
+            got = {f.kind for f in A.findings if f.kind == 'elbow_steps'}
+            txt = '\n'.join(A.out)
+            it = (A.f218 or {}).get('items', {}).get((3, 'walk'))
+            check(got == want and it is not None and 6.5 < it['secs'] < 7.5 and abs(it['limited'] - 0.1) < 0.02 and 'item 3, walk (0.3 to 4 m/s)' in txt and 'F218 over' in txt,
+                  'F218 on a rifle walking with the torso %s: findings %s, want %s (%s)' % ('flipping' if flips else 'steady', sorted(got), sorted(want), it))
+            if flips:
+                check(it['r5'] > 2.5 and it['flips'] > 2.5 and abs(it['reach'] - 1.015) < 0.05 and 'rest applied' in txt and 'largest slide 6.0 cm' in txt,
+                      'F218 reads the flips: over 5 cm %.1f/s, spine flips %.1f/s, reach %.2f' % (it['r5'], it['flips'], it['reach']))
+            else:
+                check(it['r5'] == 0.0 and it['flips'] == 0.0 and 'rest applied' in txt and 'refused 0' in txt, 'F218 on a steady torso reads no step and no flip')
+        d = fresh()
+        _make(d, stamp, [], [torso_post(True)], drop={'pin': ['f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'], 'ik': ['l_swivel_limited', 'r_swivel_limited', 'l_swivel_cut_deg', 'r_swivel_cut_deg']})
+        S, A = analyse(d)
+        txt = '\n'.join(A.out)
+        check('pin.f218_* missing' in txt and 'l_swivel_limited absent' in txt and 'item 3, walk' in txt and 'elbow_steps' in {f.kind for f in A.findings} and 'F218 over' not in txt,
+              'a recording from before F218 and F219 still prints the step figures, says which fields it lacks, and gives the finding the steps alone support')
+        d = fresh()
+        _make(d, stamp)
+        S, A = analyse(d)
+        check('nothing to read' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'elbow_steps'], 'a session with no left-arm writing at speed reads nothing and names no finding')
         # arms the IK did not write: a huge reach and swivel jumps make no event
         d = fresh()
 

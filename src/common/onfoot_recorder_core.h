@@ -137,16 +137,16 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(f64, f179_stand_w) S(f64, f179_stand_raise) S(f64, f179_legs_room) S(f64, f193_neck_y) S(f64, f193_eye_ask)                                            \
     S(f64, guard_push_cm) S(f64, guard_pred_cm) S(f64, guard_dist_cm)                                                                                        \
     S(f64, stored_neck_stand) S(f64, stored_neck_crouch) S(f64, stored_cam_stand) S(f64, stored_cam_crouch) S(f64, f214_target) S(f64, f215_body_y) S(f64, f215_target)                            \
-    S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3)                                                                                                        \
+    S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3) S(f32, f218_offset_m)                                                                                                        \
     S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) E(PinState, pin_state) E(Support, support)    \
     E(EyeSource, eye_source) S(u8, hunched) S(u8, pin_capped_h) S(u8, pin_capped_v) S(u8, f97_capped) S(u8, f107_began) E(F193Source, f193_source)         \
-    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state) E(F215State, f215_state)
+    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state) E(F215State, f215_state) S(u8, f218_held) S(u8, f218_applied) S(u8, f218_refused)
 
 // ik: the Animate thread, once per local-body call, at the end of a completed call and at each early exit
 #define ONF_IK_ARM_F32(S, p)                                                                                                                                 \
-    S(f32, p##reach_ratio) S(f32, p##shortfall_cm) S(f32, p##w_arm) S(f32, p##swivel_deg) S(f32, p##elbow_deg) S(f32, p##clav_deg) S(f32, p##grip_err_cm)
+    S(f32, p##reach_ratio) S(f32, p##shortfall_cm) S(f32, p##w_arm) S(f32, p##swivel_deg) S(f32, p##elbow_deg) S(f32, p##clav_deg) S(f32, p##grip_err_cm) S(f32, p##swivel_cut_deg)
 #define ONF_IK_ARM_U8(S, E, p)                                                                                                                               \
-    S(u8, p##ok) S(u8, p##wrote) E(PoleSrc, p##pole_src) S(u8, p##swivel_capped) S(u8, p##swivel_min_violation) S(u8, p##swivel_fallback)                    \
+    S(u8, p##ok) S(u8, p##wrote) E(PoleSrc, p##pole_src) S(u8, p##swivel_capped) S(u8, p##swivel_limited) S(u8, p##swivel_min_violation) S(u8, p##swivel_fallback)                    \
     S(u8, p##reach_limited) S(u8, p##assisted) S(u8, p##f98_seed_kept) S(u8, p##f159_reseed) S(u8, p##f165_applied) S(u8, p##f192_applied)                  \
     E(Hold, p##hold)
 #define ONF_LIST_IK(S, A, E)                                                                                                                                 \

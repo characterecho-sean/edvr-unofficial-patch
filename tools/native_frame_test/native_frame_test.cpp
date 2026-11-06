@@ -79,6 +79,8 @@
 #include "f195_checks.h"    // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B key): the four flown engages kept whole, 26.4 up keeps 15 and centres 11.4, 20 down, exactly +-15, offsets that are not numbers and the key off centring all, the follower, the key's places, the line, the sites
 #include "f214_checks.h"    // F214: unarmed, the view raise follows the neck while the body moves (TEMPORARY A/B key): the 0.6 s window, the stride's ripple, a slope step, every outcome and the once-only re-publish, the line, the sites
 #include "f215_checks.h"    // F215: unarmed and upright, the body follows the view (TEMPORARY A/B key): level ground, a slope term, a turn on the spot, the releases and holds, the key off, the rate limit and cap, the shifted write, the line, the sites
+#include "f218_checks.h"    // F218: the rifle's torso: the rest solution held back after a refusal (1 s, extended while moving), the slide across a switch (continuity, decay, the 20 cm limit, dt), the line, the sites
+#include "f219_checks.h"    // F219: the elbow's swing limited per frame at the hip: the signed angle, the limit, the memory, a 15 deg hop to 4 deg on the real two-bone frame, F181's 45 deg search, the line, the sites
 #include "f216_checks.h"    // F216: the view bob (user setting): the filter on a 3.4 Hz sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets, the seated sign through adsUnlockedCam, the history by serial, the line, the sites
 #include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
@@ -7769,6 +7771,10 @@ int wmain(int argc, wchar_t** argv) {
     f214test::run214(check);
     // F215: the body follows the view: the rule on level ground, a slope and a turn, the releases, holds and key off, the rate limit and cap, the shifted write, the line, the sites.
     f215test::run215(check);
+    // F218: the rifle's torso: the hold's timing, the slide's continuity, decay, jump limit, first call and dt clamp, the line, the sites.
+    f218test::run218(check);
+    // F219: the elbow's swing limited at the hip: the angle's sign and degenerate parts, the limit, the step, the memory, the limit on the real two-bone frame, F181's search held to 45 deg, the line, the sites.
+    f219test::run219(check);
     // F216: the view bob filter on a sprint (a sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets), the seated sign, the history by serial, the line, the sites.
     f216test::run216(check);
     // F205: the effective sight eye and the ADS view circle.
