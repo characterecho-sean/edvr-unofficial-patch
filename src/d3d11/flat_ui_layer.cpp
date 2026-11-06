@@ -975,6 +975,14 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         const std::string layerText = "flat layer: " + barsLayer;
         supercruiseBarsLog(layerText.c_str());
     }
+    // The legacy canopy (kLegacyGlass), the same counts with its reasons. ALWAYS printed: all zeros is `odyssey`, or a window with no canopy drawn.
+    {
+        const size_t fg = static_cast<size_t>(UiLayerFamily::kLegacyGlass);
+        Log::get().note("flat ui layer legacy glass: asked=%llu decided=%llu taken=%llu refused-at-issue=%llu refused=%llu (%s)", static_cast<unsigned long long>(w.asked[fg]),
+                        static_cast<unsigned long long>(w.decided[fg]), static_cast<unsigned long long>(w.taken[fg]), static_cast<unsigned long long>(w.atIssue[fg]),
+                        static_cast<unsigned long long>(refusedTotalOf(w.glassRefused, w.glassDeclined, w.atIssue[fg])),
+                        reasonsOf(w.glassRefused, w.glassDeclined, w.atIssue[fg]).c_str());
+    }
     // The HUD's bloom feed: every first-level draw that asked for H' this window, by what the pass came to. "fed" is the draws that read H'; a
     // window with the layer live and the HUD taken but nothing here is a build that never ran it, or a game with Bloom off (no first level).
     {
