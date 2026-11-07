@@ -44,6 +44,8 @@ enum : int {
     kIdRepair = 1021,
     kIdUninstall = 1022,
     kIdCollectLogs = 1024,
+    kIdCopyPath = 1025,
+    kIdShowFolder = 1026,
     kIdReport = 1030,
     kIdKofi = 1040,
     kIdDiscord = 1041,
@@ -101,6 +103,12 @@ struct Gui {
     HWND repair = nullptr;
     HWND uninstall = nullptr;
     HWND collectLogs = nullptr;
+    HWND copyPath = nullptr;    // Wine only: shown after a successful Save logs
+    HWND showFolder = nullptr;  // Wine only: shown after a successful Save logs
+    bool hostButtonsShown = false;
+    std::string  savedReport;      // the report Save logs showed, which the two buttons add a line to
+    std::string  savedHostPath;    // the zip's path as the host sees it
+    std::wstring savedFolder;      // the folder it went into, as Windows sees it
     HWND tabInstall = nullptr;
     HWND tabSettings = nullptr;
     HWND settingsVr = nullptr;
@@ -325,6 +333,15 @@ void applyLayout() {
         const int y = frameTop + (frameH > textH ? (frameH - textH) / 2 : 0);
         MoveWindow(g.search, dp(kMargin + kCardPad), y, dp(310), textH, TRUE);
     }
+
+    // The two Wine buttons beside Save logs: there only once a save has worked, and only on this screen.
+    for (HWND hostButton : {g.copyPath, g.showFolder}) {
+        if (hostButton) ShowWindow(hostButton, g.hostButtonsShown && g.screen == Screen::Install ? SW_SHOW : SW_HIDE);
+    }
+    // From 8 units after Save logs to the card's inner edge (kClientWidth - kMargin - kCardPad = 676). The labels measure
+    // 60 and 70 units at 96 dpi, so the widths are not equal: 70 and 78 leave 5 and 4 units a side.
+    if (g.copyPath) MoveWindow(g.copyPath, dp(520), dp(436), dp(70), dp(34), TRUE);
+    if (g.showFolder) MoveWindow(g.showFolder, dp(598), dp(436), dp(kClientWidth - kMargin - kCardPad - 598), dp(34), TRUE);
 
     // Shown or hidden by the scope, not by the screen alone, so it runs after the loop above.
     syncSettingsSelector();
@@ -992,17 +1009,37 @@ void runAction(AppArgs::Act action) {
     showSurvey();
 }
 
+// Wine only. The two buttons add a status line under the saved report and keep the report itself,
+// so the crash dump's path and its warning stay on screen.
+void copySavedPath() {
+    std::string error;
+    if (copyTextToClipboard(g.window, g.savedHostPath, &error)) {
+        setReport(g.savedReport + "\r\nCopied " + g.savedHostPath + " to the clipboard.\r\n");
+    } else {
+        setReport(g.savedReport + "\r\nCould not copy the path (" + error + "). It is " + g.savedHostPath +
+                  "\r\n");
+    }
+}
+
+void showSavedFolder() {
+    if (!showFolderOnHost(g.savedFolder)) {
+        setReport(g.savedReport + "\r\nCould not open the folder. The zip is at " + g.savedHostPath + "\r\n");
+    }
+}
+
 // One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
 // settings file and the install record -- the four things the README asks a
 // reporter to attach, from three different folders, chosen from the right
 // session.
 void saveLogs() {
     if (!g.haveSurvey) return;
-    const LogBundle bundle = collectLogs(g.survey.game.dir, desktopFolder());
+    const bool wine = runningUnderWine();
+    const LogBundle bundle = collectLogs(g.survey.game.dir, logSaveFolder());
+    g.hostButtonsShown = false;
 
     std::string text;
     if (bundle.ok) {
-        text = "Saved " + toUtf8(bundle.zipPath) + "\r\n\r\nIt contains:\r\n";
+        text = "Saved " + hostPathFor(bundle.zipPath) + "\r\n\r\nIt contains:\r\n";
         for (const std::wstring& name : bundle.included) text += "  " + toUtf8(name) + "\r\n";
         if (!bundle.notes.empty()) {
             text += "\r\n";
@@ -1020,22 +1057,30 @@ void saveLogs() {
                 text += "On Linux, paste before you close this window; the copy may not outlive it.\r\n";
             }
         } else {
-            text += "\r\nCould not copy it to the clipboard (" + clipError + "). The file on the "
-                    "Desktop is fine.\r\n";
+            text += "\r\nCould not copy it to the clipboard (" + clipError + "). The file on the " +
+                    std::string(wine ? "disk" : "Desktop") + " is fine.\r\n";
         }
         if (!bundle.dumpZipPath.empty()) {
             // The dump is a separate file for a reason: it is a copy of the game's
             // memory, which is not for a public issue.
             text += "\r\nThe game crashed in that session, so its crash dump is saved apart from the logs: " +
-                    toUtf8(bundle.dumpZipPath) +
+                    hostPathFor(bundle.dumpZipPath) +
                     "\r\nIt holds a copy of the game's memory. Do not attach it to a public issue; "
                     "send it to the developer privately if asked.\r\n";
+        }
+        if (wine) {
+            g.savedHostPath = hostPathFor(bundle.zipPath);
+            const size_t slash = bundle.zipPath.find_last_of(L'\\');
+            g.savedFolder = slash == std::wstring::npos ? bundle.zipPath : bundle.zipPath.substr(0, slash);
+            g.hostButtonsShown = true;
         }
     } else {
         text = bundle.error + "\r\n";
         for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
     }
+    if (wine) g.savedReport = text;
     setReport(text);
+    if (wine) applyLayout();  // brings up the two buttons
 }
 void showScreen(Screen screen) {
     g.screen = screen;
@@ -1120,6 +1165,12 @@ void createControls(HWND window) {
     place(g.repair, 172, 436, 104, 34, Screen::Install);
     place(g.uninstall, 284, 436, 104, 34, Screen::Install);
     place(g.collectLogs, 396, 436, 116, 34, Screen::Install);
+    if (runningUnderWine()) {
+        g.copyPath = ui::makeButton(window, L"Copy path", kIdCopyPath, ui::ButtonStyle::Secondary, f.body);
+        g.showFolder = ui::makeButton(window, L"Show folder", kIdShowFolder, ui::ButtonStyle::Secondary, f.body);
+        ShowWindow(g.copyPath, SW_HIDE);
+        ShowWindow(g.showFolder, SW_HIDE);
+    }
     // No Close button: it was the one control at list height marked
     // both-screens, so it painted through the settings page -- and the
     // window's own close box already does the job.
@@ -1254,6 +1305,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdRepair: runAction(AppArgs::Act::Repair); return 0;
                 case kIdUninstall: runAction(AppArgs::Act::Uninstall); return 0;
                 case kIdCollectLogs: saveLogs(); return 0;
+                case kIdCopyPath: copySavedPath(); return 0;
+                case kIdShowFolder: showSavedFolder(); return 0;
                 case kIdTabInstall: showScreen(Screen::Install); return 0;
                 case kIdTabSettings: showScreen(Screen::Settings); return 0;
                 case kIdKofi:

@@ -414,6 +414,21 @@ line's `--collect-logs` leaves the clipboard alone. The block's layout is
 checked in `installer_test` with the shell's own `DragQueryFileW`; the rig does
 not touch the clipboard.
 
+Under Wine, Proton or CrossOver the Desktop is inside the prefix, so the zip
+goes to the host instead. The installer reads `WINEHOMEDIR` (`\??\Z:\home\deck`
+normally), drops the `\??\` prefix, and tries `<home>\Downloads`, then `<home>`,
+then the prefix Desktop, using the first that exists and takes a test file. A
+value with no drive letter (`\??\unix\home\deck`) or no value means the home is
+unknown. The report shows the host path (`/home/deck/Downloads/edvr-logs-....zip`),
+found with `wine_get_unix_file_name` looked up at run time, and falls back to the
+`C:\` path if that fails. After a save, **Copy path** puts the host path on the
+clipboard as text and **Show folder** starts `winebrowser.exe` on the folder,
+which hands it to `xdg-open` (`open` on a Mac). `--collect-logs` makes the same
+folder choice and prints the host path; with `--dry-run` it only prints the
+folder it would save to and writes nothing, not even the test file. None of this runs on real Windows. The
+string handling is a pure function, covered in `installer_test`; the Wine calls
+themselves have not been run on a Wine host.
+
 *Most recent session* is meant literally. EDVR names its logs
 `edvr_<gfx|vr>_YYYYMMDD_HHMMSS.log` and writes two a few seconds apart at each
 launch, so the newest stamp and everything within three minutes of it is one

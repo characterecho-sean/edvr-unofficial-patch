@@ -6503,6 +6503,23 @@ static void testLogBundle(const std::wstring& scratch) {
         check(!copyFileToClipboard(nullptr, std::wstring(), &copyError) && !copyError.empty(),
               "copying no file says so rather than clearing the clipboard");
     }
+
+    // Wine's WINEHOMEDIR, as the pure string function reads it.
+    {
+        check(hostHomeFromWineHomeDir(L"\\??\\Z:\\home\\deck") == L"Z:\\home\\deck", "the Z: form loses its NT prefix");
+        check(hostHomeFromWineHomeDir(L"\\??\\z:\\home\\deck") == L"z:\\home\\deck", "a lower-case drive is a drive");
+        check(hostHomeFromWineHomeDir(L"\\??\\Z:\\home\\deck\\") == L"Z:\\home\\deck", "a trailing backslash is trimmed");
+        check(hostHomeFromWineHomeDir(L"\\??\\Z:\\") == L"Z:\\", "a bare drive root keeps its backslash");
+        check(hostHomeFromWineHomeDir(L"\\??\\unix\\home\\deck").empty(), "the \\??\\unix form names no drive");
+        check(hostHomeFromWineHomeDir(L"").empty(), "an empty value is an unknown home");
+        check(hostHomeFromWineHomeDir(L"\\??\\Z:\\Users\\sean") == L"Z:\\Users\\sean", "a Mac-style home");
+        check(hostHomeFromWineHomeDir(L"Z:\\home\\deck") == L"Z:\\home\\deck", "a value without the prefix still works");
+        // Not Wine here: the folder is the Desktop, as before, and a host path is the Windows path.
+        if (!runningUnderWine()) {
+            check(logSaveFolder(true) == desktopFolder(), "on Windows the logs go to the Desktop");
+            check(hostPathFor(L"C:\\a\\b.zip") == "C:\\a\\b.zip", "on Windows the path is shown as it is");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

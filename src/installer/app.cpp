@@ -335,16 +335,22 @@ int runConsole(const AppArgs& args) {
     if (args.action == AppArgs::Act::None) return 0;
 
     if (args.action == AppArgs::Act::CollectLogs) {
-        const LogBundle bundle = collectLogs(survey.game.dir, desktopFolder());
+        const std::wstring saveFolder = logSaveFolder(args.dryRun);
+        if (args.dryRun) {
+            writeOut("\r\nDry run: would save the log zip to " + hostPathFor(saveFolder) +
+                     ". Nothing was written.\r\n");
+            return 0;
+        }
+        const LogBundle bundle = collectLogs(survey.game.dir, saveFolder);
         for (const std::string& note : bundle.notes) writeOut("  " + note + "\r\n");
         if (!bundle.ok) {
             writeOut(bundle.error + "\r\n");
             return 1;
         }
-        writeOut("\r\nSaved " + toUtf8(bundle.zipPath) + "\r\n");
+        writeOut("\r\nSaved " + hostPathFor(bundle.zipPath) + "\r\n");
         for (const std::wstring& name : bundle.included) writeOut("  " + toUtf8(name) + "\r\n");
         if (!bundle.dumpZipPath.empty()) {
-            writeOut("\r\nCrash dump (private; not for a public issue): " + toUtf8(bundle.dumpZipPath) + "\r\n");
+            writeOut("\r\nCrash dump (private; not for a public issue): " + hostPathFor(bundle.dumpZipPath) + "\r\n");
             for (const std::wstring& name : bundle.dumpEntries) writeOut("  " + toUtf8(name) + "\r\n");
         }
         return 0;

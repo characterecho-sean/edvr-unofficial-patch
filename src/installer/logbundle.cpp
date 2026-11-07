@@ -283,6 +283,113 @@ bool runningUnderWine() {
     return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
+std::wstring hostHomeFromWineHomeDir(const std::wstring& value) {
+    std::wstring home = value;
+    // Wine hands Windows processes an NT path: \??\Z:\home\deck.
+    if (home.compare(0, 4, L"\\??\\") == 0) home.erase(0, 4);
+    // A drive letter is what makes it a path this process can open. The fallback \??\unix\home\deck
+    // names no drive, so the home is unknown.
+    const bool letter = !home.empty() && ((home[0] >= L'A' && home[0] <= L'Z') || (home[0] >= L'a' && home[0] <= L'z'));
+    if (!letter || home.size() < 2 || home[1] != L':') return std::wstring();
+    if (home.size() > 2 && home[2] != L'\\') return std::wstring();
+    while (home.size() > 3 && home.back() == L'\\') home.pop_back();
+    if (home.size() == 2) home += L'\\';
+    return home;
+}
+
+namespace {
+
+// A folder that exists and, unless this is a dry run, takes a file: the test file is made and removed
+// again. A dry run only asks whether the folder is there.
+bool folderAcceptsFile(const std::wstring& dir, bool dryRun) {
+    if (dir.empty() || !dirExists(dir)) return false;
+    if (dryRun) return true;
+    const std::wstring probe = joinPath(dir, L"edvr-write-test-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+    HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(h);
+    return true;
+}
+
+}  // namespace
+
+std::wstring logSaveFolder(bool dryRun) {
+    if (!runningUnderWine()) return desktopFolder();
+    wchar_t value[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableW(L"WINEHOMEDIR", value, MAX_PATH);
+    const std::wstring home = (n > 0 && n < MAX_PATH) ? hostHomeFromWineHomeDir(value) : std::wstring();
+    if (!home.empty()) {
+        const std::wstring downloads = joinPath(home, L"Downloads");
+        if (folderAcceptsFile(downloads, dryRun)) return downloads;
+        if (folderAcceptsFile(home, dryRun)) return home;
+    }
+    return desktopFolder();
+}
+
+std::string hostPathFor(const std::wstring& windowsPath) {
+    if (runningUnderWine() && !windowsPath.empty()) {
+        using GetUnixName = char*(__cdecl*)(const wchar_t*);
+        const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        const GetUnixName convert =
+            kernel ? reinterpret_cast<GetUnixName>(GetProcAddress(kernel, "wine_get_unix_file_name")) : nullptr;
+        if (convert) {
+            char* unixPath = convert(windowsPath.c_str());
+            if (unixPath) {
+                const std::string out = unixPath;
+                HeapFree(GetProcessHeap(), 0, unixPath);
+                if (!out.empty()) return out;
+            }
+        }
+    }
+    return toUtf8(windowsPath);
+}
+
+bool copyTextToClipboard(HWND owner, const std::string& utf8, std::string* error) {
+    const std::wstring text = fromUtf8(utf8);
+    bool open = false;
+    for (int attempt = 0; attempt < 10 && !open; ++attempt) {
+        open = OpenClipboard(owner) != FALSE;
+        if (!open) Sleep(20);
+    }
+    if (!open) {
+        if (error) *error = "the clipboard is in use by another program";
+        return false;
+    }
+    bool ok = false;
+    if (EmptyClipboard()) {
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+        void* bytes = memory ? GlobalLock(memory) : nullptr;
+        if (bytes) {
+            memcpy(bytes, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+            GlobalUnlock(memory);
+            ok = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+        }
+        if (!ok && memory) GlobalFree(memory);
+    }
+    if (!ok && error) *error = "the clipboard refused the text (Windows error " + std::to_string(GetLastError()) + ")";
+    CloseClipboard();
+    return ok;
+}
+
+bool showFolderOnHost(const std::wstring& folder) {
+    wchar_t system[MAX_PATH]{};
+    const UINT n = GetSystemDirectoryW(system, MAX_PATH);
+    std::wstring exe = L"winebrowser.exe";
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring full = joinPath(system, L"winebrowser.exe");
+        if (fileExists(full)) exe = full;
+    }
+    std::wstring command = L"\"" + exe + L"\" \"" + folder + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
 bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& files,
               const std::vector<std::wstring>& names, std::string* error,
               std::vector<std::wstring>* skippedOut) {
