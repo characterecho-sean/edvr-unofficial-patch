@@ -342,7 +342,7 @@ the Sharpening row shipped as a text box for three releases: the in-headset
 menu echoes `fix.render_sharpness` with `getString` from a file that sorts
 before the pass reading it with `getFloat`, and a text box that shows
 percentages wrote a typed `20` as `20` and showed it back as `2000%`
-([#35](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/35)).
+([#35](https://github.com/characterecho-sean/ed-unofficial-patch/issues/35)).
 The generator's `--self-test` holds that shape, and `build.bat` runs it before
 generating.
 

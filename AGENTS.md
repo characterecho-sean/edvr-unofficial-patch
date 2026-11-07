@@ -304,7 +304,7 @@ minutes after a flight finally reproduced the effect being chased.
 ## Tracking work
 
 - **Work is tracked in GitHub issues** on
-  `characterecho-sean/edvr-unofficial-patch` (`gh issue list`). A finding
+  `characterecho-sean/ed-unofficial-patch` (`gh issue list`). A finding
   to act on later — a review follow-up, a retro item, a bug noticed in
   passing — becomes an issue. Commits and PRs name it (`(#97)`,
   `Closes #97`). A plan or task list that only hands one session's work

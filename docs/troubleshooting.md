@@ -4,7 +4,7 @@ Known faults with known answers for both Flat screen and VR users, plus how to
 collect automated diagnostic data for anything new.
 
 If your issue is not listed below, open [an
-issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
+issue](https://github.com/characterecho-sean/ed-unofficial-patch/issues/new/choose)
 or ask on Discord with your logs attached: run the installer and click **Save
 logs**, which gathers the relevant session's logs, breadcrumbs, and settings
 into one zip on your Desktop.
