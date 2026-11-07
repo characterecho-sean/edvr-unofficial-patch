@@ -106,6 +106,7 @@ struct Gui {
     HWND copyPath = nullptr;    // Wine only: shown after a successful Save logs
     HWND showFolder = nullptr;  // Wine only: shown after a successful Save logs
     bool hostButtonsShown = false;
+    std::string  savedReport;      // the report Save logs showed, which the two buttons add a line to
     std::string  savedHostPath;    // the zip's path as the host sees it
     std::wstring savedFolder;      // the folder it went into, as Windows sees it
     HWND tabInstall = nullptr;
@@ -337,8 +338,10 @@ void applyLayout() {
     for (HWND hostButton : {g.copyPath, g.showFolder}) {
         if (hostButton) ShowWindow(hostButton, g.hostButtonsShown && g.screen == Screen::Install ? SW_SHOW : SW_HIDE);
     }
-    if (g.copyPath) MoveWindow(g.copyPath, dp(520), dp(436), dp(84), dp(34), TRUE);
-    if (g.showFolder) MoveWindow(g.showFolder, dp(612), dp(436), dp(84), dp(34), TRUE);
+    // From 8 units after Save logs to the card's inner edge (kClientWidth - kMargin - kCardPad = 676). The labels measure
+    // 60 and 70 units at 96 dpi, so the widths are not equal: 70 and 78 leave 5 and 4 units a side.
+    if (g.copyPath) MoveWindow(g.copyPath, dp(520), dp(436), dp(70), dp(34), TRUE);
+    if (g.showFolder) MoveWindow(g.showFolder, dp(598), dp(436), dp(kClientWidth - kMargin - kCardPad - 598), dp(34), TRUE);
 
     // Shown or hidden by the scope, not by the screen alone, so it runs after the loop above.
     syncSettingsSelector();
@@ -1006,25 +1009,28 @@ void runAction(AppArgs::Act action) {
     showSurvey();
 }
 
-// One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
-// settings file and the install record -- the four things the README asks a
-// reporter to attach, from three different folders, chosen from the right
-// session.
+// Wine only. The two buttons add a status line under the saved report and keep the report itself,
+// so the crash dump's path and its warning stay on screen.
 void copySavedPath() {
     std::string error;
     if (copyTextToClipboard(g.window, g.savedHostPath, &error)) {
-        setReport("Copied " + g.savedHostPath + " to the clipboard.\r\n");
+        setReport(g.savedReport + "\r\nCopied " + g.savedHostPath + " to the clipboard.\r\n");
     } else {
-        setReport("Could not copy the path (" + error + "). It is " + g.savedHostPath + "\r\n");
+        setReport(g.savedReport + "\r\nCould not copy the path (" + error + "). It is " + g.savedHostPath +
+                  "\r\n");
     }
 }
 
 void showSavedFolder() {
     if (!showFolderOnHost(g.savedFolder)) {
-        setReport("Could not open the folder. The zip is at " + g.savedHostPath + "\r\n");
+        setReport(g.savedReport + "\r\nCould not open the folder. The zip is at " + g.savedHostPath + "\r\n");
     }
 }
 
+// One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
+// settings file and the install record -- the four things the README asks a
+// reporter to attach, from three different folders, chosen from the right
+// session.
 void saveLogs() {
     if (!g.haveSurvey) return;
     const bool wine = runningUnderWine();
@@ -1072,6 +1078,7 @@ void saveLogs() {
         text = bundle.error + "\r\n";
         for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
     }
+    if (wine) g.savedReport = text;
     setReport(text);
     if (wine) applyLayout();  // brings up the two buttons
 }

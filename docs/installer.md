@@ -424,8 +424,8 @@ found with `wine_get_unix_file_name` looked up at run time, and falls back to th
 `C:\` path if that fails. After a save, **Copy path** puts the host path on the
 clipboard as text and **Show folder** starts `winebrowser.exe` on the folder,
 which hands it to `xdg-open` (`open` on a Mac). `--collect-logs` makes the same
-folder choice and prints the host path; with `--dry-run` the choice checks that
-folders exist and writes no test file. None of this runs on real Windows. The
+folder choice and prints the host path; with `--dry-run` it only prints the
+folder it would save to and writes nothing, not even the test file. None of this runs on real Windows. The
 string handling is a pure function, covered in `installer_test`; the Wine calls
 themselves have not been run on a Wine host.
 

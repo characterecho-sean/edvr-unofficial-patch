@@ -335,7 +335,13 @@ int runConsole(const AppArgs& args) {
     if (args.action == AppArgs::Act::None) return 0;
 
     if (args.action == AppArgs::Act::CollectLogs) {
-        const LogBundle bundle = collectLogs(survey.game.dir, logSaveFolder(args.dryRun));
+        const std::wstring saveFolder = logSaveFolder(args.dryRun);
+        if (args.dryRun) {
+            writeOut("\r\nDry run: would save the log zip to " + hostPathFor(saveFolder) +
+                     ". Nothing was written.\r\n");
+            return 0;
+        }
+        const LogBundle bundle = collectLogs(survey.game.dir, saveFolder);
         for (const std::string& note : bundle.notes) writeOut("  " + note + "\r\n");
         if (!bundle.ok) {
             writeOut(bundle.error + "\r\n");
