@@ -7,6 +7,8 @@
   - It lives in this repo and grows out of `src\installer`, which it replaces.
   - The repo was renamed to `ed-unofficial-patch` on 2026-11-07 (see Name).
   - It ships as a bare exe that registers itself on first run, with no MSI.
+  - It is one Windows exe everywhere. On Linux and Mac it runs inside Proton or
+    CrossOver beside the game, with no cross-platform SDK.
   - It updates from GitHub Releases, using a signed manifest.
   - It starts the game directly on Steam and on the Frontier store. The sign-in
     is ported to C++ from min-ed-launcher. EDLaunch stays for Epic, for patching
@@ -22,7 +24,12 @@
     WatchDog64 above it.
   - T4: the Frontier-store route works from the separate launcher and product
     folders, and 2FA is asked once.
-- **Next flight:** T1 to T4, all with min-ed-launcher, no EDVR changes.
+  - T5: the installer's window, network access and signature checks work under
+    Proton on the Deck.
+  - T6: a Windows exe inside the Proton prefix can get a Steam ticket.
+  - T7: the same launch works in a CrossOver bottle on the Mac.
+- **Next flight:** T1 to T4 on Windows, with min-ed-launcher and no EDVR changes,
+  then T5 to T7 on the Deck and the Mac.
 - **Unchecked:** Frontier's terms on third-party launchers. Read them before
   shipping direct launch as the default.
 - **Issues:** [#196](https://github.com/characterecho-sean/ed-unofficial-patch/issues/196).
@@ -278,8 +285,8 @@ window writes through `mergeIni` and the mirror. Two changes:
 
 ## Test plan
 
-All four run with min-ed-launcher against stock installs. `/dryrun` prints live
-tokens, so its output is not shared or pasted.
+T1 to T4 run with min-ed-launcher on Windows. `/dryrun` prints live tokens, so its
+output is not shared or pasted.
 
 | Test | Launch | Confirms | If it fails |
 |---|---|---|---|
@@ -287,6 +294,9 @@ tokens, so its output is not shared or pasted.
 | T2 | The same without `/dryrun` | The game reaches the menu with no relaunch through Steam. Steam shows it running, playtime counts, the overlay works, and SteamVR files it as `steam.app.359320` | As T1, or note what is lost |
 | T3 | T2 with EDVR installed, once with `/vr` and once with `/novr` | `edvr_log.py` shows the right build and the `profile:` line with the flag applied, both logs exist with no stand-down, and `/novr` has no `openvr_api.dll` load | Direct launch changes something EDVR depends on: find what before porting |
 | T4 | Frontier store, `MinEdLauncher.exe /frontier <profile> /autorun /autoquit /edo /vr`, launched twice | Finds the separate product folder. 2FA is asked once. The second launch is silent | Frontier stays on the EDLaunch route |
+| T5 | Deck, the current installer through `proton runinprefix` | The window draws and works, `--collect-logs` reaches the host, and a test build can reach GitHub and verify a P-256 signature | Fix it, or rethink the one exe |
+| T6 | Deck, Windows min-ed-launcher under Proton, with `EDLaunch.exe` swapped for it in Steam's `%command%` | A Windows exe in the prefix gets a ticket and starts the game | Linux stays on the EDLaunch route |
+| T7 | Mac, the same launch in a CrossOver bottle | The same, with Windows Steam in the bottle | The Mac stays on the EDLaunch route |
 
 After that, `/dryrun` is the reference for the port: its command line, with tokens
 masked, must match ours. The API client gets a test rig against a local fake server
@@ -304,14 +314,33 @@ and costs no flight.
 5. Pre-launch check and `--wrap`.
 6. Direct launch on the Frontier store, with its login window.
 7. The per-eye field, the headset record and the settings table as data.
-8. Retire `edvr-installer-*` once the launcher has proved itself.
+8. Linux and Mac launching, once T5 to T7 pass.
+9. Retire `edvr-installer-*` once the launcher has proved itself.
 
-Linux stays out of scope. It was 113 of 1,009 installer downloads for 0.21.1, and
-the installer under Proton is still recorded as unverified (`installer.md`). Linux
-users keep today's flow, which runs the new exe with `--payload`.
+## Linux and Mac
+
+The game only runs through a Windows compatibility layer on those systems, and an
+exe in the same prefix or bottle sees the same files, registry and Steam bridge.
+`install_proton.py` already runs the installer that way, and the Mac flights'
+`edvr-logs-*` bundles suggest it has run in a bottle too. SteamOS on Arm runs it
+through Proton and FEX like the game. A native app would need its own prefix code on
+Linux, an Arm build, and could not reach the Windows Steam inside a Mac bottle.
+
+- **Starting it on Linux:** a small script swaps `EDLaunch.exe` for the launcher in
+  Steam's `%command%`, so Proton starts it in the prefix with Steam's environment.
+- **Gaming Mode:** the window needs a mouse, so a launch from Steam runs silently with
+  the saved mode and shows a window only on an error.
+- **Stored logins:** as far as we know, DPAPI under Wine is not real protection. This
+  affects only Frontier-store logins.
+- **Log bundles:** under Wine the bundle goes to the host's Downloads folder, found
+  through `WINEHOMEDIR`. The window shows the host path and can open the folder through
+  `winebrowser`. This goes into the current installer first, and the launcher inherits it.
 
 ## Ruled out
 
+- ruled out: a cross-platform SDK, because the planner, chain and ini code would need
+  rewriting or duplicating beside the DLL's, and a native app still could not reach
+  Steam inside a Mac bottle. One Windows exe already runs wherever the game does.
 - ruled out: a separate launcher repo for branding, because the mod's releases would
   stay under the old name. Renaming this repo moves everything at once.
 - ruled out: an MSI for now, because Windows Installer tracks the exe it installed and
