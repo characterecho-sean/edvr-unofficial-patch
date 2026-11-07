@@ -25,7 +25,7 @@
 - **Next flight:** T1 to T4, all with min-ed-launcher, no EDVR changes.
 - **Unchecked:** Frontier's terms on third-party launchers. Read them before
   shipping direct launch as the default.
-- **Issues:** none filed yet.
+- **Issues:** [#196](https://github.com/characterecho-sean/ed-unofficial-patch/issues/196).
 
 ## Why this repo
 
