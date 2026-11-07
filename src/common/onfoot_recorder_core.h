@@ -96,7 +96,7 @@ ONF_ENUM(PinState, "still", "walk", "run", "air", "crouched")
 // nofoot::f214::State: what the moving view follow did this call (not_run: the call never reached the step)
 ONF_ENUM(F214State, "off", "not_moving", "filling", "followed", "held_aim", "held_head", "held_pose", "held_posture", "held_item", "held_f138", "held_away", "not_run")
 // nofoot::f215::State: what the body-follows-view rule did this call (not_run: the call never reached the step)
-ONF_ENUM(F215State, "off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "held_head", "filling", "active", "held_sights", "active_item", "not_run")
+ONF_ENUM(F215State, "off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "filling", "active", "held_sights", "active_item", "not_run")
 // IkRefusal (native_on_foot.cpp): the last refusal the call counted, then none
 ONF_ENUM(IkRefuse, "buffer", "plan_torn", "plan", "fp_torn", "fp_stale", "g_torn", "g_stale", "side", "singular", "write", "fp_rig", "none")
 // SideOut::f98Source: where the elbow's swivel came from. F84's rifle support and the pistol's pole are body_down; F165, F192, F159 and F181 are the flags beside it.
@@ -140,7 +140,7 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3) S(f32, f218_offset_m) S(f32, f223_pop_m) S(f32, f224_lead_m)                                                                 \
     S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) E(PinState, pin_state) E(Support, support)    \
     E(EyeSource, eye_source) S(u8, hunched) S(u8, pin_capped_h) S(u8, pin_capped_v) S(u8, f97_capped) S(u8, f107_began) E(F193Source, f193_source)         \
-    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state) E(F215State, f215_state) S(u8, f218_held) S(u8, f218_applied) S(u8, f218_refused)
+    S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state) E(F215State, f215_state) S(u8, f218_held) S(u8, f218_applied) S(u8, f218_refused) S(u8, f226_head_pitched)
 
 // ik: the Animate thread, once per local-body call, at the end of a completed call and at each early exit
 #define ONF_IK_ARM_F32(S, p)                                                                                                                                 \

@@ -12666,7 +12666,7 @@ def _hj_f214(rows, ctx):
 # a different label ("body follows view (F215, TEMPORARY)"), so it is not a window line this rule must parse. F214's line reads off while this key is on.
 H215_LABEL = "native on foot body follows view (F215)"
 H215_RE = (r"native on foot body follows view \(F215\) (?P<wl>\d+) s: experimental\.native_on_foot_body_follows_view is (?P<key>on|off); pin calls (?P<calls>\d+), unarmed (?P<un>\d+), "
-           r"active (?P<act>\d+), held head (?P<head>\d+) aim (?P<aim>\d+) pose (?P<pose>\d+), filling (?P<fil>\d+), released item (?P<item>\d+) posture (?P<post>\d+) away (?P<away>\d+); "
+           r"active (?P<act>\d+), (?:held head (?P<hheld>\d+) aim|head past the gate with the move on (?P<head>\d+), held aim) (?P<aim>\d+) pose (?P<pose>\d+), filling (?P<fil>\d+), released item (?P<item>\d+) posture (?P<post>\d+) away (?P<away>\d+); "
            r"body move (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<n>\d+) active calls); raise R0 (?P<r0>%s) cm; poses written shifted (?P<shifted>\d+)(?:; item at the hip active (?P<iact>\d+), held in the sights (?P<sight>\d+))?$" % ((_HN,) * 4))
 H215_MIN_CALLS = 30   # unarmed calls with the key on and none active: the neck window fills in 0.2 s (18 calls at 90 Hz), so this many unarmed calls could not all be held by chance
 
@@ -12681,8 +12681,11 @@ def _hj_f215(rows, ctx):
         return None
     on = [r for r in sec if r["key"] == "on"]
     g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
-    held = ", ".join("%s %d" % (name, g(k)) for name, k in (("head pitch", "head"), ("aim pitch", "aim"), ("no pose", "pose"), ("filling", "fil"), ("item", "item"), ("posture", "post"),
-                                                          ("away", "away")) if g(k))
+    # F226: a head past the gate no longer holds the move; logs from before it counted "held head" (the group hheld), logs from F226 on count the calls with the head past the gate and the move on (head)
+    gz = lambda k, rr=sec: sum(int(r[k]) for r in rr if r.get(k) is not None)
+    held = ", ".join("%s %d" % (name, gz(k)) for name, k in (("head pitch", "hheld"), ("aim pitch", "aim"), ("no pose", "pose"), ("filling", "fil"), ("item", "item"), ("posture", "post"),
+                                                           ("away", "away")) if gz(k))
+    headp = ("; head past the gate with the move on %d" % gz("head")) if any(r.get("head") is not None for r in sec) else ""
     # F217: the item-at-the-hip part is at the end of the line and absent from older logs; it is reported, never judged (an item at the hip does not make a flight NEVER APPLIED)
     ig = lambda k: sum(int(r[k]) for r in sec if r.get(k) is not None)
     armed = ("; item at the hip: active %d, held in the sights %d" % (ig("iact"), ig("sight"))) if any(r.get("iact") is not None for r in sec) else ""
@@ -12690,7 +12693,7 @@ def _hj_f215(rows, ctx):
     mvn = sum(int(r["n"]) for r in mv)
     rng = ("; body move mean %+.1f cm, min %+.1f, max %+.1f over %d active calls" % (sum(float(r["mean"]) * int(r["n"]) for r in mv) / mvn, min(float(r["min"]) for r in mv),
                                                                                  max(float(r["max"]) for r in mv), mvn)) if mvn else "; no active call"
-    text = "%d s: %d pin calls, %d unarmed, %d active%s%s; poses written shifted %d; R0 %s cm" % (_hsecs(sec), g("calls"), g("un"), g("act"), "; not active: " + held if held else "", rng, g("shifted"), sec[-1]["r0"]) + armed
+    text = "%d s: %d pin calls, %d unarmed, %d active%s%s; poses written shifted %d; R0 %s cm" % (_hsecs(sec), g("calls"), g("un"), g("act"), "; not active: " + held if held else "", rng, g("shifted"), sec[-1]["r0"]) + headp + armed
     if not on:
         return ("IDLE", text + "; the key was off in every window: the body is as the game animates it")
     un, act, shifted = g("un", on), g("act", on), g("shifted", on)
@@ -12701,6 +12704,33 @@ def _hj_f215(rows, ctx):
     if un < H215_MIN_CALLS:
         return ("IDLE", text + "; under %d unarmed calls with the key on: little to judge" % H215_MIN_CALLS)
     return ("OK", text + "; active in %d of %d unarmed calls (%.0f%%), %d pose writes shifted" % (act, un, 100.0 * act / un, shifted))
+
+
+# F226: the head's pitch no longer holds the whole-body move; the F215 window line counts the calls with the head past the gate and the move on (the line's "head past the gate" count). The row is judged on
+# the same line as F215's. A head down is the pilot's choice, so none of those calls is not a failure; a flight whose move never ran is F215's to call NEVER APPLIED, and here it is IDLE with the reason.
+H226_MIN_CALLS = 30
+
+
+def _hj_f226(rows, ctx):
+    """F226: the head's pitch no longer holds F215's whole-body move. Reads the F215 window line's count of pin calls with the head past the gate and the move on. A line from before F226 (it
+    counted "held head") gives no verdict. IDLE: the key off in every window, under 30 pin calls, or no active call at all (the move never ran: F215's row says why). OK otherwise, with the count and
+    its share of the calls, zero included."""
+    sec = [r for r in rows.get("sec", []) if r.get("head") is not None]
+    if not sec:
+        return None
+    on = [r for r in sec if r["key"] == "on"]
+    g = lambda k, rr: sum(int(r[k]) for r in rr)
+    if not on:
+        return ("IDLE", "%d s: the key was off in every window" % _hsecs(sec))
+    calls, head = g("calls", on), g("head", on)
+    ran = g("act", on) + sum(int(r["iact"]) for r in on if r.get("iact") is not None)
+    text = "%d s: head past the gate with the move on %d of %d pin calls (%.1f%%); active %d unarmed, %d at the hip" % (
+        _hsecs(on), head, calls, 100.0 * head / calls if calls else 0.0, g("act", on), ran - g("act", on))
+    if calls < H226_MIN_CALLS:
+        return ("IDLE", text + "; under %d pin calls: little to judge" % H226_MIN_CALLS)
+    if not ran:
+        return ("IDLE", text + "; no active call: the move never ran, F215's row says why")
+    return ("OK", text)
 
 
 # F216: the view's running bob (fix.native_on_foot_view_bob, a user setting; formatLine in src/d3d11/native_on_foot_f216.h). The key's own note line carries a different label ("view bob setting (F216):"
@@ -18144,6 +18174,9 @@ HEALTH_RULES = (
     _hrule("reach margin (F225)", ("F225",), (H225_LABEL,), (
         ("sec", H225_RE),
     ), _hj_f225),
+    _hrule("head pitched (F226)", ("F215",), (H215_LABEL,), (
+        ("sec", H215_RE),
+    ), _hj_f226),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -24597,11 +24630,16 @@ def self_test_health():
         F215 = "body follows view (F215)"
 
         def win215(key="on", calls=900, un=600, act=500, held=(20, 10, 5, 30, 15, 10, 10), mv="mean +20.0 cm (min -5.0, max +45.0) over 500 active calls", r0="7.0", shifted=480, wl=10, iact=0, sight=0,
-                   old=False):
+                   old=False, oldhead=False):
             fmt = health_c_format(f215src, "native on foot body follows view (F215) %u s")
             if fmt is None:
                 raise AssertionError("native_on_foot_f215.h has no format holding the F215 window line: the --health rule that reads it is out of date")
             line = health_render(fmt, (wl, key, calls, un, act) + tuple(held) + (mv, float(r0), shifted, iact, sight))
+            if oldhead:   # a log from before F226 counted "held head" where F226 counts the head past the gate
+                new_ = "head past the gate with the move on %d, held aim %d" % (held[0], held[1])
+                if new_ not in line:
+                    raise AssertionError("the F215 window line no longer has the head part the F215 old-log case rewrites: update the test")
+                line = line.replace(new_, "held head %d aim %d" % (held[0], held[1]))
             tail = "; item at the hip active %d, held in the sights %d" % (iact, sight)
             if old:   # a log from before F217 ends at the shifted count
                 if not line.endswith(tail):
@@ -24609,7 +24647,7 @@ def self_test_health():
                 line = line[:-len(tail)]
             return line
         check("F215: a flight that was active in 500 of 600 unarmed calls and shifted 480 poses is OK and names the held reasons", [win215()], 0, [("OK", F215)],
-              has=["10 s: 900 pin calls, 600 unarmed, 500 active; not active: head pitch 20, aim pitch 10, no pose 5, filling 30, item 15, posture 10, away 10; body move mean +20.0 cm, min -5.0, max +45.0 over 500 active calls; poses written shifted 480; R0 7.0 cm",
+              has=["10 s: 900 pin calls, 600 unarmed, 500 active; not active: aim pitch 10, no pose 5, filling 30, item 15, posture 10, away 10; body move mean +20.0 cm, min -5.0, max +45.0 over 500 active calls; poses written shifted 480; R0 7.0 cm; head past the gate with the move on 20",
                    "active in 500 of 600 unarmed calls (83%), 480 pose writes shifted"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
         check("F217: a line from before the item part still parses and reports no item part", [win215(old=True)], 0, [("OK", F215)], has=["poses written shifted 480; R0 7.0 cm"], lacks=["UNPARSED", "item at the hip"])
         check("F217: the item at the hip is reported with its counts", [win215(iact=300, sight=40)], 0, [("OK", F215)], has=["item at the hip: active 300, held in the sights 40"], lacks=["UNPARSED", "NEVER APPLIED"])
@@ -24617,8 +24655,10 @@ def self_test_health():
               has=["item at the hip: active 800, held in the sights 40"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F215: the key on, 600 unarmed calls and none active is NEVER APPLIED", [win215(act=0, held=(0,) * 7, mv="none", shifted=0)], 3, [("NEVER APPLIED", F215)],
               has=["the key is on and 600 unarmed calls were active in none"], lacks=["UNPARSED"])
-        check("F215: the key on, every unarmed call held (a head pitched the whole time) is NEVER APPLIED, with the counts to read", [win215(act=0, held=(600, 0, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3,
-              [("NEVER APPLIED", F215)], has=["not active: head pitch 600", "no active call"], lacks=["UNPARSED"])
+        check("F215: the key on, every unarmed call held (an aim pitched the whole time) is NEVER APPLIED, with the counts to read", [win215(act=0, held=(0, 600, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3,
+              [("NEVER APPLIED", F215)], has=["not active: aim pitch 600", "no active call"], lacks=["UNPARSED"])
+        check("F215: a log from before F226 (held head) still parses and names the head pitch among the held reasons", [win215(act=0, held=(600, 0, 0, 0, 0, 0, 0), mv="none", shifted=0, oldhead=True)], 3,
+              [("NEVER APPLIED", F215)], has=["not active: head pitch 600", "no active call"], lacks=["UNPARSED", "head past the gate"])
         check("F215: active calls and not one pose written shifted is NEVER APPLIED", [win215(shifted=0)], 3, [("NEVER APPLIED", F215)], has=["500 calls were active but not one pose was written with the shift"], lacks=["UNPARSED"])
         check("F215: the key off with unarmed calls is IDLE, never NEVER APPLIED", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0)], 0, [("IDLE", F215)],
               has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
@@ -24626,7 +24666,15 @@ def self_test_health():
               has=["under 30 unarmed calls"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F215: a window with the key off beside one with it on is judged on the on window", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0), win215()], 0, [("OK", F215)],
               has=["20 s: 1800 pin calls"], lacks=["NEVER APPLIED", "UNPARSED"])
-        check("F215: a window line that drifted from its pattern is UNPARSED", [win215().replace("pin calls", "calls")], 4, [("UNPARSED", F215)])
+        check("F215: a window line that drifted from its pattern is UNPARSED", [win215().replace("pin calls", "calls")], 4, [("UNPARSED", F215), ("UNPARSED", "head pitched (F226)")])
+        F226 = "head pitched (F226)"
+        check("F226: a flight with calls at the head past the gate and the move on is OK with the count and its share", [win215(held=(120, 10, 5, 30, 15, 10, 10))], 0, [("OK", F215), ("OK", F226)],
+              has=["head past the gate with the move on 120 of 900 pin calls (13.3%); active 500 unarmed, 0 at the hip"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: none of those calls is not a failure", [win215(held=(0, 10, 5, 30, 15, 10, 10))], 0, [("OK", F215), ("OK", F226)], has=["head past the gate with the move on 0 of 900 pin calls (0.0%)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: a move that never ran is IDLE here (F215's row calls it)", [win215(act=0, held=(0, 600, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3, [("NEVER APPLIED", F215), ("IDLE", F226)], has=["no active call: the move never ran"], lacks=["UNPARSED"])
+        check("F226: the key off is IDLE and under 30 calls is IDLE", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0), win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0)], 0, [("IDLE", F215), ("IDLE", F226)],
+              has=["the key was off in every window"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: a log from before F226 has no verdict from this row and is not unparsed", [win215(oldhead=True)], 0, [("OK", F215)], lacks=["UNPARSED", "head past the gate"])
         # ---- F216: the view bob; its window line is rendered from the C format string in native_on_foot_f216.h ----
         f216src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f216.h"))
         F216 = "view bob (F216)"

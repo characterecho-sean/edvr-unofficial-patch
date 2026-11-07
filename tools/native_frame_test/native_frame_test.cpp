@@ -86,6 +86,7 @@
 #include "f223_checks.h"    // F223: a jump of the model root goes into the whole-body move: the recorded series, a camera that moved, the cap, the line, the sites
 #include "f224_checks.h"    // F224: the whole-body move loses its call of lag: the recorded jitter through F215 and the lead, the limit, a taken jump, the line, the sites
 #include "f225_checks.h"    // F225: the shoulder reach margin ramps: a sweep across the threshold, the exact move at full weight, the timing, a flicker, the line, the sites
+#include "f226_checks.h"    // F226: the head pitch no longer holds the whole-body shift: the landing armed and unarmed, the flag at the gate, a stale call, no state change at the gate, the line, the sites
 #include "f216_checks.h"    // F216: the view bob (user setting): the filter on a 3.4 Hz sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets, the seated sign through adsUnlockedCam, the history by serial, the line, the sites
 #include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
@@ -7790,6 +7791,8 @@ int wmain(int argc, wchar_t** argv) {
     f224test::run224(check);
     // F225: the reach margin: a sweep across the threshold, the move at full weight, the timing, a flicker, the line, the sites.
     f225test::run225(check);
+    // F226: the head pitch and the whole-body shift: the landing with the head down armed and unarmed, the flag, a non-fresh call, the gate is no change of state, the line, the sites.
+    f226test::run226(check);
     // F216: the view bob filter on a sprint (a sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets), the seated sign, the history by serial, the line, the sites.
     f216test::run216(check);
     // F205: the effective sight eye and the ADS view circle.

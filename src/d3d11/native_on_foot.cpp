@@ -17697,6 +17697,7 @@ struct PinCall {
     double f214Target = std::nan("");
     // F215: what the body-follows-view rule did this call (nofoot::f215::State; kNotRun: the call never reached the step), the shift it put on the pose (m) and where it was going (m)
     uint8_t f215State = nofoot::f215::kNotRun;
+    bool f226HeadPitched = false;   // F226: the call reached the head gate with the head past it (the settle is refused; y no longer holds)
     double f224LeadM = 0.0;   // F224: the lead, part of f215BodyY
     double f223PopM = 0.0;   // F223: the root jump the rule has taken, part of f215BodyY
     double f215BodyY = 0.0, f215Target = 0.0;   // f215BodyY: the shift in force for this whole call (the last call's result: the internal space is the model's with the body unshifted, every pose write adds it)
@@ -18317,9 +18318,11 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 const nofoot::f215::Out bo = g_f215.step(bi);
                 pc.f215State = bo.state;   // the result takes effect on the next call (pc.f215BodyY is the shift this call works in)
                 pc.f215Target = bo.targetY;
-                if (bi.keyOn && nofoot::f215::settleHeld(bo.state)) si.valid = false;   // y holds while the camera moves on: a settle now would read the slope as a stance
+                pc.f226HeadPitched = bo.headPitched;
+                if (bi.keyOn && (nofoot::f215::settleHeld(bo.state) || bo.headPitched)) si.valid = false;   // y holds while the camera moves on: a settle now would read the slope as a stance; F226: and a head pitched past the gate refuses the settle (y no longer holds on it)
                 nofoot::f215::Call bc;
                 bc.state = bo.state;
+                bc.headPitched = bo.headPitched;
                 bc.keyOn = bi.keyOn;
                 bc.unarmed = !f138Item;
                 bc.yM = bo.y;
@@ -21392,6 +21395,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.f214_state = pc.f214State;   // F214
         r.f214_target = pc.f214Target;
         r.f215_state = pc.f215State;   // F215
+        r.f226_head_pitched = pc.f226HeadPitched ? 1 : 0;   // F226
         r.f215_body_y = pc.f215BodyY;
         r.f215_target = pc.f215Target;
         r.f218_held = pc.f218Held;   // F218

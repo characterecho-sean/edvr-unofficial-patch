@@ -24,6 +24,14 @@
 // less y (shiftWorldToModel on the world-to-model matrix and on G), and the y used in a call is the last call's result: the step's result takes effect on the next call. The neck's true height
 // is then a function of the true camera whatever y is.
 //
+// F226: the head's pitch no longer holds y. Recording 20261106_185259 (the flight of F224 and F225): kHeadGateDeg froze y at -0.40 m for 7.24 s after a landing's camera dip, the pilot looking down
+// the whole time. The rule reads pc.eyeYSelected, which has the head's pitch taken out, so a nod moves its input only -0.30 to +0.11 cm per 10 deg armed and -0.05 to 0 unarmed: there is nothing for
+// a hold to protect. A head past the gate now falls through to the same rule as one inside it (the hip item's active state, or the unarmed neck window, which keeps filling), and the pose-less
+// case stays held (without a pose the normalisation is off). The settle is as it was: Out::headPitched is true exactly where the old head check sat, and the pin refuses the settle on it, so the
+// stance's store is never taken with the head pitched. The F224 lead reads the raw camera (e223 in native_on_foot.cpp), so a nod reaches the shift for that call only and does not accumulate; standing
+// with the head past the gate the raw camera steps a median of 0.27 to 0.37 mm a call, 2.7 to 3.1 mm at the 99th percentile and 12 mm at the largest. The lead is deliberately left as it is. It now also
+// runs in jumps with the head down, where it was off before.
+//
 // One writer: the pin hook (under g_pfzBusy). The key (experimental.native_on_foot_body_follows_view) is TEMPORARY, an A/B switch for the pilot; with it off nothing here runs and F214 is
 // in force as it was.
 #pragma once
@@ -42,7 +50,7 @@ namespace f215 {
 
 constexpr double kNeckMeanS = 0.6;      // the animated neck's mean window (f214::Mean's window)
 constexpr double kFillS = 0.2;          // the window must span this much before the rule acts
-constexpr double kHeadGateDeg = 20.0;   // the physical head's pitch, either way, at or over which y holds
+constexpr double kHeadGateDeg = 20.0;   // the physical head's pitch, either way, at or over which the stance's settle is refused (F226: y no longer holds on it)
 constexpr double kCapM = 0.6;           // |target y| is held to this
 constexpr double kTrackMps = 3.0;       // y follows its target at most this fast
 constexpr double kCatchMps = 0.6;       // ... or this fast while catching (after any change of state into or out of the rule, and while releasing)
@@ -66,16 +74,16 @@ inline double levelCamY(bool haveStandingNeck, double storedNeckY) noexcept {
 }
 // What a pin call did, in the recording's order (onfoot_recorder_core.h ONF_ENUM(F215State)): not_run is a call that never reached the step.
 enum State : uint8_t {
-    kOff = 0, kReleasedAway, kReleasedItem, kReleasedPosture, kHeldAim, kHeldPose, kHeldHead, kFilling, kActive, kHeldSights, kActiveItem, kNotRun, kStates
+    kOff = 0, kReleasedAway, kReleasedItem, kReleasedPosture, kHeldAim, kHeldPose, kFilling, kActive, kHeldSights, kActiveItem, kNotRun, kStates
 };
 inline const char* stateName(unsigned s) noexcept {
-    static const char* const n[kStates] = {"off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "held_head", "filling", "active", "held_sights", "active_item", "not_run"};
+    static const char* const n[kStates] = {"off", "released_away", "released_item", "released_posture", "held_aim", "held_pose", "filling", "active", "held_sights", "active_item", "not_run"};
     return s < kStates ? n[s] : "?";
 }
 inline bool isReleased(unsigned s) noexcept { return s == kOff || s == kReleasedAway || s == kReleasedItem || s == kReleasedPosture; }
 inline bool isActive(unsigned s) noexcept { return s == kActive || s == kActiveItem; }
 // The states in which y holds while the camera moves on: a settle then would read the slope as a stance, so the settle is not taken.
-inline bool settleHeld(unsigned s) noexcept { return s == kHeldAim || s == kHeldPose || s == kHeldHead || s == kFilling || s == kHeldSights; }
+inline bool settleHeld(unsigned s) noexcept { return s == kHeldAim || s == kHeldPose || s == kFilling || s == kHeldSights; }
 struct In {
     bool keyOn = false;
     bool away = false;          // the game's camera is away from the commander
@@ -99,6 +107,7 @@ struct Out {
     double y = 0.0;             // the shift in force after this call (m)
     double targetY = 0.0;       // where it is going (m): 0 released, y held, the rule's value active
     double r0M = 0.0;           // the constant raise R0
+    bool headPitched = false;   // F226: the call reached the place the head gate stood (key on, not away, not in the sights, no low posture, aim and pose clear) with the head at or over kHeadGateDeg: the settle is refused
     bool active() const noexcept { return isActive(state); }
 };
 
@@ -107,7 +116,9 @@ struct Follow {
     double y = 0.0, lastT = 0.0;
     bool haveT = false, catching = false;
     State last = kNotRun;
+    bool lastHeadPitched = false;
     void reset() noexcept {
+        lastHeadPitched = false;
         win.clear();
         y = lastT = 0.0;
         haveT = false;
@@ -121,6 +132,7 @@ struct Follow {
             o.state = last;
             o.y = y;
             o.targetY = y;
+            o.headPitched = lastHeadPitched;
             return o;
         }
         double dt = 0.0;
@@ -132,6 +144,7 @@ struct Follow {
         }
         State s;
         double target = y;
+        bool headPitched = false;
         if (!in.keyOn) {
             s = kOff;
             target = 0.0;
@@ -152,9 +165,8 @@ struct Follow {
                 s = kHeldAim;
             } else if (!in.poseValid || !std::isfinite(in.headPitchDeg)) {
                 s = kHeldPose;
-            } else if (!(std::fabs(in.headPitchDeg) < kHeadGateDeg)) {
-                s = kHeldHead;
             } else {
+                headPitched = !(std::fabs(in.headPitchDeg) < kHeadGateDeg);
                 s = kActiveItem;
                 target = in.eyeY - in.levelCamY;
                 target = target > kCapM ? kCapM : target < -kCapM ? -kCapM : target;
@@ -167,9 +179,8 @@ struct Follow {
             s = kHeldAim;
         } else if (!in.poseValid || !std::isfinite(in.headPitchDeg)) {
             s = kHeldPose;
-        } else if (!(std::fabs(in.headPitchDeg) < kHeadGateDeg)) {
-            s = kHeldHead;
         } else {
+            headPitched = !(std::fabs(in.headPitchDeg) < kHeadGateDeg);
             win.add(in.tS, in.neckY);
             if (win.n < 2 || win.spanS() < kFillS - 1e-9) {
                 s = kFilling;
@@ -181,6 +192,7 @@ struct Follow {
         }
         if (s != last && (isActive(s) || isActive(last) || isReleased(s))) catching = true;
         last = s;
+        lastHeadPitched = headPitched;
         const double rate = catching ? kCatchMps : kTrackMps;
         const double step = rate * dt;
         const double diff = target - y;
@@ -189,6 +201,7 @@ struct Follow {
         o.state = s;
         o.y = y;
         o.targetY = target;
+        o.headPitched = headPitched;
         return o;
     }
 };
@@ -199,11 +212,12 @@ struct Call {
     State state = kNotRun;
     bool keyOn = false;
     bool unarmed = false;     // nothing drawn, whatever the key
+    bool headPitched = false; // F226: the head was past the gate and the move on (Out::headPitched)
     double yM = 0.0;          // the shift in force after the call
     double r0M = std::nan("");
 };
 struct Stats {
-    uint32_t calls = 0, unarmed = 0, active = 0;
+    uint32_t calls = 0, unarmed = 0, active = 0, headPitched = 0;
     uint32_t byState[kStates] = {};
     double ySum = 0.0, yMin = 0.0, yMax = 0.0;   // over the active calls
     double r0M = std::nan("");
@@ -212,6 +226,7 @@ struct Stats {
         ++calls;
         keyOn = c.keyOn;
         if (c.unarmed) ++unarmed;
+        if (c.headPitched) ++headPitched;
         if (c.state < kStates) ++byState[c.state];
         if (std::isfinite(c.r0M)) r0M = c.r0M;
         if (c.state == kActive) {
@@ -232,9 +247,9 @@ inline int formatLine(char* buf, size_t n, uint32_t seconds, const Stats& s, uin
     if (s.active) std::snprintf(mv, sizeof(mv), "mean %+.1f cm (min %+.1f, max %+.1f) over %u active calls", s.ySum / s.active * 100.0, s.yMin * 100.0, s.yMax * 100.0, s.active);
     else std::snprintf(mv, sizeof(mv), "none");
     return std::snprintf(buf, n,
-                         "native on foot body follows view (F215) %u s: experimental.native_on_foot_body_follows_view is %s; pin calls %u, unarmed %u, active %u, held head %u aim %u pose %u, filling %u, "
+                         "native on foot body follows view (F215) %u s: experimental.native_on_foot_body_follows_view is %s; pin calls %u, unarmed %u, active %u, head past the gate with the move on %u, held aim %u pose %u, filling %u, "
                          "released item %u posture %u away %u; body move %s; raise R0 %.1f cm; poses written shifted %u; item at the hip active %u, held in the sights %u",
-                         seconds, s.keyOn ? "on" : "off", s.calls, s.unarmed, s.active, s.byState[kHeldHead], s.byState[kHeldAim], s.byState[kHeldPose], s.byState[kFilling],
+                         seconds, s.keyOn ? "on" : "off", s.calls, s.unarmed, s.active, s.headPitched, s.byState[kHeldAim], s.byState[kHeldPose], s.byState[kFilling],
                          s.byState[kReleasedItem], s.byState[kReleasedPosture], s.byState[kReleasedAway], mv, std::isfinite(s.r0M) ? s.r0M * 100.0 : 0.0, shifted, s.byState[kActiveItem], s.byState[kHeldSights]);
 }
 

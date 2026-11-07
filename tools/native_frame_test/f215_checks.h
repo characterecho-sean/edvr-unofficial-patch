@@ -153,8 +153,6 @@ void run215(Check&& check) {
             void (*set)(f215::In&);
         };
         const Case cases[] = {
-            {"the head pitched 30 deg", f215::kHeldHead, [](f215::In& i) { i.headPitchDeg = 30.0; }},
-            {"the head pitched -20 deg", f215::kHeldHead, [](f215::In& i) { i.headPitchDeg = -20.0; }},
             {"F138's aim gate", f215::kHeldAim, [](f215::In& i) { i.aimRefused = true; }},
             {"no valid pose", f215::kHeldPose, [](f215::In& i) { i.poseValid = false; }},
             {"a head pitch that is not a number", f215::kHeldPose, [](f215::In& i) { i.headPitchDeg = std::nan(""); }},
@@ -272,9 +270,10 @@ void run215(Check&& check) {
     // ---- 10. the log line ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         f215::Stats s;
-        const auto call = [&](f215::State st, bool unarmed, double y) {
+        const auto call = [&](f215::State st, bool unarmed, double y, bool headPitched = false) {
             f215::Call cl;
             cl.state = st;
+            cl.headPitched = headPitched;
             cl.keyOn = true;
             cl.unarmed = unarmed;
             cl.yM = y;
@@ -284,7 +283,7 @@ void run215(Check&& check) {
         call(f215::kFilling, true, 0.0);
         call(f215::kActive, true, 0.10);
         call(f215::kActive, true, 0.30);
-        call(f215::kHeldHead, true, 0.30);
+        call(f215::kFilling, true, 0.30, true);
         call(f215::kHeldAim, true, 0.30);
         call(f215::kHeldPose, true, 0.30);
         call(f215::kReleasedItem, false, 0.2);
@@ -296,7 +295,7 @@ void run215(Check&& check) {
         char line[900];
         f215::formatLine(line, sizeof(line), 10, s, 7);
         check(std::strstr(line, "native on foot body follows view (F215) 10 s:") == line &&
-                  std::strstr(line, "experimental.native_on_foot_body_follows_view is on; pin calls 12, unarmed 8, active 2, held head 1 aim 1 pose 1, filling 1, released item 1 posture 1 away 1;") != nullptr &&
+                  std::strstr(line, "experimental.native_on_foot_body_follows_view is on; pin calls 12, unarmed 8, active 2, head past the gate with the move on 1, held aim 1 pose 1, filling 2, released item 1 posture 1 away 1;") != nullptr &&
                   std::strstr(line, "body move mean +20.0 cm (min +10.0, max +30.0) over 2 active calls; raise R0 7.0 cm; poses written shifted 7; item at the hip active 2, held in the sights 1") != nullptr,
               "F215: the line names the key, the calls, the active, every held and released reason, the body move, R0 and the shifted writes");
         f215::Stats off;
@@ -387,11 +386,12 @@ void run215(Check&& check) {
             f215::In head = itemCall(t, level + 0.1);
             head.headPitchDeg = 30.0;
             o = f.step(head);
-            check(o.state == f215::kHeldHead && o.y == y0, "F217: a head pitched 30 deg holds y with an item at the hip");
+            check(o.state == f215::kActiveItem && o.headPitched && o.y != y0, "F226: a head pitched 30 deg no longer holds y with an item at the hip: the move follows, and the call says the head was past the gate");
+            const double y1 = o.y;   // F226: the head call moved y
             f215::In pose = itemCall(t + kDt, level + 0.1);
             pose.poseValid = false;
             o = f.step(pose);
-            check(o.state == f215::kHeldPose && o.y == y0, "F217: no valid pose holds y with an item at the hip");
+            check(o.state == f215::kHeldPose && o.y == y1, "F217: no valid pose holds y with an item at the hip");
         }
         {   // postureW releases toward 0 at the catch rate
             f215::Follow f;
@@ -439,7 +439,7 @@ void run215(Check&& check) {
             }
             check(rateOk && o.y == 0.0, "F217: the key off releases an item's y to exactly 0");
         }
-        check(f215::settleHeld(f215::kHeldAim) && f215::settleHeld(f215::kHeldPose) && f215::settleHeld(f215::kHeldHead) && f215::settleHeld(f215::kFilling) && f215::settleHeld(f215::kHeldSights) &&
+        check(f215::settleHeld(f215::kHeldAim) && f215::settleHeld(f215::kHeldPose) && f215::settleHeld(f215::kFilling) && f215::settleHeld(f215::kHeldSights) &&
                   !f215::settleHeld(f215::kActive) && !f215::settleHeld(f215::kActiveItem) && !f215::settleHeld(f215::kOff) && !f215::settleHeld(f215::kReleasedAway) && !f215::settleHeld(f215::kReleasedPosture) &&
                   !f215::settleHeld(f215::kNotRun),
               "F217: the settle is not taken in a state that holds y");
@@ -480,7 +480,7 @@ void run215(Check&& check) {
                   has(cpp, "g_f138.noteRunning(si.tS, g_f138HeldM, pc.rawEyeY, N0[1]") && !has(cpp, "pc.rawEyeY - pc.f215BodyY"),
               "F217: F138 sees the internal (level) camera in its stance, its running reference and its step, with no second subtraction");
         check(has(cpp, "nofoot::f215::shiftWorldToModel(invM, pc.f215BodyY);") && has(cpp, "nofoot::f215::shiftWorldToModel(G.g, yUsed);") && has(cpp, "bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;") &&
-                  !has(cpp, "pc.f215BodyY = bo.y;") && has(cpp, "nofoot::f215::settleHeld(bo.state)) si.valid = false;"),
+                  !has(cpp, "pc.f215BodyY = bo.y;") && has(cpp, "nofoot::f215::settleHeld(bo.state) || bo.headPitched)) si.valid = false;"),
               "F217: the world-to-model matrix and G enter less the shift in force, the step reads the true camera, its result takes effect next call, and a held state takes no settle");
         check(has(cpp, "r.eye_y_selected = pc.eyeYSelected + pc.f215BodyY;") && has(cpp, "r.raw_eye_y = pc.rawEyeY + pc.f215BodyY;") && has(cpp, "r.e[1] += pc.f215BodyY;"), "F217: the recording keeps the true camera");
         check(has(cpp, "xi.keyOn = g_f214Key.load(std::memory_order_relaxed) && !g_f215Key.load(std::memory_order_relaxed);"), "F215: F214 is inert while the key is on");
