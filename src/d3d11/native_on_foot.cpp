@@ -222,6 +222,8 @@ std::atomic<int> g_lookSmoothMs{50};           // fix.native_on_foot_look_to_aim
 std::atomic<int> g_ltaStyle{nofoot::f109::kSnap};
 std::atomic<int> g_ltaSnapDeg{nofoot::f109::kSnapDegDefault};
 std::atomic<bool> g_ltaDrop{false};
+std::atomic<bool> g_ltaAdsVertKey{false};   // fix.native_on_foot_look_to_aim_ads_vertical is on (live)
+std::atomic<bool> g_ltaPitchPass{false};    // the frame thread: look to aim is dropping the player's look and the player is aiming down sights with the key on: the pitch input passes
 std::atomic<float> g_snapIn{0.0f};
 // F109: what the update hook saw of the player's look (the detectors' input): the stick's yaw as the last call ran (raw, -1..1), the mouse's horizontal summed
 // since the frame thread last took it (game input units), and the per-call counts the 1 s line reports.
@@ -1698,6 +1700,17 @@ void readKey() {
     if (lookSmooth < 0) lookSmooth = 0;
     if (lookSmooth > 1000) lookSmooth = 1000;
     g_lookSmoothMs.store(lookSmooth, std::memory_order_relaxed);
+    {
+        const bool adsVert = cfg.getString("fix.native_on_foot_look_to_aim_ads_vertical", "off") == "on";
+        static bool adsVertLast = false, adsVertInit = false;   // frame thread only
+        g_ltaAdsVertKey.store(adsVert, std::memory_order_relaxed);
+        if (!adsVertInit || adsVert != adsVertLast) {
+            Log::get().note("native on foot look to aim: keys: fix.native_on_foot_look_to_aim_ads_vertical = %s (the mouse's and the stick's up and down %s while aiming down sights)",
+                            adsVert ? "on" : "off", adsVert ? "aim the weapon" : "stay dropped");
+            adsVertInit = true;
+            adsVertLast = adsVert;
+        }
+    }
     const std::string turnStyle = cfg.getString("fix.native_on_foot_turn_style", "snap");
     {
         static std::string badLast;   // frame thread only: the unknown value last named
@@ -7451,6 +7464,12 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     const float ip = hookOn ? g_adsInPitch.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     const float snap = drop ? g_snapIn.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     nofoot::f109::Feed f = nofoot::f109::feed(drop, style, oldSY, oldSP, oldY, oldP, snap);
+    // fix.native_on_foot_look_to_aim_ads_vertical: aiming down sights with look to aim, the player's own up and down passes (the yaws stay as the turn style says).
+    // It is the player's aim, not the head's: the follower's target and the split leave it out, as they do the snap turn.
+    if (drop && g_ltaPitchPass.load(std::memory_order_relaxed)) {
+        f.mousePitch = oldP;
+        f.stickPitch = oldSP;
+    }
     // F176: in the sights with the head aiming in mouse look (published by the frame thread, with the hook on) the mouse's and the stick's pitch are held: only the rate input is dropped, the
     // yaws are untouched, the head aim's own ask (ip) is added below as always. Look to aim has dropped them already (drop), and a trip or any stop clears the flag.
     const bool pitchHeld = hookOn && !drop && g_adsPitchHeld.load(std::memory_order_relaxed);
@@ -9245,6 +9264,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         }
         f131Step(now, g_lta.engaged);   // F131: a panel, a menu or a stopped look holds look to aim (the player's look is the game's own meanwhile)
         g_ltaDrop.store(g_lta.engaged && !g_f131.held, std::memory_order_relaxed);
+        g_ltaPitchPass.store(g_lta.engaged && !g_f131.held && ads && g_ltaAdsVertKey.load(std::memory_order_relaxed), std::memory_order_relaxed);
     }
     const bool allowed = g_adsGate.allow(ads);   // a hold-off lasts one press: the flag falling clears it
     if (off || !allowed) {
@@ -38361,6 +38381,7 @@ static std::string recorderKeysJson() {
     num("fix.native_on_foot_eye_height_cm", nofoot::f94::eyeHeightClampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_eye_height_cm", static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)))));
     str("fix.native_on_foot_look_to_aim", cfg.getString("fix.native_on_foot_look_to_aim", "off"));
     num("fix.native_on_foot_look_to_aim_smoothing_ms", cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 50));
+    str("fix.native_on_foot_look_to_aim_ads_vertical", cfg.getString("fix.native_on_foot_look_to_aim_ads_vertical", "off"));
     num("experimental.native_on_foot_neck_guard_cm",
         nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)))));
     str("experimental.native_on_foot_view_follows_body_moving", cfg.getString("experimental.native_on_foot_view_follows_body_moving", "on"));
