@@ -100,6 +100,7 @@
 #include "native_on_foot_f216.h"   // F216: the view's running bob taken out of the camera (the filter, the seated term, its history by serial, the log line: pure parts)
 #include "native_on_foot_f218.h"   // F218: with the laser rifle at the hip the torso stays on one solution, and a switch slides (the hold, the slide, the log line: pure parts)
 #include "native_on_foot_f222.h"   // F222: the eye's heading, up and offset taken in the frame they were drawn in (the rotation memory, the log line: pure parts)
+#include "native_on_foot_f225.h"   // F225: the shoulder's reach margin ramps instead of stepping (the weight, the move, the log line: pure parts)
 #include "native_on_foot_f223.h"   // F223: a jump of the model root goes into the whole-body move (the rule, the log line: pure parts)
 #include "native_on_foot_f221.h"   // F221: with the arc cutter the left elbow hangs from the body-down pole (the name, the ramp, the log line: pure parts)
 #include "native_on_foot_f219.h"   // F219: at the hip the elbow's swing about the shoulder-to-hand axis is limited per frame (the angle, the memory, the log line: pure parts)
@@ -314,6 +315,11 @@ nofoot::f222::OwnFrame g_f222;                                // F222: the rotat
 nofoot::f171c::Mailbox<nofoot::f222::Stats> g_f222Box;        // F222: the hook's window of pin calls for the log line (the frame thread takes it)
 uint64_t g_f222LineMs = 0;                                    // F222: the log window's start (frame thread)
 nofoot::f223::RootJump g_f223;                                // F223: the root jump rule's memory (one writer: armIkAfterAnimate, under g_pfzBusy; reset at an edge)
+double g_f224Lead = 0.0;                                     // F224: this call's change of the camera in the model, which joins the shift so the move has no call of lag (same writer as g_f223Pop)
+nofoot::f171c::Mailbox<nofoot::f223::LeadStats> g_f224Box;    // F224: the window of fresh calls in an F215 active state for the log line (the frame thread takes it)
+uint64_t g_f224LineMs = 0;                                    // F224: the log window's start (frame thread)
+nofoot::f171c::Mailbox<nofoot::f225::Stats> g_f225Box;        // F225: the left arm's window of armed solves for the log line (one writer: the arm solve, under g_pfzBusy)
+uint64_t g_f225LineMs = 0;                                    // F225: the log window's start (frame thread)
 double g_f223Pop = 0.0;                                       // F223: the move the rule has taken, which joins F215's shift in force (same writer)
 nofoot::f171c::Mailbox<nofoot::f223::Stats> g_f223Box;        // F223: the window of steps for the log line (the frame thread takes it)
 uint64_t g_f223LineMs = 0;                                    // F223: the log window's start (frame thread)
@@ -17691,6 +17697,7 @@ struct PinCall {
     double f214Target = std::nan("");
     // F215: what the body-follows-view rule did this call (nofoot::f215::State; kNotRun: the call never reached the step), the shift it put on the pose (m) and where it was going (m)
     uint8_t f215State = nofoot::f215::kNotRun;
+    double f224LeadM = 0.0;   // F224: the lead, part of f215BodyY
     double f223PopM = 0.0;   // F223: the root jump the rule has taken, part of f215BodyY
     double f215BodyY = 0.0, f215Target = 0.0;   // f215BodyY: the shift in force for this whole call (the last call's result: the internal space is the model's with the body unshifted, every pose write adds it)
     bool f215Wrote = false;   // F217: stage 0 wrote the whole pose (with the shift)
@@ -17768,7 +17775,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         else if (!nofoot::pfzAffineInverse(in.m3p, invM)) refusal = kPinRefMatrix;
         else {   // F217: the internal space: the model's with the body unshifted. Everything formed from invM (E, the drawn eye, the view, G's root) enters less the shift in force, which every pose write adds back
             pc.f223PopM = g_f223Pop;   // F223: the move the root jump rule has taken joins F215's shift
-            pc.f215BodyY = g_f215.y + g_f223Pop;
+            pc.f224LeadM = g_f224Lead;   // F224: and the lead (this call's small change of the camera) so the move has no call of lag
+            pc.f215BodyY = g_f215.y + g_f223Pop + g_f224Lead;
             nofoot::f215::shiftWorldToModel(invM, pc.f215BodyY);
         }
         if (in.localPitchValid && in.localPoseQpc != 0 && nowQ >= in.localPoseQpc) {
@@ -18256,6 +18264,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 g_f222.reset();   // F222: and no rotation of the last frame
                 g_f223.reset();   // F223: and no root jump memory, nor a move taken before it
                 g_f223Pop = 0.0;
+                g_f224Lead = 0.0;
                 g_f215.reset();   // F215: and no neck window, nor a shift from before it (the shift in force this call is already in its figures and writes; the next call starts from 0)
                 g_f218Hold.reset();   // F218: and no hold on the rest solution, nor a slide, from before it
                 g_f218Slide.reset();
@@ -18302,7 +18311,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 bi.fresh = freshIn;
                 bi.headPitchDeg = localPitchValid ? localPitchRad * 180.0 / nofoot::kIkPi : std::nan("");
                 bi.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
-                bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;   // F223: the rule does not see the root jump;  E is internal (less the shift in force); the rule reads the true camera
+                bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;   // F223: the rule does not see the root jump; F224: internal E plus the whole shift (the lead included) is the true camera, so the lead stays in what the rule reads;  E is internal (less the shift in force); the rule reads the true camera
                 bi.neckY = N0[1];
                 bi.eyeHeightM = f97H;
                 const nofoot::f215::Out bo = g_f215.step(bi);
@@ -20658,9 +20667,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 const double up223[3] = {static_cast<double>(pi223.m3p[4]), static_cast<double>(pi223.m3p[5]), static_cast<double>(pi223.m3p[6])};
                 const bool fresh223 = pi223.p1 != s_f223P1;
                 g_f223Pop = g_f223.step(fresh223, static_cast<double>(f30QpcUs(pi223.qpc)) * 1e-6, e223[1], cam223, up223);
+                const bool f224Active = nofoot::f215::isActive(g_f215.last);   // F224: the lead only while the whole-body move is on
+                g_f224Lead = f224Active ? g_f223.lead : 0.0;
                 if (fresh223) {
                     s_f223P1 = pi223.p1;
                     g_f223Box.write([&](nofoot::f223::Stats& win) noexcept { win.add(g_f223); });
+                    g_f224Box.write([&](nofoot::f223::LeadStats& win) noexcept { win.add(f224Active, g_f223); });
                 }
                 f223Ok = true;
             }
@@ -20668,6 +20680,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (!f223Ok) {
             g_f223.reset();
             g_f223Pop = 0.0;
+            g_f224Lead = 0.0;
             s_f223P1 = 0xFFFFFFFFu;
         }
     }
@@ -20716,7 +20729,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             std::memcpy(fpm, s_fpm, sizeof(fpm));
             G = s_G;
             if (pinWanted) {   // F217: G is formed from the true FP root and AMC; the pin and the arms work in the internal space (the body unshifted), so it enters less the shift in force (s_G and g_ikG stay true)
-                yUsed = g_f215.y + g_f223Pop;   // F223: the root jump the rule took joins the shift
+                yUsed = g_f215.y + g_f223Pop + g_f224Lead;   // F223: the root jump the rule took joins the shift; F224: and the lead
                 nofoot::f215::shiftWorldToModel(G.g, yUsed);
             }
         }
@@ -21386,6 +21399,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.f218_refused = pc.neckRestRefused;
         r.f218_offset_m = static_cast<float>(pc.f218OffsetM);
         r.f223_pop_m = static_cast<float>(pc.f223PopM);   // F223
+        r.f224_lead_m = static_cast<float>(pc.f224LeadM);   // F224
         onfootrec::push(r);
     }
     if (!pinStageOk) {
@@ -21797,7 +21811,19 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             ikPos(g_ikM0[C], Cp);
             const double ts[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
             const double distTS = nofoot::ikLen(ts);
-            const double move = nofoot::ikAssistReachMove(distTS, l1, l2, &excess);
+            // F225: armed, the reach margin ramps (nofoot::f225): the part past 0.97 of the reach is immediate and only the 3 cm margin goes in over 0.2 s and out over 0.4 s, so the assist is not a 3 cm step
+            // at the threshold (the clavicle assist's flips, the left elbow hopping 4.5 cm with the hand steady). Not armed: ikAssistReachMove as it was, the margin forgotten. A solve that does not write
+            // does not step the margin and forgets it, as it forgets the applied move below.
+            static nofoot::f225::Margin s_f225[2];
+            double move;
+            if (armedNow) {
+                if (doSolveWrite) s_f225[side].step(distTS - nofoot::kIkAssistReach * (l1 + l2) > 0.0, supportDt);
+                else s_f225[side].reset();
+                move = nofoot::f225::reachMove(distTS, l1, l2, s_f225[side].w, &excess);
+            } else {
+                s_f225[side].reset();
+                move = nofoot::ikAssistReachMove(distTS, l1, l2, &excess);
+            }
             double want[3];
             for (int i = 0; i < 3; ++i) want[i] = ((distTS > 1e-6 ? move * ts[i] / distTS : 0.0) + adsPush[i]) * wSolve;
             double disp[3];
@@ -21808,6 +21834,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 else for (int i = 0; i < 3; ++i) g_ikAssistApplied[side][i] = wf[i];   // F67f: no cap on the armed path
                 g_ikAssistMs[side] = now;
                 for (int i = 0; i < 3; ++i) disp[i] = static_cast<double>(g_ikAssistApplied[side][i]);
+                if (side == 0 && armedNow) {
+                    const double f225W = s_f225[side].w, f225Cm = nofoot::ikLen(disp) * 100.0;
+                    const bool f225Over = excess > 0.0;
+                    g_f225Box.write([&](nofoot::f225::Stats& win) noexcept { win.add(f225Over, f225W, f225Cm); });
+                }
             } else {
                 for (int i = 0; i < 3; ++i) disp[i] = want[i];
                 g_ikAssistApplied[side][0] = g_ikAssistApplied[side][1] = g_ikAssistApplied[side][2] = 0.0f;
@@ -26072,7 +26103,9 @@ void f138Line(uint64_t now) noexcept {
         g_f216Box.clearPending.store(true, std::memory_order_relaxed);   // F216: nor the bob's
         g_f220LineMs = 0;
         g_f220Box.clearPending.store(true, std::memory_order_relaxed);   // F220: nor the HUD shift's
-        g_f218LineMs = g_f219LineMs = g_f221LineMs = g_f222LineMs = g_f223LineMs = 0;
+        g_f218LineMs = g_f219LineMs = g_f221LineMs = g_f222LineMs = g_f223LineMs = g_f224LineMs = g_f225LineMs = 0;
+        g_f224Box.clearPending.store(true, std::memory_order_relaxed);   // F224: nor the lead's
+        g_f225Box.clearPending.store(true, std::memory_order_relaxed);   // F225: nor the reach margin's
         g_f222Box.clearPending.store(true, std::memory_order_relaxed);   // F222: nor the eye in its own frame's
         g_f223Box.clearPending.store(true, std::memory_order_relaxed);   // F223: nor the root jump's
         g_f221Box.clearPending.store(true, std::memory_order_relaxed);   // F221: nor the tool elbow's
@@ -26212,6 +26245,22 @@ void f138Line(uint64_t now) noexcept {
             char jumpLine[400];
             nofoot::f223::formatLine(jumpLine, sizeof(jumpLine), secs223, jw);
             Log::get().note("%s", jumpLine);
+        }
+    }
+    if (const uint32_t secs224 = nofoot::logwin::window(g_f224LineMs, now)) {
+        nofoot::f223::LeadStats lw;
+        if (g_f224Box.take(&lw) && lw.any()) {
+            char leadLine[400];
+            nofoot::f223::formatLeadLine(leadLine, sizeof(leadLine), secs224, lw);
+            Log::get().note("%s", leadLine);
+        }
+    }
+    if (const uint32_t secs225 = nofoot::logwin::window(g_f225LineMs, now)) {
+        nofoot::f225::Stats mw;
+        if (g_f225Box.take(&mw) && mw.any()) {
+            char marginLine[400];
+            nofoot::f225::formatLine(marginLine, sizeof(marginLine), secs225, mw);
+            Log::get().note("%s", marginLine);
         }
     }
     for (int m = 0; m < 2; ++m)

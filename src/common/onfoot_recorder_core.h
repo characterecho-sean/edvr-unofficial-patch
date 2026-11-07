@@ -137,7 +137,7 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(f64, f179_stand_w) S(f64, f179_stand_raise) S(f64, f179_legs_room) S(f64, f193_neck_y) S(f64, f193_eye_ask)                                            \
     S(f64, guard_push_cm) S(f64, guard_pred_cm) S(f64, guard_dist_cm)                                                                                        \
     S(f64, stored_neck_stand) S(f64, stored_neck_crouch) S(f64, stored_cam_stand) S(f64, stored_cam_crouch) S(f64, f214_target) S(f64, f215_body_y) S(f64, f215_target)                            \
-    S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3) S(f32, f218_offset_m) S(f32, f223_pop_m)                                                                                     \
+    S(u32, item_serial) S(u32, p1) A(f32, heading, 2) A(f32, up, 3) A(f32, fwd, 3) S(f32, f218_offset_m) S(f32, f223_pop_m) S(f32, f224_lead_m)                                                                 \
     S(u8, valid) E(PinRefuse, refuse) S(u8, settled) E(SettleWhy, settle_why) S(u8, f138_refused) E(Stance, stance) E(PinState, pin_state) E(Support, support)    \
     E(EyeSource, eye_source) S(u8, hunched) S(u8, pin_capped_h) S(u8, pin_capped_v) S(u8, f97_capped) S(u8, f107_began) E(F193Source, f193_source)         \
     S(u8, f193_camera) S(u8, f179_ran) S(u8, f179_measure) S(u8, have_stored_stand) S(u8, have_stored_crouch) S(u8, armed) S(u8, aim_known) E(F214State, f214_state) E(F215State, f215_state) S(u8, f218_held) S(u8, f218_applied) S(u8, f218_refused)

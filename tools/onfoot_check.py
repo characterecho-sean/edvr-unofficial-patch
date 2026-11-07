@@ -158,6 +158,16 @@ F222_MIN_ROWS = 40          # ... an item with this many is read
 F222_FINDING_ROWS = 100     # finding heading_follows_yaw_step: this many rows ...
 F222_FINDING_SLOPE = -0.5   # ... and the heading's residual on the yaw step's residual under this slope
 F222_RATE_SPAN_S = 0.15     # the body's yaw rate is taken over the last this many seconds
+F224_AIR_FOOT_M = 0.30      # F224 section: the lower animated foot over this is air
+F224_RUN_MPS = 3.5          # ... on the ground over this speed is a run, from F218_WALK_MPS a walk, under it still
+F224_MIN_ROWS = 30          # a class with fewer rows is left out
+F224_FINDING_MM = 5.0       # finding body_move_late: the air residual of the camera less the whole shift over this (rms, mm) ...
+F224_FINDING_ROWS = 100     # ... on this many rows
+F225_HOP_STEP_M = 0.02      # F225: a solver hop: the left elbow's step against the chest over this with the hand against the chest under ...
+F225_HAND_STEP_M = 0.008    # ... this
+F225_FLIP_CALLS = 3         # ... and it is on an assist flip when l_assisted changed within this many calls
+F225_FINDING_PER_S = 0.5    # finding elbow_solver_hop: more hops a second than this on the ground at the hip ...
+F225_FINDING_MIN_S = 10.0   # ... over this many seconds
 F223_JUMP_M = 0.10          # F223 section: the rule's limits (src/d3d11/native_on_foot_f223.h): a change of the camera in the model this large ...
 F223_CAMERA_SHARE = 0.5     # ... with the camera in the world moving less than this share of it ...
 F223_MAX_GAP_S = 0.1        # ... between frames this close
@@ -209,8 +219,9 @@ REQ_F216 = {'align': ['bob_seated', 'bob_w'], 'p1': ['sub_bob', 'bob_w']}   # re
 REQ_F218 = {'pin': ['root', 'item_serial', 'f218_held', 'f218_applied', 'f218_refused', 'f218_offset_m'],
             'ik': ['item_serial', 'spine_w', 'l_reach_ratio', 'l_wrote', 'final_l_fore', 'final_chest', 'final_valid', 'l_swivel_limited', 'r_swivel_limited', 'l_swivel_cut_deg', 'r_swivel_cut_deg']}
 REQ_F223 = {'pin': ['f223_pop_m']}   # recorded from F223 on; older recordings lack it and the root jump section says so
+REQ_F224 = {'pin': ['f224_lead_m']}   # recorded from F224 on; older recordings lack it and the whole-body move section says so
 REQ_ALL = {}
-for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216, REQ_F218, REQ_F223):
+for _d in (REQ_LEDGER, REQ_FWD, REQ_IK, REQ_MARK, REQ_VIEW, REQ_STALE, REQ_NEW, REQ_F214, REQ_F215, REQ_F216, REQ_F218, REQ_F223, REQ_F224):
     for _k, _v in _d.items():
         REQ_ALL.setdefault(_k, [])
         REQ_ALL[_k] = sorted(set(REQ_ALL[_k]) | set(_v))
@@ -465,6 +476,8 @@ class Analysis:
         self.leak = {}
         self.cannot = []
         self.ik = None
+        self.f224 = None   # the F224 section's figures
+        self._f218_speed = None   # the root's plane speed on each ik row, set by the F218 section for the F224 one
         self.f222 = self.f223 = None   # the F222 and F223 sections' figures
         self.f215 = self.f216 = self.f218 = None   # the F215, F216 and F218/F219 sections' figures
         self.lever = self.lever_view = self.f214 = None   # the E / view over neck fits on the slope, and the F214 section's figures
@@ -1603,6 +1616,7 @@ class Analysis:
         pi = np.searchsorted(t_pin, t_ik, 'right') - 1
         near = (pi >= 0) & (t_ik - t_pin[np.maximum(pi, 0)] < 0.2)
         v_ik = np.where(near, speed[np.maximum(pi, 0)], np.nan)
+        self._f218_speed = v_ik
         cls_of = lambda v: np.where(np.isfinite(v), np.where(v >= F218_SPRINT_MPS, 2, np.where(v >= F218_WALK_MPS, 1, 0)), -1)
         cls_ik, cls_pin = cls_of(v_ik), cls_of(speed)
         n = len(t_ik)
@@ -1706,6 +1720,47 @@ class Analysis:
                     txt, fig = f221_text(m)
                     self.say('  item %d, %s (%g m/s or more along the body\'s %s): %.1f s%s' % (s, nm, F221_STRAFE_MPS, nm.split()[1], secs, txt))
                     self.f218['strafe'][(int(s), nm)] = dict(secs=secs, f221=fig)
+        # F225: solver hops on the ground at the hip: the left elbow stepping over 2 cm against the chest while the hand against the chest steps under 8 mm, per second, and how many fall on a flip of the
+        # F59 clavicle assist (l_assisted changing within 3 calls). Finding elbow_solver_hop: over 0.5 a second on 10 s or more.
+        self.f218['hops'] = {}
+        if have_f221 and ik.has('l_assisted') and ik.has('anim_l_foot') and ik.has('anim_r_foot'):
+            chest_ = ik.f('final_chest').astype(np.float64)
+            hand_rel = ik.f('final_l_hand').astype(np.float64) - chest_
+            hstep = np.zeros(n)
+            hstep[1:] = np.linalg.norm(hand_rel[1:] - hand_rel[:-1], axis=1)
+            asst = ik.f('l_assisted').astype(int)
+            flip = np.zeros(n, bool)
+            flip[1:] = asst[1:] != asst[:-1]
+            fl3 = flip.copy()
+            for sh in range(1, F225_FLIP_CALLS + 1):
+                fl3[sh:] |= flip[:-sh]
+            air_ = np.minimum(ik.f('anim_l_foot')[:, 1], ik.f('anim_r_foot')[:, 1]).astype(np.float64) > F224_AIR_FOOT_M
+            vs2 = np.zeros(n, bool)
+            with np.errstate(invalid='ignore'):
+                vs2[1:] = elig[1:] & elig[:-1] & (ser[1:] == ser[:-1]) & (dt[1:] > 0.0) & (dt[1:] < 0.1) & hip[1:] & ~air_[1:] & np.isfinite(stp[1:])
+                hop = vs2 & (stp > F225_HOP_STEP_M) & (hstep < F225_HAND_STEP_M)
+            tot = [0.0, 0, 0]
+            for s_ in sorted(set(ser[vs2].tolist())):
+                m = vs2 & (ser == s_)
+                secs = float(dt[m].sum())
+                if secs < F218_MIN_CLASS_S:
+                    continue
+                nh, nf = int((hop & m).sum()), int((hop & m & fl3).sum())
+                tot[0] += secs
+                tot[1] += nh
+                tot[2] += nf
+                self.f218['hops'][int(s_)] = dict(secs=secs, hops=nh, on_flip=nf, rate=nh / secs)
+                self.say('  item %d on the ground at the hip: %.1f s; solver hops (left elbow step over %g cm against the chest, the hand under %g mm) %d = %.2f/s, %d on a clavicle assist flip (within %d calls)' % (
+                    s_, secs, 100.0 * F225_HOP_STEP_M, 1000.0 * F225_HAND_STEP_M, nh, nh / secs, nf, F225_FLIP_CALLS))
+                if secs >= F225_FINDING_MIN_S and nh / secs > F225_FINDING_PER_S:
+                    idx = np.flatnonzero(hop & m)
+                    self.findings.append(Finding(t_ik[idx].min(), t_ik[idx].max(), 'elbow_solver_hop', 'assist' if nf * 2 >= nh else 'solver', 'F225: item %d, the left elbow hopped over %g cm with the hand steady %d times in %.1f s at the hip on the ground '
+                                                 '(%.2f a second, limit %.1f); %d on a flip of the clavicle assist' % (s_, 100.0 * F225_HOP_STEP_M, nh, secs, nh / secs, F225_FINDING_PER_S, nf)))
+            if tot[0] > 0.0:
+                self.f218['hops']['all'] = dict(secs=tot[0], hops=tot[1], on_flip=tot[2], rate=tot[1] / tot[0])
+                self.say('  all items on the ground at the hip: %.1f s; solver hops %d = %.2f/s, %d on a clavicle assist flip' % (tot[0], tot[1], tot[1] / tot[0], tot[2]))
+        elif not (ik.has('l_assisted') and ik.has('anim_l_foot')):
+            self.say('  ik.l_assisted or the animated feet missing: no solver hop figures')
         if not self.f218['items']:
             self.say('  no item with %.0f s or more of left-arm writes at %g m/s or more (the root\'s plane speed over %.1f s): nothing to read' % (F218_MIN_CLASS_S, F218_WALK_MPS, F218_SPEED_S))
         if not have_f218:
@@ -1833,6 +1888,72 @@ class Analysis:
                                              '(limit %.1f): the eye rows are taken through the wrong frame' % (s_, slope, n, F222_RATE_DPS, F222_FINDING_SLOPE)))
         if not self.f222['items']:
             self.say('  no item with %d rows or more at %g deg/s or more: nothing to read' % (F222_MIN_ROWS, F222_RATE_DPS))
+
+    # -- F224: the whole-body move ------------------------------------------------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    def f224_resid(x):
+        """x less its quadratic smoothing over 7 calls (the Savitzky-Golay centre weights -2 3 6 7 6 3 -2 over 21), along axis 0; 3 rows at each end are not a number."""
+        x = np.asarray(x, dtype=np.float64)
+        w = np.array([-2.0, 3.0, 6.0, 7.0, 6.0, 3.0, -2.0]) / 21.0
+        out = np.full(x.shape, np.nan)
+        n = len(x)
+        if n < 7:
+            return out
+        sm = np.zeros((n - 6,) + x.shape[1:])
+        for j in range(7):
+            sm += w[j] * x[j:j + n - 6]
+        out[3:n - 3] = x[3:n - 3] - sm
+        return out
+
+    def f224_section(self):
+        """Rows in F215's active states (active, active_item), each ik row with the pin record of its own call, split into air (the lower animated foot over F224_AIR_FOOT_M) and, on the ground, by the
+        root's speed (run over F224_RUN_MPS, walk from F218_WALK_MPS, still): the residual about a local quadratic over 7 calls along y (rms, mm) of the true camera (pin.e[1] less f223_pop_m: what F215's
+        rule reads), of the camera less the whole shift (pin.e[1] less f215_body_y: the height the pin and the hands work in) and of the final left hand against the final chest; f224_lead_m's rms when
+        recorded. Finding body_move_late: the air residual of the camera less the shift over F224_FINDING_MM (rms) on F224_FINDING_ROWS or more rows."""
+        S = self.S
+        self.f224 = None
+        self.say('')
+        self.say('== whole-body move (F224): residual about a local quadratic over 7 calls along y, in F215 active states, by air and ground speed')
+        ik, pin = S.tab('ik'), S.tab('pin')
+        miss = [('ik.' + f) for f in ('final_chest', 'final_l_hand', 'anim_l_foot', 'anim_r_foot') if not ik.has(f)] + [('pin.' + f) for f in ('e', 'f215_state', 'f215_body_y') if not pin.has(f)]
+        if not len(ik) or not len(pin) or miss:
+            self.say('  cannot evaluate: %s' % (', '.join(miss) if miss else 'no ik or pin records'))
+            return
+        t_ik, t_pin = S.t('ik'), S.t('pin')
+        pi = np.searchsorted(t_pin, t_ik, 'right') - 1
+        have = pi >= 0
+        pi = np.maximum(pi, 0)
+        st = pin.f('f215_state').astype(int)[pi]
+        ai, ac = S.enum('F215State', 'active_item'), S.enum('F215State', 'active')
+        act = have & ((st == ai) | (st == ac))
+        act = act & (np.convolve(act.astype(float), np.ones(7), 'same') > 6.5)   # the 7-call window lies wholly inside the active state: a change of state is not a residual
+        e1 = pin.f('e').astype(np.float64)[pi, 1]
+        pop = pin.f('f223_pop_m').astype(np.float64)[pi] if pin.has('f223_pop_m') else np.zeros(len(pi))
+        by = pin.f('f215_body_y').astype(np.float64)[pi]
+        lead = pin.f('f224_lead_m').astype(np.float64)[pi] if pin.has('f224_lead_m') else None
+        r_true = self.f224_resid(e1 - pop) * 1000.0
+        r_less = self.f224_resid(e1 - by) * 1000.0
+        r_hand = self.f224_resid(ik.f('final_l_hand').astype(np.float64)[:, 1] - ik.f('final_chest').astype(np.float64)[:, 1]) * 1000.0
+        air = np.minimum(ik.f('anim_l_foot')[:, 1], ik.f('anim_r_foot')[:, 1]).astype(np.float64) > F224_AIR_FOOT_M
+        v = self._f218_speed if self._f218_speed is not None and len(self._f218_speed) == len(t_ik) else np.full(len(t_ik), np.nan)
+        with np.errstate(invalid='ignore'):
+            classes = (('air', act & air), ('run', act & ~air & (v >= F224_RUN_MPS)), ('walk', act & ~air & (v >= F218_WALK_MPS) & (v < F224_RUN_MPS)), ('still', act & ~air & (v < F218_WALK_MPS)))
+        self.f224 = dict(classes={}, active=int(act.sum()), lead_recorded=lead is not None)
+        rms = lambda x: float(np.sqrt(np.mean(x ** 2)))
+        for name, m in classes:
+            m = m & np.isfinite(r_true) & np.isfinite(r_less) & np.isfinite(r_hand)
+            n = int(m.sum())
+            if n < F224_MIN_ROWS:
+                continue
+            fig = dict(rows=n, true=rms(r_true[m]), less=rms(r_less[m]), hand=rms(r_hand[m]), lead=(rms(lead[m]) * 1000.0 if lead is not None else None))
+            self.f224['classes'][name] = fig
+            self.say('  %s: %d rows; residual rms: true camera %.2f mm, camera less the whole shift %.2f mm, left hand against the chest %.2f mm; %s' % (
+                name, n, fig['true'], fig['less'], fig['hand'], ('f224_lead_m rms %.2f mm' % fig['lead']) if lead is not None else 'f224_lead_m not recorded (a recording from before F224)'))
+            if name == 'air' and n >= F224_FINDING_ROWS and fig['less'] > F224_FINDING_MM:
+                self.findings.append(Finding(t_ik[m].min(), t_ik[m].max(), 'body_move_late', 'body', 'F224: in the air the camera less the whole-body shift (what the pin and the hands work in) had a residual of %.1f mm rms over %d rows '
+                                             '(true camera %.1f mm; limit %.1f): the move follows the camera a call late' % (fig['less'], n, fig['true'], F224_FINDING_MM)))
+        if not self.f224['classes']:
+            self.say('  no class with %d rows or more in an F215 active state (%d active rows): nothing to read' % (F224_MIN_ROWS, self.f224['active']))
 
     # -- F223: root jumps -----------------------------------------------------------------------------------------------------------------------------------------------------------------
     def f223_section(self):
@@ -2266,6 +2387,7 @@ class Analysis:
         self.f218_section()
         self.f222_section()
         self.f223_section()
+        self.f224_section()
         self.ik_events()
         if since is not None or until is not None:
             lo = since if since is not None else 0.0
@@ -2503,7 +2625,7 @@ SYN_SCHEMA['p1'] = (2, _A('f64', 3, 'cam', 'e') + _A('f32', 3, 'sub_ads', 'sub_v
 SYN_SCHEMA['pin'] = (3, _A('f64', 3, 'root') + _S('f64', 'root_vy', 'root_speed') + _A('f64', 3, 'e', 'neck_anim', 'neck_target', 'neck_applied') +
                      _S('f64', 'delta', 'demand_v', 'demand_h', 'e_age_ms', 'detach_w', 'posture_w', 'aim_pitch_deg', 'eye_y_selected', 'raw_eye_y', 'f98_eye_y', 'raise_target', 'f95_target', 'wc',
                         'f97_w', 'f97_asked', 'f179_stand_w', 'f179_stand_raise', 'f179_legs_room', 'f193_neck_y', 'f193_eye_ask', 'guard_push_cm', 'guard_pred_cm', 'guard_dist_cm',
-                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') + _S('f32', 'f218_offset_m', 'f223_pop_m') +
+                        'stored_neck_stand', 'stored_neck_crouch', 'stored_cam_stand', 'stored_cam_crouch', 'f214_target', 'f215_body_y', 'f215_target') + _S('u32', 'item_serial', 'p1') + _A('f32', 2, 'heading') + _A('f32', 3, 'up', 'fwd') + _S('f32', 'f218_offset_m', 'f223_pop_m', 'f224_lead_m') +
                      _S('u8', 'valid') + _E('PinRefuse', 'refuse') + _S('u8', 'settled') + _E('SettleWhy', 'settle_why') + _S('u8', 'f138_refused') + _E('Stance', 'stance') +
                      _E('PinState', 'pin_state') + _E('Support', 'support') + _E('EyeSource', 'eye_source') + _S('u8', 'hunched', 'pin_capped_h', 'pin_capped_v', 'f97_capped', 'f107_began') +
                      _E('F193Source', 'f193_source') + _S('u8', 'f193_camera', 'f179_ran', 'f179_measure', 'have_stored_stand', 'have_stored_crouch', 'armed', 'aim_known') + _E('F214State', 'f214_state') + _E('F215State', 'f215_state') + _S('u8', 'f218_held', 'f218_applied', 'f218_refused'))
@@ -3505,6 +3627,73 @@ def self_test():
         _make(d, stamp)
         S, A = analyse(d)
         check('no call the rule would take' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'root_jump_crushed'], 'F223: a recording with no jump lists none')
+        # F224: rows in the air in F215's active state with the camera jittering a centimetre a call. The whole shift one call late (the camera's last value) leaves the camera less the shift alternating:
+        # the section reads a residual over 5 mm and a finding; with the lead in the shift it reads about nothing.
+        def lag_post(lead_on):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                n = len(t)
+                m = (t >= 2.0) & (t < 9.0)
+                c = 1.50 + 0.008 * (np.arange(n) % 2 * 2 - 1)
+                e = pin['e'].copy()
+                e[:, 1] = c
+                pin['e'] = e
+                body = np.zeros(n)
+                body[1:] = c[:-1] - 1.60
+                lead = np.zeros(n)
+                lead[1:] = c[1:] - c[:-1]
+                pin['f215_state'] = np.where(m, SYN_ENUMS['F215State'].index('active_item'), 0)
+                pin['f215_body_y'] = np.where(m, body + (lead if lead_on else 0.0), 0.0)
+                pin['f224_lead_m'] = np.where(m & lead_on, lead, 0.0)
+                for nm in ('anim_l_foot', 'anim_r_foot'):
+                    f = ik[nm].copy()
+                    f[:, 1] = np.where(m, 0.5, 0.0)
+                    ik[nm] = f
+            return post
+        for lead_on in (False, True):
+            d = fresh()
+            _make(d, stamp, [], [lag_post(lead_on)])
+            S, A = analyse(d)
+            cl = (A.f224 or {}).get('classes', {}).get('air')
+            got = [f for f in A.findings if f.kind == 'body_move_late']
+            if not lead_on:
+                check(cl is not None and cl['less'] > 5.0 and cl['true'] < 8.0 and cl['rows'] > 300 and len(got) == 1 and '== whole-body move (F224)' in '\n'.join(A.out),
+                      'F224: the shift one call late leaves the camera less the shift alternating (rms over 5 mm in the air) and one body_move_late finding: %s' % (cl,))
+            else:
+                check(cl is not None and cl['less'] < 1.0 and cl['lead'] is not None and cl['lead'] > 5.0 and not got, 'F224: with the lead in the shift the residual is under 1 mm and there is no finding: %s' % (cl,))
+        d = fresh()
+        _make(d, stamp, [], [lag_post(False)], drop={'pin': ['f224_lead_m', 'f223_pop_m']})
+        S, A = analyse(d)
+        check('f224_lead_m not recorded (a recording from before F224)' in '\n'.join(A.out) and (A.f224 or {}).get('classes', {}).get('air') is not None, 'F224: a recording from before the lead was recorded still reads and says so')
+        d = fresh()
+        _make(d, stamp)
+        S, A = analyse(d)
+        check('nothing to read' in '\n'.join(A.out) and not [f for f in A.findings if f.kind == 'body_move_late'], 'F224: a recording with no active whole-body move reads nothing and names no finding')
+        # F225: a rifle (serial 3) at the hip on the ground with the left hand steady: the assist flips every 20 calls and the elbow moves 4.5 cm with each, so the elbow hops (about 4.5 a second, all of them on a
+        # flip) and there is a finding; with the assist steady there is none.
+        def hop_post(flips):
+            def post(s_):
+                pin, ik = s_.tables['pin'], s_.tables['ik']
+                t = s_.t
+                n = len(t)
+                m = (t >= 1.0) & (t < 14.0)
+                ik['item_serial'], pin['item_serial'] = np.where(m, 3, 0), np.where(m, 3, 0)
+                pin['detach_w'] = np.zeros(n)
+                on = (np.arange(n) // 20) % 2 == 1 if flips else np.zeros(n, bool)
+                ik['l_assisted'] = (m & on).astype(int)
+                ik['final_l_fore'] = ik['final_l_fore'] + np.where(m & on, 1.0, 0.0)[:, None] * np.array([0.045, 0.0, 0.0])
+            return post
+        for flips in (True, False):
+            d = fresh()
+            _make(d, stamp, [], [hop_post(flips)])
+            S, A = analyse(d)
+            hp = (A.f218 or {}).get('hops', {}).get(3)
+            got = [f for f in A.findings if f.kind == 'elbow_solver_hop' and 'item 3' in f.detail]
+            if flips:
+                check(hp is not None and hp['secs'] > 12.0 and hp['rate'] > 3.0 and hp['on_flip'] == hp['hops'] and len(got) == 1, 'F225: an elbow hopping on every assist flip reads the rate, all on a flip, and one elbow_solver_hop finding: %s' % (hp,))
+            else:
+                check(hp is not None and hp['hops'] == 0 and not got, 'F225: a steady assist reads no hop and no finding: %s' % (hp,))
         # arms the IK did not write: a huge reach and swivel jumps make no event
         d = fresh()
 

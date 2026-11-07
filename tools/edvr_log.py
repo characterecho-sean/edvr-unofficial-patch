@@ -12898,6 +12898,52 @@ def _hj_f223(rows, ctx):
     return ("IDLE", text + "; nothing taken: no jump pack start, or the camera moved with the model")
 
 
+# F224: the whole-body move loses its call of lag (formatLeadLine in src/d3d11/native_on_foot_f223.h). It needs F215's key: the window counts the fresh calls in an F215 active state.
+H224_LABEL = "native on foot body move lead (F224)"
+H224_RE = (r"native on foot body move lead \(F224\) (?P<wl>\d+) s: (?P<active>\d+) active calls, the lead rms (?P<rms>%s) mm, largest (?P<mx>%s) mm; (?P<over>\d+) over the limit$" % (_HN, _HN))
+H224_MIN_CALLS = 100
+
+
+def _hj_f224(rows, ctx):
+    """F224: the whole-body move takes this call's small change of the camera as a lead, so it has no call of lag. The window line counts the fresh calls in an F215 active state, the lead's rms and
+    largest (mm) and the calls whose change was over the 8 cm limit. IDLE under 100 active calls; NEVER APPLIED with 100 or more and a lead of 0 on every one; OK with the figures. No line is not
+    present (F215's key off, or no whole-body move)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["active"]) for r in sec)
+    over = sum(int(r["over"]) for r in sec)
+    rms = (sum(int(r["active"]) * float(r["rms"]) ** 2 for r in sec) / n) ** 0.5 if n else 0.0
+    mx = max((float(r["mx"]) for r in sec), key=abs)
+    text = "%d s: %d active calls, the lead rms %.1f mm, largest %+.1f mm; %d over the limit" % (_hsecs(sec), n, rms, mx, over)
+    if n < H224_MIN_CALLS:
+        return ("IDLE", text + "; under %d active calls: little to judge" % H224_MIN_CALLS)
+    if all(float(r["rms"]) == 0.0 and float(r["mx"]) == 0.0 for r in sec):
+        return ("NEVER APPLIED", text + "; %d active calls and the lead was 0 on every one (F224; it needs F215's key and a jittering camera)" % n)
+    return ("OK", text)
+
+
+# F225: the shoulder's reach margin ramps (formatLine in src/d3d11/native_on_foot_f225.h), the left arm's armed solves.
+H225_LABEL = "native on foot reach margin (F225)"
+H225_RE = (r"native on foot reach margin \(F225\) (?P<wl>\d+) s: (?P<solves>\d+) armed solves, over the reach on (?P<over>\d+), margin weight mean (?P<wm>%s); the shoulder's assist move largest (?P<mv>%s) cm$" % (_HN, _HN))
+H225_MIN_OVER = 30
+
+
+def _hj_f225(rows, ctx):
+    """F225: the clavicle assist's 3 cm reach margin goes in over 0.2 s and out over 0.4 s instead of stepping at 0.97 of the reach. The window line counts the left arm's armed solves, those over the
+    reach, the margin weight's mean and the largest assist move. IDLE under 30 solves over the reach; OK with the figures. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["solves"]) for r in sec)
+    over = sum(int(r["over"]) for r in sec)
+    wm = sum(int(r["solves"]) * float(r["wm"]) for r in sec) / n if n else 0.0
+    text = "%d s: %d armed solves, over the reach on %d, margin weight mean %.2f; the shoulder's assist move largest %.1f cm" % (_hsecs(sec), n, over, wm, max(float(r["mv"]) for r in sec))
+    if over < H225_MIN_OVER:
+        return ("IDLE", text + "; under %d solves over the reach: little to judge" % H225_MIN_OVER)
+    return ("OK", text)
+
+
 H_F213 = "on-foot recording (F213)"
 F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
 
@@ -18092,6 +18138,12 @@ HEALTH_RULES = (
     _hrule("root jump (F223)", ("F223",), (H223_LABEL,), (
         ("sec", H223_RE),
     ), _hj_f223),
+    _hrule("body move lead (F224)", ("F224",), (H224_LABEL,), (
+        ("sec", H224_RE),
+    ), _hj_f224),
+    _hrule("reach margin (F225)", ("F225",), (H225_LABEL,), (
+        ("sec", H225_RE),
+    ), _hj_f225),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -24695,6 +24747,35 @@ def self_test_health():
         check("F223: refusals alone are IDLE", [win223(taken=0, largest=0.0, refused=3, move=0.0)], 0, [("IDLE", F223)], has=["nothing taken"], lacks=["UNPARSED", "NEVER"])
         check("F223: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
         check("F223: a window line that drifted from its pattern is UNPARSED", [win223().replace("calls taken", "taken")], 4, [("UNPARSED", F223)])
+        # ---- F224, F225: the whole-body move's lead and the reach margin; their window lines are rendered from the C format strings in the headers ----
+        f224src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f223.h"))
+        f225src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f225.h"))
+        F224 = "body move lead (F224)"
+        F225 = "reach margin (F225)"
+
+        def win224(active=900, rms=8.2, mx=-31.0, over=2, wl=10):
+            fmt = health_c_format(f224src, "native on foot body move lead (F224) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f223.h has no format holding the F224 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, active, float(rms), float(mx), over))
+
+        def win225(solves=900, over=300, wm=0.62, mv=3.4, wl=10):
+            fmt = health_c_format(f225src, "native on foot reach margin (F225) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f225.h has no format holding the F225 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, solves, over, float(wm), float(mv)))
+        check("F224: a window of active calls with a lead is OK with the figures", [win224()], 0, [("OK", F224)],
+              has=["10 s: 900 active calls, the lead rms 8.2 mm, largest -31.0 mm; 2 over the limit"], lacks=["UNPARSED", "NEVER"])
+        check("F224: 100 or more active calls and a lead of 0 on every one is NEVER APPLIED", [win224(rms=0.0, mx=0.0, over=0)], 3, [("NEVER APPLIED", F224)], has=["the lead was 0 on every one"], lacks=["UNPARSED"])
+        check("F224: under 100 active calls is IDLE", [win224(active=60, rms=0.0, mx=0.0, over=0)], 0, [("IDLE", F224)], has=["under 100 active calls"], lacks=["NEVER", "UNPARSED"])
+        check("F224: windows add up, the rms weighted by the calls", [win224(active=100, rms=10.0, mx=5.0), win224(active=300, rms=0.0, mx=-2.0)], 0, [("OK", F224)], has=["20 s: 400 active calls, the lead rms 5.0 mm, largest +5.0 mm"], lacks=["UNPARSED"])
+        check("F224: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F224: a window line that drifted from its pattern is UNPARSED", [win224().replace("active calls", "calls")], 4, [("UNPARSED", F224)])
+        check("F225: a window with solves over the reach is OK with the figures", [win225()], 0, [("OK", F225)],
+              has=["10 s: 900 armed solves, over the reach on 300, margin weight mean 0.62; the shoulder's assist move largest 3.4 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F225: under 30 solves over the reach is IDLE", [win225(over=20, wm=0.0, mv=0.0)], 0, [("IDLE", F225)], has=["under 30 solves over the reach"], lacks=["UNPARSED", "NEVER"])
+        check("F225: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F225: a window line that drifted from its pattern is UNPARSED", [win225().replace("armed solves", "solves")], 4, [("UNPARSED", F225)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

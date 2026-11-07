@@ -116,8 +116,8 @@ inline void run223(Check&& check) {
     {   // the sites
         const std::string cpp = slurp223("src/d3d11/native_on_foot.cpp"), rec = slurp223("src/common/onfoot_recorder_core.h");
         const auto has = [&](const char* needle) { return cpp.find(needle) != std::string::npos; };
-        check(has("pc.f215BodyY = g_f215.y + g_f223Pop;") && has("yUsed = g_f215.y + g_f223Pop;") && has("bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;"), "F223: the shift in force is F215's plus the move, and F215's rule reads the camera less the move");
-        const size_t step = cpp.find("g_f223Pop = g_f223.step(fresh223,"), shift = cpp.find("yUsed = g_f215.y + g_f223Pop;"), branch = cpp.find("if (!nofoot::f126::armsMayUseSnapshot(fpAgeUsable, fpRigCurrent))");
+        check(has("pc.f215BodyY = g_f215.y + g_f223Pop + g_f224Lead;") && has("yUsed = g_f215.y + g_f223Pop + g_f224Lead;") && has("bi.eyeY = pc.eyeYSelected + pc.f215BodyY - pc.f223PopM;"), "F223: the shift in force is F215's plus the move, and F215's rule reads the camera less the move");
+        const size_t step = cpp.find("g_f223Pop = g_f223.step(fresh223,"), shift = cpp.find("yUsed = g_f215.y + g_f223Pop + g_f224Lead;"), branch = cpp.find("if (!nofoot::f126::armsMayUseSnapshot(fpAgeUsable, fpRigCurrent))");
         check(step != std::string::npos && shift != std::string::npos && branch != std::string::npos && step < branch && branch < shift, "F223: the rule runs once a call before G's refusals and before the shift is formed");
         check(has("pinWanted && g_f215Key.load(std::memory_order_relaxed) && !g_f107Away.away") && has("g_f223.reset();\n            g_f223Pop = 0.0;"), "F223: the key, the camera away or a failed read reset the rule and the move");
         check(has("r.f223_pop_m = static_cast<float>(pc.f223PopM);") && rec.find("S(f32, f223_pop_m)") != std::string::npos, "F223: the pin record carries the move");
