@@ -15,21 +15,19 @@
     the game, and as the fallback when direct launch fails.
   - VR or flat is `/vr` or `/novr`, never a Settings.xml write on a direct
     launch.
-- **Open hypotheses, tested before any launcher code (see Test plan):**
-  - T1: a process Steam did not start can get a ticket, given a running Steam
-    and `SteamAppId=359320`.
-  - T2: the game runs normally from that launch, with Steam's overlay, playtime
-    and SteamVR's app identity intact.
-  - T3: EDVR comes up correctly in VR and flat when the game has no EDLaunch or
-    WatchDog64 above it.
-  - T4: the Frontier-store route works from the separate launcher and product
-    folders, and 2FA is asked once.
+- **Proven on Windows, 2026-11-07 (T1 to T4, see Test results):** a process Steam
+  did not start gets a ticket with `SteamAppId=359320`, and the game then runs
+  in VR and flat with no EDLaunch or WatchDog64 above it. The Frontier store works
+  from its separate folders with a saved login.
+- **Not yet shown on Windows:** a first Frontier login with 2FA, playtime counting,
+  the overlay working on screen, and rendering in a headset.
+- **Open hypotheses, for Linux and Mac:**
   - T5: the installer's window, network access and signature checks work under
     Proton on the Deck.
   - T6: a Windows exe inside the Proton prefix can get a Steam ticket.
   - T7: the same launch works in a CrossOver bottle on the Mac.
-- **Next flight:** T1 to T4 on Windows, with min-ed-launcher and no EDVR changes,
-  then T5 to T7 on the Deck and the Mac.
+- **Next flight:** T5 to T7 on the Deck and the Mac, before step 8 of the build
+  order. Steps 2 to 7 do not wait for them.
 - **Unchecked:** Frontier's terms on third-party launchers. Read them before
   shipping direct launch as the default.
 - **Issues:** [#196](https://github.com/characterecho-sean/ed-unofficial-patch/issues/196).
@@ -165,8 +163,8 @@ The game folders on the maintainer's machine, 2026-11-07:
 | Frontier | `C:\Program Files (x86)\Frontier\EDLaunch` | `%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64` | None |
 
 `VersionInfo.txt` says `useWatchDog64: true`. min-ed-launcher's shipped default
-does not use WatchDog64, so direct launches run the game without it. T3 covers
-that.
+does not use WatchDog64, so direct launches run the game without it. T3 ran that
+way with no trouble.
 
 ### Epic stays on EDLaunch for now
 
@@ -218,10 +216,7 @@ playing.
 Play in Steam to run the pre-launch check. If the command ends in `EDLaunch.exe`
 the wrapper replaces it with a direct launch. Anything else, such as
 `MinEdLauncher.exe`, is passed through after the check, so existing min-ed-launcher
-setups still work. If T1 fails this stops being optional on Steam: the launcher
-starts `steam://rungameid/359320` and hands its VR or flat choice to the wrapper
-in a one-shot file, because `steam://run/359320//<args>` reportedly raises Steam's
-Optional Parameters Warning.
+setups still work. T1 showed the launcher does not need it to sign in on Steam.
 
 ### Elevation
 
@@ -303,9 +298,30 @@ masked, must match ours. The API client gets a test rig against a local fake ser
 with recorded, scrubbed responses, so an unexpected response shape fails in the build
 and costs no flight.
 
+## Test results
+
+T1 to T4, 2026-11-07, on Windows, with min-ed-launcher v0.13.0 and its automatic game
+updates turned off by `/settingsOverlay`. Real launches used `/autoquit waitForExit`,
+so min-ed-launcher stayed open as the launcher will. Each ran about two minutes at the
+main menu.
+
+| Test | Result | Evidence |
+|---|---|---|
+| T1 | Pass | Without `SteamAppId`: "Unable to initialize Steam". With it: signed in, and the dry run's command line ended `/steam /vr`. There is no `steam_appid.txt` in the game folder |
+| T2 flat, Steam | Pass | The game's parent was min-ed-launcher, EDLaunch never ran, `RunningAppID` was 359320 during the run and 0 after, and `gameoverlayrenderer64.dll` was loaded |
+| T3 flat, Steam | Pass | Build `v0.22.0-rc.6-326-gac4ab507`. `profile: flat (... command line /novr applied)`, no `openvr_api.dll`, gfx log present, no stand-down |
+| T2 and T3 VR, Steam | Pass | `profile: vr (... command line /vr applied)`, `openvr_api.dll` and `openxr_loader.dll` loaded, both logs present. The runtime log has `steam_identity,variable=SteamAppId,source=inherited,app_id=359320`, 10,483 submitted frame pairs and a graceful close. Whether a headset was on is unknown |
+| T4 flat, Frontier | Pass, with a saved login | Build `v0.22.0-rc.7-15-g4d5bd6e4`. Two silent dry runs and one real launch from `%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64`. `/novr` applied, no `/steam`, `RunningAppID` stayed 0 |
+
+Not covered: a first Frontier login with 2FA, because a saved login already existed;
+playtime counting; whether the overlay works on screen; rendering in a headset; play
+past the main menu; and the Frontier launch's process parent, because that query
+failed during a concurrent build. The port's source is v0.14.0, so its changes since
+v0.13.0 need reading during the port.
+
 ## Build order
 
-1. T1 to T4.
+1. T1 to T4 (done).
 2. Publish the new assets and the signed manifest beside today's. Nothing breaks.
 3. Launcher from the installer: file cache in place of the embedded payload, update,
    self-update, and the EDLaunch route with the close after exit. It ships beside the
@@ -338,6 +354,11 @@ Linux, an Arm build, and could not reach the Windows Steam inside a Mac bottle.
 
 ## Ruled out
 
+- ruled out: the game closing itself after a direct launch, because the two early
+  launches that seemed to were closed by hand, and three later launches ran until the
+  test closed them.
+- ruled out: needing `--wrap` or `steam://` to sign in on Steam, because T1 got a
+  ticket from a process Steam did not start.
 - ruled out: a cross-platform SDK, because the planner, chain and ini code would need
   rewriting or duplicating beside the DLL's, and a native app still could not reach
   Steam inside a Mac bottle. One Windows exe already runs wherever the game does.
