@@ -148,12 +148,12 @@ def versioninfo_lines(version, file_description, internal_name, original_filenam
         '    BEGIN',
         '        BLOCK "040904b0"',
         '        BEGIN',
-        '            VALUE "CompanyName", "EDVR (unofficial)"',
+        '            VALUE "CompanyName", "ED-UP (unofficial)"',
         '            VALUE "FileDescription", "%s"' % file_description,
         '            VALUE "FileVersion", "%s"' % version,
         '            VALUE "InternalName", "%s"' % internal_name,
         '            VALUE "OriginalFilename", "%s"' % original_filename,
-        '            VALUE "ProductName", "EDVR unofficial patch"',
+        '            VALUE "ProductName", "ED Unofficial Patch"',
         '            VALUE "ProductVersion", "%s"' % version,
         '            VALUE "LegalCopyright", "Copyright (c) 2026 characterecho-sean. MIT License."',
         '            VALUE "Comments", "%s"' % comments,
@@ -179,7 +179,7 @@ def write_version_rc(which, version, out, dry_run):
     if which == 'graphics':
         lines = versioninfo_lines(
             version,
-            file_description=('EDVR unofficial VR patch for Elite Dangerous: Direct3D 11 '
+            file_description=('ED Unofficial Patch for Elite Dangerous: Direct3D 11 '
                               'proxy (forwards to the system d3d11.dll)'),
             internal_name='edvr_openxr_graphics',
             original_filename='d3d11.dll',
@@ -189,7 +189,7 @@ def write_version_rc(which, version, out, dry_run):
     else:
         lines = versioninfo_lines(
             version,
-            file_description=('EDVR unofficial VR patch for Elite Dangerous: OpenXR runtime '
+            file_description=('ED Unofficial Patch for Elite Dangerous: OpenXR runtime '
                               'speaking the OpenVR ABI'),
             internal_name='edvr_openxr_runtime',
             original_filename='openvr_api.dll',
@@ -458,7 +458,7 @@ def main(argv=None):
     version = args.version
     lines += [''] + versioninfo_lines(
         version,
-        file_description='EDVR installer',
+        file_description='ED-UP installer',
         internal_name='edvr-installer',
         original_filename='edvr-installer.exe',
         file_type='0x1L',

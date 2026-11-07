@@ -306,9 +306,9 @@ jobs:
           if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Tail 100 }
           if ($code -ne 0) { throw "Packaging failed with exit code $code" }
           $names = @(
-            "edvr-$env:PACKAGE_VERSION.zip",
-            "edvr-installer-$env:PACKAGE_VERSION.zip",
-            "edvr-installer-linux-$env:PACKAGE_VERSION.zip"
+            "ed-up-$env:PACKAGE_VERSION.zip",
+            "ed-up-installer-$env:PACKAGE_VERSION.zip",
+            "ed-up-installer-linux-$env:PACKAGE_VERSION.zip"
           )
           $lines = @()
           foreach ($name in $names) {
@@ -360,5 +360,5 @@ jobs:
           name: edvr-packages-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           path: |
-            dist/edvr-*.zip
+            dist/ed-up-*.zip
             dist/SHA256SUMS

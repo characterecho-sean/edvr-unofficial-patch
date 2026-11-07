@@ -60,7 +60,7 @@ const UINT kMsgFirstScan = WM_APP + 1;
 
 const wchar_t* kTipUrl = L"https://ko-fi.com/seancharacterecho";
 const wchar_t* kDiscordUrl = L"https://discord.gg/AWJ6djKKzr";
-const wchar_t* kTipText = L"EDVR is free. If it makes your flight more enjoyable, you can";
+const wchar_t* kTipText = L"ED-UP is free. If it makes your flight more enjoyable, you can";
 constexpr int kTipTop = 658;  // the tip line's top: the painted sentence and both links share it
 
 // The client area and every control position below are in 96-dpi units, scaled
@@ -369,7 +369,7 @@ void rebuildStatus() {
     // A record older than the files says nothing about what is installed, its version included.
     const bool stale = installRecordStale(s);
     if (s.d3d11.kind == DllKind::Edvr) {
-        fixes.value = L"EDVR installed as d3d11.dll";
+        fixes.value = L"ED-UP installed as d3d11.dll";
         if (!s.state.edvrVersion.empty() && !stale) fixes.value += L" \x00b7 " + fromUtf8(s.state.edvrVersion);
     } else if (s.d3d11.kind == DllKind::Absent) {
         fixes.value = L"not installed";
@@ -385,7 +385,7 @@ void rebuildStatus() {
         vr.value = L"no Openvr folder found under this install";
     } else if (s.openvrCurrent.kind == DllKind::Edvr) {
         vr.tone = Tone::Good;
-        vr.value = L"EDVR installed as openvr_api.dll";
+        vr.value = L"ED-UP installed as openvr_api.dll";
     } else if (s.openvrCurrent.kind == DllKind::OpenVrRuntime) {
         vr.tone = Tone::Muted;
         vr.value = L"not installed \x00b7 the game's own runtime is in place";
@@ -418,7 +418,7 @@ void rebuildStatus() {
                 orig.value = L"safe, renamed openvr_api_orig.dll";
             } else if (s.openvrCurrent.kind == DllKind::Edvr) {
                 orig.tone = Tone::Warn;
-                orig.value = L"EDVR's runtime is in place; flat restores the game's own";
+                orig.value = L"ED-UP's runtime is in place; flat restores the game's own";
             } else {
                 orig.tone = Tone::Muted;
                 orig.value = L"not found";
@@ -426,7 +426,7 @@ void rebuildStatus() {
         } else {
             if (s.openvrCurrent.kind == DllKind::Edvr) {
                 orig.tone = Tone::Good;
-                orig.value = L"EDVR's own runtime is in place";
+                orig.value = L"ED-UP's own runtime is in place";
             } else if (s.openvrCurrent.kind == DllKind::OpenVrRuntime) {
                 orig.tone = Tone::Muted;
                 orig.value = L"the game's own runtime; the install replaces it";
@@ -502,16 +502,16 @@ void rebuildStatus() {
     // when the scope leaves that half out, said again: somebody who installed VR only and
     // then turned 3D off is owed the reason the flat fixes are not there.
     if (!g.mode.known) {
-        g.modeLine = L"Elite's 3D mode is unknown: EDVR starts in VR.";
+        g.modeLine = L"Elite's 3D mode is unknown: ED-UP starts in VR.";
     } else if (g.mode.mode == edvr::GameMode::Flat) {
-        g.modeLine = L"Elite's 3D mode is off: EDVR runs its flat fixes.";
+        g.modeLine = L"Elite's 3D mode is off: ED-UP runs its flat fixes.";
     } else {
-        g.modeLine = L"Elite's 3D mode is on: EDVR runs its VR fixes.";
+        g.modeLine = L"Elite's 3D mode is on: ED-UP runs its VR fixes.";
     }
     if (g.mode.mode == edvr::GameMode::Flat && scope == "vr") {
-        g.scopeLine = L"This install does not include flat: EDVR stays out of the way.";
+        g.scopeLine = L"This install does not include flat: ED-UP stays out of the way.";
     } else if (g.mode.mode == edvr::GameMode::Vr && scope == "flat") {
-        g.scopeLine = L"This install does not include VR: EDVR stays out of the way.";
+        g.scopeLine = L"This install does not include VR: ED-UP stays out of the way.";
     }
 }
 
@@ -581,7 +581,7 @@ void paintInstallScreen(HDC dc) {
 
     // The scope prompt sits on the tab row, to the right of the tabs.
     RECT scopeLabel{dp(372), dp(146), dp(484), dp(176)};
-    ui::drawText(dc, L"Install EDVR for:", scopeLabel, f.body, t.subtext, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui::drawText(dc, L"Install ED-UP for:", scopeLabel, f.body, t.subtext, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     RECT actions{dp(kMargin), dp(394), dp(kClientWidth - kMargin), dp(512)};
     ui::paintCard(dc, actions, g.dpi);
@@ -647,7 +647,7 @@ void paintWindow(HWND window) {
     ui::fillRect(dc, client, t.windowBg);
 
     RECT title{dp(kMargin), dp(18), dp(400), dp(50)};
-    ui::drawText(dc, L"EDVR", title, f.title, t.text, DT_LEFT | DT_SINGLELINE);
+    ui::drawText(dc, L"ED-UP", title, f.title, t.text, DT_LEFT | DT_SINGLELINE);
 
     const std::wstring subtitle = fromUtf8(payloadInfo().version) +
         L"  \x00b7  unofficial patch for Elite Dangerous in VR and flat";
@@ -830,7 +830,7 @@ void browseForFolder() {
         MessageBoxW(g.window,
                     L"There is no EliteDangerous64.exe in that folder, or in a Products folder "
                     L"under it.\n\nPick the folder that holds EliteDangerous64.exe itself.",
-                    L"EDVR installer", MB_OK | MB_ICONWARNING);
+                    L"ED-UP installer", MB_OK | MB_ICONWARNING);
         return;
     }
     addInstall(game);
@@ -885,7 +885,7 @@ void runAction(AppArgs::Act action) {
                 fromUtf8(mirror.savedUtc) +
                 L".\n\nRestore them before installing? They are kept at\n" + mirror.dir +
                 L"\nprecisely so a game update wiping this folder cannot take them too.";
-            const int answer = MessageBoxW(g.window, text.c_str(), L"EDVR installer",
+            const int answer = MessageBoxW(g.window, text.c_str(), L"ED-UP installer",
                                            MB_YESNO | MB_ICONQUESTION);
             if (answer == IDYES) {
                 std::vector<std::string> notes;
@@ -896,7 +896,7 @@ void runAction(AppArgs::Act action) {
                     std::wstring why = L"Not all of your saved settings could be restored:\n\n";
                     for (const std::string& n : notes) why += L"\x2022 " + fromUtf8(n) + L"\n";
                     why += L"\nThe install carries on with what is in the folder now.";
-                    MessageBoxW(g.window, why.c_str(), L"EDVR installer", MB_OK | MB_ICONWARNING);
+                    MessageBoxW(g.window, why.c_str(), L"ED-UP installer", MB_OK | MB_ICONWARNING);
                 }
                 // Whatever did come back is what the plan is for.
                 g.survey = surveyTarget(g.survey.game);
@@ -925,9 +925,9 @@ void runAction(AppArgs::Act action) {
         return;
     }
 
-    const wchar_t* verb = action == AppArgs::Act::Uninstall ? L"About to remove EDVR:"
+    const wchar_t* verb = action == AppArgs::Act::Uninstall ? L"About to remove ED-UP:"
                           : action == AppArgs::Act::Repair  ? L"About to repair this install:"
-                                                            : L"About to install EDVR:";
+                                                            : L"About to install ED-UP:";
     if (!args.autorun) {
         // No is the default button, deliberately. Install is this window's
         // default push button, so Return reaches it -- and if the confirmation
@@ -935,7 +935,7 @@ void runAction(AppArgs::Act action) {
         // taken the foreground would be enough to modify a game folder. That
         // is not hypothetical: it happened twice during development, to a real
         // install, while windows were being opened for screenshots.
-        const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"EDVR installer",
+        const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"ED-UP installer",
                                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
     }
@@ -945,7 +945,7 @@ void runAction(AppArgs::Act action) {
             g.window,
             L"This game folder can only be written to by an administrator (it is usually under "
             L"Program Files).\n\nRestart the installer with administrator rights and carry on?",
-            L"EDVR installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+            L"ED-UP installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
         AppArgs elevated = args;
         elevated.autorun = true;
@@ -965,7 +965,7 @@ void runAction(AppArgs::Act action) {
     text += "\r\n----\r\n";
     for (const std::string& line : result.done) text += "  " + line + "\r\n";
     if (result.ok) {
-        text += "\r\nDone. Start Elite Dangerous; EDVR writes what it managed to install into "
+        text += "\r\nDone. Start Elite Dangerous; ED-UP writes what it managed to install into "
                 "edvr_logs\\ next to the game.\r\n";
         if (canMirror) {
             const MirrorResult m = updateMirror(g.survey.game.dir, plan.backupDir, mirrorDir);
@@ -1008,7 +1008,7 @@ void saveLogs() {
             text += "\r\n";
             for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
         }
-        text += "\r\nAttach it to a GitHub issue, or drop it on Discord. It holds EDVR's own "
+        text += "\r\nAttach it to a GitHub issue, or drop it on Discord. It holds ED-UP's own "
                 "logs and settings and nothing else.\r\n";
         // The same zip, as a copied file: Ctrl+V in Discord or a GitHub comment attaches it. Only the
         // logs zip -- the crash dump below is private and never goes on the clipboard.
@@ -1420,7 +1420,7 @@ int runGui(HINSTANCE instance, const AppArgs& args) {
     cls.hIconSm = cls.hIcon;
     RegisterClassExW(&cls);
 
-    HWND window = CreateWindowExW(0, cls.lpszClassName, L"EDVR installer",
+    HWND window = CreateWindowExW(0, cls.lpszClassName, L"ED-UP installer",
                                   (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)) |
                                       WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, kClientWidth, kClientHeight,

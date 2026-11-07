@@ -497,7 +497,7 @@ void applyValue(List* list, size_t rowIndex, const std::string& value) {
     if (!list->model) return;
     if (!list->model->set(rowIndex, value)) {
         list->error = list->model->lastError();
-        MessageBoxW(GetParent(list->hwnd), fromUtf8(list->error).c_str(), L"EDVR installer",
+        MessageBoxW(GetParent(list->hwnd), fromUtf8(list->error).c_str(), L"ED-UP installer",
                     MB_OK | MB_ICONWARNING);
     } else {
         list->error.clear();

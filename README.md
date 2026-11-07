@@ -1,10 +1,10 @@
-# EDVR: an unofficial patch for Elite Dangerous in VR
+# ED Unofficial Patch (ED-UP): upscaling and fixes for Elite Dangerous, in VR and flat
 
-DLSS, FSR and XeSS upscaling for Elite in VR, and two dozen fixes for things
-that make Odyssey uncomfortable in a headset, in a native OpenXR package that
-takes about three minutes to install. [Upscaling: DLSS, FSR and
-XeSS](#upscaling-dlss-fsr-and-xess) covers the upscalers. The short list of
-fixes is under [What it fixes](#what-it-fixes), and
+DLSS, FSR and XeSS upscaling for Elite in VR and on a flat screen, and two
+dozen fixes for things that make Odyssey uncomfortable in a headset, in a
+native OpenXR package that takes about three minutes to install. [Upscaling:
+DLSS, FSR and XeSS](#upscaling-dlss-fsr-and-xess) covers the upscalers. The
+short list of fixes is under [What it fixes](#what-it-fixes), and
 [docs/fixes.md](docs/fixes.md) describes each one in full.
 
 If something is not working, [open an
@@ -20,11 +20,11 @@ C++ changes need a full native Windows validation build. For rendering changes,
 say which headset and VR runtime you tested, or say that a headset flight is
 still needed. The maintainer handles merging and releases.
 
-EDVR is free and stays free. If it improves your VR experience, [tips are
+ED-UP is free and stays free. If it improves your game, [tips are
 welcome](https://ko-fi.com/seancharacterecho), but please do not feel any
 obligation.
 
-> **Already running EDHM or ReShade?** Both run alongside EDVR. EDHM also
+> **Already running EDHM or ReShade?** Both run alongside ED-UP. EDHM also
 > installs itself as `d3d11.dll`, and only one file can have that name, so
 > don't overwrite it. The installer handles this for you; by hand it takes one
 > rename and one setting, described under [Running alongside other
@@ -33,41 +33,41 @@ obligation.
 
 ## Headsets and VR runtimes
 
-EDVR's native OpenXR route has been checked in the field on Pimax over
+ED-UP's native OpenXR route has been checked in the field on Pimax over
 PiOpenXR, Quest 3 over Virtual Desktop's VDXR, and the latest Air Link flight.
 Nothing is claimed for other headsets and runtimes.
 
-Elite still starts VR through its OpenVR-facing path, and EDVR keeps that entry
-point for compatibility; behind it, EDVR's native runtime owns the OpenXR
+Elite still starts VR through its OpenVR-facing path, and ED-UP keeps that entry
+point for compatibility; behind it, ED-UP's native runtime owns the OpenXR
 session. The bundled Khronos loader reaches whichever runtime Windows has set
 as its active OpenXR runtime, whether SteamVR, PiOpenXR, VDXR or Meta's, and
-all of them run on the same native EDVR backend. The package has no backend to
-choose and never falls back to the legacy EDVR pair; Elite's legacy LibOVR path
+all of them run on the same native ED-UP backend. The package has no backend to
+choose and never falls back to the legacy ED-UP pair; Elite's legacy LibOVR path
 is not supported, even as a fallback. The release installer checks the Elite
 executable's profile and refuses Elite Dangerous (Horizons) or an unreadable
 executable before it writes anything. An Odyssey revision that build was not
 checked against installs with a warning: the game starts, the fixes tied to the
 game build stand down and the gfx log names each one, and the Oculus PC runtime
-may bypass EDVR's OpenXR runtime until an EDVR update for that revision.
+may bypass ED-UP's OpenXR runtime until an ED-UP update for that revision.
 
 Before launching Elite, set the Windows active OpenXR runtime to the one you
 intend to use, since that is the one the bundled loader picks, and make sure
-that runtime is available and your headset connected. EDVR needs no SteamVR
+that runtime is available and your headset connected. ED-UP needs no SteamVR
 loader; do not install OpenComposite or a vendor OpenXR loader to make it work.
 Then launch Elite as you normally would.
 
 Canted Pimax headsets (Vision 8K X, 8K Plus, 8K, 5K Super, 5K Plus, 5K XR and
 Artisan) should turn "Enable Parallel Projection" off in Pimax Play and restart
-the game. EDVR renders canted displays correctly without it. With it on, the
+the game. ED-UP renders canted displays correctly without it. With it on, the
 headset renders much larger frames (8268x3948 instead of 5016x3160 per eye on
 an 8K X at FOV Wide), and turning it off cut GPU time by up to about 30% in
 testing. This works with PimaxXR as the OpenXR runtime; with Pimax Play's own
-OpenXR runtime the toggle may have no effect. When EDVR sees the setting on
+OpenXR runtime the toggle may have no effect. When ED-UP sees the setting on
 with PimaxXR, it shows a notice in the headset.
 
 ## Install
 
-**Download `edvr-installer-<version>.zip` from the release, unzip it, and run
+**Download `ed-up-installer-<version>.zip` from the release, unzip it, and run
 `edvr-installer.exe`.** It is a single file once unzipped, with nothing else to
 extract or put in the right folder, and it carries the native graphics/runtime
 pair, the bundled OpenXR loader and its notice, `edvr.ini`, `edvr-flat.ini`,
@@ -77,7 +77,7 @@ about to do and waits for a yes, and it copies every file it replaces into
 `edvr_backup\` first. [docs/installer.md](docs/installer.md) covers its buttons
 and explains what it decides and why.
 
-The same installer serves flat-screen players. Under "Install EDVR for:",
+The same installer serves flat-screen players. Under "Install ED-UP for:",
 choose "VR and flat" (the default), "VR only" or "Flat only"; the choice can be
 changed later with an ordinary Update, and no settings file is deleted by it.
 
@@ -93,7 +93,7 @@ rename that most manual installs get wrong.
 
 ### Linux on Steam (Proton)
 
-Download `edvr-installer-linux-<version>.zip` from the release and unzip it. It
+Download `ed-up-installer-linux-<version>.zip` from the release and unzip it. It
 contains `edvr_installer.sh`, `edvr-installer-linux.py`, the Windows
 `edvr-installer.exe`, and `README-linux.txt`. The launcher needs Python 3 and
 the Proton installation already used by Steam. It needs no Protontricks or
@@ -135,7 +135,7 @@ the game is not on its OpenVR path and half the patch never loaded: see
 If you still see a flash, press **Pause** straight after it and send the logs.
 Pause writes the temporal pass's recent camera history and says whether the
 jump-flash hold was armed. A `transition flash: frame N held` line near the
-moment means EDVR held a frame and the flash got through anyway; no such line
+moment means ED-UP held a frame and the flash got through anyway; no such line
 means it held nothing.
 
 ### Reporting a problem
@@ -154,7 +154,7 @@ of the game's memory, so it is kept out of the log zip: attach only the log zip
 to a public issue, and send the dump privately if you are asked for it.
 
 To do it by hand, attach `edvr_logs\` (both files if there are two). The log
-records the build stamp, which fixes EDVR managed to install, and what each one
+records the build stamp, which fixes ED-UP managed to install, and what each one
 decided, so a report with the log attached can usually be diagnosed in one
 pass; without it there is very little to go on. If the game will not start at
 all, send `edvr_breadcrumbs.txt` from next to `EliteDangerous64.exe`. It is
@@ -163,23 +163,23 @@ written unbuffered, so it survives a crash that eats the log.
 If something has gone wrong and the log has not answered it,
 [docs/troubleshooting.md](docs/troubleshooting.md) covers the faults with a
 known cause and what each one needs, among them a game that dies a second or
-two after launch and VR that fails to start after an EDVR update.
+two after launch and VR that fails to start after an ED-UP update.
 
 ### Uninstall
 
-Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files and
+Run `edvr-installer.exe` and press **Uninstall**. It removes ED-UP's files and
 renames the game's `openvr_api.dll` back. If another mod was chained behind
-EDVR, it also puts that mod back under its own name, the step a manual
+ED-UP, it also puts that mod back under its own name, the step a manual
 uninstall usually forgets. It leaves your `edvr.ini` alone unless you ask for
 it to go, so a reinstall finds your settings again.
 
 To uninstall by hand, delete `d3d11.dll` and `edvr.ini` from the game folder,
-then, in whichever `Openvr` folder you used, delete EDVR's `openvr_api.dll` and
+then, in whichever `Openvr` folder you used, delete ED-UP's `openvr_api.dll` and
 rename `openvr_api_orig.dll` back.
 
 ## Upscaling: DLSS, FSR and XeSS
 
-EDVR can hand each frame to an upscaler that calms the shimmer: NVIDIA's
+ED-UP can hand each frame to an upscaler that calms the shimmer: NVIDIA's
 trained DLSS on an RTX card; AMD's FSR 3.1, which runs on any GPU and needs no
 extra file; or Intel's XeSS-SR, which also runs on any GPU and is fastest on an
 Intel Arc card. On other cards XeSS costs more than DLSS or FSR: on an RTX 5090
@@ -195,7 +195,7 @@ Performance page, or set `fix.temporal_aa = dlss`, `fsr` or `xess`. It is off
 by default and takes effect at the next frame; set Elite's own anti-aliasing to
 Off or SMAA with it on. DLSS needs NVIDIA's runtime, which the installer places
 on a machine with an NVIDIA card; without an RTX card or the runtime it runs
-EDVR's own TAA instead and says so in the log. XeSS needs Intel's runtime,
+ED-UP's own TAA instead and says so in the log. XeSS needs Intel's runtime,
 `libxess.dll`, which the installer places beside the game with its licence
 notices. The DLSS preset, on the same page, is K by default
 (`fix.temporal_aa_model = k`). Sharpening, also on that page
@@ -221,19 +221,19 @@ instead of standing in the world, or sized for a screen you are not looking at.
   the splash screen's own surface.
 - The one-frame flash each time you jump or drop out of supercruise is caught
   and not sent, so the runtime holds the previous frame. It is always on and
-  has no setting; a game build EDVR does not recognise gets no hold, and the
+  has no setting; a game build ED-UP does not recognise gets no hold, and the
   log says so.
 - For shimmer and frame time there is DLSS, FSR or XeSS, under [Upscaling:
   DLSS, FSR and XeSS](#upscaling-dlss-fsr-and-xess).
 - Over planets, Elite culled terrain with a head pose about 42 ms older than
   the one it drew with, so squares of ground at the edges of view went undrawn
-  when you moved your head. EDVR answers the game's request for the head pose
+  when you moved your head. ED-UP answers the game's request for the head pose
   "now" at the instant of the frame being drawn. On a headset whose eyes see
   further out than the centred frustum Elite culls terrain against (a Quest 3,
-  a cropped Pimax), EDVR also widens that frustum to what each eye shows, which
+  a cropped Pimax), ED-UP also widens that frustum to what each eye shows, which
   stopped the black flashes at the outer corners over flat ground. There is no
   setting.
-- On foot, EDVR answers the game's request for its flat on-foot screen with the
+- On foot, ED-UP answers the game's request for its flat on-foot screen with the
   headset's own stereo, so you see the world in 3D from your commander's eyes.
   Where the game still shows the flat screen, the grey surround is made properly
   black and the screen is moved, bent and raised above its forced 1920x1080.
@@ -246,7 +246,7 @@ menu.
 ## On foot
 
 On foot, Elite asks for a flat screen and shows the same image to both eyes.
-With `fix.native_on_foot` on (the default), EDVR answers that request with the
+With `fix.native_on_foot` on (the default), ED-UP answers that request with the
 headset's own stereo while a game session is live, so the world is drawn for
 each eye from your commander's head, and your commander's own head is hidden
 from the inside. The setting and the other on-foot options are on the menu's
@@ -274,12 +274,12 @@ While the menu is open the game sees no keyboard at all, though your HOTAS and
 mouse still do. Every change is written to `edvr.ini` and applies the way a
 hand edit would, and a row that only takes effect at the next launch says so.
 
-EDVR's own keys have a page of their own, **Hotkeys**: the menu key, the AA
+ED-UP's own keys have a page of their own, **Hotkeys**: the menu key, the AA
 comparison key and the camera-history key. Pick a row, press Enter, then press the key you want, with
 Ctrl, Shift or Alt for a chord, a gamepad button, or a button or hat on your
 HOTAS. Escape cancels and Delete clears (the menu key can be changed but never
 cleared from the menu). A choice that Elite also binds is flagged "also in
-Elite", because EDVR watches these keys and never takes them from the game. In
+Elite", because ED-UP watches these keys and never takes them from the game. In
 `edvr.ini` they read `F5`, `CTRL+SHIFT+F9`, `GamePad_Back` or `231D0200:Joy_12`
 (the device is the vendor and product, as Elite's own bindings file spells it).
 
@@ -292,17 +292,17 @@ sections. The whole design is in
 ## Running alongside other mods
 
 **The installer does this for you**: it recognises what is in the `d3d11.dll`
-slot, renames it, writes the setting, and tells you what it did. EDVR then
+slot, renames it, writes the setting, and tells you what it did. ED-UP then
 passes everything through EDHM.
 [docs/manual-install.md](docs/manual-install.md#running-alongside-edhm-by-hand)
 has the same procedure by hand.
 
-**EDHM's uninstaller runs `del d3d11.dll`**, which after this is *EDVR's* file.
-If that has happened, leaving EDVR gone and EDHM still parked under the renamed
+**EDHM's uninstaller runs `del d3d11.dll`**, which after this is *ED-UP's* file.
+If that has happened, leaving ED-UP gone and EDHM still parked under the renamed
 file, the installer's Repair recognises it and puts both back.
 
 ReShade needs no configuration. Install it the way ReShade tells you to
-(normally as `dxgi.dll`) and EDVR composes with it, so both mods' effects
+(normally as `dxgi.dll`) and ED-UP composes with it, so both mods' effects
 apply.
 
 ## Game updates
@@ -314,17 +314,17 @@ version of Elite compiled it. The two things measured from one build (330683 /
 [docs/fixes.md](docs/fixes.md#surviving-a-game-update) describes.
 
 Frontier's launcher may remove `d3d11.dll` when it verifies the install.
-Nothing is broken when it does: it has simply uninstalled EDVR, so copy the
+Nothing is broken when it does: it has simply uninstalled ED-UP, so copy the
 file back.
 
 ## What it does and does not do
 
-EDVR loads alongside the game as a `d3d11.dll` proxy that forwards every call
-to Windows' real `d3d11.dll`, and its `openvr_api.dll` is EDVR's own OpenXR
+ED-UP loads alongside the game as a `d3d11.dll` proxy that forwards every call
+to Windows' real `d3d11.dll`, and its `openvr_api.dll` is ED-UP's own OpenXR
 runtime. Most of the fixes work on the frames and never touch the game. A few
 change the running game in memory: by default the resolution fix rewrites
 twelve numbers in the game's code, and two of the game's imports are always
-redirected so that EDVR handles VR startup and the menu's keyboard. DLSS, FSR,
+redirected so that ED-UP handles VR startup and the menu's keyboard. DLSS, FSR,
 XeSS and TAA hook the game's object updates while they are on.
 [docs/fixes.md](docs/fixes.md#what-the-fixes-touch) lists each change, its
 safeguards, and which settings turn it off.
@@ -359,7 +359,7 @@ The source is here so you can read exactly what it does and build it yourself.
 
 ## Licence and standing
 
-EDVR is MIT licensed; see [LICENSE](LICENSE). One file the installer carries is
+ED-UP is MIT licensed; see [LICENSE](LICENSE). One file the installer carries is
 not: NVIDIA's DLSS runtime, `nvngx_dlss.dll`, is NVIDIA's software under the
 NVIDIA RTX SDKs licence. It is distributed unmodified as part of this
 application, as that licence allows, and only placed on machines with an NVIDIA

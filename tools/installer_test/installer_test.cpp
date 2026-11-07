@@ -1593,7 +1593,7 @@ static void testPlanner() {
         check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"), "and EDVR goes back");
         expectEq(iniValue(plannedIni(plan), "advanced.real_dll"), "d3d11_reshade.dll",
                  "with the chain pointed at it");
-        check(notesMention(plan, "replaced EDVR"), "the report says what happened");
+        check(notesMention(plan, "replaced ED-UP"), "the report says what happened");
     }
 
     {   // The same mod reinstalled itself over us twice: its older copy is
@@ -1907,14 +1907,14 @@ static void testPlanner() {
         Plan plan = planInstall(s, options, payload);
         check(plan.blocked && plan.steps.empty(), "legacy Elite Dangerous is refused");
         check(notesMention(plan, "Elite Dangerous (Horizons)"), "and named as Horizons, not Odyssey");
-        check(notesMention(plan, "no EDVR build supports this game"),
+        check(notesMention(plan, "no ED-UP build supports this game"),
               "with no pointer at some other build");
 
         s.eliteKind = EliteExeKind::OdysseyUnknown;
         s.eliteFileVersion = L"999999";
         plan = planInstall(s, options, payload);
         check(!plan.blocked && !plan.steps.empty(), "an unknown Odyssey revision installs");
-        check(problemMentions(plan, "is not the one this EDVR build was checked against"),
+        check(problemMentions(plan, "is not the one this ED-UP build was checked against"),
               "with a warning that says why");
         check(problemMentions(plan, "fixes tied to the game build stand down"),
               "and says what stands down");
@@ -2627,7 +2627,7 @@ static void testContentOwnership(const std::wstring& scratch) {
         check(!hasStep(plan, Action::Delete, L"libxess.dll", nullptr) &&
               !hasStep(plan, Action::Delete, L"INTEL-XESS-LICENSE.txt", nullptr) &&
               !hasStep(plan, Action::Delete, L"INTEL-XESS-THIRD-PARTY.txt", nullptr) &&
-              notesMention(plan, "nothing shows EDVR placed it"),
+              notesMention(plan, "nothing shows ED-UP placed it"),
               "keeps the XeSS trio: a payload match with no record or receipt is not proof");
         check(hasStep(plan, Action::Delete, L"openvr_api.dll", nullptr) &&
               hasStep(plan, Action::Rename, L"openvr_api_orig.dll", L"openvr_api.dll"),
@@ -2689,7 +2689,7 @@ static void testSharedFilesKept() {
     const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
     const PayloadInfo p = contentPayload();
     const std::wstring loaderPath = joinPath(joinPath(dir, L"Openvr\\win64"), L"openxr_loader.dll");
-    const char* kept = "matches EDVR's copy but nothing shows EDVR placed it; left alone";
+    const char* kept = "matches ED-UP's copy but nothing shows ED-UP placed it; left alone";
     {   // A fresh flat install, stock runtime, no record, no descriptor: another mod's loader matching the payload is kept.
         Survey s = baseSurvey(dir);
         s.openxrLoader = fakeDll(DllKind::Foreign, loaderPath, p.openxrLoaderSha);
@@ -2979,7 +2979,7 @@ static void testToolAdoption(const std::wstring& scratch) {
     {
         const Survey s = survey();
         const Plan conversion = planInstall(s, flatOptions, flat);
-        check(conversion.blocked && notesMention(conversion, "Cannot prove EDVR's VR runtime and the game's original"),
+        check(conversion.blocked && notesMention(conversion, "Cannot prove ED-UP's VR runtime and the game's original"),
               "and flat conversion is still blocked with today's message");
         check(planUninstall(s, testOptions(), vr).blocked, "and uninstall is still blocked");
     }

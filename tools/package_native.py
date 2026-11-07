@@ -268,8 +268,8 @@ def _write_zip_entry(output, source, name):
 
 def package(root, version, no_dlss=False, dry_run=False):
     version = _version(version); root = root.resolve()
-    dist = root / "dist"; stage = dist / (".edvr-stage-" + version); final_stage = dist / ("edvr-" + version)
-    archive = dist / ("edvr-" + version + ".zip"); temporary_archive = dist / (".edvr-" + version + ".zip.tmp")
+    dist = root / "dist"; stage = dist / (".edvr-stage-" + version); final_stage = dist / ("ed-up-" + version)
+    archive = dist / ("ed-up-" + version + ".zip"); temporary_archive = dist / (".edvr-" + version + ".zip.tmp")
     if not _inside(stage, dist) or not _inside(final_stage, dist) or not _inside(archive, dist):
         raise ValueError("resolved staging destination escapes repository dist")
     files = _files(root, no_dlss)
@@ -297,8 +297,8 @@ def package(root, version, no_dlss=False, dry_run=False):
     _validate_installer_resources(root / "build" / INSTALLER, files)
     print("[edvr] package plan: %s" % archive)
     for _, name in files: print("       %s" % name)
-    installer_archive = dist / ("edvr-installer-" + version + ".zip")
-    linux_archive = dist / ("edvr-installer-linux-" + version + ".zip")
+    installer_archive = dist / ("ed-up-installer-" + version + ".zip")
+    linux_archive = dist / ("ed-up-installer-linux-" + version + ".zip")
     print("[edvr] installer plan: %s (%s)" % (installer_archive, INSTALLER))
     print("[edvr] Linux installer plan: %s (%s, %s, %s, README-linux.txt)" %
           (linux_archive, INSTALLER, LINUX_WRAPPER, LINUX_LAUNCHER))
@@ -460,10 +460,10 @@ def self_test():
             try: package(root, "../escape", dry_run=True); raise AssertionError("bad version accepted")
             except ValueError: pass
             assert package(root, "1.2.3", no_dlss=True) == 0
-            with zipfile.ZipFile(root / "dist" / "edvr-installer-1.2.3.zip") as installer_archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-installer-1.2.3.zip") as installer_archive:
                 assert set(installer_archive.namelist()) == {"edvr-installer.exe"}
                 assert installer_archive.read("edvr-installer.exe") == b"payload"
-            with zipfile.ZipFile(root / "dist" / "edvr-installer-linux-1.2.3.zip") as linux_archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-installer-linux-1.2.3.zip") as linux_archive:
                 assert set(linux_archive.namelist()) == {INSTALLER, LINUX_WRAPPER, LINUX_LAUNCHER,
                                                         "README-linux.txt"}
                 assert linux_archive.read(INSTALLER) == b"payload"
@@ -516,9 +516,9 @@ def self_test():
                 result = subprocess.run([str(extracted_launcher)], cwd=elsewhere,
                                         env=dict(env, PATH=""), capture_output=True, check=False)
                 assert result.returncode != 0 and b"python3 is required" in result.stderr
-            assert not (root / "dist" / "edvr-installer-1.2.3.exe").exists()
+            assert not (root / "dist" / "ed-up-installer-1.2.3.exe").exists()
             artifacts = [root / "dist" / (name + "-1.2.3.zip") for name in
-                         ("edvr", "edvr-installer", "edvr-installer-linux")]
+                         ("ed-up", "ed-up-installer", "ed-up-installer-linux")]
             old_archives = {path: path.read_bytes() for path in artifacts}
             for missing_file in (wrapper_source, launcher_source, root / "release" / "README-linux.txt"):
                 saved = missing_file.read_bytes()
@@ -544,7 +544,7 @@ def self_test():
             assert not (root / "dist" / ".edvr-stage-1.2.3").exists()
             old_replace = os.replace
             linux_temporary = root / "dist" / ".edvr-installer-linux-1.2.3.zip.tmp"
-            linux_destination = root / "dist" / "edvr-installer-linux-1.2.3.zip"
+            linux_destination = root / "dist" / "ed-up-installer-linux-1.2.3.zip"
 
             def fail_linux_publish(source, destination):
                 if Path(source) == linux_temporary and Path(destination) == linux_destination:
@@ -569,7 +569,7 @@ def self_test():
             except ValueError:
                 pass
             assert all(path.read_bytes() == old_archives[path] for path in artifacts)
-            with zipfile.ZipFile(root / "dist" / "edvr-1.2.3.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-1.2.3.zip") as archive:
                 names = set(archive.namelist())
                 assert names == {"d3d11.dll", "edvr_profile.ini", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                                  "openvr/OPENXR-LOADER-LICENSE.txt", "edvr-installer.exe",
@@ -580,7 +580,7 @@ def self_test():
                 assert archive.getinfo(LINUX_WRAPPER).external_attr >> 16 == 0o100755
                 assert archive.read(LINUX_LAUNCHER) == launcher_source.read_bytes()
                 assert archive.getinfo(LINUX_LAUNCHER).external_attr >> 16 == 0o100755
-                with zipfile.ZipFile(root / "dist" / "edvr-installer-linux-1.2.3.zip") as linux_archive:
+                with zipfile.ZipFile(root / "dist" / "ed-up-installer-linux-1.2.3.zip") as linux_archive:
                     assert archive.read(INSTALLER) == linux_archive.read(INSTALLER)
             (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
             dlss = root / "build" / "nvngx_dlss.dll"
@@ -600,7 +600,7 @@ def self_test():
                 pass
             notice.write_bytes(b"NVIDIA runtime notice")
             assert package(root, "1.2.4", no_dlss=True) == 0
-            with zipfile.ZipFile(root / "dist" / "edvr-1.2.4.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-1.2.4.zip") as archive:
                 assert archive.read("nvngx_dlss.dll") == resources[104]
                 assert archive.read("NVIDIA-DLSS-LICENSE.txt") == notice.read_bytes()
             for bad in (None, b"different-installer-runtime"):
@@ -626,11 +626,11 @@ def self_test():
             assert not ffx.exists()
             ffx.write_bytes(b"MIT, FidelityFX SDK DX11 port")
             assert package(root, "1.2.6", no_dlss=True) == 0
-            with zipfile.ZipFile(root / "dist" / "edvr-1.2.6.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-1.2.6.zip") as archive:
                 assert archive.read("FIDELITYFX-SDK-DX11-LICENSE.txt") == ffx.read_bytes()
             ffx.unlink()
             assert package(root, "1.2.7", no_dlss=True) == 0
-            with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-1.2.7.zip") as archive:
                 assert "FIDELITYFX-SDK-DX11-LICENSE.txt" not in set(archive.namelist())
 
             # The release version check through package(): read before anything is
@@ -652,20 +652,20 @@ def self_test():
                         raise AssertionError("%s accepted (dry_run=%s)" % (label, dry_run))
                     except ValueError as error:
                         assert needle in str(error) and "3.0.0" in str(error), (label, str(error))
-                assert not (root / "dist" / "edvr-3.0.0.zip").exists(), "a refused release wrote: " + label
-                assert not (root / "dist" / "edvr-installer-linux-3.0.0.zip").exists()
+                assert not (root / "dist" / "ed-up-3.0.0.zip").exists(), "a refused release wrote: " + label
+                assert not (root / "dist" / "ed-up-installer-linux-3.0.0.zip").exists()
                 assert not (root / "dist" / ".edvr-stage-3.0.0").exists(), "a refused release staged: " + label
-                assert not (root / "dist" / "edvr-3.0.0").exists(), "a refused release staged: " + label
+                assert not (root / "dist" / "ed-up-3.0.0").exists(), "a refused release staged: " + label
             stamps["override"] = {}
             assert package(root, "3.0.0", no_dlss=True, dry_run=True) == 0
-            assert not (root / "dist" / "edvr-3.0.0.zip").exists()
-            assert not (root / "dist" / "edvr-installer-linux-3.0.0.zip").exists()
+            assert not (root / "dist" / "ed-up-3.0.0.zip").exists()
+            assert not (root / "dist" / "ed-up-installer-linux-3.0.0.zip").exists()
             assert not (root / "dist" / ".edvr-installer-linux-3.0.0.zip.tmp").exists()
-            assert package(root, "3.0.0", no_dlss=True) == 0 and (root / "dist" / "edvr-3.0.0.zip").is_file()
+            assert package(root, "3.0.0", no_dlss=True) == 0 and (root / "dist" / "ed-up-3.0.0.zip").is_file()
 
             # One release, one installer executable: there is no flat archive,
             # and --profile is no longer an option. The VR archive carries both settings files.
-            with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-1.2.7.zip") as archive:
                 assert "edvr-flat.ini" in set(archive.namelist()) and "edvr.ini" in set(archive.namelist())
             import contextlib, io
             refusal = io.StringIO()  # argparse's usage text: expected, so not echoed raw
@@ -677,7 +677,7 @@ def self_test():
                 assert error.code == 2
                 assert "unrecognized arguments: --profile flat" in refusal.getvalue()
                 print("expected-error: argparse refused --profile flat (exit 2)")
-            assert not (root / "dist" / "edvr-flat-1.2.8.zip").exists()
+            assert not (root / "dist" / "ed-up-flat-1.2.8.zip").exists()
             # The installer's own copy of each settings file is checked against that
             # file, under its own name: edvr-flat.ini (111) is not edvr.ini (103).
             resources[111] = b"[fix]\r\ntemporal_aa = dlss\r\n"
@@ -694,7 +694,7 @@ def self_test():
             except ValueError:
                 pass
             resources[111] = b"payload"
-            with zipfile.ZipFile(root / "dist" / "edvr-installer-1.2.7.zip") as installer_archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-installer-1.2.7.zip") as installer_archive:
                 assert set(installer_archive.namelist()) == {"edvr-installer.exe"}
             xess_files = {108: "libxess.dll", 109: "INTEL-XESS-LICENSE.txt",
                           110: "INTEL-XESS-THIRD-PARTY.txt"}
@@ -703,7 +703,7 @@ def self_test():
                 (root / "build" / name).write_bytes(contents)
                 resources[resource_id] = contents
             assert package(root, "3.0.3", no_dlss=True) == 0
-            with zipfile.ZipFile(root / "dist" / "edvr-3.0.3.zip") as archive:
+            with zipfile.ZipFile(root / "dist" / "ed-up-3.0.3.zip") as archive:
                 for name in xess_files.values():
                     assert archive.read(name) == (root / "build" / name).read_bytes()
             resources[108] = b"wrong XeSS"
