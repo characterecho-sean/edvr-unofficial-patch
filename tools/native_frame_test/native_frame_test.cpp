@@ -77,6 +77,17 @@
 #include "f194_checks.h"    // F194: look to aim aims at the middle of the picture and its eye height settles as mouse look's does (TEMPORARY A/B keys): the pitch helper (Quest -13.0 deg, Pimax 0), the channel's swap, the ray (a level head, a head pitched +13, a rolled head turned about its own right axis, the refusals near vertical), centreOffset with the key on and off, the settle gate's verdicts (aim -13 / -15 / +12 against F139's rule; off: 10 deg), the lines, the height probe, the source sites
 #include "f205_checks.h"    // F205/F206: the full-detail scope on by default taking both eyes (the effective sight eye, decided at the press start), and its view circle (which presses have one, the centre-only request, the wire, the lines, the sites)
 #include "f195_checks.h"    // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B key): the four flown engages kept whole, 26.4 up keeps 15 and centres 11.4, 20 down, exactly +-15, offsets that are not numbers and the key off centring all, the follower, the key's places, the line, the sites
+#include "f214_checks.h"    // F214: unarmed, the view raise follows the neck while the body moves (TEMPORARY A/B key): the 0.6 s window, the stride's ripple, a slope step, every outcome and the once-only re-publish, the line, the sites
+#include "f215_checks.h"    // F215: unarmed and upright, the body follows the view (TEMPORARY A/B key): level ground, a slope term, a turn on the spot, the releases and holds, the key off, the rate limit and cap, the shifted write, the line, the sites
+#include "f218_checks.h"    // F218: the rifle's torso: the rest solution held back after a refusal (1 s, extended while moving), the slide across a switch (continuity, decay, the 20 cm limit, dt), the line, the sites
+#include "f219_checks.h"    // F219: the elbow's swing limited per frame at the hip: the signed angle, the limit, the memory, a 15 deg hop to 4 deg on the real two-bone frame, F181's 45 deg search, the line, the sites
+#include "f221_checks.h"    // F221: the arc cutter's left elbow from the body-down pole: the name, the ramp, the cap share and blend weight at 0 and 1, the real two-bone frame, the line, the sites
+#include "f222_checks.h"    // F222: the eye rows heading, up and offset taken in the frame they were drawn in: an uneven turn, a repeated frame, no previous rotation, the line, the sites
+#include "f223_checks.h"    // F223: a jump of the model root goes into the whole-body move: the recorded series, a camera that moved, the cap, the line, the sites
+#include "f224_checks.h"    // F224: the whole-body move loses its call of lag: the recorded jitter through F215 and the lead, the limit, a taken jump, the line, the sites
+#include "f225_checks.h"    // F225: the shoulder reach margin ramps: a sweep across the threshold, the exact move at full weight, the timing, a flicker, the line, the sites
+#include "f226_checks.h"    // F226: the head pitch no longer holds the whole-body shift: the landing armed and unarmed, the flag at the gate, a stale call, no state change at the gate, the line, the sites
+#include "f216_checks.h"    // F216: the view bob (user setting): the filter on a 3.4 Hz sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets, the seated sign through adsUnlockedCam, the history by serial, the line, the sites
 #include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
 #include "f180_checks.h"    // F180: the left elbow hangs standing in ADS (the blend weight), the spine straighten dial (TEMPORARY: the plan of the spine and the neck, F166's capture and apply on a toy skeleton: slerp share, the reference store, the line), the neck guard's distance (TEMPORARY) and the unarmed guard measuring only, the source sites
@@ -7762,6 +7773,28 @@ int wmain(int argc, wchar_t** argv) {
     f194test::run194(check);
     // F195: the engage keeps the aim's pitch (the pilot's flown 0.77 to 5.55 deg offsets stay; 26.4 deg up keeps 15 and centres 11.4; the key off, and an offset that is not a number, centre all); the key's places; the line; the sites.
     f195test::run195(check);
+    // F214: the moving follow's window and rule (the mean, the fill, the gap; a +-10 cm stride; a 25 cm slope step; each held reason; the re-publish for an item or a posture and none for a pitch; the key off), its line and its sites.
+    f214test::run214(check);
+    // F215: the body follows the view: the rule on level ground, a slope and a turn, the releases, holds and key off, the rate limit and cap, the shifted write, the line, the sites.
+    f215test::run215(check);
+    // F218: the rifle's torso: the hold's timing, the slide's continuity, decay, jump limit, first call and dt clamp, the line, the sites.
+    f218test::run218(check);
+    // F219: the elbow's swing limited at the hip: the angle's sign and degenerate parts, the limit, the step, the memory, the limit on the real two-bone frame, F181's search held to 45 deg, the line, the sites.
+    f219test::run219(check);
+    // F221: the arc cutter's left elbow: the name, the ramp, the weight at 0 (nothing changes) and 1 (no cap), the two-bone frame, the line, the sites.
+    f221test::run221(check);
+    // F222: the eye in its own frame: an uneven turn, a repeated frame, no previous rotation, zero yaw, the line, the sites.
+    f222test::run222(check);
+    // F223: the root jump into the whole-body move: the recorded series, a camera that moved, a small step, a stale frame, a gap, the cap, the line, the sites.
+    f223test::run223(check);
+    // F224: the lead: the recorded jitter through F215 and RootJump with y a call late, the limit, a taken jump, a stale frame, the line, the sites.
+    f224test::run224(check);
+    // F225: the reach margin: a sweep across the threshold, the move at full weight, the timing, a flicker, the line, the sites.
+    f225test::run225(check);
+    // F226: the head pitch and the whole-body shift: the landing with the head down armed and unarmed, the flag, a non-fresh call, the gate is no change of state, the line, the sites.
+    f226test::run226(check);
+    // F216: the view bob filter on a sprint (a sine, a ramp, the clamp, the weight, the speed gate, the key on, the resets), the seated sign, the history by serial, the line, the sites.
+    f216test::run216(check);
     // F205: the effective sight eye and the ADS view circle.
     f205test::run205(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.

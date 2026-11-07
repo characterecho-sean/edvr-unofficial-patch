@@ -10,8 +10,8 @@
 // upper arm, between the animated arm's hinge normal turned by the shortest arc and the solved arm's, 0..180). With a two-handed gun (the left hand's stable-pole branch, the gate F165 and F180a
 // use) at the hip, a solve whose plane angle p is over the cap c is brought to p - hipShare x (p - c), the hip share being 1 less the detach weight: the cap whole at the hip, none in the
 // sights (F180a's body-down blend rules there), continuous between. It turns the pole about the shoulder-to-hand axis (the swivel) toward the plane, from where the pole is, along the way the
-// plane angle falls, to the first swivel where the plane angle is the target: it cannot pass through the plane, so the elbow keeps its side. A plane angle already at or under the cap, a cap of
-// 90 (off), the sights, a pistol, a tool, unarmed: the swivel is not touched, bit for bit. The pole's seed (axis, reference) is not touched: the cap is made again on every solve from the
+// plane angle falls, to the first swivel where the plane angle is the target, within 45 deg of the pole (kMaxTurnRad; past that the closest approach decides): it cannot pass through the plane, so the elbow keeps its side. A plane angle already at or under the cap, a cap of
+// 90 (off), the sights, a pistol, a tool (the arc cutter has F221's body-down pole and no cap), unarmed: the swivel is not touched, bit for bit. The pole's seed (axis, reference) is not touched: the cap is made again on every solve from the
 // pole, so leaving the cap's reach (the key at 90, the sights) returns along the pole's own angle.
 #pragma once
 
@@ -31,6 +31,10 @@ namespace f181 {
 constexpr double kCapMinDeg = 0.0, kCapMaxDeg = 90.0, kCapDefaultDeg = 25.0;   // the key's range and default (90 leaves the game's pose)
 constexpr double kHoldTolDeg = 2.0;                                              // the health rule: a plane angle this far over the cap after it is a cap that did not hold
 constexpr uint32_t kMinSolves = 30;                                              // the health rule: fewer two-handed hip solves than this are too few to judge
+
+// The search turns the pole at most this far (45 deg). With the arm folded to its limit the first swivel under the target can lie a long way round: the flight 20261106_090823 cut up to 132.7 deg
+// and moved the elbow 25 cm in a frame. Past this turn the closest approach decides, and it is not applied when it gains under 1 deg.
+constexpr double kMaxTurnRad = 45.0 * kIkPi / 180.0;
 
 // The key's value held to its range; a value that is not a number reads the default.
 inline double clampCapDeg(double deg) noexcept { return !std::isfinite(deg) ? kCapDefaultDeg : deg < kCapMinDeg ? kCapMinDeg : deg > kCapMaxDeg ? kCapMaxDeg : deg; }
@@ -58,8 +62,8 @@ struct Cap {
 };
 
 // The swivel brought to the target plane angle. theta0 / planeDeg0: the pole's swivel (rad) and its plane angle (deg); targetDeg: from targetDeg() above; planeAt(theta): the plane angle (deg)
-// of the solve at a swivel (the same measure, 180 where it cannot be measured). Along the way the plane angle falls (tried 0.5 deg either side of the pole), in steps of 3 deg up to a half
-// turn, to the first swivel where it is at or under the target; then 24 bisections between the last swivel over and that one. Where it never gets to the target on that side (a cap of 0 asks
+// of the solve at a swivel (the same measure, 180 where it cannot be measured). Along the way the plane angle falls (tried 0.5 deg either side of the pole), in steps of 3 deg up to kMaxTurnRad
+// (45 deg), to the first swivel where it is at or under the target; then 24 bisections between the last swivel over and that one. Where it never gets to the target on that side (a cap of 0 asks
 // for the plane itself) the closest approach it does reach is taken, when that is 1 deg or more nearer the plane than the pole is. Not applied (the swivel unchanged) when the plane angle is not
 // over the target, or does not fall.
 template <class PlaneAt>
@@ -72,7 +76,7 @@ inline Cap capSwivel(double theta0, double planeDeg0, double target, PlaneAt&& p
     const double dir = gPlus < gMinus ? 1.0 : -1.0;
     double lo = 0.0, hi = -1.0;   // lo: the last turn with the plane angle over the target, hi: the first at or under it
     double bestT = 0.0, bestG = planeDeg0;
-    for (double t = 3.0 * deg; t <= kIkPi + 1e-9; t += 3.0 * deg) {
+    for (double t = 3.0 * deg; t <= kMaxTurnRad + 1e-9; t += 3.0 * deg) {
         const double g = planeAt(theta0 + dir * t);
         if (g <= target) {
             hi = t;
@@ -91,6 +95,7 @@ inline Cap capSwivel(double theta0, double planeDeg0, double target, PlaneAt&& p
         if (!(bestT > 0.0) || !(planeDeg0 - bestG >= 1.0)) return out;
         double a = bestT - 3.0 * deg, b = bestT + 3.0 * deg;
         a = a < 0.0 ? 0.0 : a;
+        b = b > kMaxTurnRad ? kMaxTurnRad : b;   // the refinement stays inside the search's turn too
         for (int i = 0; i < 60; ++i) {
             const double m1 = a + (b - a) / 3.0, m2 = b - (b - a) / 3.0;
             if (planeAt(theta0 + dir * m1) < planeAt(theta0 + dir * m2)) b = m2;

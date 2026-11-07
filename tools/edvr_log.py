@@ -12625,6 +12625,401 @@ def _hj_f212(rows, ctx):
     return ("OK", text)
 
 
+# F214 (TEMPORARY): unarmed, the view raise follows the neck while the body moves (experimental.native_on_foot_view_follows_body_moving; formatLine in src/d3d11/native_on_foot_f214.h).
+# The key's own note line carries a different label ("view follows body (F214, TEMPORARY)"), so it is not a window line this rule must parse.
+H214_LABEL = "native on foot view follows body (F214)"
+H214_RE = (r"native on foot view follows body \(F214\) (?P<wl>\d+) s: experimental\.native_on_foot_view_follows_body_moving is (?P<key>on|off); pin calls (?P<calls>\d+), moving and unarmed "
+           r"(?P<mv>\d+), followed (?P<fol>\d+); held: filling (?P<fil>\d+), aim pitch (?P<aim>\d+), head pitch (?P<head>\d+), no pose (?P<pose>\d+), posture (?P<post>\d+), item (?P<item>\d+), "
+           r"F138 (?P<f138>\d+), away (?P<away>\d+); published target (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<pub>\d+) calls); re-published (?P<re>\d+)$" % ((_HN,) * 3))
+H214_MIN_CALLS = 30   # moving unarmed calls with the key on and none followed: the window fills in 0.3 s (27 calls at 90 Hz), so this many moving calls could not all be held by chance
+
+
+def _hj_f214(rows, ctx):
+    """F214 (TEMPORARY): unarmed, the view raise follows the neck while the body moves, through a 0.6 s mean (the slope flight: the camera over the neck is +9 cm + 60 cm x tan(slope), and
+    only a settled stance corrected it). The window line counts the pin calls: moving and unarmed, followed, and held by reason (filling, aim pitch, head pitch, no pose, posture, item, F138,
+    away). NEVER APPLIED: the key on, 30 or more moving unarmed calls in all, and not one followed (the step never ran to a published target, or every call was held: the held counts say which).
+    IDLE: the key off in every window (the raise is as before F214), or under 30 moving unarmed calls (a flight spent standing or armed). OK otherwise, with the followed share, the held
+    reasons, and the published target's range."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    on = [r for r in sec if r["key"] == "on"]
+    g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
+    held = ", ".join("%s %d" % (name, g(k)) for name, k in (("filling", "fil"), ("aim pitch", "aim"), ("head pitch", "head"), ("no pose", "pose"), ("posture", "post"), ("item", "item"),
+                                                          ("F138", "f138"), ("away", "away")) if g(k))
+    pub = [r for r in sec if r["mean"] is not None]
+    pubn = sum(int(r["pub"]) for r in pub)
+    rng = ("; published target mean %+.1f cm, min %+.1f, max %+.1f over %d calls" % (sum(float(r["mean"]) * int(r["pub"]) for r in pub) / pubn, min(float(r["min"]) for r in pub),
+                                                                                    max(float(r["max"]) for r in pub), pubn)) if pubn else "; no target published"
+    text = "%d s: %d pin calls, %d moving and unarmed, %d followed%s%s; re-published %d" % (_hsecs(sec), g("calls"), g("mv"), g("fol"), "; held: " + held if held else "", rng, g("re"))
+    if not on:
+        return ("IDLE", text + "; the key was off in every window: the raise is as before F214")
+    mv, fol = g("mv", on), g("fol", on)
+    if mv >= H214_MIN_CALLS and not fol:
+        return ("NEVER APPLIED", text + "; the key is on and %d moving unarmed calls followed none (the held counts say whether the step ran and held every call, or no call reached it)" % mv)
+    if mv < H214_MIN_CALLS:
+        return ("IDLE", text + "; under %d moving unarmed calls with the key on: little to judge" % H214_MIN_CALLS)
+    return ("OK", text + "; followed %d of %d moving unarmed calls (%.0f%%)" % (fol, mv, 100.0 * fol / mv))
+
+
+# F215 (TEMPORARY): unarmed and upright, the body follows the view (experimental.native_on_foot_body_follows_view; formatLine in src/d3d11/native_on_foot_f215.h). The key's own note line carries
+# a different label ("body follows view (F215, TEMPORARY)"), so it is not a window line this rule must parse. F214's line reads off while this key is on.
+H215_LABEL = "native on foot body follows view (F215)"
+H215_RE = (r"native on foot body follows view \(F215\) (?P<wl>\d+) s: experimental\.native_on_foot_body_follows_view is (?P<key>on|off); pin calls (?P<calls>\d+), unarmed (?P<un>\d+), "
+           r"active (?P<act>\d+), (?:held head (?P<hheld>\d+) aim|head past the gate with the move on (?P<head>\d+), held aim) (?P<aim>\d+) pose (?P<pose>\d+), filling (?P<fil>\d+), released item (?P<item>\d+) posture (?P<post>\d+) away (?P<away>\d+); "
+           r"body move (?:none|mean (?P<mean>%s) cm \(min (?P<min>%s), max (?P<max>%s)\) over (?P<n>\d+) active calls); raise R0 (?P<r0>%s) cm; poses written shifted (?P<shifted>\d+)(?:; item at the hip active (?P<iact>\d+), held in the sights (?P<sight>\d+))?$" % ((_HN,) * 4))
+H215_MIN_CALLS = 30   # unarmed calls with the key on and none active: the neck window fills in 0.2 s (18 calls at 90 Hz), so this many unarmed calls could not all be held by chance
+
+
+def _hj_f215(rows, ctx):
+    """F215 (TEMPORARY): unarmed and upright, the whole body moves up and down so the neck stays the eye height under a view that is the game's camera plus a constant raise. The window line counts
+    the pin calls (unarmed, active, held by reason, released by reason), the body's move over the active calls, R0, and the pose writes that carried a shift. NEVER APPLIED: the key on and 30 or more
+    unarmed calls in all with not one active (the step never ran to an active state, or every call was held or released: the counts say which); or active calls and not one pose written shifted
+    (the rule ran and the pose was never written with its shift); an item at the hip (F217) is reported and never judged. IDLE: the key off in every window, or under 30 unarmed calls. OK otherwise, with the active share and the body's move."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    on = [r for r in sec if r["key"] == "on"]
+    g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
+    # F226: a head past the gate no longer holds the move; logs from before it counted "held head" (the group hheld), logs from F226 on count the calls with the head past the gate and the move on (head)
+    gz = lambda k, rr=sec: sum(int(r[k]) for r in rr if r.get(k) is not None)
+    held = ", ".join("%s %d" % (name, gz(k)) for name, k in (("head pitch", "hheld"), ("aim pitch", "aim"), ("no pose", "pose"), ("filling", "fil"), ("item", "item"), ("posture", "post"),
+                                                           ("away", "away")) if gz(k))
+    headp = ("; head past the gate with the move on %d" % gz("head")) if any(r.get("head") is not None for r in sec) else ""
+    # F217: the item-at-the-hip part is at the end of the line and absent from older logs; it is reported, never judged (an item at the hip does not make a flight NEVER APPLIED)
+    ig = lambda k: sum(int(r[k]) for r in sec if r.get(k) is not None)
+    armed = ("; item at the hip: active %d, held in the sights %d" % (ig("iact"), ig("sight"))) if any(r.get("iact") is not None for r in sec) else ""
+    mv = [r for r in sec if r["mean"] is not None]
+    mvn = sum(int(r["n"]) for r in mv)
+    rng = ("; body move mean %+.1f cm, min %+.1f, max %+.1f over %d active calls" % (sum(float(r["mean"]) * int(r["n"]) for r in mv) / mvn, min(float(r["min"]) for r in mv),
+                                                                                 max(float(r["max"]) for r in mv), mvn)) if mvn else "; no active call"
+    text = "%d s: %d pin calls, %d unarmed, %d active%s%s; poses written shifted %d; R0 %s cm" % (_hsecs(sec), g("calls"), g("un"), g("act"), "; not active: " + held if held else "", rng, g("shifted"), sec[-1]["r0"]) + headp + armed
+    if not on:
+        return ("IDLE", text + "; the key was off in every window: the body is as the game animates it")
+    un, act, shifted = g("un", on), g("act", on), g("shifted", on)
+    if un >= H215_MIN_CALLS and not act:
+        return ("NEVER APPLIED", text + "; the key is on and %d unarmed calls were active in none (the held and released counts say whether the step ran and held every call, or no call reached it)" % un)
+    if act and not shifted:
+        return ("NEVER APPLIED", text + "; the key is on and %d calls were active but not one pose was written with the shift (the writes bypass the shifted write, or the whole-pose block never ran)" % act)
+    if un < H215_MIN_CALLS:
+        return ("IDLE", text + "; under %d unarmed calls with the key on: little to judge" % H215_MIN_CALLS)
+    return ("OK", text + "; active in %d of %d unarmed calls (%.0f%%), %d pose writes shifted" % (act, un, 100.0 * act / un, shifted))
+
+
+# F226: the head's pitch no longer holds the whole-body move; the F215 window line counts the calls with the head past the gate and the move on (the line's "head past the gate" count). The row is judged on
+# the same line as F215's. A head down is the pilot's choice, so none of those calls is not a failure; a flight whose move never ran is F215's to call NEVER APPLIED, and here it is IDLE with the reason.
+H226_MIN_CALLS = 30
+
+
+def _hj_f226(rows, ctx):
+    """F226: the head's pitch no longer holds F215's whole-body move. Reads the F215 window line's count of pin calls with the head past the gate and the move on. A line from before F226 (it
+    counted "held head") gives no verdict. IDLE: the key off in every window, under 30 pin calls, or no active call at all (the move never ran: F215's row says why). OK otherwise, with the count and
+    its share of the calls, zero included."""
+    sec = [r for r in rows.get("sec", []) if r.get("head") is not None]
+    if not sec:
+        return None
+    on = [r for r in sec if r["key"] == "on"]
+    g = lambda k, rr: sum(int(r[k]) for r in rr)
+    if not on:
+        return ("IDLE", "%d s: the key was off in every window" % _hsecs(sec))
+    calls, head = g("calls", on), g("head", on)
+    ran = g("act", on) + sum(int(r["iact"]) for r in on if r.get("iact") is not None)
+    text = "%d s: head past the gate with the move on %d of %d pin calls (%.1f%%); active %d unarmed, %d at the hip" % (
+        _hsecs(on), head, calls, 100.0 * head / calls if calls else 0.0, g("act", on), ran - g("act", on))
+    if calls < H226_MIN_CALLS:
+        return ("IDLE", text + "; under %d pin calls: little to judge" % H226_MIN_CALLS)
+    if not ran:
+        return ("IDLE", text + "; no active call: the move never ran, F215's row says why")
+    return ("OK", text)
+
+
+# F216: the view's running bob (fix.native_on_foot_view_bob, a user setting; formatLine in src/d3d11/native_on_foot_f216.h). The key's own note line carries a different label ("view bob setting (F216):"
+# with no seconds), so it is not a window line this rule must parse.
+H216_LABEL = "native on foot view bob (F216)"
+H216_RE = (r"native on foot view bob \(F216\) (?P<wl>\d+) s: fix\.native_on_foot_view_bob is (?P<key>on|off); game frames (?P<frames>\d+), running (?P<run>\d+), removing (?P<rem>\d+); "
+           r"up rms (?P<urms>%s) max (?P<umax>%s) mm, right rms (?P<rrms>%s) max (?P<rmax>%s) mm, along rms (?P<arms>%s) max (?P<amax>%s) mm; at the clamp (?P<clamp>\d+)$" % ((_HN,) * 6))
+H216_MIN_FRAMES = 90   # frames at a run (2 m/s or more over the last half second) with the key off and none removing: a second of running at 90 Hz
+
+
+def _hj_f216(rows, ctx):
+    """F216: the view's running bob. The key says on (the game's bob kept) or off (the default: most of it taken out at a run of 2 m/s or more outside the sights). The window line counts the
+    game frames, those at a run and those the filter removed from, and each axis's rms and largest move of the removing frames. IDLE: the key on in every window (nothing is removed by choice), or
+    under 90 frames at a run. NEVER APPLIED: the key off, 90 or more frames at a run in all, and not one removing (the filter never took hold, or nothing reached the frame thread). OK otherwise,
+    with the removing share and the moves."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    off = [r for r in sec if r["key"] == "off"]
+    g = lambda k, rr=sec: sum(int(r[k]) for r in rr)
+    rem = g("rem")
+    wsum = lambda k: sum(float(r[k]) ** 2 * int(r["rem"]) for r in sec)
+    rms = lambda k: (wsum(k) / rem) ** 0.5 if rem else 0.0
+    text = "%d s: %d game frames, %d at a run, %d removing%s; at the clamp %d" % (_hsecs(sec), g("frames"), g("run"), rem,
+                                                                          ("; up rms %.1f mm (max %.1f), right rms %.1f (max %.1f), along rms %.1f (max %.1f)" % (
+                                                                              rms("urms"), max(float(r["umax"]) for r in sec), rms("rrms"), max(float(r["rmax"]) for r in sec),
+                                                                              rms("arms"), max(float(r["amax"]) for r in sec))) if rem else "", g("clamp"))
+    if not off:
+        return ("IDLE", text + "; the key was on in every window: the view has the game's bob as it is")
+    run, rem_off = g("run", off), g("rem", off)
+    if run >= H216_MIN_FRAMES and not rem_off:
+        return ("NEVER APPLIED", text + "; the key is off and %d frames were at a run with the filter removing from none" % run)
+    if run < H216_MIN_FRAMES:
+        return ("IDLE", text + "; under %d frames at a run with the key off: little to judge" % H216_MIN_FRAMES)
+    return ("OK", text + "; removing in %d of %d frames at a run (%.0f%%)" % (rem_off, run, 100.0 * rem_off / run))
+
+
+# F220 (TEMPORARY): the HUD goes with the view (experimental.native_on_foot_hud_stays_with_view; formatHudLine in src/d3d11/native_on_foot_f216.h). The window line counts the placement calls on foot and
+# those that carried a shift. The key's own note line carries "(F220, TEMPORARY)", so it is not a window line this rule must parse. The rule reads the F216 line of the same log too: that line says
+# whether any frame had a term to move the HUD by.
+H220_LABEL = "native on foot hud with the view (F220)"
+H220_RE = (r"native on foot hud with the view \(F220\) (?P<wl>\d+) s: experimental\.native_on_foot_hud_stays_with_view is (?P<key>on|off); placement calls (?P<calls>\d+), with a shift (?P<sh>\d+); "
+           r"up rms (?P<urms>%s) max (?P<umax>%s) mm, side rms (?P<srms>%s) max (?P<smax>%s) mm$" % ((_HN,) * 4))
+
+
+def _hj_f220(rows, ctx):
+    """F220: the HUD goes with the view. IDLE: the key off in every window, or no frame carried a term (the F216 line shows none removing: the key View bob on, or nothing at a run).
+    NEVER APPLIED: the key on, the F216 line shows the term removing from some frame, and not one placement call had a shift (the placement hook never read the term, or the key is not read).
+    OK otherwise, with the calls that had a shift and the largest of the shift."""
+    hud = rows.get("hud", [])
+    if not hud:
+        return None
+    on = [r for r in hud if r["key"] == "on"]
+    rem = sum(int(r["rem"]) for r in rows.get("bob", []))
+    text = "%d s: %d placement calls, %d with a shift" % (_hsecs(hud), sum(int(r["calls"]) for r in hud), sum(int(r["sh"]) for r in hud))
+    if not on:
+        return ("IDLE", text + "; the key was off in every window: the HUD stays where the game places it")
+    calls, shifted = sum(int(r["calls"]) for r in on), sum(int(r["sh"]) for r in on)
+    if not rem:
+        return ("IDLE", text + "; no frame carried a term (the F216 line shows none removing): nothing to move the HUD by")
+    if not shifted:
+        return ("NEVER APPLIED", text + "; the key is on, the view bob term was removing from %d frames and not one of %d placement calls had a shift" % (rem, calls))
+    wsum = lambda k: sum(float(r[k]) ** 2 * int(r["sh"]) for r in on)
+    return ("OK", text + "; shifted in %d of %d placement calls (%.0f%%); up rms %.1f mm (max %.1f), side rms %.1f (max %.1f)" % (
+        shifted, calls, 100.0 * shifted / calls, (wsum("urms") / shifted) ** 0.5, max(float(r["umax"]) for r in on), (wsum("srms") / shifted) ** 0.5, max(float(r["smax"]) for r in on)))
+
+
+# F218: the laser rifle's torso at the hip (formatLine in src/d3d11/native_on_foot_f218.h). The window line counts the pin calls that moved the pose with the rifle held, those on the rest solution
+# (applied), refused or held back, the changes of solution (switches) and the slide's largest offset.
+H218_LABEL = "native on foot rifle torso (F218)"
+H218_RE = (r"native on foot rifle torso \(F218\) (?P<wl>\d+) s: rifle calls (?P<calls>\d+), rest applied (?P<app>\d+), refused (?P<ref>\d+), held (?P<held>\d+); switches (?P<sw>\d+); "
+           r"largest slide (?P<slide>%s) cm$" % _HN)
+H218_MIN_CALLS = 90      # rifle calls (a second at 90 Hz) under which there is little to judge
+H218_SWITCH_PER_S = 1.0  # more changes of solution than this a second is a torso that did not stay on one
+
+
+def _hj_f218(rows, ctx):
+    """F218: the rifle's torso stays on one solution. The window line counts the calls with a rifle held that moved the pose, those on F82's rest solution, those where it was refused and those where
+    it was held back after a refusal, the changes of solution and the largest slide. IDLE: no rifle at the hip (no window line), or under 90 calls in all. PARTIAL: more than one change of solution a
+    second (the hold did not keep the torso on one solution), named with the count. OK otherwise, with the counts."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None   # no rifle at the hip: no window line (reported as not present; a label with no matching pattern is UNPARSED)
+    g = lambda k: sum(int(r[k]) for r in sec)
+    secs = max(_hsecs(sec), 1)
+    calls, sw = g("calls"), g("sw")
+    text = "%d s: %d rifle calls, rest applied %d, refused %d, held back %d; %d switches of solution; largest slide %.1f cm" % (secs, calls, g("app"), g("ref"), g("held"), sw, max(float(r["slide"]) for r in sec))
+    if calls < H218_MIN_CALLS:
+        return ("IDLE", text + "; under %d rifle calls: little to judge" % H218_MIN_CALLS)
+    if sw > H218_SWITCH_PER_S * secs:
+        return ("PARTIAL", text + "; %d switches in %d s (%.1f a second, over %.0f): the torso did not stay on one solution" % (sw, secs, sw / float(secs), H218_SWITCH_PER_S))
+    return ("OK", text + "; %.1f switches a second" % (sw / float(secs)))
+
+
+# F219: the elbow's swing limited per frame at the hip (formatLine in src/d3d11/native_on_foot_f219.h). The window line counts each side's solves at the hip, those limited and the largest cut.
+H219_LABEL = "native on foot elbow step (F219)"
+H219_RE = (r"native on foot elbow step \(F219\) (?P<wl>\d+) s: left solves (?P<ls>\d+) limited (?P<ll>\d+) largest cut (?P<lc>%s) deg; right solves (?P<rs>\d+) limited (?P<rl>\d+) "
+           r"largest cut (?P<rc>%s) deg$" % (_HN, _HN))
+H219_LIMITED_SHARE = 0.25   # a side with more than this share of its solves limited is a swing that was often over the limit
+
+
+def _hj_f219(rows, ctx):
+    """F219: the elbow's swing about the shoulder-to-hand axis is limited per frame at the hip. The window line counts each side's solves at the hip, those limited and the largest cut (deg).
+    No window line (no arm solve at the hip) is not present; IDLE is window lines with no solves in them. PARTIAL: over a quarter of a side's solves limited, the side named (the solver asks for hops the limit keeps taking off).
+    OK otherwise, with each side's counts."""
+    sec = rows.get("sec", [])
+    sides = (("left", "ls", "ll", "lc"), ("right", "rs", "rl", "rc"))
+    tot = {n: (sum(int(r[s]) for r in sec), sum(int(r[l]) for r in sec), max([float(r[c]) for r in sec] or [0.0])) for n, s, l, c in sides}
+    if not sec:
+        return None   # no arm solve at the hip: no window line
+    if not any(v[0] for v in tot.values()):
+        return ("IDLE", "window lines with no arm solve at the hip: nothing to limit")
+    text = "%d s: " % _hsecs(sec) + "; ".join("%s %d solves, %d limited (%.0f%%), largest cut %.1f deg" % (n, tot[n][0], tot[n][1], 100.0 * tot[n][1] / tot[n][0] if tot[n][0] else 0.0, tot[n][2]) for n, _, _, _ in sides)
+    over = [n for n, _, _, _ in sides if tot[n][0] and tot[n][1] > H219_LIMITED_SHARE * tot[n][0]]
+    if over:
+        return ("PARTIAL", text + "; the %s arm: over a quarter of its solves were limited" % " and ".join(over))
+    return ("OK", text)
+
+
+# F221: the arc cutter's left elbow hung from the body-down pole (formatLine in src/d3d11/native_on_foot_f221.h): solves with the arc cutter, those hung and their weight mean, the ceiling clamp, the
+# vertical axis (previous radial) and the elbow over the hand.
+H221_LABEL = "native on foot tool elbow (F221)"
+H221_RE = (r"native on foot tool elbow \(F221\) (?P<wl>\d+) s: (?P<n>\d+) solves with the arc cutter, hung (?P<hung>\d+) \(weight mean (?P<wm>%s)\), guarded (?P<g>\d+), axis vertical (?P<fb>\d+); "
+           r"the elbow over the hand mean (?P<om>%s) cm, highest (?P<ox>%s) cm$" % (_HN, _HN, _HN))
+H221_MIN_SOLVES = 30
+
+
+def _hj_f221(rows, ctx):
+    """F221: with the arc cutter the left elbow hangs from the body-down pole (ramped over 0.2 s), the F181a cap's share falling with it. The window line counts the left-arm solves with the
+    weight above 0, those the blend applied to, the weight's mean, the ceiling clamp, the vertical axis, and the written elbow over the hand (cm). No line is not present (no arc cutter).
+    IDLE under 30 solves; NEVER APPLIED with 30 or more solves and none hung; OK otherwise with the figures."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["n"]) for r in sec)
+    hung = sum(int(r["hung"]) for r in sec)
+    g = sum(int(r["g"]) for r in sec)
+    fb = sum(int(r["fb"]) for r in sec)
+    wm = sum(int(r["n"]) * float(r["wm"]) for r in sec) / n if n else 0.0
+    om = sum(int(r["n"]) * float(r["om"]) for r in sec) / n if n else 0.0
+    ox = max(float(r["ox"]) for r in sec)
+    text = "%d s: %d solves with the arc cutter, hung %d (weight mean %.2f), guarded %d, axis vertical %d; the elbow over the hand mean %+.1f cm, highest %+.1f cm" % (_hsecs(sec), n, hung, wm, g, fb, om, ox)
+    if n < H221_MIN_SOLVES:
+        return ("IDLE", text + "; under %d solves: little to judge" % H221_MIN_SOLVES)
+    if hung == 0:
+        return ("NEVER APPLIED", text + "; %d solves with the arc cutter and the body-down pole never applied (F221)" % n)
+    return ("OK", text)
+
+
+# F222 (TEMPORARY): the eye rows' heading, up and offset taken in the frame they were drawn in (experimental.native_on_foot_steady_body_in_turns; formatLine in src/d3d11/native_on_foot_f222.h).
+H222_LABEL = "native on foot eye in its own frame (F222)"
+H222_RE = (r"native on foot eye in its own frame \(F222\) (?P<wl>\d+) s: experimental\.native_on_foot_steady_body_in_turns is (?P<key>on|off); (?P<calls>\d+) pin calls, (?P<taken>\d+) rows taken; "
+           r"the body's turn taken out of the heading mean (?P<mean>%s) deg, largest (?P<max>%s)$" % (_HN, _HN))
+H222_MIN_CALLS = 30
+
+
+def _hj_f222(rows, ctx):
+    """F222: the eye's heading, up and offset are taken in the frame the rows were drawn in. The window line counts the pin calls, the calls that took new rows, and with the key on the horizontal
+    angle the body's turn since the rows were drawn would have put into the heading (mean, largest). IDLE with the key off or under 30 calls; NEVER APPLIED with the key on, 30 or more calls and
+    no row taken; OK with the figures. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    calls = sum(int(r["calls"]) for r in sec)
+    taken = sum(int(r["taken"]) for r in sec)
+    on = any(r["key"] == "on" for r in sec)
+    mean_w = sum(int(r["calls"]) * float(r["mean"]) for r in sec if r["key"] == "on") / max(1, sum(int(r["calls"]) for r in sec if r["key"] == "on"))
+    text = "%d s: key %s; %d pin calls, %d rows taken; the body's turn taken out of the heading mean %.2f deg, largest %.2f" % (_hsecs(sec), "on" if on else "off", calls, taken, mean_w, max(float(r["max"]) for r in sec))
+    if not on:
+        return ("IDLE", text + "; the key is off")
+    if calls < H222_MIN_CALLS:
+        return ("IDLE", text + "; under %d pin calls: little to judge" % H222_MIN_CALLS)
+    if taken == 0:
+        return ("NEVER APPLIED", text + "; %d pin calls with the key on and not one took rows (F222)" % calls)
+    return ("OK", text)
+
+
+# F223: a jump of the model root goes into the whole-body move (formatLine in src/d3d11/native_on_foot_f223.h): printed only for a window that took or refused a call.
+H223_LABEL = "native on foot root jump (F223)"
+H223_RE = (r"native on foot root jump \(F223\) (?P<wl>\d+) s: (?P<taken>\d+) calls taken, the largest (?P<largest>%s) m; (?P<refused>\d+) refused \(the camera itself moved\); the move now (?P<move>%s) m$" % (_HN, _HN))
+
+
+def _hj_f223(rows, ctx):
+    """F223: a jump of the model root goes into the whole-body move. The window line, printed only for a window with a call taken or refused, counts the calls taken, the largest, those refused
+    (the camera itself moved) and the move in force. OK when a call was taken; IDLE when only refusals. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    taken = sum(int(r["taken"]) for r in sec)
+    refused = sum(int(r["refused"]) for r in sec)
+    largest = max((float(r["largest"]) for r in sec), key=abs)
+    text = "%d s: %d calls taken, the largest %+.2f m; %d refused" % (_hsecs(sec), taken, largest, refused)
+    if taken > 0:
+        return ("OK", text)
+    return ("IDLE", text + "; nothing taken: no jump pack start, or the camera moved with the model")
+
+
+# F224: the whole-body move loses its call of lag (formatLeadLine in src/d3d11/native_on_foot_f223.h). It needs F215's key: the window counts the fresh calls in an F215 active state.
+H224_LABEL = "native on foot body move lead (F224)"
+H224_RE = (r"native on foot body move lead \(F224\) (?P<wl>\d+) s: (?P<active>\d+) active calls, the lead rms (?P<rms>%s) mm, largest (?P<mx>%s) mm; (?P<over>\d+) over the limit$" % (_HN, _HN))
+H224_MIN_CALLS = 100
+
+
+def _hj_f224(rows, ctx):
+    """F224: the whole-body move takes this call's small change of the camera as a lead, so it has no call of lag. The window line counts the fresh calls in an F215 active state, the lead's rms and
+    largest (mm) and the calls whose change was over the 8 cm limit. IDLE under 100 active calls; NEVER APPLIED with 100 or more and a lead of 0 on every one; OK with the figures. No line is not
+    present (F215's key off, or no whole-body move)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["active"]) for r in sec)
+    over = sum(int(r["over"]) for r in sec)
+    rms = (sum(int(r["active"]) * float(r["rms"]) ** 2 for r in sec) / n) ** 0.5 if n else 0.0
+    mx = max((float(r["mx"]) for r in sec), key=abs)
+    text = "%d s: %d active calls, the lead rms %.1f mm, largest %+.1f mm; %d over the limit" % (_hsecs(sec), n, rms, mx, over)
+    if n < H224_MIN_CALLS:
+        return ("IDLE", text + "; under %d active calls: little to judge" % H224_MIN_CALLS)
+    if all(float(r["rms"]) == 0.0 and float(r["mx"]) == 0.0 for r in sec):
+        return ("NEVER APPLIED", text + "; %d active calls and the lead was 0 on every one (F224; it needs F215's key and a jittering camera)" % n)
+    return ("OK", text)
+
+
+# F225: the shoulder's reach margin ramps (formatLine in src/d3d11/native_on_foot_f225.h), the left arm's armed solves.
+H225_LABEL = "native on foot reach margin (F225)"
+H225_RE = (r"native on foot reach margin \(F225\) (?P<wl>\d+) s: (?P<solves>\d+) armed solves, over the reach on (?P<over>\d+), margin weight mean (?P<wm>%s); the shoulder's assist move largest (?P<mv>%s) cm$" % (_HN, _HN))
+H225_MIN_OVER = 30
+
+
+def _hj_f225(rows, ctx):
+    """F225: the clavicle assist's 3 cm reach margin goes in over 0.2 s and out over 0.4 s instead of stepping at 0.97 of the reach. The window line counts the left arm's armed solves, those over the
+    reach, the margin weight's mean and the largest assist move. IDLE under 30 solves over the reach; OK with the figures. No line is not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["solves"]) for r in sec)
+    over = sum(int(r["over"]) for r in sec)
+    wm = sum(int(r["solves"]) * float(r["wm"]) for r in sec) / n if n else 0.0
+    text = "%d s: %d armed solves, over the reach on %d, margin weight mean %.2f; the shoulder's assist move largest %.1f cm" % (_hsecs(sec), n, over, wm, max(float(r["mv"]) for r in sec))
+    if over < H225_MIN_OVER:
+        return ("IDLE", text + "; under %d solves over the reach: little to judge" % H225_MIN_OVER)
+    return ("OK", text)
+
+
+H_F213 = "on-foot recording (F213)"
+F213_TYPES = (("align", "a", "ad"), ("p1", "p", "pd"), ("pin", "n", "nd"), ("ik", "i", "id"), ("mark", "m", "md"), ("rt_eye", "e", "ed"), ("rt_recentre", "r", "rd"))
+
+
+def _hj_f213(rows, ctx):
+    """F213: the on-foot flight recorder (src\\common\\onfoot_recorder_core.h formatWindowLine, src\\d3d11\\onfoot_recorder.cpp). It records only with log.on_foot_detail on and native
+    on foot, and says so in one line a window with the records and drops of each of its seven types, plus a "ready" line once a launch that proves the build has it.
+    NEVER APPLIED: on-foot time with the detail log on and the build's ready line, and no window line at all; or window lines in which no type had a record (the recorder not
+    running says why); a "not recording" line. PARTIAL: any type dropped records (the ring was full: the writer fell behind), named with its count. A type with no record in a
+    window that had others is only said (a site that did not run, or a stage that was off). The state of the detail log comes from F125's line."""
+    wins, ready = rows.get("win", []), rows.get("ready", [])
+    detail, onfoot = _hdetail(ctx), _hnative_onfoot(ctx)
+    if not any(rows.values()):
+        return None
+    if not wins:
+        if rows.get("fail"):
+            return ("NEVER APPLIED", "not recording: %s" % rows["fail"][-1]["why"])
+        if ready and detail in ("on", "mixed") and onfoot:
+            return ("NEVER APPLIED", "native on foot with log.on_foot_detail on and the recorder's ready line, but not one window line: the recorder never ran (F213)")
+        return ("IDLE", "the recorder is ready; no window line (the detail log was off, or native on foot was not on)")
+    totals = {name: sum(int(r[k]) for r in wins) for name, k, _ in F213_TYPES}
+    drops = {name: sum(int(r[k]) for r in wins) for name, _, k in F213_TYPES}
+    parts = ["%d s of windows: %s" % (_hsecs(wins), ", ".join("%s %d" % (name, totals[name]) for name, _, _ in F213_TYPES))]
+    parts.append("%d bytes written, %d segment(s), writer stall max %d ms" % (sum(int(r["bytes"]) for r in wins), max(int(r["seg"]) for r in wins), max(int(r["stall"]) for r in wins)))
+    ikn = sum(int(r["ikn"]) for r in wins)
+    if ikn:
+        parts.append("ik producer cost mean %.1f us, max %.1f us over %d" % (sum(float(r["mean"]) * int(r["ikn"]) for r in wins) / ikn, max(float(r["max"]) for r in wins), ikn))
+    marks = rows.get("mark", [])
+    if marks:
+        parts.append("%d mark press(es), %d with the recorder off" % (len(marks), sum(1 for r in marks if r["what"] != "recorded")))
+    text = "; ".join(parts)
+    if not any(totals.values()):
+        notrun = [r for r in wins if r["state"] != "running"]
+        why = "; " + notrun[-1]["state"] if notrun else ""
+        return ("NEVER APPLIED", text + "; the recorder was asked for and wrote no record of any type" + why)
+    if rows.get("fail"):
+        return ("NEVER APPLIED", text + "; the recorder stopped: %s" % rows["fail"][-1]["why"])
+    dropped = [(name, drops[name]) for name, _, _ in F213_TYPES if drops[name]]
+    zero = [name for name, _, _ in F213_TYPES if not totals[name] and name not in ("mark", "rt_recentre")]
+    if zero:
+        text += "; no record of %s in the whole window" % ", ".join(zero)
+    if dropped:
+        return ("PARTIAL", text + "; the ring was full and records were dropped: " + ", ".join("%s %d" % d for d in dropped) + " (the writer fell behind; a gap in a type's sequence is a drop)")
+    return ("OK", text)
+
+
 def _hj_f115_pair(edges, secs):
     """[(edge, read-back or None)]: each edge with the first read-back not yet taken that comes at or after it and before the next edge (by the log's clock; in the
     log's order when a line has no stamp)."""
@@ -15271,7 +15666,9 @@ def _hj_f181a_hip_cap(rows, ctx):
     swivel from the stance's plane at 52 to 55 deg at the hip with the plasma assault rifle (over 45 deg in every solve), the forearm climbing steeply to the foregrip. A solve over the cap is
     brought to the plane angle p - (hip share) x (p - cap) by turning the pole about the shoulder-to-hand axis toward the plane, on the side it was on. Reads the F98a line's ending: the
     two-handed hip solves, those capped, the cut (mean, largest), the cap, and the solves still 2 deg or more over the cap after it. Per item. NEVER APPLIED when 30 or more two-handed hip
-    solves were still 2 deg or more over the cap after it (the cap did not hold); IDLE under 30 two-handed hip solves (none included); OK with the figures. A line without the ending (a build
+    solves were still 2 deg or more over the cap after it, and they were a quarter or more of the item's hip solves (the cap did not hold); IDLE under 30 two-handed hip solves (none
+    included); OK with the figures. Since F219 limits the cap's turn to 45 deg per search the closest approach stands in for the target by design, so a few solves stay over: the flight
+    20261106_132805 had 289 of 4964 and 671 of 13295 still over (6 and 5 percent) with the cap working. A line without the ending (a build
     before F181) gives no verdict."""
     sec = [r for r in rows.get("sec", []) if r.get("cap_n") is not None]
     if not sec:
@@ -15292,7 +15689,7 @@ def _hj_f181a_hip_cap(rows, ctx):
         plane = sum(int(r["n"]) * float(r["plane"]) for r in rs) / sum(int(r["n"]) for r in rs) if sum(int(r["n"]) for r in rs) else 0.0
         parts.append("%s %d s: %d two-handed hip solves, capped %d (%.0f%%; the cut mean %.1f deg, largest %.1f), the cap %s, %d still 2 deg or more over it after; the swivel from the stance's plane "
                      "over all this item's solves %.1f deg" % (item, _hsecs(rs), hip, capped, 100.0 * capped / hip if hip else 0.0, cut, cutmax, capt, over, plane))
-        if hip >= 30 and over >= 30:
+        if over >= 30 and over >= 0.25 * hip:
             never.append("%d of %d two-handed hip solves with %s were still 2 deg or more over the cap after it (the cap did not hold)" % (over, hip, item))
     text = "; ".join(parts)
     if never:
@@ -17438,6 +17835,18 @@ HEALTH_RULES = (
                 r"the game asked for up to \|yaw\| (?P<ay>[\d.]+) and \|pitch\| (?P<ap>[\d.]+); look processor, local component, native on foot active \((?P<reads>\d+) read\(s\)\): "
                 r"largest \|velocity\| yaw (?P<vy>[\d.]+) pitch (?P<vp>[\d.]+), largest \|target\| yaw (?P<ty>[\d.]+) pitch (?P<tp>[\d.]+)"),
     ), _hj_f212),
+    _hrule(H_F213, ("F213",), ("(F213)",), (
+        ("ready", r"native on foot recorder \(F213\): ready; it records to edvr_logs\\onfoot while"),
+        ("win", r"native on foot recorder \(F213\) (?P<wl>\d+) s: (?P<state>running|not running(?:: .*?)?); records \(drops\): align (?P<a>\d+) \((?P<ad>\d+)\), p1 (?P<p>\d+) \((?P<pd>\d+)\), "
+                r"pin (?P<n>\d+) \((?P<nd>\d+)\), ik (?P<i>\d+) \((?P<id>\d+)\), mark (?P<m>\d+) \((?P<md>\d+)\), rt_eye (?P<e>\d+) \((?P<ed>\d+)\), "
+                r"rt_recentre (?P<r>\d+) \((?P<rd>\d+)\); runtime pushes seen (?P<rt>\d+); (?P<bytes>\d+) bytes written, (?P<seg>\d+) segment\(s\), writer stall max (?P<stall>\d+) ms; "
+                r"ik producer cost mean (?P<mean>[\d.]+) us, max (?P<max>[\d.]+) us over (?P<ikn>\d+); file (?P<file>.*)$"),
+        ("open", r"native on foot recorder \(F213\): segment (?P<seg>\d+) opened: (?P<file>\S+)$"),
+        ("close", r"native on foot recorder \(F213\): closed (?P<file>\S+) \(the session: (?P<rec>\d+) records, (?P<bytes>\d+) bytes, (?P<segs>\d+) segment\(s\), "
+                  r"(?P<old>\d+) older file\(s\) removed at the start, (?P<rot>\d+) segment\(s\) removed by rotation\)(?: at shutdown)?$"),
+        ("fail", r"native on foot recorder \(F213\): not recording: (?P<why>.*)$"),
+        ("mark", r"native on foot mark (?P<n>\d+) \(F213\): (?P<what>recorded|recorder off|recorder busy, not recorded)$"),
+    ), _hj_f213, needs_detail=True),
     _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
         ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
         ("began", r"native on foot \(F115\): native stereo on foot began at frame (?P<frame>\d+)"),   # F212 reads it: native on foot was active
@@ -17731,6 +18140,43 @@ HEALTH_RULES = (
         ("seconds", r"native on foot view motion \(F95a\) seconds: body \[(?P<body>[\d.,]*)\], ground \[(?P<ground>[\d.,]*)\], HUD standing \[(?P<hs>[\d.,]*)\], "
                     r"HUD moving \[(?P<hm>[\d.,]*)\]; settled (?P<settled_s>\d+) of (?P<ws>\d+) s$"),
     ), _hj_f95a_motion),
+    _hrule("view follows body (F214)", ("F214",), (H214_LABEL,), (
+        ("sec", H214_RE),
+    ), _hj_f214),
+    _hrule("body follows view (F215)", ("F215",), (H215_LABEL,), (
+        ("sec", H215_RE),
+    ), _hj_f215),
+    _hrule("view bob (F216)", ("F216",), (H216_LABEL,), (
+        ("sec", H216_RE),
+    ), _hj_f216),
+    _hrule("HUD with the view (F220)", ("F220", "F216"), (H220_LABEL,), (
+        ("hud", H220_RE),
+        ("bob", H216_RE),
+    ), _hj_f220),
+    _hrule("rifle torso (F218)", ("F218",), (H218_LABEL,), (
+        ("sec", H218_RE),
+    ), _hj_f218),
+    _hrule("elbow step (F219)", ("F219",), (H219_LABEL,), (
+        ("sec", H219_RE),
+    ), _hj_f219),
+    _hrule("tool elbow (F221)", ("F221",), (H221_LABEL,), (
+        ("sec", H221_RE),
+    ), _hj_f221),
+    _hrule("eye in its own frame (F222)", ("F222",), (H222_LABEL,), (
+        ("sec", H222_RE),
+    ), _hj_f222),
+    _hrule("root jump (F223)", ("F223",), (H223_LABEL,), (
+        ("sec", H223_RE),
+    ), _hj_f223),
+    _hrule("body move lead (F224)", ("F224",), (H224_LABEL,), (
+        ("sec", H224_RE),
+    ), _hj_f224),
+    _hrule("reach margin (F225)", ("F225",), (H225_LABEL,), (
+        ("sec", H225_RE),
+    ), _hj_f225),
+    _hrule("head pitched (F226)", ("F215",), (H215_LABEL,), (
+        ("sec", H215_RE),
+    ), _hj_f226),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
         ("sec", H97_RE),
     ), _hj_f97a_body),
@@ -21194,8 +21640,10 @@ def self_test_health():
               has=[RIFLE181 + " 1 s: 900 two-handed hip solves, capped 900 (100%; the cut mean 28.0 deg, largest 31.0), the cap 25 deg, 0 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: the shotgun under the cap is not touched: 0 of 900 capped", [elbow98("$wpn_m_shotgun_plasma_doublebarrel_name;", plane=18.5, n=900, cap=(900, 0, 0.0, 0.0, 25.0, 0))], 0,
               [("OK", F181A)], has=["two-handed hip solves, capped 0 (0%; the cut mean 0.0 deg, largest 0.0)"], lacks=["UNPARSED", "NEVER"])
-        check("F181a cap: a cap that did not hold: 40 of 900 hip solves still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 40))], 3,
-              [("NEVER APPLIED", F181A)], has=["40 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: a cap that did not hold: 225 of 900 hip solves (a quarter) still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 225))], 3,
+              [("NEVER APPLIED", F181A)], has=["225 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: 45 of 900 hip solves (5 percent) still over is the closest approach by design and is OK with the figures", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 45))], 0,
+              [("OK", F181A)], has=["45 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: 29 solves still over is not yet 30", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 29))], 0, [("OK", F181A)], lacks=["UNPARSED", "NEVER"])
         check("F181a cap: under 30 two-handed hip solves is too few to judge", [elbow98(RIFLE181, n=20, cap=(20, 20, 25.0, 30.0, 25.0, 0))], 0, [("IDLE", F181A)],
               has=["under 30 two-handed hip solves: little to judge"], lacks=["UNPARSED"])
@@ -24113,6 +24561,269 @@ def self_test_health():
                       has=[row("NEVER APPLIED", syn.name)], lacks=["not judged"])
         detail_report("F125: the off state carried into a --since window", [F125_OFF, (90, f90_part())], 0, has=["not judged (detail log off)"],
                       lacks=["NEVER APPLIED"], since="10:01:00")
+        # ---- the on-foot recording (F213): its lines are rendered from the C format strings in onfoot_recorder_core.h and onfoot_recorder.cpp ----
+        rec_core = read_text(os.path.join(repo_root(), "src", "common", "onfoot_recorder_core.h"))
+        rec_cpp = read_text(os.path.join(repo_root(), "src", "d3d11", "onfoot_recorder.cpp"))
+
+        def RF213(src, needle, *vals):
+            fmt = health_c_format(src, needle)
+            if fmt is None:
+                raise AssertionError("the F213 sources have no log format holding %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmt, vals)
+
+        def win213(state="running", rec=(90, 90, 90, 90, 0, 180, 0), drop=(0, 0, 0, 0, 0, 0, 0), stall=3, ikn=90):
+            vals = [1, state]
+            for n, d in zip(rec, drop):
+                vals += [n, d]
+            return RF213(rec_core, "native on foot recorder (F213) %u s", *vals, 180, 100000, 1, stall, 12.5, 40.0, ikn, "onfoot_20261105_171000_000.rec")
+        READY213 = RF213(rec_cpp, "native on foot recorder (F213): ready")
+        FAIL213 = RF213(rec_cpp, "not recording: %s", "the ring could not be allocated")
+        MARK213 = RF213(rec_cpp, "native on foot mark %u (F213)", 3, "recorded")
+        MARKOFF213 = RF213(rec_cpp, "native on foot mark %u (F213)", 4, "recorder off")
+        ONFOOT213 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        check("F213: records of every stage, no drops: OK", [F125_ON, ONFOOT213, READY213, win213(), MARK213], 0, [("OK", H_F213)],
+              has=["1 s of windows: align 90, p1 90, pin 90, ik 90, mark 0, rt_eye 180, rt_recentre 0", "100000 bytes written, 1 segment(s), writer stall max 3 ms",
+                   "ik producer cost mean 12.5 us, max 40.0 us over 90", "1 mark press(es), 0 with the recorder off"], lacks=["UNPARSED", "PARTIAL", "NEVER APPLIED"])
+        check("F213: a mark pressed with the recorder off is counted", [F125_ON, ONFOOT213, READY213, win213(), MARKOFF213], 0, [("OK", H_F213)], has=["1 mark press(es), 1 with the recorder off"])
+        check("F213: windows with no record of any type are NEVER APPLIED", [F125_ON, ONFOOT213, READY213, win213(rec=(0,) * 7)], 3, [("NEVER APPLIED", H_F213)],
+              has=["wrote no record of any type"], lacks=["UNPARSED"])
+        check("F213: a recorder that is not running says why, and is NEVER APPLIED", [F125_ON, ONFOOT213, READY213, win213(state="not running: the ring could not be allocated", rec=(0,) * 7)], 3,
+              [("NEVER APPLIED", H_F213)], has=["not running: the ring could not be allocated"], lacks=["UNPARSED"])
+        check("F213: on foot with the detail log on and the ready line but no window line is NEVER APPLIED", [F125_ON, ONFOOT213, READY213], 3, [("NEVER APPLIED", H_F213)],
+              has=["not one window line"], lacks=["UNPARSED"])
+        check("F213: a 'not recording' line is NEVER APPLIED", [F125_ON, ONFOOT213, READY213, FAIL213], 3, [("NEVER APPLIED", H_F213)], has=["not recording: the ring could not be allocated"],
+              lacks=["UNPARSED"])
+        check("F213: dropped records are PARTIAL and name the type", [F125_ON, ONFOOT213, READY213, win213(drop=(0, 0, 7, 0, 0, 0, 0))], 0, [("PARTIAL", H_F213)],
+              has=["records were dropped: pin 7"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F213: a type with no record while the others have some is said, not judged", [F125_ON, ONFOOT213, READY213, win213(rec=(90, 0, 90, 90, 0, 180, 0))], 0, [("OK", H_F213)],
+              has=["no record of p1 in the whole window"])
+        check("F213: detail off with only the ready line is idle, never NEVER APPLIED", [F125_OFF, ONFOOT213, READY213], 0, [("IDLE", H_F213)], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F213: a window line that drifted from its pattern is not read as a window (no window: NEVER APPLIED, with the line named)",
+              [F125_ON, ONFOOT213, READY213, win213().replace("records (drops)", "records")], 3, [("NEVER APPLIED", H_F213)], has=["line(s) the rule's patterns do not match"])
+        check("F213: a lone line of the rule's label that no pattern matches is UNPARSED", [F125_ON, ONFOOT213, "native on foot recorder (F213): something new happened"], 4, [("UNPARSED", H_F213)])
+        # ---- F214 (TEMPORARY): the view follows the body while moving; its window line is rendered from the C format string in native_on_foot_f214.h ----
+        f214src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f214.h"))
+        F214 = "view follows body (F214)"
+
+        def win214(key="on", calls=900, mv=600, fol=500, held=(50, 10, 20, 5, 0, 0, 15, 0), pub="mean +15.0 cm (min +10.0, max +20.0) over 500 calls", re_=0, wl=10):
+            fmt = health_c_format(f214src, "native on foot view follows body (F214) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f214.h has no format holding the F214 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, mv, fol) + tuple(held) + (pub, re_))
+        check("F214: a flight that followed 500 of 600 moving unarmed calls is OK and names the held reasons", [win214()], 0, [("OK", F214)],
+              has=["10 s: 900 pin calls, 600 moving and unarmed, 500 followed; held: filling 50, aim pitch 10, head pitch 20, no pose 5, F138 15; published target mean +15.0 cm, min +10.0, max +20.0 over 500 calls",
+                   "followed 500 of 600 moving unarmed calls (83%)"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F214: the key on, 600 moving unarmed calls and none followed is NEVER APPLIED", [win214(fol=0, held=(0, 0, 0, 0, 0, 0, 0, 0), pub="none")], 3, [("NEVER APPLIED", F214)],
+              has=["the key is on and 600 moving unarmed calls followed none"], lacks=["UNPARSED"])
+        check("F214: the key on, every moving call held (a head pitched the whole time) is NEVER APPLIED, with the held counts to read", [win214(fol=0, held=(0, 0, 600, 0, 0, 0, 0, 0), pub="none")], 3,
+              [("NEVER APPLIED", F214)], has=["held: head pitch 600", "no target published"], lacks=["UNPARSED"])
+        check("F214: the key off with moving calls is IDLE, never NEVER APPLIED", [win214(key="off", fol=0, held=(0,) * 8, pub="none")], 0, [("IDLE", F214)],
+              has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: under 30 moving unarmed calls with none followed is IDLE", [win214(mv=20, fol=0, held=(20, 0, 0, 0, 0, 0, 0, 0), pub="none")], 0, [("IDLE", F214)],
+              has=["under 30 moving unarmed calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: a window with the key off beside one with it on is judged on the on window", [win214(key="off", fol=0, held=(0,) * 8, pub="none"), win214()], 0, [("OK", F214)],
+              has=["20 s: 1800 pin calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F214: the re-publishes are counted", [win214(re_=3)], 0, [("OK", F214)], has=["re-published 3"], lacks=["UNPARSED"])
+        check("F214: a window line that drifted from its pattern is UNPARSED", [win214().replace("pin calls", "calls")], 4, [("UNPARSED", F214)])
+        # ---- F215 (TEMPORARY): the body follows the view; its window line is rendered from the C format string in native_on_foot_f215.h ----
+        f215src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f215.h"))
+        F215 = "body follows view (F215)"
+
+        def win215(key="on", calls=900, un=600, act=500, held=(20, 10, 5, 30, 15, 10, 10), mv="mean +20.0 cm (min -5.0, max +45.0) over 500 active calls", r0="7.0", shifted=480, wl=10, iact=0, sight=0,
+                   old=False, oldhead=False):
+            fmt = health_c_format(f215src, "native on foot body follows view (F215) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f215.h has no format holding the F215 window line: the --health rule that reads it is out of date")
+            line = health_render(fmt, (wl, key, calls, un, act) + tuple(held) + (mv, float(r0), shifted, iact, sight))
+            if oldhead:   # a log from before F226 counted "held head" where F226 counts the head past the gate
+                new_ = "head past the gate with the move on %d, held aim %d" % (held[0], held[1])
+                if new_ not in line:
+                    raise AssertionError("the F215 window line no longer has the head part the F215 old-log case rewrites: update the test")
+                line = line.replace(new_, "held head %d aim %d" % (held[0], held[1]))
+            tail = "; item at the hip active %d, held in the sights %d" % (iact, sight)
+            if old:   # a log from before F217 ends at the shifted count
+                if not line.endswith(tail):
+                    raise AssertionError("the F215 window line no longer ends with the item-at-the-hip part: the --health rule that reads it is out of date")
+                line = line[:-len(tail)]
+            return line
+        check("F215: a flight that was active in 500 of 600 unarmed calls and shifted 480 poses is OK and names the held reasons", [win215()], 0, [("OK", F215)],
+              has=["10 s: 900 pin calls, 600 unarmed, 500 active; not active: aim pitch 10, no pose 5, filling 30, item 15, posture 10, away 10; body move mean +20.0 cm, min -5.0, max +45.0 over 500 active calls; poses written shifted 480; R0 7.0 cm; head past the gate with the move on 20",
+                   "active in 500 of 600 unarmed calls (83%), 480 pose writes shifted"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F217: a line from before the item part still parses and reports no item part", [win215(old=True)], 0, [("OK", F215)], has=["poses written shifted 480; R0 7.0 cm"], lacks=["UNPARSED", "item at the hip"])
+        check("F217: the item at the hip is reported with its counts", [win215(iact=300, sight=40)], 0, [("OK", F215)], has=["item at the hip: active 300, held in the sights 40"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F217: an armed flight (no unarmed calls, item active) is never NEVER APPLIED", [win215(calls=900, un=0, act=0, held=(0,) * 7, mv="none", shifted=700, iact=800, sight=40)], 0, [("IDLE", F215)],
+              has=["item at the hip: active 800, held in the sights 40"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F215: the key on, 600 unarmed calls and none active is NEVER APPLIED", [win215(act=0, held=(0,) * 7, mv="none", shifted=0)], 3, [("NEVER APPLIED", F215)],
+              has=["the key is on and 600 unarmed calls were active in none"], lacks=["UNPARSED"])
+        check("F215: the key on, every unarmed call held (an aim pitched the whole time) is NEVER APPLIED, with the counts to read", [win215(act=0, held=(0, 600, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3,
+              [("NEVER APPLIED", F215)], has=["not active: aim pitch 600", "no active call"], lacks=["UNPARSED"])
+        check("F215: a log from before F226 (held head) still parses and names the head pitch among the held reasons", [win215(act=0, held=(600, 0, 0, 0, 0, 0, 0), mv="none", shifted=0, oldhead=True)], 3,
+              [("NEVER APPLIED", F215)], has=["not active: head pitch 600", "no active call"], lacks=["UNPARSED", "head past the gate"])
+        check("F215: active calls and not one pose written shifted is NEVER APPLIED", [win215(shifted=0)], 3, [("NEVER APPLIED", F215)], has=["500 calls were active but not one pose was written with the shift"], lacks=["UNPARSED"])
+        check("F215: the key off with unarmed calls is IDLE, never NEVER APPLIED", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0)], 0, [("IDLE", F215)],
+              has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F215: under 30 unarmed calls with none active is IDLE", [win215(un=20, act=0, held=(20, 0, 0, 0, 0, 0, 0), mv="none", shifted=0)], 0, [("IDLE", F215)],
+              has=["under 30 unarmed calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F215: a window with the key off beside one with it on is judged on the on window", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0), win215()], 0, [("OK", F215)],
+              has=["20 s: 1800 pin calls"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F215: a window line that drifted from its pattern is UNPARSED", [win215().replace("pin calls", "calls")], 4, [("UNPARSED", F215), ("UNPARSED", "head pitched (F226)")])
+        F226 = "head pitched (F226)"
+        check("F226: a flight with calls at the head past the gate and the move on is OK with the count and its share", [win215(held=(120, 10, 5, 30, 15, 10, 10))], 0, [("OK", F215), ("OK", F226)],
+              has=["head past the gate with the move on 120 of 900 pin calls (13.3%); active 500 unarmed, 0 at the hip"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: none of those calls is not a failure", [win215(held=(0, 10, 5, 30, 15, 10, 10))], 0, [("OK", F215), ("OK", F226)], has=["head past the gate with the move on 0 of 900 pin calls (0.0%)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: a move that never ran is IDLE here (F215's row calls it)", [win215(act=0, held=(0, 600, 0, 0, 0, 0, 0), mv="none", shifted=0)], 3, [("NEVER APPLIED", F215), ("IDLE", F226)], has=["no active call: the move never ran"], lacks=["UNPARSED"])
+        check("F226: the key off is IDLE and under 30 calls is IDLE", [win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0), win215(key="off", act=0, held=(0,) * 7, mv="none", shifted=0)], 0, [("IDLE", F215), ("IDLE", F226)],
+              has=["the key was off in every window"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F226: a log from before F226 has no verdict from this row and is not unparsed", [win215(oldhead=True)], 0, [("OK", F215)], lacks=["UNPARSED", "head past the gate"])
+        # ---- F216: the view bob; its window line is rendered from the C format string in native_on_foot_f216.h ----
+        f216src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f216.h"))
+        F216 = "view bob (F216)"
+
+        def win216(key="off", frames=900, run=600, rem=500, moves=(2.1, 4.9, 1.2, 3.0, 1.8, 4.0), clamp=3, wl=10):
+            fmt = health_c_format(f216src, "native on foot view bob (F216) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f216.h has no format holding the F216 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, frames, run, rem) + tuple(float(m) for m in moves) + (clamp,))
+        check("F216: a run with the filter removing from 500 of 600 frames at a run is OK and names the moves", [win216()], 0, [("OK", F216)],
+              has=["10 s: 900 game frames, 600 at a run, 500 removing; up rms 2.1 mm (max 4.9), right rms 1.2 (max 3.0), along rms 1.8 (max 4.0); at the clamp 3", "removing in 500 of 600 frames at a run (83%)"],
+              lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F216: the key off, 600 frames at a run and none removing is NEVER APPLIED", [win216(rem=0, moves=(0,) * 6, clamp=0)], 3, [("NEVER APPLIED", F216)],
+              has=["the key is off and 600 frames were at a run with the filter removing from none"], lacks=["UNPARSED"])
+        check("F216: the key on is IDLE, never NEVER APPLIED", [win216(key="on", rem=0, moves=(0,) * 6, clamp=0)], 0, [("IDLE", F216)],
+              has=["the key was on in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F216: under 90 frames at a run with none removing is IDLE", [win216(run=60, rem=0, moves=(0,) * 6, clamp=0)], 0, [("IDLE", F216)],
+              has=["under 90 frames at a run"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F216: a window with the key on beside one with it off is judged on the off window", [win216(key="on", rem=0, moves=(0,) * 6, clamp=0), win216()], 0, [("OK", F216)],
+              has=["20 s: 1800 game frames"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F216: a window line that drifted from its pattern is UNPARSED", [win216().replace("game frames", "frames")], 4, [("UNPARSED", F216)])
+        # ---- F220: the HUD goes with the view; its window line is rendered from the C format string in native_on_foot_f216.h, and the rule reads the F216 line beside it ----
+        F220 = "HUD with the view (F220)"
+
+        def win220(key="on", calls=900, sh=600, moves=(3.4, 7.1, 2.0, 4.5), wl=10):
+            fmt = health_c_format(f216src, "native on foot hud with the view (F220) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f216.h has no format holding the F220 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, sh) + tuple(float(m) for m in moves))
+        check("F220: the key on, the term removing and 600 of 900 placement calls shifted is OK and names the shift", [win216(), win220()], 0, [("OK", F220)],
+              has=["10 s: 900 placement calls, 600 with a shift", "shifted in 600 of 900 placement calls (67%); up rms 3.4 mm (max 7.1), side rms 2.0 (max 4.5)"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F220: the key on, the term removing and not one placement call shifted is NEVER APPLIED", [win216(), win220(sh=0, moves=(0,) * 4)], 3, [("NEVER APPLIED", F220)],
+              has=["the view bob term was removing from 500 frames and not one of 900 placement calls had a shift"], lacks=["UNPARSED"])
+        check("F220: the key off is IDLE, never NEVER APPLIED", [win216(), win220(key="off", sh=0, moves=(0,) * 4)], 0, [("IDLE", F220)],
+              has=["the key was off in every window"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F220: no frame removing (the F216 line shows none) is IDLE, never NEVER APPLIED", [win216(run=60, rem=0, moves=(0,) * 6, clamp=0), win220(sh=0, moves=(0,) * 4)], 0, [("IDLE", F220)],
+              has=["no frame carried a term"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F220: a window line that drifted from its pattern is UNPARSED", [win216(), win220().replace("placement calls", "calls")], 4, [("UNPARSED", F220)])
+        # ---- F218: the rifle's torso; its window line is rendered from the C format string in native_on_foot_f218.h ----
+        f218src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f218.h"))
+        F218 = "rifle torso (F218)"
+
+        def win218(calls=900, app=700, ref=40, held=160, sw=6, slide=3.5, wl=10):
+            fmt = health_c_format(f218src, "native on foot rifle torso (F218) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f218.h has no format holding the F218 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, calls, app, ref, held, sw, float(slide)))
+        check("F218: a rifle held on the rest solution with a few switches is OK and names the counts", [win218()], 0, [("OK", F218)],
+              has=["10 s: 900 rifle calls, rest applied 700, refused 40, held back 160; 6 switches of solution; largest slide 3.5 cm", "0.6 switches a second"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
+        check("F218: more than one change of solution a second is PARTIAL and names the rate", [win218(sw=25, app=400, ref=250, held=0)], 0, [("PARTIAL", F218)],
+              has=["25 switches in 10 s (2.5 a second, over 1)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F218: exactly one a second is not PARTIAL", [win218(sw=10)], 0, [("OK", F218)], lacks=["PARTIAL", "UNPARSED"])
+        check("F218: under 90 rifle calls is IDLE, even with switches", [win218(calls=60, app=30, ref=10, held=20, sw=40)], 0, [("IDLE", F218)],
+              has=["under 90 rifle calls"], lacks=["PARTIAL", "UNPARSED"])
+        check("F218: no rifle at the hip (no window line) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["PARTIAL", "NEVER APPLIED"])
+        check("F218: windows add up before they are judged", [win218(calls=500, sw=3), win218(calls=500, sw=4)], 0, [("OK", F218)], has=["20 s: 1000 rifle calls", "7 switches"], lacks=["UNPARSED"])
+        check("F218: a window line that drifted from its pattern is UNPARSED", [win218().replace("rifle calls", "calls")], 4, [("UNPARSED", F218)])
+        # ---- F219: the elbow's swing limit; its window line is rendered from the C format string in native_on_foot_f219.h ----
+        f219src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f219.h"))
+        F219 = "elbow step (F219)"
+
+        def win219(ls=800, ll=40, lc=12.5, rs=800, rl=5, rc=6.0, wl=10):
+            fmt = health_c_format(f219src, "native on foot elbow step (F219) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f219.h has no format holding the F219 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, ls, ll, float(lc), rs, rl, float(rc)))
+        check("F219: arm solves at the hip with a few limited is OK and names each side", [win219()], 0, [("OK", F219)],
+              has=["10 s: left 800 solves, 40 limited (5%), largest cut 12.5 deg; right 800 solves, 5 limited (1%), largest cut 6.0 deg"], lacks=["UNPARSED", "PARTIAL"])
+        check("F219: over a quarter of the left arm's solves limited is PARTIAL and names the side", [win219(ll=300)], 0, [("PARTIAL", F219)],
+              has=["the left arm: over a quarter of its solves were limited"], lacks=["UNPARSED", "right arm"])
+        check("F219: both sides over a quarter names both", [win219(ll=300, rl=400)], 0, [("PARTIAL", F219)], has=["the left and right arm"], lacks=["UNPARSED"])
+        check("F219: exactly a quarter is not PARTIAL", [win219(ll=200, rl=200)], 0, [("OK", F219)], lacks=["PARTIAL", "UNPARSED"])
+        check("F219: window lines with no solve at the hip are IDLE", [win219(ls=0, ll=0, lc=0.0, rs=0, rl=0, rc=0.0)], 0, [("IDLE", F219)], has=["nothing to limit"], lacks=["PARTIAL", "UNPARSED"])
+        check("F219: no window line (no arm solve at the hip) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["PARTIAL", "NEVER APPLIED"])
+        check("F219: a window line that drifted from its pattern is UNPARSED", [win219().replace("left solves", "left")], 4, [("UNPARSED", F219)])
+        # ---- F221: the arc cutter's left elbow; its window line is rendered from the C format string in native_on_foot_f221.h ----
+        f221src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f221.h"))
+        F221 = "tool elbow (F221)"
+
+        def win221(n=300, hung=290, wm=0.97, g=3, fb=0, om=-12.5, ox=-4.0, wl=10):
+            fmt = health_c_format(f221src, "native on foot tool elbow (F221) %.0f s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f221.h has no format holding the F221 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (float(wl), n, hung, float(wm), g, fb, float(om), float(ox)))
+        check("F221: a window of arc cutter solves with the pole applied is OK with the figures", [win221()], 0, [("OK", F221)],
+              has=["10 s: 300 solves with the arc cutter, hung 290 (weight mean 0.97), guarded 3, axis vertical 0; the elbow over the hand mean -12.5 cm, highest -4.0 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F221: 30 or more solves and none hung is NEVER APPLIED", [win221(n=300, hung=0, wm=0.0)], 3, [("NEVER APPLIED", F221)], has=["the body-down pole never applied"], lacks=["UNPARSED"])
+        check("F221: under 30 solves is IDLE, even with none hung", [win221(n=20, hung=0, wm=0.0)], 0, [("IDLE", F221)], has=["under 30 solves"], lacks=["NEVER", "UNPARSED"])
+        check("F221: windows add up, the mean weighted by the solves", [win221(n=100, wm=1.0, om=-10.0, ox=-2.0), win221(n=300, wm=0.5, om=-20.0, ox=1.5)], 0, [("OK", F221)],
+              has=["20 s: 400 solves", "weight mean 0.62", "mean -17.5 cm, highest +1.5 cm"], lacks=["UNPARSED"])
+        check("F221: no window line (no arc cutter) is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F221: a window line that drifted from its pattern is UNPARSED", [win221().replace("solves with", "solves of")], 4, [("UNPARSED", F221)])
+        # ---- F222, F223: the eye in its own frame and the root jump; their window lines are rendered from the C format strings in the headers ----
+        f222src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f222.h"))
+        f223src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f223.h"))
+        F222 = "eye in its own frame (F222)"
+        F223 = "root jump (F223)"
+
+        def win222(key="on", calls=900, taken=890, mean=3.4, mx=5.3, wl=10):
+            fmt = health_c_format(f222src, "native on foot eye in its own frame (F222) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f222.h has no format holding the F222 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, key, calls, taken, float(mean), float(mx)))
+
+        def win223(taken=4, largest=-1.14, refused=0, move=-0.5, wl=10):
+            fmt = health_c_format(f223src, "native on foot root jump (F223) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f223.h has no format holding the F223 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, taken, float(largest), refused, float(move)))
+        check("F222: a window with rows taken is OK with the figures", [win222()], 0, [("OK", F222)],
+              has=["10 s: key on; 900 pin calls, 890 rows taken; the body's turn taken out of the heading mean 3.40 deg, largest 5.30"], lacks=["UNPARSED", "NEVER"])
+        check("F222: the key on, 30 or more calls and no row taken is NEVER APPLIED", [win222(taken=0)], 3, [("NEVER APPLIED", F222)], has=["not one took rows"], lacks=["UNPARSED"])
+        check("F222: the key off is IDLE", [win222(key="off", taken=0, mean=0.0, mx=0.0)], 0, [("IDLE", F222)], has=["the key is off"], lacks=["NEVER", "UNPARSED"])
+        check("F222: under 30 calls is IDLE, even with no row taken", [win222(calls=20, taken=0)], 0, [("IDLE", F222)], has=["under 30 pin calls"], lacks=["NEVER", "UNPARSED"])
+        check("F222: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F222: a window line that drifted from its pattern is UNPARSED", [win222().replace("rows taken", "rows")], 4, [("UNPARSED", F222)])
+        check("F223: a window with a call taken is OK with the figures", [win223()], 0, [("OK", F223)], has=["10 s: 4 calls taken, the largest -1.14 m; 0 refused"], lacks=["UNPARSED", "NEVER"])
+        check("F223: refusals alone are IDLE", [win223(taken=0, largest=0.0, refused=3, move=0.0)], 0, [("IDLE", F223)], has=["nothing taken"], lacks=["UNPARSED", "NEVER"])
+        check("F223: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F223: a window line that drifted from its pattern is UNPARSED", [win223().replace("calls taken", "taken")], 4, [("UNPARSED", F223)])
+        # ---- F224, F225: the whole-body move's lead and the reach margin; their window lines are rendered from the C format strings in the headers ----
+        f224src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f223.h"))
+        f225src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f225.h"))
+        F224 = "body move lead (F224)"
+        F225 = "reach margin (F225)"
+
+        def win224(active=900, rms=8.2, mx=-31.0, over=2, wl=10):
+            fmt = health_c_format(f224src, "native on foot body move lead (F224) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f223.h has no format holding the F224 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, active, float(rms), float(mx), over))
+
+        def win225(solves=900, over=300, wm=0.62, mv=3.4, wl=10):
+            fmt = health_c_format(f225src, "native on foot reach margin (F225) %u s")
+            if fmt is None:
+                raise AssertionError("native_on_foot_f225.h has no format holding the F225 window line: the --health rule that reads it is out of date")
+            return health_render(fmt, (wl, solves, over, float(wm), float(mv)))
+        check("F224: a window of active calls with a lead is OK with the figures", [win224()], 0, [("OK", F224)],
+              has=["10 s: 900 active calls, the lead rms 8.2 mm, largest -31.0 mm; 2 over the limit"], lacks=["UNPARSED", "NEVER"])
+        check("F224: 100 or more active calls and a lead of 0 on every one is NEVER APPLIED", [win224(rms=0.0, mx=0.0, over=0)], 3, [("NEVER APPLIED", F224)], has=["the lead was 0 on every one"], lacks=["UNPARSED"])
+        check("F224: under 100 active calls is IDLE", [win224(active=60, rms=0.0, mx=0.0, over=0)], 0, [("IDLE", F224)], has=["under 100 active calls"], lacks=["NEVER", "UNPARSED"])
+        check("F224: windows add up, the rms weighted by the calls", [win224(active=100, rms=10.0, mx=5.0), win224(active=300, rms=0.0, mx=-2.0)], 0, [("OK", F224)], has=["20 s: 400 active calls, the lead rms 5.0 mm, largest +5.0 mm"], lacks=["UNPARSED"])
+        check("F224: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F224: a window line that drifted from its pattern is UNPARSED", [win224().replace("active calls", "calls")], 4, [("UNPARSED", F224)])
+        check("F225: a window with solves over the reach is OK with the figures", [win225()], 0, [("OK", F225)],
+              has=["10 s: 900 armed solves, over the reach on 300, margin weight mean 0.62; the shoulder's assist move largest 3.4 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F225: under 30 solves over the reach is IDLE", [win225(over=20, wm=0.0, mv=0.0)], 0, [("IDLE", F225)], has=["under 30 solves over the reach"], lacks=["UNPARSED", "NEVER"])
+        check("F225: no window line is not present, never a verdict", ["native on foot arm IK (F59): square-up: 0 calls"], 0, [], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("F225: a window line that drifted from its pattern is UNPARSED", [win225().replace("armed solves", "solves")], 4, [("UNPARSED", F225)])
         # The ADS residual is controller input, not a logging accumulator.
         # A suppressed detail line must still close this original 1 s window;
         # F109's independent 1 s player-turn events must remain outside the gate.

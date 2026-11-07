@@ -96,8 +96,15 @@ inline void run181(Check&& check) {
         }
         check(continuous && eq(last, 53.0, 1e-9), "F181a: the plane angle after the cap rises without a step from the cap (25 at the hip) to the pole's own (53 in the sights) as the detach weight rises");
         // a cap of 0: into the plane; the cap off: not applied
-        const f181::Cap zero = f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 0.0, 1.0), vee);
-        check(zero.applied && vee(zero.theta) < 1e-3, "F181a: a cap of 0 puts the elbow in the stance's plane");
+        const double nearStart = thetaZ + rad(40.0);   // F218: a turn of 40 deg is inside the search; the 53 deg start above needs 53, past kMaxTurnRad
+        const f181::Cap zero = f181::capSwivel(nearStart, vee(nearStart), f181::targetDeg(vee(nearStart), 0.0, 1.0), vee);
+        check(zero.applied && vee(zero.theta) < 1e-3, "F181a: a cap of 0 puts the elbow in the stance's plane (from 40 deg off it)");
+        // F219: the search turns the pole at most 45 deg; a cap whose first swivel lies further round takes the closest approach inside the turn
+        const f181::Cap longTurn = f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 0.0, 1.0), vee);
+        check(longTurn.applied && longTurn.turnedDeg <= 45.0 + 1e-6 && eq(longTurn.turnedDeg, 45.0, 1e-3) && eq(vee(longTurn.theta), 8.0, 1e-3) && nf::ikWrapPi(longTurn.theta - thetaZ) > 0.0,
+              "F219: the cap's search is held to 45 deg of turn: 53 deg off the plane with a cap of 0 comes to 8 deg off it (the closest approach inside 45), not into the plane");
+        const auto veeFar = [&](double th) { return std::fabs(nf::ikWrapPi(th - thetaZ)) * 180.0 / kPi * 0.01 + 60.0; };   // 60 to 61.8 deg wherever it is: no gain of 1 deg inside the turn
+        check(!f181::capSwivel(start, veeFar(start), 25.0, veeFar).applied, "F219: a pose that gains under 1 deg inside the 45 deg turn is not applied");
         check(!f181::capSwivel(start, vee(start), f181::targetDeg(vee(start), 90.0, 1.0), vee).applied, "F181a: the cap at 90 is off: not applied");
         // across the wrap of the swivel's angle
         const double zWrap = rad(170.0);
@@ -211,7 +218,7 @@ inline void run181(Check&& check) {
         // the cap: after the hinge measure, before the swivel choice that follows, from the hip share, through capSwivel on the same measure
         const size_t hsOk = at("nofoot::HingeSwings hs = nofoot::ikHingeSwings(S, F0, H0, E, tb.hand,"), capAt = at("if (f181Eligible) {\n            const double capDeg"), next = at("// F76 armed full-grip solving follows a transported physical pole.");
         check(hsOk != std::string::npos && hsOk < capAt && capAt < next &&
-                  has("const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), o.f192Dh));") && has("if (target < planeBefore) {") &&
+                  has("const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f192::capShare(nofoot::f181::hipShare(pinCall.detachW), nofoot::f192::blendWeight(o.f192Dh, w221)));") && has("if (target < planeBefore) {") &&
                   has("const nofoot::f181::Cap cap = nofoot::f181::capSwivel(theta, planeBefore, target, planeAt);") &&
                   has("const nofoot::HingeSwings c = nofoot::ikHingeSwings(S, F0, H0, Ec, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);"),
               "F181a: the cap sits after the hinge is measured and before the swivel choice, takes its target from the hip share, and measures the plane angle of each swivel it tries with the same ikHingeSwings call F98a's figure comes from");
@@ -219,7 +226,7 @@ inline void run181(Check&& check) {
         check(!capBlock.empty() && capBlock.find("physicalPoleCommit") == std::string::npos && capBlock.find("s_physicalPole") == std::string::npos && capBlock.find("seed.") == std::string::npos &&
                   capBlock.find("ikSwivelClamp") != std::string::npos,
               "F181a: the cap does not touch the pole's seed or what is committed from it (it is made again on every solve from the pole), and holds the ceiling as blendPole does");
-        check(has("o.f181Hip = nofoot::f159::atHip(pinCall.detachW);") && has("if (so[0].f181Hip && !(so[0].f192Dh > 0.0)) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane,") && has("nofoot::f181::Counters f181;") &&
+        check(has("o.f181Hip = nofoot::f159::atHip(pinCall.detachW);") && has("if (so[0].f181Hip && !(so[0].f192Dh > 0.0) && !(so[0].f221W > 0.0)) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane,") && has("nofoot::f181::Counters f181;") &&
                   has("nofoot::f181::appendSummary(line98, sizeof(line98), f98.f181,") && has("Log::get().note(\"%s\", line98);") && logpin.find("d.f181.merge(s.f181);") != std::string::npos,
               "F181a: the two-handed hip solves are counted after the cap (the plane angle as finally solved), F98Left carries the counters, logpin merges them and the F98a line ends with them");
         // the ini key: beside the standing ADS dials' neighbours, after the neck guard, with its ui row

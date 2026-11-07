@@ -81,6 +81,7 @@ corrupted. Do not regenerate the one-liner — extend the script.
 | Check the install matches the build | `python tools\install_edvr.py --verify-only` | eyeballing timestamps |
 | Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`; first command on an on-foot flight: add `--health [--since HH:MM:SS] [--until HH:MM:SS]`, which says which tagged features ran and applied and exits 3 on a NEVER APPLIED one) | `Get-Content -Tail` + `Select-String` |
 | Measure a skinned character's motion error in an eye dump | `python tools\character_motion_check.py --target frontier [--stamp S]` (face, a named draw and the body against the raw input; exits 3 past its limits) | a scratch warp script retyped each session |
+| Read an on-foot recording (needs log.on_foot_detail on; F9 marks a moment) | `python tools\onfoot_check.py --target <game dir> --expect-build HEAD [--mark N]` | reading the on-foot 1 s lines by hand |
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
 | Make a worktree that can build | `python tools\worktree.py add <path>` | `git worktree add` alone (no deps) |
