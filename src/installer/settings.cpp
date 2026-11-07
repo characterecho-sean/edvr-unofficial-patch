@@ -244,7 +244,7 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     // untouched. Exactly what a careful hand edit would do.
     std::string source = m_text;
     if (source.empty()) {
-        m_error = leaf + " is not there yet -- install EDVR into this folder first.";
+        m_error = leaf + " is not there yet -- install ED-UP into this folder first.";
         return false;
     }
     // One copy of the file as it was when this window opened, before the first

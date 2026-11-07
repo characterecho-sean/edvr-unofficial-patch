@@ -40,13 +40,13 @@ std::string bullets(const char* title, const std::vector<std::string>& items) {
 
 std::string usageText() {
     const char* exe = "edvr-installer.exe";
-    std::string out = "EDVR installer\r\n";
+    std::string out = "ED-UP installer\r\n";
     out +=
            "\r\n"
            "  " + std::string(exe) + "                        open the window\r\n"
            "  " + std::string(exe) + " --install [--dir D]    install or update\r\n"
            "  " + std::string(exe) + " --repair  [--dir D]    repair this install\r\n"
-           "  " + std::string(exe) + " --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
+           "  " + std::string(exe) + " --uninstall [--dir D]  remove ED-UP, restoring what it replaced\r\n"
            "  " + std::string(exe) + " --collect-logs         zip the latest logs onto the Desktop\r\n"
            "\r\n"
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
@@ -210,7 +210,7 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload, const std:
             out += "\r\n";
         }
     }
-    if (!payload.version.empty()) out += "\r\nThis installer carries EDVR " + payload.version + ".\r\n";
+    if (!payload.version.empty()) out += "\r\nThis installer carries ED-UP " + payload.version + ".\r\n";
     if (s.gameRunningHere) {
         out += "\r\n!  Elite Dangerous is running. Close it before installing anything.\r\n";
     } else if (s.gameRunningElsewhere) {
@@ -238,7 +238,7 @@ std::string planReport(const Plan& plan) {
     out += bullets("  Set by the installer:", plan.merge.forced);
     out += bullets("  Followed a setting that moved, and still applies:", plan.merge.followed);
     out += bullets("  Carried over, no longer used by this version:", plan.merge.retired);
-    out += bullets("  Carried over, not an EDVR setting:", plan.merge.carried);
+    out += bullets("  Carried over, not an ED-UP setting:", plan.merge.carried);
     out += bullets("  Lines you had removed, left commented out:", plan.merge.removed);
     return out;
 }

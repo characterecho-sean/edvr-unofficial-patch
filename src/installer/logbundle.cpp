@@ -661,7 +661,7 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
     if (logs.empty()) {
         std::string where;
         for (const std::wstring& dir : logDirs) where += (where.empty() ? "" : " or ") + toUtf8(dir);
-        bundle.notes.push_back("No logs in " + where + " -- has the game been started since EDVR was installed?");
+        bundle.notes.push_back("No logs in " + where + " -- has the game been started since ED-UP was installed?");
     } else {
         const LogFile* newest = &logs.front();
         for (const LogFile& log : logs) {

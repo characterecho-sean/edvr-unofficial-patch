@@ -429,7 +429,7 @@ std::wstring describeDll(const DllInfo& info) {
     std::wstring s;
     const std::wstring mod = modNameOf(info);
     if (info.kind == DllKind::Edvr) {
-        s = L"EDVR";
+        s = L"ED-UP";
     } else if (!mod.empty()) {
         s = mod;
     } else if (!info.product.empty()) {

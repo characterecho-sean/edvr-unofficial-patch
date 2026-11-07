@@ -291,7 +291,7 @@ bool startupConfigOwned(const Survey& s) {
 }
 
 // The note for a file whose bytes are EDVR's but which nothing shows EDVR placed: another mod's identical copy looks exactly like this.
-const char* kMatchesNoProof = "matches EDVR's copy but nothing shows EDVR placed it; left alone";
+const char* kMatchesNoProof = "matches ED-UP's copy but nothing shows ED-UP placed it; left alone";
 
 // The game's original runtime that the tool kept when it installed over it: the native receipt's runtime entry, whose backup sits beside
 // the runtime. It is adopted only when every proof holds: the receipt names this folder (readToolReceipts), the entry is this folder's
@@ -543,13 +543,13 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             (s.openvrOrig.kind != DllKind::OpenVrRuntime || s.state.openvrOrigSha.empty() ||
              s.openvrOrig.sha256 == s.state.openvrOrigSha);
         if (!s.state.present || !ownedVr) {
-            plan.blocked = true; plan.problems.push_back("Cannot prove EDVR's VR runtime and the game's original; flat conversion left the VR files intact."); return plan;
+            plan.blocked = true; plan.problems.push_back("Cannot prove ED-UP's VR runtime and the game's original; flat conversion left the VR files intact."); return plan;
         }
         // The OpenXR files beside the runtime are retired with it, so each must be EDVR's by a proof; a changed one refuses the conversion.
         if ((s.openxrLoader.kind != DllKind::Absent && !loaderOwned(s, p.openxrLoaderSha)) ||
             (s.openxrLicense.kind != DllKind::Absent && !licenseOwned(s, p.openxrLicenseSha)) ||
             (s.nativeConfig.kind != DllKind::Absent && !startupConfigOwned(s))) {
-            plan.blocked = true; plan.problems.push_back("An OpenXR asset differs from EDVR's record; conversion cannot retire it safely."); return plan;
+            plan.blocked = true; plan.problems.push_back("An OpenXR asset differs from ED-UP's record; conversion cannot retire it safely."); return plan;
         }
     }
     switch (s.eliteKind) {
@@ -559,7 +559,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             plan.blocked = true;
             plan.problems.push_back(
                 "This is Elite Dangerous (Horizons), not Elite Dangerous: Odyssey. "
-                "EDVR supports Odyssey only; no EDVR build supports this game.");
+                "ED-UP supports Odyssey only; no ED-UP build supports this game.");
             return plan;
         case EliteExeKind::Unreadable:
             plan.blocked = true;
@@ -572,10 +572,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             std::string msg = "This Elite Dangerous: Odyssey revision";
             if (!s.eliteFileVersion.empty())
                 msg += " (version " + toUtf8(s.eliteFileVersion) + ")";
-            msg += " is not the one this EDVR build was checked against. "
-                   "EDVR will install and the game will start; fixes tied to the game build stand down "
-                   "and the gfx log names each one, and the Oculus PC runtime may bypass EDVR's OpenXR "
-                   "runtime until an EDVR update for this revision.";
+            msg += " is not the one this ED-UP build was checked against. "
+                   "ED-UP will install and the game will start; fixes tied to the game build stand down "
+                   "and the gfx log names each one, and the Oculus PC runtime may bypass ED-UP's OpenXR "
+                   "runtime until an ED-UP update for this revision.";
             plan.problems.push_back(msg);
             break;
         }
@@ -680,26 +680,26 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         if (cur.kind == DllKind::Unreadable) {
             plan.problems.push_back(
                 "There is a d3d11.dll next to the game that cannot be read -- something has it "
-                "open, or it is not a DLL. EDVR's own d3d11.dll was not installed; nothing else "
+                "open, or it is not a DLL. ED-UP's own d3d11.dll was not installed; nothing else "
                 "was touched.");
         } else if (cur.kind == DllKind::Edvr) {
             if (cur.sha256 == p.d3d11Sha && !o.repair) {
                 plan.notes.push_back("d3d11.dll is already this build -- left alone.");
             } else {
-                backup(dst, "the EDVR d3d11.dll being replaced");
+                backup(dst, "the ED-UP d3d11.dll being replaced");
                 writePayload("d3d11", dst,
-                             o.repair ? "reinstalls EDVR's d3d11.dll" : "updates EDVR's d3d11.dll");
+                             o.repair ? "reinstalls ED-UP's d3d11.dll" : "updates ED-UP's d3d11.dll");
                 plan.notes.push_back(o.repair ? "Reinstalling d3d11.dll (the fixes)."
                                               : "Updating d3d11.dll (the fixes).");
             }
             next.d3d11Installed = true;
             next.d3d11Sha = p.d3d11Sha;
         } else if (cur.kind == DllKind::Absent) {
-            writePayload("d3d11", dst, "installs EDVR's d3d11.dll");
+            writePayload("d3d11", dst, "installs ED-UP's d3d11.dll");
             plan.notes.push_back(
                 s.state.d3d11Installed
-                    ? "Restoring d3d11.dll -- EDVR was installed here, and the file is gone. "
-                      "(EDHM's uninstaller runs `del d3d11.dll`, which after an EDVR install is "
+                    ? "Restoring d3d11.dll -- ED-UP was installed here, and the file is gone. "
+                      "(EDHM's uninstaller runs `del d3d11.dll`, which after an ED-UP install is "
                       "ours.)"
                     : "Installing d3d11.dll (the fixes).");
             next.d3d11Installed = true;
@@ -733,10 +733,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                         "folder before deleting anything.");
                 }
             }
-            backup(dst, "the " + modSay + " d3d11.dll found in EDVR's place");
+            backup(dst, "the " + modSay + " d3d11.dll found in ED-UP's place");
             rename(dst, chainPath, "moves " + modSay + " aside, keeping it installed",
                    cur.sha256);
-            writePayload("d3d11", dst, "installs EDVR's d3d11.dll in its place");
+            writePayload("d3d11", dst, "installs ED-UP's d3d11.dll in its place");
 
             forced.emplace_back(kChainKey, say(chainLeaf));
             next.chainTarget = chainLeaf;
@@ -751,11 +751,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 const DllInfo* previous = siblingNamed(s.otherD3d11, s.state.chainTarget);
                 if (previous && previous->kind != DllKind::Absent) {
                     plan.problems.push_back(
-                        "EDVR was passing calls through " + say(s.state.chainTarget) +
+                        "ED-UP was passing calls through " + say(s.state.chainTarget) +
                         (s.state.chainMod.empty() ? std::string()
                                                   : " (" + say(s.state.chainMod) + ")") +
                         ", and now passes them through " + modSay +
-                        " instead -- EDVR can only chain to one. The older one is still in the "
+                        " instead -- ED-UP can only chain to one. The older one is still in the "
                         "folder but nothing loads it. If you want that one back, set "
                         "advanced.real_dll to it by hand.");
                 }
@@ -765,13 +765,13 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
 
             if (s.state.d3d11Installed) {
                 plan.notes.push_back(modSay +
-                                     " has replaced EDVR's d3d11.dll since the last install. Both "
+                                     " has replaced ED-UP's d3d11.dll since the last install. Both "
                                      "are kept: it becomes " + say(chainLeaf) +
-                                     ", EDVR takes the d3d11.dll name back, and every call passes "
+                                     ", ED-UP takes the d3d11.dll name back, and every call passes "
                                      "through to it.");
             } else {
                 plan.notes.push_back(modSay + " is installed as d3d11.dll. It is renamed " +
-                                     say(chainLeaf) + ", EDVR takes its place, and "
+                                     say(chainLeaf) + ", ED-UP takes its place, and "
                                      "advanced.real_dll points back at it -- both mods run.");
             }
             if (!cur.is64) {
@@ -802,7 +802,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             plan.notes.push_back("Keeping the chain to " + say(s.state.chainTarget) + ".");
         } else {
             forced.emplace_back(kChainKey, "");
-            plan.notes.push_back("The mod EDVR was passing calls through to (" +
+            plan.notes.push_back("The mod ED-UP was passing calls through to (" +
                                  say(s.state.chainTarget) +
                                  ") is no longer there, so advanced.real_dll has been cleared.");
         }
@@ -843,14 +843,14 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         } else if (!s.nvidiaAdapter) {
             plan.notes.push_back(
                 "No NVIDIA graphics card was found, so NVIDIA's DLSS runtime (nvngx_dlss.dll, "
-                "59 MB) was not placed. temporal_aa = dlaa and dlss need one, and run EDVR's own "
+                "59 MB) was not placed. temporal_aa = dlaa and dlss need one, and run ED-UP's own "
                 "history without it.");
             if (ours) {
                 next.ngxInstalled = true;
                 next.ngxSha = s.state.ngxSha;
             }
         } else {
-            if (present) backup(dst, "the nvngx_dlss.dll EDVR placed, being replaced");
+            if (present) backup(dst, "the nvngx_dlss.dll ED-UP placed, being replaced");
             writePayload("ngx", dst,
                          present ? "updates NVIDIA's DLSS runtime"
                                  : "places NVIDIA's DLSS runtime beside the game");
@@ -904,7 +904,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 file.recorded->clear();
             } else {
                 const std::wstring dst = joinPath(s.game.dir, file.leaf);
-                if (present) backup(dst, "the XeSS file EDVR placed, being replaced");
+                if (present) backup(dst, "the XeSS file ED-UP placed, being replaced");
                 writePayload(file.item, dst, "places Intel XeSS-SR runtime or notice");
                 *file.recorded = *file.desired;
                 ++(present ? updated : placed);
@@ -935,7 +935,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     if(saved.kind==DllKind::Absent && current.kind!=DllKind::OpenVrRuntime && s.toolOriginal.kind==DllKind::OpenVrRuntime) {
         Step adopt;adopt.action=Action::Backup;adopt.from=s.toolOriginal.path;adopt.to=original;
         adopt.expectSha=s.toolOriginal.sha256;adopt.required=true;
-        adopt.why="keeps the game's original VR library, from the backup the tool made, where EDVR can restore it";
+        adopt.why="keeps the game's original VR library, from the backup the tool made, where ED-UP can restore it";
         body.push_back(adopt);changed=true;
         next.openvrOrigSha=s.toolOriginal.sha256;
         plan.notes.push_back("Adopting the game's original VR library from the backup the tool made, so it can be restored later.");
@@ -992,11 +992,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         // build (proved above), and each OpenXR file by its hash or its content, whether or not this folder's record lists it.
         const std::wstring runtime = joinPath(nativeDir, kOpenvr);
         if (retireRuntime) {
-            backup(runtime, "the EDVR VR runtime being retired");
+            backup(runtime, "the ED-UP VR runtime being retired");
             body.back().required = true; body.back().expectSha = s.openvrCurrent.sha256;
             Step removeRuntime; removeRuntime.action = Action::Delete; removeRuntime.from = runtime;
             removeRuntime.expectSha = s.openvrCurrent.sha256;
-            removeRuntime.why = "retires EDVR's VR runtime"; body.push_back(removeRuntime); changed = true;
+            removeRuntime.why = "retires ED-UP's VR runtime"; body.push_back(removeRuntime); changed = true;
             const bool savedOriginal = s.openvrOrig.kind == DllKind::OpenVrRuntime;
             Step restoreOriginal;
             restoreOriginal.action = savedOriginal ? Action::Rename : Action::Backup;
@@ -1020,10 +1020,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                     : "Keeping a changed OpenXR file: " + say(leafOf(file.info->path)));
                 continue;
             }
-            backup(file.info->path, "the EDVR OpenXR asset being retired");
+            backup(file.info->path, "the ED-UP OpenXR asset being retired");
             body.back().required = true; body.back().expectSha = file.info->sha256;
             Step retire; retire.action = Action::Delete; retire.from = file.info->path;
-            retire.expectSha = file.info->sha256; retire.why = "retires EDVR's OpenXR asset";
+            retire.expectSha = file.info->sha256; retire.why = "retires ED-UP's OpenXR asset";
             body.push_back(retire);
             changed = true;
         }
@@ -1033,9 +1033,9 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         next.openxrLicenseSha.clear(); next.nativeConfigSha.clear();
         next.nativeOriginalName.clear(); next.nativeOriginalSha.clear();
         if (retireRuntime) {
-            plan.notes.push_back("Converting VR to flat: the game's original VR library is in place and verified EDVR OpenXR assets are retired.");
+            plan.notes.push_back("Converting VR to flat: the game's original VR library is in place and verified ED-UP OpenXR assets are retired.");
         } else if (!installed.empty() && installed != "flat") {
-            plan.notes.push_back("Converting to flat: the VR library here is not EDVR's, so it is left where it is.");
+            plan.notes.push_back("Converting to flat: the VR library here is not ED-UP's, so it is left where it is.");
         }
     }
     if (flat) next.nativeGraphicsSha = p.d3d11Sha;
@@ -1044,10 +1044,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     const std::wstring descriptorPath = joinPath(s.game.dir, kProfile);
     if (!s.descriptorPresent || s.descriptorSha != descriptorSha || o.repair) {
         if (s.descriptorPresent) {
-            backup(descriptorPath, "the previous EDVR profile descriptor");
+            backup(descriptorPath, "the previous ED-UP profile descriptor");
             body.back().required = true; body.back().expectSha = s.descriptorSha;
         }
-        writeText(descriptor, descriptorPath, "declares the installed EDVR scope");
+        writeText(descriptor, descriptorPath, "declares the installed ED-UP scope");
         changed = true;
     }
 
@@ -1370,8 +1370,8 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     // ---- d3d11 --------------------------------------------------------
     const std::wstring d3d11Path = joinPath(s.game.dir, kD3d11);
     if (s.d3d11.kind == DllKind::Edvr) {
-        backup(d3d11Path, "EDVR's d3d11.dll");
-        remove(d3d11Path, "removes EDVR's d3d11.dll", s.d3d11.sha256);
+        backup(d3d11Path, "ED-UP's d3d11.dll");
+        remove(d3d11Path, "removes ED-UP's d3d11.dll", s.d3d11.sha256);
 
         // Whatever we moved aside goes back under the name it had. Without
         // this, uninstalling EDVR silently uninstalls the other mod too: its
@@ -1398,10 +1398,10 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                                                        : say(s.state.chainMod)) +
                        " back under its own name",
                    target->sha256);
-            plan.notes.push_back("Removing EDVR's d3d11.dll and restoring " + say(chain) +
+            plan.notes.push_back("Removing ED-UP's d3d11.dll and restoring " + say(chain) +
                                  " as d3d11.dll.");
         } else {
-            plan.notes.push_back("Removing EDVR's d3d11.dll.");
+            plan.notes.push_back("Removing ED-UP's d3d11.dll.");
             if (!chain.empty()) {
                 plan.problems.push_back(
                     runtimeIniName + " pointed at " + say(chain) +
@@ -1411,7 +1411,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     } else if (s.d3d11.kind == DllKind::Absent) {
         plan.notes.push_back("No d3d11.dll to remove.");
     } else {
-        plan.notes.push_back("The d3d11.dll here is not EDVR's (" + say(describeDll(s.d3d11)) +
+        plan.notes.push_back("The d3d11.dll here is not ED-UP's (" + say(describeDll(s.d3d11)) +
                              ") -- left alone.");
     }
 
@@ -1423,20 +1423,20 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         const std::wstring origPath = joinPath(s.game.openvrDir, origName);
         if (s.openvrCurrent.kind == DllKind::Edvr) {
             if (s.openvrOrig.kind == DllKind::OpenVrRuntime) {
-                backup(dst, "EDVR's openvr_api.dll");
-                remove(dst, "removes EDVR's openvr_api.dll", s.openvrCurrent.sha256);
+                backup(dst, "ED-UP's openvr_api.dll");
+                remove(dst, "removes ED-UP's openvr_api.dll", s.openvrCurrent.sha256);
                 rename(origPath, dst, "puts the game's own openvr_api.dll back",
                        s.openvrOrig.sha256);
                 plan.notes.push_back(
-                    "Removing EDVR's openvr_api.dll and renaming the game's original back.");
+                    "Removing ED-UP's openvr_api.dll and renaming the game's original back.");
             } else if (!s.openvrOrigInBackups.empty()) {
                 // The renamed original is gone, but this installer kept a copy
                 // of it before it ever renamed anything. Uninstalling from that
                 // copy is a great deal better than sending somebody to their
                 // launcher's file verification.
                 const std::wstring& copy = s.openvrOrigInBackups.front();
-                backup(dst, "EDVR's openvr_api.dll");
-                restore(copy, dst, "puts the game's own openvr_api.dll back from an EDVR backup");
+                backup(dst, "ED-UP's openvr_api.dll");
+                restore(copy, dst, "puts the game's own openvr_api.dll back from an ED-UP backup");
                 plan.notes.push_back(
                     "The renamed original is missing, so the game's own openvr_api.dll is being "
                     "restored from the backup this installer made before it first renamed it.");
@@ -1446,7 +1446,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 // removing it. The file stays until there is something to put
                 // in its place.
                 plan.problems.push_back(
-                    "EDVR's openvr_api.dll has been left in place: the game's original is not "
+                    "ED-UP's openvr_api.dll has been left in place: the game's original is not "
                     "there to put back, and no backup of it was found, so removing ours would "
                     "leave that folder with no openvr_api.dll at all. Verify or repair the game "
                     "files in your launcher -- that restores the original -- and then uninstall "
@@ -1458,7 +1458,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 "The game's own openvr_api.dll is already in place; the spare copy at "
                 "openvr_api_orig.dll was left where it is.");
         } else {
-            plan.notes.push_back("No EDVR openvr_api.dll to remove.");
+            plan.notes.push_back("No ED-UP openvr_api.dll to remove.");
         }
     }
 
@@ -1473,7 +1473,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 return;
             }
             backup(info.path,"the native OpenXR file being removed");
-            remove(info.path,"removes EDVR's OpenXR dependency",info.sha256);
+            remove(info.path,"removes ED-UP's OpenXR dependency",info.sha256);
         };
         retire(s.openxrLoader,loaderOwned(s,p.openxrLoaderSha),sameSha(s.openxrLoader.sha256,p.openxrLoaderSha));
         retire(s.openxrLicense,licenseOwned(s,p.openxrLicenseSha),sameSha(s.openxrLicense.sha256,p.openxrLicenseSha));
@@ -1487,11 +1487,11 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     const std::wstring ngxPath = joinPath(s.game.dir, kNgx);
     if (s.state.ngxInstalled && !s.state.ngxSha.empty() && s.ngx.kind != DllKind::Absent &&
         s.ngx.kind != DllKind::Unreadable && s.ngx.sha256 == s.state.ngxSha) {
-        remove(ngxPath, "removes NVIDIA's DLSS runtime, which EDVR placed", s.ngx.sha256);
-        plan.notes.push_back("Removing nvngx_dlss.dll (NVIDIA's DLSS runtime, which EDVR placed).");
+        remove(ngxPath, "removes NVIDIA's DLSS runtime, which ED-UP placed", s.ngx.sha256);
+        plan.notes.push_back("Removing nvngx_dlss.dll (NVIDIA's DLSS runtime, which ED-UP placed).");
     } else if (s.ngx.kind != DllKind::Absent) {
         plan.notes.push_back(
-            "The nvngx_dlss.dll beside the game is not the copy EDVR placed -- left alone.");
+            "The nvngx_dlss.dll beside the game is not the copy ED-UP placed -- left alone.");
     }
 
     const DllInfo* xessFiles[] = {&s.xess, &s.xessLicense, &s.xessThirdParty};
@@ -1510,7 +1510,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                                          : "Keeping a changed XeSS file: " + say(leafOf(cur.path)));
             continue;
         }
-        remove(cur.path, "removes Intel XeSS-SR file EDVR placed", cur.sha256);
+        remove(cur.path, "removes Intel XeSS-SR file ED-UP placed", cur.sha256);
     }
 
     // ---- settings and record ------------------------------------------
@@ -1551,7 +1551,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     // says `scope = both` in exactly EDVR's bytes, and is EDVR's whatever the record says.
     if (s.descriptorPresent && ((!s.state.descriptorSha.empty() && s.descriptorSha == s.state.descriptorSha) ||
                                 isCanonicalDescriptor(s.descriptorSha))) {
-        remove(descriptorPath, "removes EDVR's profile descriptor", s.descriptorSha);
+        remove(descriptorPath, "removes ED-UP's profile descriptor", s.descriptorSha);
     } else if (s.descriptorPresent) {
         plan.notes.push_back("Keeping an unverified edvr_profile.ini; its ownership could not be proved.");
     }
@@ -1562,7 +1562,7 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
 
     if (!changed) {
         plan.nothingToDo = true;
-        plan.notes.push_back("EDVR does not appear to be installed here.");
+        plan.notes.push_back("ED-UP does not appear to be installed here.");
     } else {
         if (wantBackupDir) {
             Step mk;

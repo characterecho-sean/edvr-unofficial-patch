@@ -219,12 +219,12 @@ python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out
 if ($LASTEXITCODE -ne 0) { throw 'Review release credits before continuing' }
 # Edit release-notes.md and include the reviewed ## Thanks section from thanks.md.
 $assets = @(
-    "edvr-artifacts/$runId/edvr-$version.zip"
-    "edvr-artifacts/$runId/edvr-installer-$version.zip"
-    "edvr-artifacts/$runId/edvr-installer-linux-$version.zip"
+    "edvr-artifacts/$runId/ed-up-$version.zip"
+    "edvr-artifacts/$runId/ed-up-installer-$version.zip"
+    "edvr-artifacts/$runId/ed-up-installer-linux-$version.zip"
     "edvr-artifacts/$runId/SHA256SUMS"
 )
-gh release create "v$version" @assets --draft --verify-tag --notes-file release-notes.md
+gh release create "v$version" @assets --draft --verify-tag --title "ED Unofficial Patch $version" --notes-file release-notes.md
 if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
 ```
 
