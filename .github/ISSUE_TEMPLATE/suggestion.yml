@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Two things before you write it up. **What EDVR can reach** is the picture on its way to your headset and the game's Direct3D calls; it cannot touch sound, the network, or anything the server decides, and a few things have been measured as unreachable — the README's *What it does and does not do* and [docs/fixes.md](https://github.com/characterecho-sean/edvr-unofficial-patch/blob/main/docs/fixes.md) say which. And **a look through the open issues** — the thing you want may already have a thread with the measurements in it.
+        Two things before you write it up. **What EDVR can reach** is the picture on its way to your headset and the game's Direct3D calls; it cannot touch sound, the network, or anything the server decides, and a few things have been measured as unreachable — the README's *What it does and does not do* and [docs/fixes.md](https://github.com/characterecho-sean/ed-unofficial-patch/blob/main/docs/fixes.md) say which. And **a look through the open issues** — the thing you want may already have a thread with the measurements in it.
 
         The most useful suggestion here describes what you would *see or feel in the headset*, and how that differs from what the game does now. How to build it is my problem, and guesses about the mechanism tend to age badly.
 

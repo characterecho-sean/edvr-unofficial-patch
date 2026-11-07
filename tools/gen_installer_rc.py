@@ -110,7 +110,7 @@ def origin_url_https():
     repo, or no `origin` remote falls back to the project's known home rather
     than failing a build over a Comments string.
     """
-    fallback = 'https://github.com/characterecho-sean/edvr-unofficial-patch'
+    fallback = 'https://github.com/characterecho-sean/ed-unofficial-patch'
     try:
         url = subprocess.check_output(
             ['git', 'remote', 'get-url', 'origin'],

@@ -8,7 +8,7 @@ fixes is under [What it fixes](#what-it-fixes), and
 [docs/fixes.md](docs/fixes.md) describes each one in full.
 
 If something is not working, [open an
-issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose).
+issue](https://github.com/characterecho-sean/ed-unofficial-patch/issues/new/choose).
 Bugs get fixed there because you can attach the log, and the log usually shows
 the cause. The [Discord](https://discord.gg/AWJ6djKKzr) is for setup questions,
 "is this normal", or just talking about it; chat loses attachments and threads,
@@ -343,10 +343,10 @@ Building needs Visual Studio 2022 with the C++ workload, and Python.
 
 [arturbac](https://github.com/arturbac) diagnosed the Linux/Proton
 constant-buffer readback cost in [issue
-#65](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/65),
+#65](https://github.com/characterecho-sean/ed-unofficial-patch/issues/65),
 confirmed it through PDB/perf/LBR profiling, and supplied the cached mapping
 approach, working staging patch and Proton A/B tests in [PR
-#66](https://github.com/characterecho-sean/edvr-unofficial-patch/pull/66). The
+#66](https://github.com/characterecho-sean/ed-unofficial-patch/pull/66). The
 adaptive map cache on main builds on that work. The
 [investigation](docs/issue-65-proton-cb-shadows-2026-10-02.md#contribution-and-attribution-2026-10-02)
 records the contribution and measurements.
